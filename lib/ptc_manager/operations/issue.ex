@@ -10,6 +10,8 @@ defmodule PtcManager.Operations.Issue do
     field :state, :string, default: "open"
     field :workflow_label, :string
     field :workflow_label_conflict, :boolean, default: false
+    field :github_assignees, :map, default: %{"logins" => []}
+    field :github_assignment_projected, :boolean, default: false
     field :dependency_overflow, :boolean, default: false
     field :dependencies_projected, :boolean, default: false
     field :body_digest, :string
@@ -35,6 +37,8 @@ defmodule PtcManager.Operations.Issue do
       :state,
       :workflow_label,
       :workflow_label_conflict,
+      :github_assignees,
+      :github_assignment_projected,
       :dependency_overflow,
       :dependencies_projected,
       :body_digest,

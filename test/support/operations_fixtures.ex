@@ -28,6 +28,7 @@ defmodule PtcManager.OperationsFixtures do
         "https://github.com/#{repository.github_owner}/#{repository.github_name}/issues/#{number}",
       state: "open",
       dependencies_projected: true,
+      github_assignment_projected: true,
       body_digest: body_digest,
       content_digest: digest("#{title}:#{body_digest}"),
       github_updated_at: updated_at

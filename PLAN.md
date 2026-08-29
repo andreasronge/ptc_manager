@@ -21,6 +21,8 @@ without replacing the user interface or GitHub integration.
    log; it does not turn GitHub labels into an internal job queue. An optional
    mutually exclusive `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` label
    is a display-only projection and never grants authority.
+   GitHub assignees are the advisory claim signal: an assigned issue is shown
+   as taken and cannot receive a second PtcManager implementation approval.
 3. Simplified explanations are private. They may be cached in PtcManager but
    are never written to GitHub issues or pull requests.
 4. Model output is not authority by itself. Deterministic code validates queue

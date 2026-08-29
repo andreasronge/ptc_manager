@@ -162,6 +162,14 @@ is simplified. Definitive missing or pull-request references remain visible as
 projection remain approval- and dispatch-ineligible until their first successful
 GitHub synchronization.
 
+GitHub assignment is projected as the advisory work claim. Issue cards show
+`Taken by @login`, and PtcManager will not approve duplicate implementation
+while any assignee remains. This matches `ptc_runner`'s worktree helper, which
+assigns the issue and posts its standardized claim comment before work begins;
+the periodic issue sync therefore does not need to fetch every comment. Rows
+that predate this projection remain approval-ineligible until their first
+successful GitHub synchronization confirms the assignment state.
+
 Prepare merge decision is instructed to be read-only, but it currently shares
 the unrestricted authenticated maintainer-action runner. The result is fenced
 before and after execution, which prevents a changed PR from being approved,

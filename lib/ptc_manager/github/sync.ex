@@ -187,9 +187,15 @@ defmodule PtcManager.GitHub.Sync do
          %Issue{
            content_digest: digest,
            dependency_overflow: overflow,
-           dependencies_projected: true
+           dependencies_projected: true,
+           github_assignment_projected: true
          },
-         %{content_digest: digest, dependency_overflow: overflow, dependencies_projected: true}
+         %{
+           content_digest: digest,
+           dependency_overflow: overflow,
+           dependencies_projected: true,
+           github_assignment_projected: true
+         }
        ),
        do: :unchanged
 

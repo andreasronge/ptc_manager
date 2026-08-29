@@ -138,27 +138,45 @@
               </p>
               <h3 class="mt-1 text-lg font-semibold leading-7">{item.issue.title}</h3>
             </div>
-            <span
-              :if={item.proposal}
-              class={[
-                "w-fit rounded-full px-2.5 py-1 text-xs ring-1",
-                state_classes(item.proposal.readiness)
-              ]}
-            >
-              {String.replace(item.proposal.readiness, "_", " ")}
-            </span>
-            <span
-              :if={item.issue.workflow_label}
-              class="w-fit rounded-full bg-violet-400/15 px-2.5 py-1 text-xs text-violet-300 ring-1 ring-violet-400/20"
-            >
-              {item.issue.workflow_label}
-            </span>
-            <span
-              :if={item.issue.workflow_label_conflict}
-              class="w-fit rounded-full bg-amber-400/15 px-2.5 py-1 text-xs text-amber-300 ring-1 ring-amber-400/20"
-            >
-              conflicting ptc labels
-            </span>
+            <div class="flex flex-wrap items-center gap-2">
+              <span
+                :if={claimed?(item.issue)}
+                id={"issue-#{item.issue.id}-claimed"}
+                title="GitHub assignment is advisory, but PtcManager will not start duplicate work."
+                class="inline-flex w-fit items-center gap-1.5 rounded-full bg-sky-400/15 px-2.5 py-1 text-xs text-sky-300 ring-1 ring-sky-400/20"
+              >
+                <.icon name="hero-user-circle-mini" class="size-4" />
+                {claim_label(item.issue)}
+              </span>
+              <span
+                :if={not item.issue.github_assignment_projected}
+                id={"issue-#{item.issue.id}-claim-unknown"}
+                class="inline-flex w-fit items-center gap-1.5 rounded-full bg-amber-400/15 px-2.5 py-1 text-xs text-amber-300 ring-1 ring-amber-400/20"
+              >
+                <.icon name="hero-arrow-path-mini" class="size-4" /> Claim status needs sync
+              </span>
+              <span
+                :if={item.proposal}
+                class={[
+                  "w-fit rounded-full px-2.5 py-1 text-xs ring-1",
+                  state_classes(item.proposal.readiness)
+                ]}
+              >
+                {String.replace(item.proposal.readiness, "_", " ")}
+              </span>
+              <span
+                :if={item.issue.workflow_label}
+                class="w-fit rounded-full bg-violet-400/15 px-2.5 py-1 text-xs text-violet-300 ring-1 ring-violet-400/20"
+              >
+                {item.issue.workflow_label}
+              </span>
+              <span
+                :if={item.issue.workflow_label_conflict}
+                class="w-fit rounded-full bg-amber-400/15 px-2.5 py-1 text-xs text-amber-300 ring-1 ring-amber-400/20"
+              >
+                conflicting ptc labels
+              </span>
+            </div>
           </div>
 
           <div

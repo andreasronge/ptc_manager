@@ -188,6 +188,43 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert html =~ "Working for"
   end
 
+  test "shows an advisory GitHub claim and disables duplicate approval", %{conn: conn} do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        title: "Work already started elsewhere",
+        github_assignees: %{"logins" => ["outside-agent"]}
+      })
+
+    proposal_fixture(issue)
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-#{issue.id}-claimed",
+             "Taken by @outside-agent"
+           )
+
+    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+  end
+
+  test "shows unknown claim state and disables approval before first sync", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{github_assignment_projected: false})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-#{issue.id}-claim-unknown",
+             "Claim status needs sync"
+           )
+
+    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+  end
+
   test "shows linked dependency state and prompts re-review after completion", %{conn: conn} do
     repository = repository_fixture()
     blocker = issue_fixture(repository, %{number: 91, title: "Build the prerequisite"})

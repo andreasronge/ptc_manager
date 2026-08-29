@@ -10,16 +10,20 @@ defmodule PtcManager.GitHub.IssueSnapshot do
     {workflow_label, workflow_label_conflict, workflow_labels} =
       workflow_label(remote["labels"] || [])
 
+    assignee_logins = assignee_logins(remote["assignees"] || [])
+
     updated_at = parse_datetime!(remote["updated_at"])
 
-    canonical = %{
-      "body" => body,
-      "number" => remote["number"],
-      "state" => state,
-      "title" => remote["title"],
-      "workflow_labels" => workflow_labels,
-      "updated_at" => DateTime.to_iso8601(updated_at)
-    }
+    canonical =
+      %{
+        "body" => body,
+        "number" => remote["number"],
+        "state" => state,
+        "title" => remote["title"],
+        "workflow_labels" => workflow_labels,
+        "updated_at" => DateTime.to_iso8601(updated_at)
+      }
+      |> maybe_put_assignees(assignee_logins)
 
     blocking_issue_numbers = blocking_issue_numbers(body, remote["number"])
 
@@ -32,6 +36,8 @@ defmodule PtcManager.GitHub.IssueSnapshot do
       state: state,
       workflow_label: workflow_label,
       workflow_label_conflict: workflow_label_conflict,
+      github_assignees: %{"logins" => assignee_logins},
+      github_assignment_projected: true,
       blocking_issue_numbers: Enum.take(blocking_issue_numbers, @max_projected_dependencies),
       dependency_overflow: length(blocking_issue_numbers) > @max_projected_dependencies,
       dependencies_projected: true,
@@ -59,6 +65,22 @@ defmodule PtcManager.GitHub.IssueSnapshot do
     |> blocking_issue_numbers(issue_number)
     |> Enum.take(@max_projected_dependencies)
   end
+
+  defp assignee_logins(assignees) when is_list(assignees) do
+    assignees
+    |> Enum.map(fn
+      %{"login" => login} when is_binary(login) -> String.trim(login)
+      _assignee -> ""
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp assignee_logins(_assignees), do: []
+
+  defp maybe_put_assignees(canonical, []), do: canonical
+  defp maybe_put_assignees(canonical, logins), do: Map.put(canonical, "assignees", logins)
 
   defp workflow_label(labels) when is_list(labels) do
     managed =

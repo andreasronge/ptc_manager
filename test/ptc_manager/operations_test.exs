@@ -66,6 +66,29 @@ defmodule PtcManager.OperationsTest do
       assert Repo.aggregate(Job, :count) == 0
     end
 
+    test "does not approve an issue assigned on GitHub" do
+      repository = repository_fixture()
+
+      issue =
+        issue_fixture(repository, %{
+          github_assignees: %{"logins" => ["outside-agent"]}
+        })
+
+      proposal_fixture(issue)
+
+      assert {:error, :issue_claimed} = Operations.approve_issue(issue.id, "andreas")
+      assert Repo.aggregate(Job, :count) == 0
+    end
+
+    test "does not approve before GitHub assignment projection completes" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{github_assignment_projected: false})
+      proposal_fixture(issue)
+
+      assert {:error, :issue_claim_unknown} = Operations.approve_issue(issue.id, "andreas")
+      assert Repo.aggregate(Job, :count) == 0
+    end
+
     test "does not approve an analysis that is not ready" do
       repository = repository_fixture()
       issue = issue_fixture(repository)
@@ -136,6 +159,16 @@ defmodule PtcManager.OperationsTest do
       proposal_fixture(issue)
 
       refute issue.dependencies_projected
+      refute issue.github_assignment_projected
+
+      assert {:error, :issue_claim_unknown} =
+               Operations.approve_issue(issue.id, "andreas")
+    end
+
+    test "does not approve before dependency projection completes" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{dependencies_projected: false})
+      proposal_fixture(issue)
 
       assert {:error, :issue_dependencies_unresolved} =
                Operations.approve_issue(issue.id, "andreas")

@@ -1,7 +1,7 @@
 defmodule PtcManager.GitHubSyncTest do
   use PtcManager.DataCase, async: false
 
-  alias PtcManager.GitHub.Sync
+  alias PtcManager.GitHub.{IssueSnapshot, Sync}
   alias PtcManager.Operations.{Issue, IssueDependency, Repository}
   alias PtcManager.Repo
 
@@ -65,6 +65,62 @@ defmodule PtcManager.GitHubSyncTest do
 
     issue = Repo.get_by!(Issue, repository_id: repository.id, number: 46)
     assert issue.workflow_label == "ptc:ready"
+  end
+
+  test "projects GitHub assignees as the advisory issue claim" do
+    repository = repository_fixture()
+
+    assigned =
+      remote_issue(48, "Already being implemented")
+      |> Map.put("assignees", [
+        %{"login" => "worker-two"},
+        %{"login" => "worker-one"},
+        %{"login" => "worker-one"}
+      ])
+
+    Process.put(:github_result, {:ok, [assigned]})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 48)
+    assert issue.github_assignees == %{"logins" => ["worker-one", "worker-two"]}
+
+    Process.put(:github_result, {:ok, [Map.put(assigned, "assignees", [])]})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+    assert Repo.get!(Issue, issue.id).github_assignees == %{"logins" => []}
+  end
+
+  test "an empty assignment preserves the pre-projection canonical digest" do
+    repository = repository_fixture()
+    remote = remote_issue(49, "Still unclaimed")
+
+    legacy_canonical = %{
+      "body" => remote["body"],
+      "number" => remote["number"],
+      "state" => remote["state"],
+      "title" => remote["title"],
+      "workflow_labels" => [],
+      "updated_at" => remote["updated_at"]
+    }
+
+    legacy_digest = legacy_canonical |> Jason.encode!() |> IssueSnapshot.digest()
+
+    attrs =
+      remote
+      |> IssueSnapshot.normalize!(repository.id)
+      |> Map.put(:content_digest, legacy_digest)
+      |> Map.put(:github_assignment_projected, false)
+
+    {:ok, existing} = PtcManager.Operations.create_issue(attrs)
+    proposal_fixture(existing)
+
+    Process.put(:github_result, {:ok, [Map.put(remote, "assignees", [])]})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    synchronized = Repo.get!(Issue, existing.id)
+    assert synchronized.github_assignment_projected
+
+    [%{proposal: proposal}] = PtcManager.Operations.dashboard_issues()
+    assert proposal.source_digest == synchronized.content_digest
   end
 
   test "projects canonical issue blockers and follows the blocker state" do

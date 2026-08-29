@@ -1190,6 +1190,7 @@ defmodule PtcManager.Operations do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
          %Proposal{} = proposal <- latest_proposal(repo, issue_id),
          :ok <- issue_is_open(issue),
+         :ok <- issue_unclaimed(issue),
          :ok <- issue_workflow_allows_implementation(issue),
          :ok <- issue_dependencies_resolved(repo, issue),
          :ok <- proposal_is_ready(proposal),
@@ -1919,6 +1920,24 @@ defmodule PtcManager.Operations do
 
   defp issue_is_open(%Issue{state: "open"}), do: :ok
   defp issue_is_open(%Issue{}), do: {:error, :issue_closed}
+
+  defp issue_unclaimed(%Issue{github_assignment_projected: false}),
+    do: {:error, :issue_claim_unknown}
+
+  defp issue_unclaimed(%Issue{
+         github_assignment_projected: true,
+         github_assignees: %{"logins" => []}
+       }),
+       do: :ok
+
+  defp issue_unclaimed(%Issue{
+         github_assignment_projected: true,
+         github_assignees: %{"logins" => logins}
+       })
+       when is_list(logins),
+       do: {:error, :issue_claimed}
+
+  defp issue_unclaimed(%Issue{}), do: {:error, :issue_claim_unknown}
 
   defp issue_workflow_allows_implementation(%Issue{
          workflow_label_conflict: false,

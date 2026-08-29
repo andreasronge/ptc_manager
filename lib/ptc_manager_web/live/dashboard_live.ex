@@ -170,6 +170,12 @@ defmodule PtcManagerWeb.DashboardLive do
       {:error, :issue_closed} ->
         {:noreply, put_flash(socket, :error, "This issue is closed and cannot be started.")}
 
+      {:error, :issue_claimed} ->
+        {:noreply, put_flash(socket, :error, "This issue is already assigned on GitHub.")}
+
+      {:error, :issue_claim_unknown} ->
+        {:noreply, put_flash(socket, :error, "Synchronize GitHub assignment state first.")}
+
       {:error, :proposal_not_ready} ->
         {:noreply, put_flash(socket, :error, "This issue is not ready to start.")}
 
@@ -311,6 +317,8 @@ defmodule PtcManagerWeb.DashboardLive do
       ),
       do:
         fresh?(item) and not item.issue.workflow_label_conflict and
+          not claimed?(item.issue) and
+          item.issue.github_assignment_projected and
           item.issue.workflow_label in [nil, "ptc:ready"] and
           item.issue.dependencies_projected and
           not item.issue.dependency_overflow and
@@ -319,6 +327,13 @@ defmodule PtcManagerWeb.DashboardLive do
   def approvable?(_item), do: false
 
   def investigating?(investigating, issue_id), do: MapSet.member?(investigating, issue_id)
+
+  def claimed?(%{github_assignees: %{"logins" => [_login | _rest]}}), do: true
+  def claimed?(_issue), do: false
+
+  def claim_label(%{github_assignees: %{"logins" => logins}}) when is_list(logins) do
+    "Taken by " <> Enum.map_join(logins, ", ", &"@#{&1}")
+  end
 
   def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
     do: true
