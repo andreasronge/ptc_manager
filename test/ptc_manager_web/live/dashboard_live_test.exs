@@ -26,6 +26,23 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert Repo.one!(Job).issue_id == issue.id
   end
 
+  test "preserves the browser-managed technical evidence state across ticks", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+
+    {:ok, view, _html} =
+      conn
+      |> authenticated_conn()
+      |> live(~p"/")
+
+    assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
+
+    send(view.pid, :tick)
+
+    assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
+  end
+
   test "shows who an agent is working for and since when", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Explain remote failures"})
