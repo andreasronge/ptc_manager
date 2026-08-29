@@ -18,7 +18,7 @@ TimeoutStopSec=30
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-codex /var/lib/ptc_manager-output
+ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-output
 
 [Install]
 WantedBy=multi-user.target

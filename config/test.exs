@@ -5,7 +5,8 @@ config :ptc_manager, :admin_password, "test-password"
 config :ptc_manager,
   github_sync_interval_ms: 0,
   herdr_sync_interval_ms: 0,
-  manager_enabled: false
+  manager_enabled: false,
+  dispatch_enabled: false
 
 # Configure your database
 #

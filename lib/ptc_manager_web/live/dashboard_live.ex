@@ -2,6 +2,7 @@ defmodule PtcManagerWeb.DashboardLive do
   use PtcManagerWeb, :live_view
 
   alias PtcManager.GitHub.Sync, as: GitHubSync
+  alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.Manager
   alias PtcManager.Operations
 
@@ -58,6 +59,8 @@ defmodule PtcManagerWeb.DashboardLive do
   defp approve_issue(issue_id, socket) do
     case Operations.approve_issue(issue_id, socket.assigns.actor) do
       {:ok, _job} ->
+        DispatchPoller.wake()
+
         {:noreply,
          socket
          |> put_flash(:info, "Approved. One implementation job is now queued.")
@@ -191,6 +194,11 @@ defmodule PtcManagerWeb.DashboardLive do
   def state_classes("blocked"), do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
   def state_classes("failed"), do: "bg-rose-400/15 text-rose-300 ring-rose-400/20"
   def state_classes("lost"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
+  def state_classes("reconciling"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
+
+  def state_classes("awaiting_reconciliation"),
+    do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+
   def state_classes("done"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
   def state_classes(_state), do: "bg-slate-400/10 text-slate-300 ring-white/10"
 
@@ -199,7 +207,8 @@ defmodule PtcManagerWeb.DashboardLive do
       repositories: Operations.list_repositories(),
       issues: Operations.dashboard_issues(),
       agent_runs: Operations.list_agent_runs(),
-      manager_enabled: Manager.enabled?()
+      manager_enabled: Manager.enabled?(),
+      dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false)
     )
   end
 end

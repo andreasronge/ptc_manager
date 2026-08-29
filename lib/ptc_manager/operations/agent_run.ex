@@ -17,6 +17,7 @@ defmodule PtcManager.Operations.AgentRun do
     field :herdr_pane, :string
     field :herdr_session, :string
     field :external_key, :string
+    field :fencing_token, :integer, default: 0
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
@@ -38,12 +39,15 @@ defmodule PtcManager.Operations.AgentRun do
       :herdr_workspace,
       :herdr_pane,
       :herdr_session,
-      :external_key
+      :external_key,
+      :fencing_token
     ])
     |> validate_required([:worker_id, :role, :state, :started_at, :last_heartbeat_at])
     |> validate_inclusion(:role, @roles)
     |> validate_inclusion(:state, @states)
     |> validate_length(:status_text, max: 240)
+    |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
+    |> unique_constraint([:job_id, :fencing_token], name: :agent_runs_one_per_job_attempt)
     |> validate_terminal_time()
   end
 

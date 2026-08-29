@@ -26,6 +26,8 @@ github_sync_interval_ms =
 herdr_sync_interval_ms =
   System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
 
+dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
+
 config :ptc_manager,
   github_read_token: System.get_env("GITHUB_READ_TOKEN"),
   repository_path: System.get_env("PTC_REPOSITORY_PATH"),
@@ -33,10 +35,23 @@ config :ptc_manager,
   herdr_sync_interval_ms: herdr_sync_interval_ms,
   herdr_session: System.get_env("PTC_HERDR_SESSION", "default"),
   herdr_binary: System.get_env("PTC_HERDR_BINARY", "herdr"),
+  herdr_run_as_user: System.get_env("PTC_HERDR_RUN_AS_USER"),
   herdr_socket_path: System.get_env("PTC_HERDR_SOCKET_PATH"),
   herdr_timeout_ms: System.get_env("PTC_HERDR_TIMEOUT_MS", "15000") |> String.to_integer(),
   herdr_stale_after_ms:
     System.get_env("PTC_HERDR_STALE_AFTER_MS", "60000") |> String.to_integer(),
+  dispatch_enabled: dispatch_enabled,
+  dispatch_interval_ms: System.get_env("PTC_DISPATCH_INTERVAL_MS", "5000") |> String.to_integer(),
+  dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
+  dispatch_reconcile_after_ms:
+    System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
+  dispatch_concurrency: System.get_env("PTC_DISPATCH_CONCURRENCY", "1") |> String.to_integer(),
+  implementation_agent_kind: System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex"),
+  implementation_agent_args:
+    System.get_env("PTC_IMPLEMENTATION_AGENT_ARGS", "--full-auto") |> OptionParser.split(),
+  implementation_agent_start_timeout_ms:
+    System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
+    |> String.to_integer(),
   manager_enabled: System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
   manager_concurrency:
     System.get_env("PTC_CODEX_MANAGER_CONCURRENCY", "1") |> String.to_integer(),

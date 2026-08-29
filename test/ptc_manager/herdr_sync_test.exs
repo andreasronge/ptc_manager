@@ -4,7 +4,8 @@ defmodule PtcManager.HerdrSyncTest do
   import Ecto.Query
 
   alias PtcManager.Herdr.{Client, Sync}
-  alias PtcManager.Operations.{AgentRun, Worker}
+  alias PtcManager.Operations
+  alias PtcManager.Operations.{AgentRun, Job, Worker}
   alias PtcManager.Repo
 
   defmodule FakeClient do
@@ -85,6 +86,52 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.get_by!(Worker, worker_key: "herdr:outage").status == "degraded"
   end
 
+  test "a managed job becomes reconciling during an outage and resumes when observed again" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    worker = worker_fixture(%{worker_key: "herdr:managed-outage"})
+    now = now()
+
+    job
+    |> Job.changeset(%{
+      state: "working",
+      fencing_token: 1,
+      lease_owner: worker.worker_key,
+      lease_expires_at: DateTime.add(now, 60, :second),
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    })
+    |> Repo.update!()
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "working",
+        started_at: DateTime.add(now, -60, :second),
+        last_heartbeat_at: now,
+        external_key: "managed-outage:agent-history",
+        fencing_token: 1
+      })
+
+    Process.put(:herdr_result, {:error, :offline})
+
+    assert {:error, {:offline, %{lost_count: 0, uncertain_count: 1}}} =
+             Sync.sync(client: FakeClient, session: "managed-outage", stale_after_ms: 0)
+
+    assert Repo.get!(AgentRun, run.id).state == "unknown"
+    assert Repo.get!(Job, job.id).state == "reconciling"
+    assert {:error, :already_active} = Operations.approve_issue(issue.id, "andreas")
+
+    Process.put(:herdr_result, {:ok, [remote_agent("working")]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed-outage")
+
+    assert Repo.get!(AgentRun, run.id).state == "working"
+    assert Repo.get!(Job, job.id).state == "working"
+  end
+
   test "reconciles a lost agent to its later authoritative terminal state" do
     Process.put(:herdr_result, {:ok, [remote_agent("working")]})
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "recovered")
@@ -102,6 +149,199 @@ defmodule PtcManager.HerdrSyncTest do
     recovered_run = Repo.get!(AgentRun, lost_run.id)
     assert recovered_run.state == "done"
     assert recovered_run.ended_at == lost_run.ended_at
+  end
+
+  test "adopts a positively observed deterministic managed agent" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job
+    |> Job.changeset(%{
+      state: "reconciling",
+      fencing_token: 1,
+      lease_owner: "herdr:managed",
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    })
+    |> Repo.update!()
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         remote_agent("working")
+         |> Map.put("name", "impl_j#{job.id}_f1")
+         |> Map.put("agent_session", %{"value" => "managed-agent"})
+       ]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+
+    run = Repo.one!(from run in AgentRun, where: run.job_id == ^job.id)
+    assert run.fencing_token == 1
+    assert Repo.get!(Job, job.id).state == "working"
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         remote_agent("done")
+         |> Map.put("name", "impl_j#{job.id}_f1")
+         |> Map.put("agent_session", %{"value" => "managed-agent"})
+       ]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+    completed = Repo.get!(Job, job.id)
+    assert completed.state == "awaiting_reconciliation"
+    refute completed.ended_at
+    refute completed.lease_expires_at
+    assert {:error, :already_active} = Operations.approve_issue(issue.id, "andreas")
+
+    second_issue = issue_fixture(repository)
+    proposal_fixture(second_issue)
+    {:ok, second_job} = Operations.approve_issue(second_issue.id, "andreas")
+
+    assert {:ok, _leased} =
+             Operations.lease_job(
+               second_job.id,
+               "herdr:managed",
+               %{
+                 state: "open",
+                 content_digest: second_issue.content_digest,
+                 github_updated_at: second_issue.github_updated_at
+               },
+               60_000
+             )
+  end
+
+  test "a successful empty snapshot terminates an old uncertain launch" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job
+    |> Job.changeset(%{
+      state: "reconciling",
+      fencing_token: 1,
+      lease_owner: "herdr:absent",
+      started_at: DateTime.add(now(), -120, :second),
+      reconciling_at: now(),
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    })
+    |> Repo.update!()
+
+    Process.put(:herdr_result, {:ok, []})
+
+    assert {:ok, %{absent_count: 0}} =
+             Sync.sync(client: FakeClient, session: "absent", reconcile_after_ms: 60_000)
+
+    refute Repo.get!(Job, job.id).absence_observed_at
+
+    job
+    |> Job.changeset(%{reconciling_at: DateTime.add(now(), -61, :second)})
+    |> Repo.update!()
+
+    assert {:ok, %{absent_count: 0}} =
+             Sync.sync(client: FakeClient, session: "absent", reconcile_after_ms: 60_000)
+
+    first_observation = Repo.get!(Job, job.id)
+    assert first_observation.state == "reconciling"
+    assert first_observation.absence_observed_at
+
+    assert {:ok, %{absent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "absent", reconcile_after_ms: 60_000)
+
+    failed = Repo.get!(Job, job.id)
+    assert failed.state == "failed"
+    assert failed.ended_at
+    assert failed.last_error =~ "no managed agent"
+    assert {:ok, _replacement_job} = Operations.approve_issue(issue.id, "andreas")
+  end
+
+  test "does not adopt a managed identity from a different Herdr session" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job
+    |> Job.changeset(%{
+      state: "reconciling",
+      fencing_token: 1,
+      lease_owner: "herdr:expected",
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    })
+    |> Repo.update!()
+
+    Process.put(
+      :herdr_result,
+      {:ok, [remote_agent("working") |> Map.put("name", "impl_j#{job.id}_f1")]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "impostor")
+    assert Repo.one!(AgentRun).job_id == nil
+    assert Repo.get!(Job, job.id).state == "reconciling"
+  end
+
+  test "a restarted terminal managed identity requires two absent snapshots to release" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    worker = worker_fixture(%{worker_key: "herdr:restart"})
+    now = now()
+
+    job
+    |> Job.changeset(%{
+      state: "awaiting_reconciliation",
+      fencing_token: 1,
+      lease_owner: "herdr:restart",
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    })
+    |> Repo.update!()
+
+    {:ok, terminal_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "done",
+        started_at: DateTime.add(now, -60, :second),
+        last_heartbeat_at: now,
+        ended_at: now,
+        external_key: "restart:agent-history",
+        fencing_token: 1
+      })
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         remote_agent("working")
+         |> Map.put("name", "impl_j#{job.id}_f1")
+         |> Map.put("agent_session", %{"value" => "replacement-agent-session"})
+       ]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "restart")
+    assert Repo.get!(AgentRun, terminal_run.id).state == "done"
+    assert Repo.get!(Job, job.id).state == "reconciling"
+    assert Repo.aggregate(from(run in AgentRun, where: run.job_id == ^job.id), :count) == 1
+
+    Process.put(:herdr_result, {:ok, []})
+
+    assert {:ok, %{absent_count: 0}} =
+             Sync.sync(client: FakeClient, session: "restart", reconcile_after_ms: 0)
+
+    assert Repo.get!(Job, job.id).state == "reconciling"
+
+    assert {:ok, %{absent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "restart", reconcile_after_ms: 0)
+
+    assert Repo.get!(Job, job.id).state == "failed"
   end
 
   defp remote_agent(state) do

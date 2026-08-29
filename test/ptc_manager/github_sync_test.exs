@@ -8,6 +8,7 @@ defmodule PtcManager.GitHubSyncTest do
   defmodule FakeClient do
     @behaviour PtcManager.GitHub
     def list_open_issues(_repository), do: Process.get(:github_result)
+    def get_issue(_repository, _number), do: Process.get(:github_issue_result)
   end
 
   defmodule CoordinatedClient do
@@ -21,6 +22,8 @@ defmodule PtcManager.GitHubSyncTest do
         {:release_github_fetch, result} -> result
       end
     end
+
+    def get_issue(_repository, _number), do: {:error, :not_supported}
   end
 
   test "synchronizes an open issue and records repository health" do
@@ -98,7 +101,7 @@ defmodule PtcManager.GitHubSyncTest do
     send(first_fetch, {:release_github_fetch, {:ok, [remote_issue(44, "Older")]}})
     assert {:ok, _summary} = Task.await(first)
 
-    assert_receive {:github_fetch_started, second_fetch}
+    assert_receive {:github_fetch_started, second_fetch}, 1_000
 
     send(second_fetch, {
       :release_github_fetch,

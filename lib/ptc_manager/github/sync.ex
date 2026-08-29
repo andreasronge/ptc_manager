@@ -4,6 +4,7 @@ defmodule PtcManager.GitHub.Sync do
   import Ecto.Query
 
   alias PtcManager.Operations
+  alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations.{Issue, Repository}
   alias PtcManager.Repo
 
@@ -35,7 +36,7 @@ defmodule PtcManager.GitHub.Sync do
 
     result =
       Repo.transaction(fn ->
-        normalized = Enum.map(remote_issues, &normalize_issue!(&1, repository.id))
+        normalized = Enum.map(remote_issues, &IssueSnapshot.normalize!(&1, repository.id))
         open_numbers = MapSet.new(normalized, & &1.number)
 
         existing_issues =
@@ -83,33 +84,6 @@ defmodule PtcManager.GitHub.Sync do
     error -> mark_failed(repository, error)
   end
 
-  defp normalize_issue!(remote, repository_id) do
-    body = remote["body"] || ""
-    state = remote["state"] || "open"
-    updated_at = parse_datetime!(remote["updated_at"])
-    body_digest = digest(body)
-
-    canonical = %{
-      "body" => body,
-      "number" => remote["number"],
-      "state" => state,
-      "title" => remote["title"],
-      "updated_at" => DateTime.to_iso8601(updated_at)
-    }
-
-    %{
-      repository_id: repository_id,
-      number: remote["number"],
-      title: remote["title"],
-      html_url: remote["html_url"],
-      body: body,
-      state: state,
-      body_digest: body_digest,
-      content_digest: canonical |> Jason.encode!() |> digest(),
-      github_updated_at: updated_at
-    }
-  end
-
   defp upsert_issue(nil, attrs) do
     %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
     :changed
@@ -140,7 +114,7 @@ defmodule PtcManager.GitHub.Sync do
       issue
       |> Issue.changeset(%{
         state: "closed",
-        content_digest: canonical |> Jason.encode!() |> digest()
+        content_digest: canonical |> Jason.encode!() |> IssueSnapshot.digest()
       })
       |> Repo.update!()
     end)
@@ -169,15 +143,4 @@ defmodule PtcManager.GitHub.Sync do
     Operations.notify_changed(__MODULE__)
     {:error, reason}
   end
-
-  defp parse_datetime!(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :microsecond)
-      _ -> raise ArgumentError, "invalid GitHub updated_at"
-    end
-  end
-
-  defp parse_datetime!(_value), do: raise(ArgumentError, "missing GitHub updated_at")
-
-  defp digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 end

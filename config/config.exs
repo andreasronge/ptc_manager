@@ -14,11 +14,21 @@ config :ptc_manager,
   repository_path: nil,
   github_sync_interval_ms: 0,
   herdr_client: PtcManager.Herdr.Client,
+  herdr_run_as_user: nil,
   herdr_sync_interval_ms: 0,
   manager_adapter: PtcManager.Manager.CodexAdapter,
   manager_concurrency: 1,
   manager_output_dir: nil,
-  manager_enabled: false
+  manager_enabled: false,
+  dispatch_adapter: PtcManager.Dispatch.HerdrAdapter,
+  dispatch_enabled: false,
+  dispatch_interval_ms: 5_000,
+  dispatch_lease_ms: 1_800_000,
+  dispatch_reconcile_after_ms: 60_000,
+  dispatch_concurrency: 1,
+  implementation_agent_kind: "codex",
+  implementation_agent_args: ["--full-auto"],
+  implementation_agent_start_timeout_ms: 60_000
 
 # Configures the endpoint
 config :ptc_manager, PtcManagerWeb.Endpoint,

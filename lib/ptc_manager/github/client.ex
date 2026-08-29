@@ -14,6 +14,17 @@ defmodule PtcManager.GitHub.Client do
     fetch_pages(repository, 1, [])
   end
 
+  @impl true
+  def get_issue(%Repository{} = repository, number) when is_integer(number) and number > 0 do
+    url =
+      "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}/issues/#{number}"
+
+    with {:ok, response} <- get(url),
+         {:ok, issue} <- decode_issue(response) do
+      {:ok, issue}
+    end
+  end
+
   defp fetch_pages(_repository, page, _issues) when page > @max_pages,
     do: {:error, :pagination_limit_reached}
 
@@ -84,6 +95,15 @@ defmodule PtcManager.GitHub.Client do
   defp decode_items(body) do
     case Jason.decode(body) do
       {:ok, items} when is_list(items) -> {:ok, items}
+      {:ok, _other} -> {:error, :unexpected_github_response}
+      {:error, reason} -> {:error, {:invalid_github_json, reason}}
+    end
+  end
+
+  defp decode_issue(body) do
+    case Jason.decode(body) do
+      {:ok, %{"pull_request" => _pull_request}} -> {:error, :github_item_is_pull_request}
+      {:ok, issue} when is_map(issue) -> {:ok, issue}
       {:ok, _other} -> {:error, :unexpected_github_response}
       {:error, reason} -> {:error, {:invalid_github_json, reason}}
     end

@@ -18,6 +18,7 @@ defmodule PtcManager.Application do
       PtcManager.Manager.Gate,
       PtcManager.GitHub.Poller,
       PtcManager.Herdr.Poller,
+      PtcManager.Dispatch.Poller,
       # Start a worker by calling: PtcManager.Worker.start_link(arg)
       # {PtcManager.Worker, arg},
       # Start to serve requests, typically the last entry

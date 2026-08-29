@@ -1,1 +1,2 @@
 ptc-manager ALL=(ptc-manager-codex) NOPASSWD: /usr/local/bin/codex
+ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr

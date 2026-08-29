@@ -27,8 +27,8 @@
 
   <section
     id="integrations"
-    aria-label="Read-only integrations"
-    class="mb-8 grid gap-3 md:grid-cols-2"
+    aria-label="Integrations"
+    class="mb-8 grid gap-3 md:grid-cols-3"
   >
     <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
       <div class="flex items-start justify-between gap-4">
@@ -67,6 +67,17 @@
       </p>
       <p :if={!@manager_enabled} class="mt-4 text-xs text-amber-300">
         Disabled until a local checkout and explicit server setting are configured
+      </p>
+    </div>
+
+    <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
+      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Dispatcher</p>
+      <p class="mt-1 text-sm text-slate-300">Approved Herdr implementation work</p>
+      <p :if={@dispatch_enabled} class="mt-4 text-xs text-teal-300">
+        Enabled · fresh GitHub check · fenced worker lease
+      </p>
+      <p :if={!@dispatch_enabled} class="mt-4 text-xs text-amber-300">
+        Disabled · approvals remain safely queued
       </p>
     </div>
   </section>
@@ -180,6 +191,15 @@
             >
               Job {item.active_job.state}
             </span>
+            <span
+              :if={!item.active_job && item.latest_job}
+              class={[
+                "rounded-xl px-4 py-2.5 text-sm",
+                state_classes(item.latest_job.state)
+              ]}
+            >
+              Last job {item.latest_job.state}
+            </span>
             <a
               href={item.issue.html_url}
               target="_blank"
@@ -191,6 +211,12 @@
               Summary is stale
             </span>
           </div>
+          <p
+            :if={!item.active_job && item.latest_job && item.latest_job.last_error}
+            class="mt-3 text-xs text-rose-300"
+          >
+            The last attempt stopped safely. Review the service audit log before trying again.
+          </p>
         </article>
 
         <div

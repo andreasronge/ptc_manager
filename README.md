@@ -4,7 +4,8 @@ PtcManager is a private maintainer console for reviewing GitHub work, approving
 agent jobs, and seeing what Codex or Claude agents are doing and how long they
 have been running.
 
-The current second slice is deliberately read-only at its external boundaries:
+The current Slice 3 dispatch increment keeps GitHub read-only while adding the
+first approved execution path:
 
 - a responsive issue inbox with private plain-language summaries;
 - an **Approve and start** workflow backed by SQLite transactions;
@@ -16,10 +17,15 @@ The current second slice is deliberately read-only at its external boundaries:
 - manual or periodic read-only GitHub issue synchronization;
 - read-only Herdr agent reconciliation with lost-agent detection;
 - optional private Codex investigations in an ephemeral read-only sandbox.
+- synchronous GitHub freshness checks immediately before dispatch;
+- durable worker leases and monotonically increasing fencing tokens;
+- isolated Herdr worktrees and named Codex or Claude implementation agents;
+- safe failure and lost-lease states visible in the dashboard.
 
-It does **not** start Herdr sessions, dispatch queued jobs, push branches, create
-pull requests, close issues, or write to GitHub. Those capabilities remain in
-later slices behind explicit maintainer approval. See [PLAN.md](PLAN.md).
+Dispatch is disabled by default. This increment does **not** push branches,
+create pull requests, close issues, or write to GitHub. A credential-isolated
+draft-PR broker and branch reconciliation remain before Slice 3 is complete.
+See [PLAN.md](PLAN.md).
 
 ## Run locally
 
@@ -122,14 +128,19 @@ create the dedicated service account and writable database directory:
 sudo groupadd --system ptc-manager
 sudo groupadd --system ptc-manager-codex
 sudo groupadd --system ptc-manager-output
+sudo groupadd --system ptc-manager-worker
 sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager
 sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager-codex
+sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --shell /usr/sbin/nologin ptc-manager-worker
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_manager-codex
+sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
 sudo install -d -o root -g root -m 0755 /etc/ptc_manager
 sudo install -o root -g root -m 0644 deploy/ptc_manager.service /etc/systemd/system/ptc_manager.service
+sudo install -o root -g root -m 0644 deploy/ptc_manager-herdr.service /etc/systemd/system/ptc_manager-herdr.service
 sudo install -o root -g root -m 0600 deploy/ptc_manager.env.example /etc/ptc_manager/ptc_manager.env
+sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
 sudo install -o root -g root -m 0440 deploy/ptc_manager-codex.sudoers /etc/sudoers.d/ptc_manager-codex
 sudo visudo -cf /etc/sudoers.d/ptc_manager-codex
 ```
@@ -139,16 +150,20 @@ binary and checkout paths, then start the release:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now ptc_manager
+sudo systemctl enable --now ptc_manager-herdr ptc_manager
 sudo systemctl status ptc_manager
 ```
 
-The coordinator and Herdr run as `ptc-manager`. Codex runs as the separate
-`ptc-manager-codex` account, which cannot read the root-only service environment
-or inspect the coordinator process. Authenticate Codex as that account:
+The coordinator, implementation worker, and private manager run as three
+different OS identities. Herdr and implementation agents run as
+`ptc-manager-worker`; that account must not have a GitHub token or authenticated
+`gh` session. Private read-only manager investigations run as
+`ptc-manager-codex`. Neither account can read the root-only coordinator
+environment or inspect its process. Authenticate the two agent accounts:
 
 ```sh
 sudo -u ptc-manager-codex -H codex login
+sudo -u ptc-manager-worker -H codex login
 ```
 
 The checkout at `PTC_REPOSITORY_PATH` must be readable by
@@ -157,13 +172,18 @@ only the setgid `ptc-manager-output` directory at `PTC_CODEX_OUTPUT_DIR`; the
 coordinator database directory is `0700`, and the coordinator creates each
 `0660` output file before launching Codex.
 
-Use the same `HERDR_SESSION` and `HERDR_SOCKET_PATH` values whenever you start
-or connect to Herdr as `ptc-manager`. An existing Herdr session owned by `root`
-or another login account is deliberately not visible to this isolated service;
-restart or recreate that session under `ptc-manager` before enabling polling.
+Use the same Herdr session name in the coordinator and dedicated Herdr service.
+The coordinator selects it with Herdr's explicit `--session` option after
+switching OS identity, so it does not depend on `sudo` preserving environment
+variables. An existing Herdr session owned by `root`, `agent`,
+or another login account is deliberately not used by automated dispatch;
+recreate it under `ptc-manager-worker` before enabling dispatch.
 The CLI is bounded by `PTC_HERDR_TIMEOUT_MS`; after
-`PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, active agents are
-shown as `lost` rather than working forever.
+`PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
+shown as `lost`, while managed agents become `unknown` and their jobs remain in
+reconciliation so a duplicate cannot start. After
+`PTC_DISPATCH_RECONCILE_AFTER_MS`, a successful Herdr snapshot that confirms a
+managed attempt never appeared can safely release that attempt.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:
