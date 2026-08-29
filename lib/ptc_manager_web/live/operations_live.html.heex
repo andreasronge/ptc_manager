@@ -1,0 +1,171 @@
+<Layouts.app flash={@flash} current_path="/operations">
+  <section class="mb-8">
+    <p class="text-xs font-semibold uppercase tracking-[0.24em] text-teal-300">Machine room</p>
+    <div class="mt-3 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <div>
+        <h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">
+          Capacity and agent history
+        </h1>
+        <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
+          A simple answer to two questions: can this machine take more work, and what have the agents been doing?
+        </p>
+      </div>
+      <div
+        id="capacity-recommendation"
+        class={["rounded-xl border px-4 py-3 text-sm font-medium", capacity_classes(assigns)]}
+      >
+        {capacity_label(assigns)}
+      </div>
+    </div>
+  </section>
+
+  <section aria-label="Machine capacity" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <.metric_card
+      id="metric-cpu"
+      label="CPU now"
+      value={percent(@metrics.cpu_percent)}
+      detail={"#{@metrics.cores} cores · load #{load_text(@metrics.load_average)}"}
+      percent={@metrics.cpu_percent}
+      color="bg-teal-400"
+    />
+    <.metric_card
+      id="metric-memory"
+      label="Memory used"
+      value={percent(@metrics.memory_percent)}
+      detail={"#{bytes(@metrics.memory_used_bytes)} of #{bytes(@metrics.memory_total_bytes)}"}
+      percent={@metrics.memory_percent}
+      color="bg-sky-400"
+    />
+    <.metric_card
+      id="metric-disk"
+      label="Build disk used"
+      value={percent(@metrics.disk_percent)}
+      detail={"#{bytes(@metrics.disk_used_bytes)} of #{bytes(@metrics.disk_total_bytes)}"}
+      percent={@metrics.disk_percent}
+      color="bg-violet-400"
+    />
+    <article id="metric-agents" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
+      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Agent slots</p>
+      <p class="mt-3 text-3xl font-semibold">
+        {@active_slot_count} <span class="text-base text-slate-500">/ {@total_slots}</span>
+      </p>
+      <p class="mt-2 text-xs text-slate-400">
+        {@available_slots} configured slot(s) currently available
+      </p>
+      <div class="mt-4 flex gap-1.5">
+        <span
+          :for={slot <- slot_markers(@total_slots)}
+          class={[
+            "h-2 flex-1 rounded-full",
+            slot <= @active_slot_count && "bg-teal-400",
+            slot > @active_slot_count && "bg-white/10"
+          ]}
+        >
+        </span>
+      </div>
+    </article>
+  </section>
+
+  <section class="mt-8 grid gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.65fr)]">
+    <div>
+      <div class="mb-4 flex items-end justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold">Agent timeline</h2>
+          <p class="mt-1 text-xs text-slate-500">Newest start first · latest 40 runs</p>
+        </div>
+        <span class="text-xs text-slate-600">
+          Updated {Calendar.strftime(@metrics.captured_at, "%H:%M:%S")}
+        </span>
+      </div>
+      <div
+        id="agent-timeline"
+        class="relative space-y-0 before:absolute before:bottom-6 before:left-[1.15rem] before:top-6 before:w-px before:bg-white/10"
+      >
+        <article
+          :for={run <- @timeline}
+          id={"timeline-run-#{run.id}"}
+          class="relative grid grid-cols-[2.3rem_minmax(0,1fr)] gap-3 pb-4"
+        >
+          <div class={[
+            "relative z-10 mt-5 size-3.5 place-self-center rounded-full ring-4 ring-slate-950",
+            run.state in ["working", "done"] && "bg-teal-400",
+            run.state in ["failed", "lost"] && "bg-rose-400",
+            run.state in ["blocked", "unknown"] && "bg-amber-400",
+            run.state not in ["working", "done", "failed", "lost", "blocked", "unknown"] &&
+              "bg-sky-400"
+          ]}>
+          </div>
+          <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-4 sm:p-5">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p class="text-sm font-semibold">{run_name(run)}</p>
+                <p class="mt-1 text-sm leading-6 text-slate-300">{run_task(run)}</p>
+              </div>
+              <span class={[
+                "w-fit rounded-full px-2.5 py-1 text-xs ring-1",
+                state_classes(run.state)
+              ]}>
+                {run.state}
+              </span>
+            </div>
+            <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+              <span>{run.worker.name}</span>
+              <span>Started {timestamp(run.started_at)}</span>
+              <span>{duration(@now, run.started_at, run.ended_at)}</span>
+              <span :if={run.ended_at}>Ended {timestamp(run.ended_at)}</span>
+              <span :if={!run.ended_at} class="text-teal-300">Running now</span>
+            </div>
+          </div>
+        </article>
+        <div
+          :if={@timeline == []}
+          class="rounded-2xl border border-dashed border-white/10 p-10 text-center text-sm text-slate-500"
+        >
+          No agent runs have been recorded yet.
+        </div>
+      </div>
+    </div>
+
+    <aside>
+      <h2 class="mb-4 text-lg font-semibold">Workers</h2>
+      <div id="operations-workers" class="space-y-3 xl:sticky xl:top-24">
+        <article
+          :for={worker <- @workers}
+          class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold">{worker.name}</p>
+              <p class="mt-1 text-xs text-slate-500">
+                Last seen {if worker.last_heartbeat_at,
+                  do: timestamp(worker.last_heartbeat_at),
+                  else: "never"}
+              </p>
+            </div>
+            <span class={[
+              "rounded-full px-2.5 py-1 text-xs ring-1",
+              worker.status == "online" && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
+              worker.status != "online" && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+            ]}>
+              {worker.status}
+            </span>
+          </div>
+          <dl class="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 text-xs">
+            <div>
+              <dt class="text-slate-600">Slots</dt>
+              <dd class="mt-1 text-slate-300">
+                {worker.capabilities["implementation_slots"] || 0}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-slate-600">Worktrees</dt>
+              <dd class="mt-1 text-slate-300">
+                {Enum.count(worker.worktree_allocations, &(&1.state != "removed"))}
+              </dd>
+            </div>
+          </dl>
+        </article>
+      </div>
+    </aside>
+  </section>
+</Layouts.app>

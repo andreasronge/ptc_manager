@@ -3,7 +3,8 @@ defmodule PtcManager.GitHub do
   Read-only boundary for fetching canonical GitHub issue snapshots.
 
   Implementations expose no mutation operation. A configured token should be a
-  fine-grained token with read-only metadata and issues permissions.
+  fine-grained token with read-only metadata, issues, pull requests, commit
+  statuses, and checks permissions.
   """
 
   alias PtcManager.Operations.Repository

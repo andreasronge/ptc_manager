@@ -342,17 +342,22 @@ defmodule PtcManager.Publications do
 
             true ->
               publication
-              |> PrPublication.changeset(%{
-                state: "published",
-                pr_number: result.pr_number,
-                pr_url: result.pr_url,
-                remote_head_sha: result.head_sha,
-                remote_base_sha: result.base_sha,
-                published_at: now,
-                pr_state: "open",
-                pr_checked_at: now,
-                last_error: nil
-              })
+              |> PrPublication.changeset(
+                Map.merge(
+                  %{
+                    state: "published",
+                    pr_number: result.pr_number,
+                    pr_url: result.pr_url,
+                    remote_head_sha: result.head_sha,
+                    remote_base_sha: result.base_sha,
+                    published_at: now,
+                    pr_state: "open",
+                    pr_checked_at: now,
+                    last_error: nil
+                  },
+                  remote_health_attrs(result)
+                )
+              )
               |> Repo.update!()
 
               job
@@ -665,13 +670,18 @@ defmodule PtcManager.Publications do
 
             result.state == "open" ->
               publication
-              |> PrPublication.changeset(%{
-                pr_state: "open",
-                remote_base_sha: result.base_sha,
-                pr_checked_at: now,
-                pr_url: result.pr_url,
-                last_error: nil
-              })
+              |> PrPublication.changeset(
+                Map.merge(
+                  %{
+                    pr_state: "open",
+                    remote_base_sha: result.base_sha,
+                    pr_checked_at: now,
+                    pr_url: result.pr_url,
+                    last_error: nil
+                  },
+                  remote_health_attrs(result)
+                )
+              )
               |> Repo.update!()
 
               WorktreeAllocation
@@ -694,13 +704,18 @@ defmodule PtcManager.Publications do
 
             result.state in ["merged", "closed"] ->
               publication
-              |> PrPublication.changeset(%{
-                pr_state: result.state,
-                remote_base_sha: result.base_sha,
-                pr_checked_at: now,
-                pr_url: result.pr_url,
-                last_error: nil
-              })
+              |> PrPublication.changeset(
+                Map.merge(
+                  %{
+                    pr_state: result.state,
+                    remote_base_sha: result.base_sha,
+                    pr_checked_at: now,
+                    pr_url: result.pr_url,
+                    last_error: nil
+                  },
+                  remote_health_attrs(result)
+                )
+              )
               |> Repo.update!()
 
               terminal_state = if result.state == "merged", do: "done", else: "cancelled"
@@ -836,6 +851,18 @@ defmodule PtcManager.Publications do
       is_binary(result[:base_sha]) and
       Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.base_sha) and
       is_binary(result[:base_ref]) and is_binary(result[:base_repository])
+  end
+
+  defp remote_health_attrs(result) do
+    Map.take(result, [
+      :draft,
+      :mergeability,
+      :mergeable_state,
+      :checks_state,
+      :checks_total,
+      :checks_failed,
+      :checks_pending
+    ])
   end
 
   defp valid_agent_result?(result) do

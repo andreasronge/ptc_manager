@@ -12,6 +12,9 @@ The current Slice 4 increment adds the first PR decision-support path on top of
 the approved execution, publication, worktree, and maintainer-action workflows:
 
 - a responsive issue inbox with private plain-language summaries;
+- three focused maintainer views: **Planning** for backlog decisions,
+  **Delivery** for the approval-to-merge Kanban, and **Operations** for machine
+  capacity plus the agent/task timeline;
 - an **Approve and start** workflow backed by SQLite transactions;
 - one active implementation job per issue, enforced by the database;
 - a live agent-activity panel with agent name, worker, role, task, start time,
@@ -32,7 +35,9 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - exact-SHA branch push and draft-PR creation through a GitHub App broker;
 - worker-advertised implementation capacity instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
-- canonical PR status and GitHub link in the dashboard.
+- canonical PR status and GitHub link in the dashboard;
+- read-only GitHub check-run, commit-status, draft, and merge-conflict signals
+  that place open PRs in Review & CI, Needs attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
   **PR retrospective**, and **Prepare merge decision** buttons;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
@@ -66,6 +71,13 @@ mix phx.server
 
 Open <http://localhost:4000> and sign in with `ptc-manager-dev`.
 
+The authenticated routes are:
+
+- `/` — Planning backlog and maintainer actions;
+- `/board` — active delivery Kanban;
+- `/operations` — live CPU, memory, build-disk and slot signals, followed by
+  the latest 40 agent runs and their tasks.
+
 To choose a different local password:
 
 ```sh
@@ -85,7 +97,10 @@ mix phx.server
 For a public repository, manual GitHub synchronization works without a token.
 For a private repository or higher rate limits, set `GITHUB_READ_TOKEN` to a
 fine-grained token with repository metadata, Issues read, and Pull Requests read
-access. PtcManager uses it only through its GET-only GitHub client.
+access. To project CI and merge readiness onto the Delivery board, also grant
+**Commit statuses: Read** and **Checks: Read**. PtcManager uses the token only
+through its GET-only GitHub client. If either CI source is unavailable, the
+board reports CI as unknown and will not place that PR in **Ready to merge**.
 
 Automatic draft-PR publishing is a separate, off-by-default capability. Create
 a GitHub App installed only on the managed repository with repository

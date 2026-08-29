@@ -27,6 +27,13 @@ defmodule PtcManager.Operations.PrPublication do
     field :pr_state, :string
     field :pr_checked_at, :utc_datetime_usec
     field :source, :string, default: "broker"
+    field :draft, :boolean, default: false
+    field :mergeability, :string, default: "unknown"
+    field :mergeable_state, :string
+    field :checks_state, :string, default: "unknown"
+    field :checks_total, :integer, default: 0
+    field :checks_failed, :integer, default: 0
+    field :checks_pending, :integer, default: 0
 
     belongs_to :job, PtcManager.Operations.Job
     has_many :pr_analyses, PtcManager.Operations.PrAnalysis, foreign_key: :publication_id
@@ -58,7 +65,14 @@ defmodule PtcManager.Operations.PrPublication do
       :published_at,
       :pr_state,
       :pr_checked_at,
-      :source
+      :source,
+      :draft,
+      :mergeability,
+      :mergeable_state,
+      :checks_state,
+      :checks_total,
+      :checks_failed,
+      :checks_pending
     ])
     |> validate_required([
       :job_id,
@@ -75,12 +89,18 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> validate_number(:attempt_count, greater_than_or_equal_to: 0)
     |> validate_inclusion(:source, ["broker", "agent"])
+    |> validate_inclusion(:mergeability, ["unknown", "mergeable", "conflicting", "blocked"])
+    |> validate_inclusion(:checks_state, ["unknown", "none", "pending", "success", "failure"])
+    |> validate_number(:checks_total, greater_than_or_equal_to: 0)
+    |> validate_number(:checks_failed, greater_than_or_equal_to: 0)
+    |> validate_number(:checks_pending, greater_than_or_equal_to: 0)
     |> validate_number(:pr_number, greater_than: 0)
     |> validate_length(:idempotency_key, is: 64)
     |> validate_length(:branch_name, max: 240)
     |> validate_length(:attempt_token, max: 64)
     |> validate_length(:last_error, max: 500)
     |> validate_length(:pr_url, max: 500)
+    |> validate_length(:mergeable_state, max: 40)
     |> validate_inclusion(:pr_state, ["open", "merged", "closed"])
     |> validate_format(:idempotency_key, ~r/\A[0-9a-f]{64}\z/)
     |> validate_format(:base_sha, @sha)

@@ -1022,6 +1022,14 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  def list_agent_timeline(limit \\ 40) when is_integer(limit) and limit > 0 do
+    AgentRun
+    |> order_by([run], desc: run.started_at, desc: run.id)
+    |> limit(^limit)
+    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
   def list_workers_with_worktrees do
     Worker
     |> order_by([worker], asc: worker.id)

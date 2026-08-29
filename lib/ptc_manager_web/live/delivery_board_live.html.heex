@@ -1,0 +1,122 @@
+<Layouts.app flash={@flash} current_path="/board">
+  <section class="mb-8">
+    <p class="text-xs font-semibold uppercase tracking-[0.24em] text-teal-300">
+      Delivery control
+    </p>
+    <div class="mt-3 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <div>
+        <h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">From approval to merge</h1>
+        <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
+          Planning decides what should be built. This board follows approved work through agents, CI, review, and your final merge decision.
+        </p>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
+          <span class="text-2xl font-semibold">{@item_count}</span><span class="ml-2 text-slate-500">active deliveries</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mb-5 rounded-2xl border border-violet-400/15 bg-violet-400/[0.05] px-5 py-4 text-sm text-slate-300">
+    <div class="flex gap-3">
+      <.icon name="hero-sparkles-mini" class="mt-0.5 size-5 shrink-0 text-violet-300" />
+      <p>
+        <span class="font-semibold text-violet-200">Automation-ready view.</span>
+        Today the board explains the durable state; later a manager agent can use these same lanes to pick safe next actions.
+      </p>
+    </div>
+  </section>
+
+  <div
+    id="delivery-board"
+    class="grid snap-x snap-mandatory auto-cols-[minmax(280px,86vw)] grid-flow-col gap-4 overflow-x-auto pb-5 xl:auto-cols-auto xl:grid-flow-row xl:grid-cols-5 xl:overflow-visible"
+  >
+    <section
+      :for={lane <- @lane_definitions}
+      id={"lane-#{lane.key}"}
+      aria-labelledby={"lane-title-#{lane.key}"}
+      class="min-w-0 snap-start"
+    >
+      <div class="mb-3 flex items-start justify-between gap-3 px-1">
+        <div>
+          <div class="flex items-center gap-2">
+            <span class={["size-2 rounded-full", lane.color]}></span>
+            <h2 id={"lane-title-#{lane.key}"} class="text-sm font-semibold">{lane.title}</h2>
+          </div>
+          <p class="mt-1 text-[11px] leading-4 text-slate-500">{lane.subtitle}</p>
+        </div>
+        <span class="rounded-full bg-white/5 px-2 py-0.5 text-xs text-slate-400 ring-1 ring-white/10">
+          {length(lane_items(@lanes, lane.key))}
+        </span>
+      </div>
+
+      <div class="space-y-3 rounded-2xl border border-white/[0.07] bg-black/10 p-2.5 xl:min-h-[28rem]">
+        <article
+          :for={item <- lane_items(@lanes, lane.key)}
+          id={"board-job-#{item.active_job.id}"}
+          class="rounded-xl border border-white/10 bg-slate-900 p-4 shadow-lg shadow-black/10"
+        >
+          <div class="flex items-start justify-between gap-2">
+            <p class="text-[11px] font-medium text-slate-500">
+              {item.issue.repository.github_name} · #{item.issue.number}
+            </p>
+            <span class="shrink-0 text-[11px] text-slate-600">{card_age(@now, item)}</span>
+          </div>
+          <h3 class="mt-1.5 text-sm font-semibold leading-5 text-slate-100">
+            {item.issue.title}
+          </h3>
+
+          <div class="mt-3 flex flex-wrap gap-1.5">
+            <span class="rounded-full bg-sky-400/10 px-2 py-1 text-[10px] text-sky-300 ring-1 ring-sky-400/15">
+              {status_label(item.active_job.state)}
+            </span>
+            <span
+              :if={agent_label(item)}
+              class="rounded-full bg-white/5 px-2 py-1 text-[10px] text-slate-400 ring-1 ring-white/10"
+            >
+              {agent_label(item)}
+            </span>
+            <span
+              :for={{label, tone} <- health_badges(item)}
+              class={["rounded-full px-2 py-1 text-[10px] ring-1", badge_classes(tone)]}
+            >
+              {label}
+            </span>
+          </div>
+
+          <p class="mt-3 border-t border-white/10 pt-3 text-xs leading-5 text-slate-400">
+            {next_step(item, lane.key)}
+          </p>
+
+          <div class="mt-3 flex flex-wrap gap-3 text-xs">
+            <a
+              :if={item.publication && item.publication.pr_url}
+              href={item.publication.pr_url}
+              target="_blank"
+              rel="noreferrer"
+              class="font-semibold text-teal-300 hover:text-teal-200"
+            >
+              Open PR #{item.publication.pr_number} ↗
+            </a>
+            <a
+              href={item.issue.html_url}
+              target="_blank"
+              rel="noreferrer"
+              class="text-slate-500 hover:text-white"
+            >
+              Issue ↗
+            </a>
+          </div>
+        </article>
+
+        <div
+          :if={lane_items(@lanes, lane.key) == []}
+          class="grid min-h-28 place-items-center rounded-xl border border-dashed border-white/[0.07] p-4 text-center text-xs leading-5 text-slate-600"
+        >
+          No work here
+        </div>
+      </div>
+    </section>
+  </div>
+</Layouts.app>

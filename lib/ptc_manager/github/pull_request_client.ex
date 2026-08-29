@@ -12,7 +12,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
     case Client.get_json(repository_url(repository, "/pulls/#{number}")) do
       {:ok, pull} when is_map(pull) ->
         case normalize(pull) do
-          {:ok, result} -> {:ok, result}
+          {:ok, result} -> {:ok, Map.merge(result, health(repository, pull, result.head_sha))}
           {:error, reason} -> {:blocked, reason}
         end
 
@@ -36,7 +36,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
     case Client.get_json(url) do
       {:ok, [pull]} when is_map(pull) ->
         case normalize(pull) do
-          {:ok, result} -> {:ok, result}
+          {:ok, result} -> {:ok, Map.merge(result, health(repository, pull, result.head_sha))}
           {:error, reason} -> {:blocked, reason}
         end
 
@@ -105,6 +105,107 @@ defmodule PtcManager.GitHub.PullRequestClient do
       is_binary(result.base_sha) and is_binary(result.base_ref) and
       is_binary(result.base_repository)
   end
+
+  @doc false
+  def health_from_responses(pull, combined_status, check_runs) do
+    legacy = legacy_checks(combined_status)
+    checks = check_runs(check_runs)
+    total = legacy.total + checks.total
+    failed = legacy.failed + checks.failed
+    pending = legacy.pending + checks.pending
+
+    checks_state =
+      cond do
+        failed > 0 -> "failure"
+        legacy.unknown or checks.unknown -> "unknown"
+        pending > 0 -> "pending"
+        total == 0 -> "none"
+        true -> "success"
+      end
+
+    %{
+      draft: pull["draft"] == true,
+      mergeability: mergeability(pull),
+      mergeable_state: bounded_state(pull["mergeable_state"]),
+      checks_state: checks_state,
+      checks_total: total,
+      checks_failed: failed,
+      checks_pending: pending
+    }
+  end
+
+  defp health(repository, pull, head_sha) do
+    base = "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}"
+
+    combined_status =
+      case Client.get_json("#{base}/commits/#{head_sha}/status") do
+        {:ok, result} -> result
+        _failure -> nil
+      end
+
+    check_runs =
+      case Client.get_json("#{base}/commits/#{head_sha}/check-runs?per_page=100") do
+        {:ok, result} -> result
+        _failure -> nil
+      end
+
+    health_from_responses(pull, combined_status, check_runs)
+  end
+
+  defp legacy_checks(%{"total_count" => 0}),
+    do: %{total: 0, failed: 0, pending: 0, unknown: false}
+
+  defp legacy_checks(%{"state" => state, "total_count" => total})
+       when state in ["success", "pending", "failure", "error"] and is_integer(total) do
+    %{
+      total: total,
+      failed: if(state in ["failure", "error"], do: 1, else: 0),
+      pending: if(state == "pending", do: 1, else: 0),
+      unknown: false
+    }
+  end
+
+  defp legacy_checks(_response), do: %{total: 0, failed: 0, pending: 0, unknown: true}
+
+  defp check_runs(%{"check_runs" => runs} = response) when is_list(runs) do
+    observed =
+      Enum.reduce(runs, %{total: 0, failed: 0, pending: 0, unknown: false}, fn run, acc ->
+        cond do
+          run["status"] != "completed" ->
+            %{acc | total: acc.total + 1, pending: acc.pending + 1}
+
+          run["conclusion"] in ["success", "neutral", "skipped"] ->
+            %{acc | total: acc.total + 1}
+
+          true ->
+            %{acc | total: acc.total + 1, failed: acc.failed + 1}
+        end
+      end)
+
+    case response["total_count"] do
+      total when is_integer(total) and total > length(runs) ->
+        %{observed | total: total, unknown: true}
+
+      _total ->
+        observed
+    end
+  end
+
+  defp check_runs(_response), do: %{total: 0, failed: 0, pending: 0, unknown: true}
+
+  defp mergeability(%{"draft" => true}), do: "blocked"
+  defp mergeability(%{"mergeable_state" => "dirty"}), do: "conflicting"
+  defp mergeability(%{"mergeable" => false}), do: "blocked"
+  defp mergeability(%{"mergeable" => true, "mergeable_state" => "clean"}), do: "mergeable"
+
+  defp mergeability(%{"mergeable" => true, "mergeable_state" => state})
+       when state in ["behind", "blocked", "draft", "unstable"],
+       do: "blocked"
+
+  defp mergeability(_pull), do: "unknown"
+
+  defp bounded_state(value) when is_binary(value), do: String.slice(value, 0, 40)
+  defp bounded_state(_value), do: nil
 
   defp repository_url(repository, suffix) do
     "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}#{suffix}"

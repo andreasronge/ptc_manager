@@ -31,13 +31,15 @@ defmodule PtcManagerWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
 
+  attr :current_path, :string, default: "/"
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
     <div class="min-h-screen bg-slate-950 text-slate-100">
       <header class="sticky top-0 z-30 border-b border-white/10 bg-slate-950/90 px-4 backdrop-blur sm:px-6">
-        <div class="mx-auto flex h-16 max-w-7xl items-center justify-between">
+        <div class="mx-auto flex min-h-16 max-w-7xl flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3 sm:flex-nowrap sm:py-0">
           <a href={~p"/"} class="flex items-center gap-3">
             <span class="grid size-9 place-items-center rounded-xl bg-teal-400 font-black text-slate-950">
               P
@@ -47,6 +49,28 @@ defmodule PtcManagerWeb.Layouts do
               <span class="block text-xs text-slate-500">Maintainer console</span>
             </span>
           </a>
+          <nav
+            aria-label="Primary"
+            class="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto"
+          >
+            <.nav_link href={~p"/"} active={@current_path == "/"} icon="hero-inbox-stack-mini">
+              Planning
+            </.nav_link>
+            <.nav_link
+              href={~p"/board"}
+              active={@current_path == "/board"}
+              icon="hero-view-columns-mini"
+            >
+              Delivery
+            </.nav_link>
+            <.nav_link
+              href={~p"/operations"}
+              active={@current_path == "/operations"}
+              icon="hero-chart-bar-square-mini"
+            >
+              Operations
+            </.nav_link>
+          </nav>
           <.link href={~p"/logout"} method="delete" class="text-sm text-slate-400 hover:text-white">
             Sign out
           </.link>
@@ -61,6 +85,26 @@ defmodule PtcManagerWeb.Layouts do
 
       <.flash_group flash={@flash} />
     </div>
+    """
+  end
+
+  attr :href, :string, required: true
+  attr :active, :boolean, default: false
+  attr :icon, :string, required: true
+  slot :inner_block, required: true
+
+  defp nav_link(assigns) do
+    ~H"""
+    <.link
+      navigate={@href}
+      class={[
+        "inline-flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition",
+        @active && "bg-white/10 text-white",
+        !@active && "text-slate-400 hover:bg-white/5 hover:text-white"
+      ]}
+    >
+      <.icon name={@icon} class="size-4" /> {render_slot(@inner_block)}
+    </.link>
     """
   end
 

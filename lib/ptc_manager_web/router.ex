@@ -25,6 +25,8 @@ defmodule PtcManagerWeb.Router do
     pipe_through [:browser, :require_authenticated]
 
     live "/", DashboardLive, :index
+    live "/board", DeliveryBoardLive, :index
+    live "/operations", OperationsLive, :index
     delete "/logout", AuthController, :delete
   end
 
