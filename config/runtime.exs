@@ -136,7 +136,11 @@ config :ptc_manager,
     System.get_env("PTC_GIT_MEMORY_LIMIT_BYTES", "268435456") |> String.to_integer(),
   implementation_agent_kind: System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex"),
   implementation_agent_args:
-    System.get_env("PTC_IMPLEMENTATION_AGENT_ARGS", "--full-auto") |> OptionParser.split(),
+    System.get_env(
+      "PTC_IMPLEMENTATION_AGENT_ARGS",
+      "--dangerously-bypass-approvals-and-sandbox"
+    )
+    |> OptionParser.split(),
   implementation_agent_start_timeout_ms:
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),

@@ -100,7 +100,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   defp start_agent(name, pane_id) do
     kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
-    agent_args = Application.get_env(:ptc_manager, :implementation_agent_args, ["--full-auto"])
+
+    agent_args =
+      Application.get_env(:ptc_manager, :implementation_agent_args, [
+        "--dangerously-bypass-approvals-and-sandbox"
+      ])
+
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
     command_timeout = timeout + @agent_start_command_grace_ms
 

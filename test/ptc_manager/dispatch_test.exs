@@ -315,6 +315,12 @@ defmodule PtcManager.DispatchTest do
     assert dispatch.external_key == "default:impl-slow"
   end
 
+  test "Codex implementation agents use the currently supported unattended flag" do
+    assert Application.fetch_env!(:ptc_manager, :implementation_agent_args) == [
+             "--dangerously-bypass-approvals-and-sandbox"
+           ]
+  end
+
   test "builds the configurable test, prompt-only review, and broker contract" do
     repository =
       repository_fixture(%{
