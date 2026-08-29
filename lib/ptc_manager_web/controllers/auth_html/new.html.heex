@@ -1,0 +1,31 @@
+<div class="min-h-screen bg-slate-950 px-5 py-12 text-slate-100">
+  <div class="mx-auto flex min-h-[70vh] max-w-md items-center">
+    <div class="w-full rounded-3xl border border-white/10 bg-white/5 p-7 shadow-2xl shadow-black/30 backdrop-blur">
+      <div class="mb-8">
+        <p class="mb-3 text-xs font-semibold uppercase tracking-[0.24em] text-teal-300">
+          PtcManager
+        </p>
+        <h1 class="text-3xl font-semibold tracking-tight">Private maintainer console</h1>
+        <p class="mt-3 text-sm leading-6 text-slate-400">
+          Review issues, approve work, and see what every agent is doing.
+        </p>
+      </div>
+
+      <.form :let={form} for={%{}} as={:login} action={~p"/login"} class="space-y-5">
+        <.input
+          field={form[:password]}
+          name="password"
+          type="password"
+          label="Password"
+          autocomplete="current-password"
+          required
+          class="w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-3 text-slate-100"
+        />
+        <button class="w-full rounded-xl bg-teal-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-teal-300">
+          Sign in
+        </button>
+      </.form>
+    </div>
+  </div>
+  <Layouts.flash_group flash={@flash} />
+</div>
