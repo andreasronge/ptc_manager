@@ -114,11 +114,14 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
              "needs-decision",
              "reject",
              "followups-created",
-             "no-followups"
+             "no-followups",
+             "merge-ready",
+             "merge-blocked",
+             "merge-needs-decision"
            ] and is_binary(summary) and is_binary(why_it_matters) and
              scope in ["small", "medium", "large"] and risk in ["low", "medium", "high"] and
              is_binary(technical_evidence) and is_list(changes) and is_list(evidence),
-      do: validate_action_result(action_key, outcome, created_issue_numbers)
+      do: validate_action_result(action_key, outcome, created_issue_numbers, changes)
 
   def validate_result(_result, _action_key), do: {:error, :invalid_agent_action_output}
 
@@ -130,16 +133,29 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
        when outcome in ["followups-created", "no-followups"],
        do: :ok
 
+  defp validate_outcome("prepare_merge_decision", outcome)
+       when outcome in ["merge-ready", "merge-blocked", "merge-needs-decision"],
+       do: :ok
+
   defp validate_outcome(_action_key, _outcome), do: {:error, :invalid_agent_action_outcome}
 
-  defp validate_action_result(action_key, outcome, created_issue_numbers) do
+  defp validate_action_result(action_key, outcome, created_issue_numbers, changes) do
     with :ok <- validate_outcome(action_key, outcome),
-         :ok <- validate_created_issue_numbers(action_key, outcome, created_issue_numbers) do
+         :ok <- validate_created_issue_numbers(action_key, outcome, created_issue_numbers),
+         :ok <- validate_github_changes(action_key, changes) do
       :ok
     end
   end
 
+  defp validate_github_changes("prepare_merge_decision", []), do: :ok
+
+  defp validate_github_changes("prepare_merge_decision", _changes),
+    do: {:error, :unexpected_github_changes}
+
+  defp validate_github_changes(_action_key, _changes), do: :ok
+
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "no-followups", []), do: :ok
 
   defp validate_created_issue_numbers(

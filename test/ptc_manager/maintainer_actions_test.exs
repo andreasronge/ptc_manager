@@ -4,8 +4,19 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.CodexAdapter
+  alias PtcManager.MergeDecisions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent, PrPublication, Proposal}
+
+  alias PtcManager.Operations.{
+    AgentAction,
+    AgentRun,
+    AuditEvent,
+    MergeApproval,
+    PrAnalysis,
+    PrPublication,
+    Proposal
+  }
+
   alias PtcManager.Repo
 
   defmodule FakeAdapter do
@@ -69,6 +80,40 @@ defmodule PtcManager.MaintainerActionsTest do
          "created_issue_numbers" => []
        }}
     end
+  end
+
+  defmodule MergeDecisionAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(action) do
+      send(Process.get(:agent_action_test_pid), {:ran_agent_action, action})
+
+      {:ok,
+       %{
+         "outcome" => "merge-ready",
+         "private_summary" => "This PR safely fixes the reported retry bug.",
+         "why_it_matters" => "It prevents duplicate work without widening the change.",
+         "scope" => "small",
+         "risk" => "low",
+         "technical_evidence" => "The focused tests and required reviews are green.",
+         "github_changes" => [],
+         "evidence" => ["Reviewed checks, reviews, discussion, and diff"],
+         "created_issue_numbers" => []
+       }}
+    end
+  end
+
+  defmodule MergeDecisionSync do
+    def sync_action(_action) do
+      [status | remaining] = Process.get(:merge_decision_statuses)
+      Process.put(:merge_decision_statuses, remaining)
+      {:ok, %{pull_request: status}}
+    end
+  end
+
+  defmodule MergeDecisionClient do
+    @behaviour PtcManager.GitHub.PullRequests
+    def status(_publication), do: Process.get(:merge_approval_status)
   end
 
   defmodule RetrospectiveSync do
@@ -259,6 +304,172 @@ defmodule PtcManager.MaintainerActionsTest do
       |> Map.put("created_issue_numbers", [23])
 
     assert :ok = CodexAdapter.validate_result(created, "pr_retrospective")
+
+    merge_result =
+      result
+      |> Map.put("outcome", "merge-ready")
+
+    assert :ok = CodexAdapter.validate_result(merge_result, "prepare_merge_decision")
+
+    assert {:error, :unexpected_github_changes} =
+             merge_result
+             |> Map.put("github_changes", ["Approved the PR"])
+             |> CodexAdapter.validate_result("prepare_merge_decision")
+  end
+
+  test "stores a private merge decision only when the exact PR version is unchanged" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    status = merge_status(publication, repository)
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
+
+    assert queued.prompt =~ "read-only investigation"
+    assert queued.prompt =~ "Follow relevant links"
+    assert queued.prompt =~ "exact GitHub head and base SHAs"
+
+    Process.put(:merge_decision_statuses, [status, status])
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(
+               adapter: MergeDecisionAdapter,
+               sync: MergeDecisionSync
+             )
+
+    assert completed.state == "done"
+    assert completed.target_snapshot == MergeDecisions.snapshot(status)
+
+    analysis = Repo.get_by!(PrAnalysis, agent_action_id: completed.id)
+    assert analysis.outcome == "merge-ready"
+    assert analysis.head_sha == publication.remote_head_sha
+    assert analysis.reviewed_base_sha == status.base_sha
+    assert analysis.diff_digest == publication.diff_digest
+
+    second_publication = open_publication_fixture(issue_fixture(repository, %{number: 99}))
+    first = merge_status(second_publication, repository)
+    changed = %{first | base_sha: String.duplicate("e", 40)}
+
+    assert {:ok, second_action} =
+             MaintainerActions.enqueue(
+               "prepare_merge_decision",
+               second_publication.id,
+               "andreas"
+             )
+
+    Process.put(:merge_decision_statuses, [first, changed])
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: MergeDecisionAdapter,
+               sync: MergeDecisionSync
+             )
+
+    assert failed.id == second_action.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "pull_request_changed_during_analysis"
+    refute Repo.get_by(PrAnalysis, agent_action_id: second_action.id)
+  end
+
+  test "human merge approval is bound to the analyzed head, base, and diff" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    status = merge_status(publication, repository)
+
+    {:ok, action} = MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
+    Process.put(:merge_decision_statuses, [status, status])
+
+    assert {:ok, _completed} =
+             MaintainerActions.run_once(
+               adapter: MergeDecisionAdapter,
+               sync: MergeDecisionSync
+             )
+
+    Process.put(:merge_approval_status, {:ok, status})
+
+    assert {:ok, approval} =
+             MergeDecisions.approve(publication.id, "andreas", client: MergeDecisionClient)
+
+    assert approval.actor == "andreas"
+    assert approval.head_sha == status.head_sha
+    assert approval.reviewed_base_sha == status.base_sha
+    assert approval.diff_digest == publication.diff_digest
+    assert Repo.aggregate(MergeApproval, :count) == 1
+
+    changed = %{status | base_sha: String.duplicate("e", 40)}
+    Process.put(:merge_approval_status, {:ok, changed})
+
+    assert {:error, :merge_analysis_stale} =
+             MergeDecisions.approve(publication.id, "andreas", client: MergeDecisionClient)
+
+    assert Repo.aggregate(MergeApproval, :count) == 1
+    assert Repo.get!(AgentAction, action.id).state == "done"
+
+    Process.put(:merge_approval_status, {:ok, status})
+
+    assert {:ok, same_approval} =
+             MergeDecisions.approve(publication.id, "andreas", client: MergeDecisionClient)
+
+    assert same_approval.id == approval.id
+    assert Repo.aggregate(MergeApproval, :count) == 1
+
+    assert Repo.aggregate(
+             from(event in AuditEvent, where: event.action == "merge_approval.approved"),
+             :count
+           ) == 1
+  end
+
+  test "a PR closed during merge-decision preflight fails without running or blocking the queue" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, MergeDecisionClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    closed = %{merge_status(publication, repository) | state: "closed"}
+    Process.put(:merge_approval_status, {:ok, closed})
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
+
+    assert {:ok, failed} = MaintainerActions.run_once(adapter: MergeDecisionAdapter)
+    assert failed.id == queued.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "pull_request_not_open"
+    refute_receive {:ran_agent_action, _action}
+
+    assert {:ok, next_action} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+    assert Operations.next_agent_action_candidate().id == next_action.id
+  end
+
+  test "a changed PR head during merge-decision preflight fails terminally" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, MergeDecisionClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+
+    changed = %{
+      merge_status(publication, repository)
+      | head_sha: String.duplicate("e", 40)
+    }
+
+    Process.put(:merge_approval_status, {:ok, changed})
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
+
+    assert {:ok, failed} = MaintainerActions.run_once(adapter: MergeDecisionAdapter)
+    assert failed.id == queued.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "pull_request_not_open"
+    assert Repo.get!(PrPublication, publication.id).state == "blocked"
+    refute_receive {:ran_agent_action, _action}
   end
 
   test "verifies retrospective follow-up issue numbers against synchronized GitHub state" do
@@ -448,10 +659,68 @@ defmodule PtcManager.MaintainerActionsTest do
       pr_number: 81,
       pr_url: "https://github.com/example/repo/pull/81",
       remote_head_sha: String.duplicate("b", 40),
+      remote_base_sha: String.duplicate("d", 40),
       published_at: DateTime.utc_now(),
       pr_state: "merged",
       source: "broker"
     })
     |> Repo.insert!()
+  end
+
+  defp open_publication_fixture(issue) do
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    job
+    |> PtcManager.Operations.Job.changeset(%{
+      state: "pr_open",
+      branch_name: "ptc/issue-#{issue.number}",
+      result_base_sha: String.duplicate("a", 40),
+      result_head_sha: String.duplicate("b", 40),
+      result_diff_digest: String.duplicate("c", 64),
+      result_commit_count: 1,
+      result_verified_at: now
+    })
+    |> Repo.update!()
+
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      job_id: job.id,
+      state: "published",
+      idempotency_key:
+        :crypto.hash(:sha256, "open-publication-#{issue.id}")
+        |> Base.encode16(case: :lower),
+      fencing_token: job.fencing_token,
+      branch_name: "ptc/issue-#{issue.number}",
+      base_sha: String.duplicate("a", 40),
+      head_sha: String.duplicate("b", 40),
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      pr_number: 80 + issue.number,
+      pr_url: "https://github.com/example/repo/pull/#{80 + issue.number}",
+      remote_head_sha: String.duplicate("b", 40),
+      published_at: now,
+      pr_state: "open",
+      pr_checked_at: now,
+      source: "broker"
+    })
+    |> Repo.insert!()
+  end
+
+  defp merge_status(publication, repository) do
+    %{
+      pr_number: publication.pr_number,
+      pr_url: publication.pr_url,
+      state: "open",
+      draft: false,
+      body: "Fixes the retry bug.",
+      head_sha: publication.remote_head_sha,
+      head_ref: publication.branch_name,
+      head_repository: "#{repository.github_owner}/#{repository.github_name}",
+      base_sha: String.duplicate("d", 40),
+      base_ref: repository.default_branch,
+      base_repository: "#{repository.github_owner}/#{repository.github_name}"
+    }
   end
 end

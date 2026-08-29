@@ -241,6 +241,9 @@ The initial SQLite database contains:
 - `approvals`: immutable decisions bound to a proposal and source version;
 - `jobs`: durable requested work and state transitions;
 - `pr_publications`: durable exact-SHA broker claims, retry state, and PR identity;
+- `pr_analyses`: private PR summaries bound to the head SHA, reviewed base SHA,
+  and verified diff digest;
+- `merge_approvals`: immutable human decisions bound to one exact PR analysis;
 - `worktree_allocations`: worker-local paths, lifecycle state, ownership,
   verified PR/head, last use, and reclaimability evidence;
 - `workers`: stable execution nodes, capabilities, and last heartbeat;
@@ -372,6 +375,10 @@ with an audit trail, and see the authoritative GitHub result after
 re-synchronization without creating a second issue-state system.
 
 ### Slice 4: PR decision support
+
+The first vertical increment stores a private agent-prepared merge decision and
+a human approval bound to the exact head SHA, reviewed base SHA, base target,
+and verified diff digest. It deliberately stops before performing a merge.
 
 - PR plain-language and technical summaries;
 - checks and review reconciliation;

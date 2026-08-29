@@ -216,6 +216,7 @@ defmodule PtcManager.PublisherTest do
         state: "merged",
         pr_url: "https://github.com/owner/repo/pull/73",
         head_sha: result.head_sha,
+        base_sha: String.duplicate("a", 40),
         base_ref: "main",
         base_repository: base_repository(merged_job)
       }
@@ -233,6 +234,7 @@ defmodule PtcManager.PublisherTest do
         state: "closed",
         pr_url: "https://github.com/owner/repo/pull/73",
         head_sha: closed_result.head_sha,
+        base_sha: String.duplicate("a", 40),
         base_ref: "main",
         base_repository: base_repository(closed_job)
       }
@@ -267,6 +269,7 @@ defmodule PtcManager.PublisherTest do
         state: "merged",
         pr_url: publication.pr_url,
         head_sha: result.head_sha,
+        base_sha: String.duplicate("a", 40),
         base_ref: "main",
         base_repository: base_repository(job)
       }
@@ -299,6 +302,7 @@ defmodule PtcManager.PublisherTest do
         state: "open",
         pr_url: publication.pr_url,
         head_sha: result.head_sha,
+        base_sha: String.duplicate("a", 40),
         base_ref: "main",
         base_repository: base_repository(job)
       }
@@ -317,6 +321,7 @@ defmodule PtcManager.PublisherTest do
         state: "open",
         pr_url: "https://github.com/owner/repo/pull/73",
         head_sha: String.duplicate("e", 40),
+        base_sha: String.duplicate("a", 40),
         base_ref: "main",
         base_repository: base_repository(job)
       }
@@ -337,6 +342,7 @@ defmodule PtcManager.PublisherTest do
         state: "open",
         pr_url: "https://github.com/owner/repo/pull/73",
         head_sha: result.head_sha,
+        base_sha: String.duplicate("a", 40),
         base_ref: "release",
         base_repository: "owner/repo"
       }

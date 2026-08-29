@@ -575,11 +575,20 @@ defmodule PtcManager.GitHub.AppBroker do
          %{
            "state" => state,
            "html_url" => url,
-           "head" => %{"sha" => head_sha},
-           "base" => %{"ref" => base_ref, "repo" => %{"full_name" => base_repository}}
+           "head" => %{
+             "sha" => head_sha,
+             "ref" => head_ref,
+             "repo" => %{"full_name" => head_repository}
+           },
+           "base" => %{
+             "sha" => base_sha,
+             "ref" => base_ref,
+             "repo" => %{"full_name" => base_repository}
+           }
          } = pull_request
        )
        when state in ["open", "closed"] and is_binary(url) and is_binary(head_sha) and
+              is_binary(head_ref) and is_binary(head_repository) and is_binary(base_sha) and
               is_binary(base_ref) and is_binary(base_repository) do
     state =
       cond do
@@ -592,7 +601,12 @@ defmodule PtcManager.GitHub.AppBroker do
      %{
        state: state,
        pr_url: url,
+       draft: pull_request["draft"] == true,
+       body: pull_request["body"] || "",
        head_sha: head_sha,
+       head_ref: head_ref,
+       head_repository: head_repository,
+       base_sha: base_sha,
        base_ref: base_ref,
        base_repository: base_repository
      }}

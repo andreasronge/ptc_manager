@@ -22,12 +22,15 @@ defmodule PtcManager.Operations.PrPublication do
     field :pr_number, :integer
     field :pr_url, :string
     field :remote_head_sha, :string
+    field :remote_base_sha, :string
     field :published_at, :utc_datetime_usec
     field :pr_state, :string
     field :pr_checked_at, :utc_datetime_usec
     field :source, :string, default: "broker"
 
     belongs_to :job, PtcManager.Operations.Job
+    has_many :pr_analyses, PtcManager.Operations.PrAnalysis, foreign_key: :publication_id
+    has_many :merge_approvals, PtcManager.Operations.MergeApproval, foreign_key: :publication_id
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -51,6 +54,7 @@ defmodule PtcManager.Operations.PrPublication do
       :pr_number,
       :pr_url,
       :remote_head_sha,
+      :remote_base_sha,
       :published_at,
       :pr_state,
       :pr_checked_at,
@@ -82,6 +86,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_format(:base_sha, @sha)
     |> validate_format(:head_sha, @sha)
     |> validate_format(:remote_head_sha, @sha)
+    |> validate_format(:remote_base_sha, @sha)
     |> validate_format(:diff_digest, ~r/\A[0-9a-f]{64}\z/)
     |> unique_constraint(:job_id)
     |> unique_constraint(:idempotency_key)

@@ -2,8 +2,31 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, Job, PrPublication}
+  alias PtcManager.Operations.{AgentAction, Job, MergeApproval, PrAnalysis, PrPublication}
   alias PtcManager.Repo
+
+  defmodule MergeApprovalClient do
+    @behaviour PtcManager.GitHub.PullRequests
+
+    def status(publication) do
+      repository = publication.job.repository
+
+      {:ok,
+       %{
+         pr_number: publication.pr_number,
+         pr_url: publication.pr_url,
+         state: "open",
+         draft: false,
+         body: "",
+         head_sha: publication.remote_head_sha,
+         head_ref: publication.branch_name,
+         head_repository: "#{repository.github_owner}/#{repository.github_name}",
+         base_sha: String.duplicate("d", 40),
+         base_ref: repository.default_branch,
+         base_repository: "#{repository.github_owner}/#{repository.github_name}"
+       }}
+    end
+  end
 
   test "approves a fresh issue and displays the queued job", %{conn: conn} do
     repository = repository_fixture()
@@ -175,6 +198,90 @@ defmodule PtcManagerWeb.DashboardLiveTest do
            )
 
     assert job.state == "pr_open"
+  end
+
+  test "shows the private PR summary and records an exact-version merge approval", %{conn: conn} do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, MergeApprovalClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Approve only the reviewed PR"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {_job, publication} = publication_fixture(job, "published")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, action} =
+      Operations.enqueue_agent_action(%{
+        repository_id: repository.id,
+        action_key: "prepare_merge_decision",
+        target_type: "pull_request",
+        target_id: publication.id,
+        target_label: "#{repository.github_owner}/#{repository.github_name}##73",
+        prompt_version: 1,
+        prompt: "Analyze the PR read-only.",
+        actor: "andreas"
+      })
+
+    analysis =
+      %PrAnalysis{}
+      |> PrAnalysis.changeset(%{
+        publication_id: publication.id,
+        agent_action_id: action.id,
+        outcome: "merge-ready",
+        plain_summary: "The retry fix is small and ready to merge.",
+        why_it_matters: "It prevents duplicate jobs.",
+        scope: "small",
+        risk: "low",
+        technical_evidence: "Checks and reviews are green.",
+        base_repository: "#{repository.github_owner}/#{repository.github_name}",
+        base_ref: repository.default_branch,
+        reviewed_base_sha: String.duplicate("d", 40),
+        head_repository: "#{repository.github_owner}/#{repository.github_name}",
+        head_ref: publication.branch_name,
+        head_sha: publication.remote_head_sha,
+        diff_digest: publication.diff_digest,
+        analyzed_at: now
+      })
+      |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#pr-analysis-#{analysis.id}", "ready to merge")
+    assert has_element?(view, "#approve-merge-#{publication.id}", "Approve for merge")
+
+    view
+    |> element("#approve-merge-#{publication.id}")
+    |> render_click()
+
+    assert render(view) =~ "Approved for merge at this exact PR version"
+    assert render(view) =~ "Automatic merge is not enabled yet"
+
+    approval = Repo.one!(MergeApproval)
+    assert approval.pr_analysis_id == analysis.id
+    assert approval.head_sha == publication.remote_head_sha
+    assert approval.reviewed_base_sha == String.duplicate("d", 40)
+
+    publication
+    |> PrPublication.changeset(%{
+      state: "blocked",
+      remote_head_sha: String.duplicate("e", 40),
+      last_error: "GitHub reports a different pull-request head commit."
+    })
+    |> Repo.update!()
+
+    job
+    |> Job.changeset(%{
+      state: "publish_blocked",
+      last_error: "GitHub reports a different pull-request head commit."
+    })
+    |> Repo.update!()
+
+    send(view.pid, {:operations_changed, :test})
+
+    assert render(view) =~ "The previous merge approval is stale"
+    assert has_element?(view, "#pr-analysis-#{analysis.id}", "ready to merge")
   end
 
   test "offers a retrospective action after a pull request finishes", %{conn: conn} do
@@ -360,7 +467,10 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       pr_number: if(state == "published", do: 73),
       pr_url: if(state == "published", do: "https://github.com/owner/repo/pull/73"),
       remote_head_sha: if(state == "published", do: head_sha),
+      remote_base_sha: if(state == "published", do: String.duplicate("d", 40)),
       published_at: if(state == "published", do: now),
+      pr_state: if(state == "published", do: "open"),
+      pr_checked_at: if(state == "published", do: now),
       source: "broker"
     }
 

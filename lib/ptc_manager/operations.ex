@@ -18,6 +18,8 @@ defmodule PtcManager.Operations do
     AuditEvent,
     Issue,
     Job,
+    MergeApproval,
+    PrAnalysis,
     PrPublication,
     Proposal,
     Repository,
@@ -145,6 +147,69 @@ defmodule PtcManager.Operations do
       {:ok, AgentAction |> preload(:repository) |> Repo.get!(action_id)}
     else
       {:error, :agent_action_no_longer_queued}
+    end
+  end
+
+  def record_agent_action_target_snapshot(action_id, snapshot)
+      when is_integer(action_id) and is_map(snapshot) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {updated, _rows} =
+      AgentAction
+      |> where([action], action.id == ^action_id and action.state == "queued")
+      |> Repo.update_all(
+        set: [
+          target_snapshot: snapshot,
+          sync_attempt_count: 0,
+          next_sync_attempt_at: nil,
+          last_error: nil,
+          updated_at: now
+        ]
+      )
+
+    if updated == 1 do
+      {:ok, AgentAction |> preload(:repository) |> Repo.get!(action_id)}
+    else
+      {:error, :agent_action_no_longer_queued}
+    end
+  end
+
+  def fail_agent_action_preflight(action_id, reason) when is_integer(action_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    error = "Preflight stopped: #{bounded_error(reason)}"
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+        if action.state != "queued", do: Repo.rollback(:agent_action_no_longer_queued)
+
+        failed =
+          action
+          |> AgentAction.changeset(%{
+            state: "failed",
+            ended_at: now,
+            next_sync_attempt_at: nil,
+            last_error: error
+          })
+          |> Repo.update!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.preflight_failed",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{
+            "action_key" => action.action_key,
+            "error" => error
+          }
+        })
+
+        failed
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -875,6 +940,9 @@ defmodule PtcManager.Operations do
     jobs = active_jobs(issue_ids)
     latest_jobs = latest_jobs(issue_ids)
     publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
+    publication_ids = publications |> Map.values() |> Enum.map(& &1.id)
+    pr_analyses = latest_pr_analyses(publication_ids)
+    merge_approvals = latest_merge_approvals(Map.values(pr_analyses))
     agent_actions = latest_agent_actions()
 
     Enum.map(issues, fn issue ->
@@ -889,6 +957,24 @@ defmodule PtcManager.Operations do
             Map.get(jobs, issue.id),
             Map.get(latest_jobs, issue.id)
           ),
+        pr_analysis:
+          case publication_for_issue(
+                 publications,
+                 Map.get(jobs, issue.id),
+                 Map.get(latest_jobs, issue.id)
+               ) do
+            nil -> nil
+            publication -> Map.get(pr_analyses, publication.id)
+          end,
+        merge_approval:
+          case publication_for_issue(
+                 publications,
+                 Map.get(jobs, issue.id),
+                 Map.get(latest_jobs, issue.id)
+               ) do
+            nil -> nil
+            publication -> Map.get(merge_approvals, publication.id)
+          end,
         issue_agent_action: Map.get(agent_actions, {"issue", issue.id}),
         pr_agent_action:
           case publication_for_issue(
@@ -1323,6 +1409,32 @@ defmodule PtcManager.Operations do
     |> Repo.all()
     |> Enum.reduce(%{}, fn action, actions ->
       Map.put_new(actions, {action.target_type, action.target_id}, action)
+    end)
+  end
+
+  defp latest_pr_analyses([]), do: %{}
+
+  defp latest_pr_analyses(publication_ids) do
+    PrAnalysis
+    |> where([analysis], analysis.publication_id in ^publication_ids)
+    |> order_by([analysis], desc: analysis.analyzed_at, desc: analysis.id)
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn analysis, analyses ->
+      Map.put_new(analyses, analysis.publication_id, analysis)
+    end)
+  end
+
+  defp latest_merge_approvals([]), do: %{}
+
+  defp latest_merge_approvals(pr_analyses) do
+    analysis_ids = Enum.map(pr_analyses, & &1.id)
+
+    MergeApproval
+    |> where([approval], approval.pr_analysis_id in ^analysis_ids)
+    |> order_by([approval], desc: approval.approved_at, desc: approval.id)
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn approval, approvals ->
+      Map.put_new(approvals, approval.publication_id, approval)
     end)
   end
 

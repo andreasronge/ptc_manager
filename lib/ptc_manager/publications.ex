@@ -405,6 +405,7 @@ defmodule PtcManager.Publications do
               |> PrPublication.changeset(%{
                 state: "blocked",
                 pr_state: result.state,
+                remote_base_sha: result.base_sha,
                 pr_checked_at: now,
                 last_error: message
               })
@@ -426,6 +427,7 @@ defmodule PtcManager.Publications do
               |> PrPublication.changeset(%{
                 state: "blocked",
                 pr_state: result.state,
+                remote_base_sha: result.base_sha,
                 pr_checked_at: now,
                 last_error: message
               })
@@ -444,6 +446,7 @@ defmodule PtcManager.Publications do
               publication
               |> PrPublication.changeset(%{
                 pr_state: "open",
+                remote_base_sha: result.base_sha,
                 pr_checked_at: now,
                 pr_url: result.pr_url,
                 last_error: nil
@@ -472,6 +475,7 @@ defmodule PtcManager.Publications do
               publication
               |> PrPublication.changeset(%{
                 pr_state: result.state,
+                remote_base_sha: result.base_sha,
                 pr_checked_at: now,
                 pr_url: result.pr_url,
                 last_error: nil
@@ -608,6 +612,8 @@ defmodule PtcManager.Publications do
     result[:state] in ["open", "merged", "closed"] and is_binary(result[:pr_url]) and
       github_url?(result.pr_url) and is_binary(result[:head_sha]) and
       Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.head_sha) and
+      is_binary(result[:base_sha]) and
+      Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.base_sha) and
       is_binary(result[:base_ref]) and is_binary(result[:base_repository])
   end
 

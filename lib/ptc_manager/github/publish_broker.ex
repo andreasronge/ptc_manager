@@ -11,7 +11,12 @@ defmodule PtcManager.GitHub.PublishBroker do
                %{
                  state: String.t(),
                  pr_url: String.t(),
+                 draft: boolean(),
+                 body: String.t(),
                  head_sha: String.t(),
+                 head_ref: String.t(),
+                 head_repository: String.t(),
+                 base_sha: String.t(),
                  base_ref: String.t(),
                  base_repository: String.t()
                }}

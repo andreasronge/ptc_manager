@@ -60,6 +60,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
       head_sha: get_in(pull, ["head", "sha"]),
       head_ref: get_in(pull, ["head", "ref"]),
       head_repository: get_in(pull, ["head", "repo", "full_name"]),
+      base_sha: get_in(pull, ["base", "sha"]),
       base_ref: get_in(pull, ["base", "ref"]),
       base_repository: get_in(pull, ["base", "repo", "full_name"])
     }
@@ -71,7 +72,8 @@ defmodule PtcManager.GitHub.PullRequestClient do
     is_integer(result.pr_number) and result.pr_number > 0 and is_binary(result.pr_url) and
       result.state in ["open", "merged", "closed"] and is_binary(result.head_sha) and
       is_binary(result.head_ref) and is_binary(result.head_repository) and
-      is_binary(result.base_ref) and is_binary(result.base_repository)
+      is_binary(result.base_sha) and is_binary(result.base_ref) and
+      is_binary(result.base_repository)
   end
 
   defp repository_url(repository, suffix) do

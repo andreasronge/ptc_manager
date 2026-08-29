@@ -8,8 +8,8 @@ passes and fix their findings. PtcManager verifies and publishes the final
 commit through its credential-isolated GitHub broker; the maintainer's next
 consequential decision is whether the PR may merge.
 
-The current Slice 3.5 increment adds the approved execution path, reviewed PR
-publication, durable worktree lifecycle, and queued maintainer prompts:
+The current Slice 4 increment adds the first PR decision-support path on top of
+the approved execution, publication, worktree, and maintainer-action workflows:
 
 - a responsive issue inbox with private plain-language summaries;
 - an **Approve and start** workflow backed by SQLite transactions;
@@ -38,6 +38,9 @@ publication, durable worktree lifecycle, and queued maintainer prompts:
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
   `ptc:needs-decision` GitHub labels;
 - agent-action attempts, results, and elapsed time in the shared activity view.
+- private, phone-friendly PR summaries fenced by GitHub head and base SHAs;
+- an **Approve for merge** decision bound to the exact analyzed PR version;
+- explicit stale-approval display when the observed head, base, or diff changes.
 
 Dispatch, maintainer actions, and publishing are disabled by default. The
 implementation prompt forbids GitHub writes. In this initial version the worker
@@ -119,7 +122,17 @@ catalog contains:
   of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
 - **PR retrospective**, shown after a PR finishes, which may create concrete,
   non-duplicate follow-up issues. New follow-ups intentionally start without a
-  managed `ptc:*` label.
+  managed `ptc:*` label;
+- **Prepare merge decision**, shown for an open PR, which returns a private
+  simplified summary and readiness outcome. The maintainer can approve only a
+  merge-ready analysis whose head SHA, reviewed base SHA, base target, and
+  verified diff still match. This increment records approval but does not merge.
+
+Prepare merge decision is instructed to be read-only, but it currently shares
+the unrestricted authenticated maintainer-action runner. The result is fenced
+before and after execution, which prevents a changed PR from being approved,
+but it does not technically prevent other repository or GitHub mutations. A
+GET-only credential and filesystem-read-only runner remain explicitly deferred.
 
 Enable the runner only after Codex and `gh` are authenticated for its OS user:
 

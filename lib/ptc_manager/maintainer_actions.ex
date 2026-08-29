@@ -6,6 +6,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.Sync, as: ActionSync
   alias PtcManager.Manager
+  alias PtcManager.MergeDecisions
   alias PtcManager.Operations
   alias PtcManager.Operations.{Issue, PrPublication}
   alias PtcManager.Repo
@@ -24,8 +25,9 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  def enqueue("pr_retrospective" = action_key, publication_id, actor)
-      when is_integer(publication_id) and is_binary(actor) do
+  def enqueue(action_key, publication_id, actor)
+      when action_key in ["pr_retrospective", "prepare_merge_decision"] and
+             is_integer(publication_id) and is_binary(actor) do
     with %PrPublication{} = publication <-
            PrPublication
            |> Repo.get(publication_id)
@@ -79,11 +81,18 @@ defmodule PtcManager.MaintainerActions do
           sync_result = sync.sync_action(action)
 
           case sync_result do
-            {:ok, _summary} ->
+            {:ok, summary} ->
               Operations.complete_agent_action(
                 action.id,
                 token,
-                store_private_analysis(action, result)
+                store_private_analysis(action, result, summary)
+              )
+
+            {:terminal_error, reason} ->
+              Operations.complete_agent_action(
+                action.id,
+                token,
+                {:error, {:postflight_failed, reason}}
               )
 
             {:error, reason} ->
@@ -91,6 +100,7 @@ defmodule PtcManager.MaintainerActions do
           end
         else
           {:deferred, action} -> {:ok, action}
+          {:terminal, action} -> {:ok, action}
           {:error, reason} -> {:error, reason}
         end
     end
@@ -117,12 +127,34 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, sync) do
+    case sync.sync_action(action) do
+      {:ok, %{pull_request: status}} ->
+        Operations.record_agent_action_target_snapshot(action.id, MergeDecisions.snapshot(status))
+
+      {:ok, _summary} ->
+        {:error, :pull_request_status_missing}
+
+      {:terminal_error, reason} ->
+        case Operations.fail_agent_action_preflight(action.id, reason) do
+          {:ok, failed} -> {:terminal, failed}
+          {:error, failure} -> {:error, failure}
+        end
+
+      {:error, reason} ->
+        case Operations.defer_agent_action_preflight(action.id, reason) do
+          {:ok, deferred} -> {:deferred, deferred}
+          {:error, defer_reason} -> {:error, defer_reason}
+        end
+    end
+  end
+
   defp prepare_for_execution(action, _sync), do: {:ok, action}
 
   defp reconcile_action(action, sync) do
     case sync.sync_action(action) do
-      {:ok, _summary} = synced ->
-        case store_private_analysis(action, stored_execution_result(action)) do
+      {:ok, summary} = synced ->
+        case store_private_analysis(action, stored_execution_result(action), summary) do
           {:ok, _result} ->
             Operations.complete_agent_action_sync(action.id, synced)
 
@@ -132,10 +164,17 @@ defmodule PtcManager.MaintainerActions do
 
       {:error, _reason} = failed ->
         Operations.complete_agent_action_sync(action.id, failed)
+
+      {:terminal_error, reason} ->
+        Operations.complete_agent_action_sync(action.id, {:terminal_error, reason})
     end
   end
 
-  defp store_private_analysis(%{action_key: "prepare_issue", target_id: issue_id}, {:ok, result}) do
+  defp store_private_analysis(
+         %{action_key: "prepare_issue", target_id: issue_id},
+         {:ok, result},
+         _summary
+       ) do
     issue = Repo.get!(Issue, issue_id)
 
     analysis = %{
@@ -162,7 +201,8 @@ defmodule PtcManager.MaintainerActions do
            repository_id: repository_id,
            baseline_issue_numbers: baseline_issue_numbers
          },
-         {:ok, result}
+         {:ok, result},
+         _summary
        ) do
     publication = Repo.get!(PrPublication, publication_id)
 
@@ -178,7 +218,18 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp store_private_analysis(_action, result), do: result
+  defp store_private_analysis(
+         %{action_key: "prepare_merge_decision"} = action,
+         {:ok, result},
+         %{pull_request: status}
+       ) do
+    case MergeDecisions.store_analysis(action, result, status) do
+      {:ok, _analysis} -> {:ok, result}
+      {:error, reason} -> {:error, {:private_analysis_failed, reason}}
+    end
+  end
+
+  defp store_private_analysis(_action, result, _summary), do: result
 
   defp stored_execution_result(%{result_summary: body}) when is_binary(body) do
     case Jason.decode(body) do

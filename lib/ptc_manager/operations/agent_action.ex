@@ -13,6 +13,7 @@ defmodule PtcManager.Operations.AgentAction do
     field :prompt_version, :integer, default: 1
     field :prompt, :string
     field :baseline_issue_numbers, :map, default: %{"numbers" => []}
+    field :target_snapshot, :map, default: %{}
     field :actor, :string
     field :state, :string, default: "queued"
     field :attempt_count, :integer, default: 0
@@ -43,6 +44,7 @@ defmodule PtcManager.Operations.AgentAction do
       :prompt_version,
       :prompt,
       :baseline_issue_numbers,
+      :target_snapshot,
       :actor,
       :state,
       :attempt_count,
@@ -65,6 +67,7 @@ defmodule PtcManager.Operations.AgentAction do
       :prompt_version,
       :prompt,
       :baseline_issue_numbers,
+      :target_snapshot,
       :actor,
       :state,
       :attempt_count,
