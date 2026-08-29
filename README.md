@@ -224,6 +224,7 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager.env.example /etc/ptc_man
 # After downloading the GitHub App PEM to a safe temporary location:
 sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_manager/github-app.pem
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
+sudo install -o root -g root -m 0755 deploy/ptc_manager-codex-exec /usr/local/bin/ptc-manager-codex-exec
 sudo install -o root -g root -m 0440 deploy/ptc_manager-codex.sudoers /etc/sudoers.d/ptc_manager-codex
 sudo visudo -cf /etc/sudoers.d/ptc_manager-codex
 ```
