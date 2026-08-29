@@ -1,8 +1,9 @@
 defmodule PtcManager.Manager do
   @moduledoc "Creates private proposals from a configured read-only manager adapter."
 
-  alias PtcManager.Operations
+  alias PtcManager.{Operations, Repo}
   alias PtcManager.Manager.Gate
+  alias PtcManager.Operations.Proposal
 
   def enabled?, do: Application.get_env(:ptc_manager, :manager_enabled, false)
 
@@ -14,8 +15,8 @@ defmodule PtcManager.Manager do
          {:ok, lease} <- Gate.checkout() do
       try do
         with {:ok, analysis} <- adapter.analyze(issue),
-             {:ok, attrs} <- proposal_attrs(issue, analysis) do
-          Operations.create_proposal(attrs)
+             {:ok, proposal} <- store_analysis(issue, analysis) do
+          {:ok, proposal}
         end
       after
         Gate.checkin(lease)
@@ -23,6 +24,18 @@ defmodule PtcManager.Manager do
     end
   rescue
     Ecto.NoResultsError -> {:error, :not_found}
+  end
+
+  def store_analysis(issue, analysis) do
+    with {:ok, attrs} <- proposal_attrs(issue, analysis) do
+      case Repo.get_by(Proposal,
+             issue_id: attrs.issue_id,
+             proposal_digest: attrs.proposal_digest
+           ) do
+        nil -> Operations.create_proposal(attrs)
+        proposal -> {:ok, proposal}
+      end
+    end
   end
 
   defp ensure_open(%{state: "open"}), do: :ok

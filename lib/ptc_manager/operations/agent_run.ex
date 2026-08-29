@@ -21,6 +21,7 @@ defmodule PtcManager.Operations.AgentRun do
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
+    belongs_to :agent_action, PtcManager.Operations.AgentAction
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -30,6 +31,7 @@ defmodule PtcManager.Operations.AgentRun do
     |> cast(attrs, [
       :worker_id,
       :job_id,
+      :agent_action_id,
       :role,
       :state,
       :status_text,

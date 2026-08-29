@@ -8,6 +8,8 @@ defmodule PtcManager.Operations.Issue do
     field :html_url, :string
     field :body, :string, default: ""
     field :state, :string, default: "open"
+    field :workflow_label, :string
+    field :workflow_label_conflict, :boolean, default: false
     field :body_digest, :string
     field :content_digest, :string
     field :github_updated_at, :utc_datetime_usec
@@ -28,6 +30,8 @@ defmodule PtcManager.Operations.Issue do
       :html_url,
       :body,
       :state,
+      :workflow_label,
+      :workflow_label_conflict,
       :body_digest,
       :content_digest,
       :github_updated_at
@@ -44,6 +48,7 @@ defmodule PtcManager.Operations.Issue do
     ])
     |> validate_number(:number, greater_than: 0)
     |> validate_inclusion(:state, ["open", "closed"])
+    |> validate_inclusion(:workflow_label, ["ptc:ready", "ptc:blocked", "ptc:needs-decision"])
     |> unique_constraint([:repository_id, :number])
   end
 end

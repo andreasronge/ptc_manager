@@ -8,8 +8,8 @@ passes and fix their findings. PtcManager verifies and publishes the final
 commit through its credential-isolated GitHub broker; the maintainer's next
 consequential decision is whether the PR may merge.
 
-The current Slice 3 increment adds the approved execution path, reviewed PR
-publication, and durable worktree lifecycle:
+The current Slice 3.5 increment adds the approved execution path, reviewed PR
+publication, durable worktree lifecycle, and queued maintainer prompts:
 
 - a responsive issue inbox with private plain-language summaries;
 - an **Approve and start** workflow backed by SQLite transactions;
@@ -33,11 +33,19 @@ publication, and durable worktree lifecycle:
 - worker-advertised implementation capacity instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
 - canonical PR status and GitHub link in the dashboard.
+- a generic durable agent-action queue with initial **Prepare issue** and
+  **PR retrospective** buttons;
+- canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
+  `ptc:needs-decision` GitHub labels;
+- agent-action attempts, results, and elapsed time in the shared activity view.
 
-Dispatch and publishing are disabled by default. The implementation worker has
-no GitHub credential. The broker can publish only the fenced, verified job
-branch and one PR; it does **not** merge, close issues, edit issue text, or trust
-labels as commands. See [PLAN.md](PLAN.md).
+Dispatch, maintainer actions, and publishing are disabled by default. The
+implementation prompt forbids GitHub writes. In this initial version the worker
+identity also hosts explicitly queued maintainer actions and therefore has an
+authenticated `gh` session; technical separation is deferred. The broker can
+publish only the fenced, verified job branch and one PR; it does **not** merge,
+close issues, edit issue text, or trust labels as commands. See
+[PLAN.md](PLAN.md).
 
 ## Run locally
 
@@ -102,6 +110,28 @@ stored only as a private PtcManager proposal. The child process receives a
 small allowlist of environment variables; application passwords, signing keys,
 database settings, and GitHub tokens are removed.
 
+Maintainer actions are separate from private read-only investigation. Pressing
+an action button stores that prompt in the durable queue and authorizes one
+agent to use the configured checkout and authenticated `gh` CLI. The initial
+catalog contains:
+
+- **Prepare issue**, which rewrites or closes the issue and leaves exactly one
+  of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
+- **PR retrospective**, shown after a PR finishes, which may create concrete,
+  non-duplicate follow-up issues. New follow-ups intentionally start without a
+  managed `ptc:*` label.
+
+Enable the runner only after Codex and `gh` are authenticated for its OS user:
+
+```sh
+sudo -u ptc-manager-worker -H codex login
+sudo -u ptc-manager-worker -H gh auth login
+```
+
+Then set `PTC_AGENT_ACTIONS_ENABLED=true`. Completed actions trigger a GitHub
+issue re-sync; GitHub title, body, open/closed state, and workflow label remain
+canonical. The action's final private summary stays in PtcManager.
+
 The seed data is idempotent. To restore the demonstration dashboard after
 trying approvals:
 
@@ -162,7 +192,7 @@ sudo groupadd --system ptc-manager-repo
 sudo groupadd --system ptc-manager-publish
 sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output,ptc-manager-repo,ptc-manager-publish --shell /usr/sbin/nologin ptc-manager
 sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output,ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-codex
-sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-worker
+sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo,ptc-manager-output --shell /usr/sbin/nologin ptc-manager-worker
 sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --groups ptc-manager-publish --shell /usr/sbin/nologin ptc-manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2770 /var/lib/ptc_manager-output
@@ -195,9 +225,11 @@ sudo systemctl status ptc_manager
 ```
 
 The coordinator, implementation worker, private manager, and Git verifier run
-as four different OS identities. Herdr and implementation agents run as
-`ptc-manager-worker`; that account must not have a GitHub token or authenticated
-`gh` session. Private read-only manager investigations run as
+as four different OS identities. Herdr, implementation agents, and the initial
+maintainer-action runner use `ptc-manager-worker`; that account has the
+authenticated `gh` session needed by explicitly queued maintainer actions.
+The implementation prompt still instructs coding agents not to use it. A later
+credential broker can enforce that separation technically. Private read-only manager investigations run as
 `ptc-manager-codex`. Bounded branch verification runs as
 `ptc-manager-verifier` with an empty environment and no credentials. None of
 these accounts can read the root-only coordinator environment or inspect its
@@ -206,6 +238,7 @@ process. Authenticate the two agent accounts:
 ```sh
 sudo -u ptc-manager-codex -H codex login
 sudo -u ptc-manager-worker -H codex login
+sudo -u ptc-manager-worker -H gh auth login
 ```
 
 The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.

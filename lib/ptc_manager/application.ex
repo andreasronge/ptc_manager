@@ -16,6 +16,7 @@ defmodule PtcManager.Application do
       {Phoenix.PubSub, name: PtcManager.PubSub},
       {Task.Supervisor, name: PtcManager.TaskSupervisor},
       PtcManager.Manager.Gate,
+      PtcManager.MaintainerActions.Poller,
       PtcManager.GitHub.Poller,
       PtcManager.Herdr.Poller,
       PtcManager.Dispatch.Poller,

@@ -12,6 +12,7 @@ defmodule PtcManager.Operations do
   alias PtcManager.Repo
 
   alias PtcManager.Operations.{
+    AgentAction,
     AgentRun,
     Approval,
     AuditEvent,
@@ -55,6 +56,324 @@ defmodule PtcManager.Operations do
 
   def create_agent_run(attrs),
     do: %AgentRun{} |> AgentRun.changeset(attrs) |> Repo.insert() |> broadcast_change()
+
+  def enqueue_agent_action(attrs) when is_map(attrs) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    attrs = Map.merge(attrs, %{state: "queued", attempt_count: 0, requested_at: now})
+
+    Multi.new()
+    |> Multi.insert(:agent_action, AgentAction.changeset(%AgentAction{}, attrs))
+    |> Multi.insert(:audit_event, fn %{agent_action: action} ->
+      AuditEvent.changeset(%AuditEvent{}, %{
+        actor: action.actor,
+        action: "agent_action.queued",
+        target_type: "agent_action",
+        target_id: action.id,
+        details: %{
+          "action_key" => action.action_key,
+          "prompt_version" => action.prompt_version,
+          "target_type" => action.target_type,
+          "target_id" => action.target_id,
+          "target_label" => action.target_label
+        }
+      })
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{agent_action: action}} -> {:ok, action}
+      {:error, :agent_action, changeset, _changes} -> normalize_agent_action_insert(changeset)
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+    |> broadcast_change()
+  end
+
+  def claim_next_agent_action(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+    case next_agent_action_candidate(now) do
+      nil -> {:ok, nil}
+      candidate -> do_claim_agent_action(candidate, now)
+    end
+  end
+
+  def next_agent_action_candidate(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+    blocked_repository_ids =
+      AgentAction
+      |> where([action], action.state == "sync_pending")
+      |> select([action], action.repository_id)
+      |> distinct(true)
+      |> Repo.all()
+
+    AgentAction
+    |> where(
+      [action],
+      action.state == "queued" and action.repository_id not in ^blocked_repository_ids and
+        (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
+    )
+    |> order_by([action], asc: action.requested_at, asc: action.id)
+    |> limit(1)
+    |> preload(:repository)
+    |> Repo.one()
+  end
+
+  def claim_agent_action(action_id, now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond))
+      when is_integer(action_id) do
+    action_id
+    |> then(&Repo.get(AgentAction, &1))
+    |> case do
+      nil -> {:error, :agent_action_not_found}
+      candidate -> do_claim_agent_action(candidate, now)
+    end
+  end
+
+  def record_agent_action_baseline(action_id, issue_numbers)
+      when is_integer(action_id) and is_list(issue_numbers) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {updated, _rows} =
+      AgentAction
+      |> where([action], action.id == ^action_id and action.state == "queued")
+      |> Repo.update_all(
+        set: [
+          baseline_issue_numbers: %{"numbers" => issue_numbers},
+          sync_attempt_count: 0,
+          next_sync_attempt_at: nil,
+          last_error: nil,
+          updated_at: now
+        ]
+      )
+
+    if updated == 1 do
+      {:ok, AgentAction |> preload(:repository) |> Repo.get!(action_id)}
+    else
+      {:error, :agent_action_no_longer_queued}
+    end
+  end
+
+  def defer_agent_action_preflight(action_id, reason) when is_integer(action_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+        if action.state != "queued", do: Repo.rollback(:agent_action_no_longer_queued)
+
+        sync_attempt_count = action.sync_attempt_count + 1
+
+        deferred =
+          action
+          |> AgentAction.changeset(%{
+            sync_attempt_count: sync_attempt_count,
+            next_sync_attempt_at: next_sync_attempt_at(now, sync_attempt_count),
+            last_error: "Preflight GitHub synchronization pending: #{bounded_error(reason)}"
+          })
+          |> Repo.update!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.preflight_deferred",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{
+            "action_key" => action.action_key,
+            "sync_attempt_count" => sync_attempt_count,
+            "sync_error" => bounded_error(reason)
+          }
+        })
+
+        deferred
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def expire_agent_action_attempts(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+    expired =
+      AgentAction
+      |> where(
+        [action],
+        action.state == "running" and not is_nil(action.attempt_expires_at) and
+          action.attempt_expires_at <= ^now
+      )
+      |> Repo.all()
+
+    count = Enum.count(expired, &expire_agent_action_attempt(&1, now))
+    if count > 0, do: notify_changed(__MODULE__)
+    count
+  end
+
+  def complete_agent_action(action_id, attempt_token, {:ok, result})
+      when is_integer(action_id) and is_binary(attempt_token) and is_map(result) do
+    finish_agent_action(action_id, attempt_token, "done", summarize_action_result(result), nil)
+  end
+
+  def complete_agent_action(action_id, attempt_token, {:error, reason})
+      when is_integer(action_id) and is_binary(attempt_token) do
+    finish_agent_action(action_id, attempt_token, "failed", nil, bounded_error(reason))
+  end
+
+  def next_agent_action_sync_pending(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+    AgentAction
+    |> where(
+      [action],
+      action.state == "sync_pending" and
+        (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
+    )
+    |> order_by([action], asc: action.next_sync_attempt_at, asc: action.id)
+    |> limit(1)
+    |> preload(:repository)
+    |> Repo.one()
+  end
+
+  def mark_agent_action_sync_pending(action_id, attempt_token, execution_result, sync_reason)
+      when is_integer(action_id) and is_binary(attempt_token) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    {run_state, summary, execution_error} = agent_action_execution_fields(execution_result)
+    error = sync_pending_error(execution_error, sync_reason)
+    sync_attempt_count = 1
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+
+        if action.state != "running" or action.attempt_token != attempt_token,
+          do: Repo.rollback(:stale_agent_action_attempt)
+
+        pending =
+          action
+          |> AgentAction.changeset(%{
+            state: "sync_pending",
+            attempt_expires_at: nil,
+            sync_attempt_count: sync_attempt_count,
+            next_sync_attempt_at: next_sync_attempt_at(now, sync_attempt_count),
+            result_summary: summary,
+            last_error: error
+          })
+          |> Repo.update!()
+
+        finish_agent_action_run!(action, run_state, now)
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.sync_pending",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{
+            "action_key" => action.action_key,
+            "attempt_count" => action.attempt_count,
+            "execution_state" => run_state,
+            "sync_error" => bounded_error(sync_reason)
+          }
+        })
+
+        pending
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def complete_agent_action_sync(action_id, {:ok, _summary}) when is_integer(action_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+        if action.state != "sync_pending", do: Repo.rollback(:agent_action_not_sync_pending)
+
+        final_state = if is_binary(action.result_summary), do: "done", else: "failed"
+
+        completed =
+          action
+          |> AgentAction.changeset(%{
+            state: final_state,
+            ended_at: now,
+            next_sync_attempt_at: nil,
+            last_error:
+              if(final_state == "done", do: nil, else: execution_error_only(action.last_error))
+          })
+          |> Repo.update!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.sync_completed",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{"final_state" => final_state}
+        })
+
+        completed
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def complete_agent_action_sync(action_id, {:terminal_error, reason})
+      when is_integer(action_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+        if action.state != "sync_pending", do: Repo.rollback(:agent_action_not_sync_pending)
+
+        error = execution_error_only(action.last_error) || bounded_error(reason)
+
+        completed =
+          action
+          |> AgentAction.changeset(%{
+            state: "failed",
+            ended_at: now,
+            next_sync_attempt_at: nil,
+            last_error: error
+          })
+          |> Repo.update!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.sync_completed",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{"final_state" => "failed", "terminal_error" => error}
+        })
+
+        completed
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def complete_agent_action_sync(action_id, {:error, reason}) when is_integer(action_id) do
+    action = Repo.get!(AgentAction, action_id)
+
+    if action.state == "sync_pending" do
+      sync_attempt_count = action.sync_attempt_count + 1
+
+      action
+      |> AgentAction.changeset(%{
+        last_error: sync_pending_error(execution_error_only(action.last_error), reason),
+        sync_attempt_count: sync_attempt_count,
+        next_sync_attempt_at:
+          next_sync_attempt_at(
+            DateTime.utc_now() |> DateTime.truncate(:microsecond),
+            sync_attempt_count
+          )
+      })
+      |> Repo.update()
+      |> broadcast_change()
+    else
+      {:error, :agent_action_not_sync_pending}
+    end
+  end
 
   def next_queued_job do
     Job
@@ -556,6 +875,7 @@ defmodule PtcManager.Operations do
     jobs = active_jobs(issue_ids)
     latest_jobs = latest_jobs(issue_ids)
     publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
+    agent_actions = latest_agent_actions()
 
     Enum.map(issues, fn issue ->
       %{
@@ -568,7 +888,17 @@ defmodule PtcManager.Operations do
             publications,
             Map.get(jobs, issue.id),
             Map.get(latest_jobs, issue.id)
-          )
+          ),
+        issue_agent_action: Map.get(agent_actions, {"issue", issue.id}),
+        pr_agent_action:
+          case publication_for_issue(
+                 publications,
+                 Map.get(jobs, issue.id),
+                 Map.get(latest_jobs, issue.id)
+               ) do
+            nil -> nil
+            publication -> Map.get(agent_actions, {"pull_request", publication.id})
+          end
       }
     end)
   end
@@ -576,7 +906,7 @@ defmodule PtcManager.Operations do
   def list_agent_runs do
     AgentRun
     |> order_by([run], asc: run.started_at)
-    |> preload([:worker, job: [:issue, :repository]])
+    |> preload([:worker, :agent_action, job: [:issue, :repository]])
     |> Repo.all()
   end
 
@@ -748,6 +1078,7 @@ defmodule PtcManager.Operations do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
          %Proposal{} = proposal <- latest_proposal(repo, issue_id),
          :ok <- issue_is_open(issue),
+         :ok <- issue_workflow_allows_implementation(issue),
          :ok <- proposal_is_ready(proposal),
          :ok <- proposal_matches_issue(proposal, issue) do
       {:ok, {issue, proposal}}
@@ -986,6 +1317,302 @@ defmodule PtcManager.Operations do
     if job, do: Map.get(publications, job.id)
   end
 
+  defp latest_agent_actions do
+    AgentAction
+    |> order_by([action], desc: action.inserted_at, desc: action.id)
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn action, actions ->
+      Map.put_new(actions, {action.target_type, action.target_id}, action)
+    end)
+  end
+
+  defp do_claim_agent_action(candidate, now) do
+    timeout_ms = Application.get_env(:ptc_manager, :agent_action_timeout_ms, 1_800_000)
+    token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    expires_at = DateTime.add(now, timeout_ms, :millisecond)
+    attempt_count = candidate.attempt_count + 1
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          AgentAction
+          |> where(
+            [action],
+            action.id == ^candidate.id and action.attempt_count == ^candidate.attempt_count and
+              action.state == "queued"
+          )
+          |> Repo.update_all(
+            set: [
+              state: "running",
+              attempt_count: attempt_count,
+              attempt_token: token,
+              attempt_expires_at: expires_at,
+              started_at: now,
+              ended_at: nil,
+              result_summary: nil,
+              last_error: nil,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:agent_action_already_claimed)
+
+        AgentRun
+        |> where(
+          [run],
+          run.agent_action_id == ^candidate.id and
+            run.state in ["queued", "starting", "working", "idle", "blocked", "unknown"]
+        )
+        |> Repo.update_all(
+          set: [
+            state: "lost",
+            status_text: "The previous action attempt expired before reporting a result.",
+            ended_at: now,
+            last_heartbeat_at: now,
+            updated_at: now
+          ]
+        )
+
+        worker = get_or_create_agent_action_worker!(now)
+
+        %AgentRun{}
+        |> AgentRun.changeset(%{
+          worker_id: worker.id,
+          agent_action_id: candidate.id,
+          role: "manager",
+          state: "working",
+          status_text: "Running #{candidate.action_key |> String.replace("_", " ")}.",
+          started_at: now,
+          last_heartbeat_at: now,
+          fencing_token: attempt_count
+        })
+        |> Repo.insert!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.started",
+          target_type: "agent_action",
+          target_id: candidate.id,
+          details: %{
+            "action_key" => candidate.action_key,
+            "attempt_count" => attempt_count,
+            "attempt_expires_at" => DateTime.to_iso8601(expires_at)
+          }
+        })
+
+        AgentAction |> preload(:repository) |> Repo.get!(candidate.id)
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, {action, token}})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp expire_agent_action_attempt(action, now) do
+    outcome =
+      Repo.transaction(fn ->
+        message =
+          "The agent stopped reporting before the deadline; GitHub may contain partial changes. Inspect it before queuing another action."
+
+        {updated, _rows} =
+          AgentAction
+          |> where(
+            [candidate],
+            candidate.id == ^action.id and candidate.state == "running" and
+              candidate.attempt_token == ^action.attempt_token and
+              candidate.attempt_expires_at <= ^now
+          )
+          |> Repo.update_all(
+            set: [
+              state: "sync_pending",
+              ended_at: nil,
+              attempt_expires_at: nil,
+              sync_attempt_count: 0,
+              next_sync_attempt_at: now,
+              last_error: "Execution failed: #{message}",
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:agent_action_no_longer_expired)
+
+        AgentRun
+        |> where(
+          [run],
+          run.agent_action_id == ^action.id and run.fencing_token == ^action.attempt_count and
+            run.state in ["queued", "starting", "working", "idle", "blocked", "unknown"]
+        )
+        |> Repo.update_all(
+          set: [
+            state: "lost",
+            status_text: "The action deadline passed with an unknown GitHub outcome.",
+            last_heartbeat_at: now,
+            ended_at: now,
+            updated_at: now
+          ]
+        )
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.expired",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{
+            "action_key" => action.action_key,
+            "attempt_count" => action.attempt_count,
+            "outcome" => "unknown"
+          }
+        })
+
+        true
+      end)
+
+    match?({:ok, true}, outcome)
+  end
+
+  defp finish_agent_action(action_id, token, state, summary, error) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+
+        if action.state != "running" or action.attempt_token != token,
+          do: Repo.rollback(:stale_agent_action_attempt)
+
+        completed =
+          action
+          |> AgentAction.changeset(%{
+            state: state,
+            ended_at: now,
+            attempt_expires_at: nil,
+            result_summary: summary,
+            last_error: error
+          })
+          |> Repo.update!()
+
+        run =
+          AgentRun
+          |> where(
+            [run],
+            run.agent_action_id == ^action.id and run.fencing_token == ^action.attempt_count
+          )
+          |> order_by([run], desc: run.id)
+          |> limit(1)
+          |> Repo.one!()
+
+        run
+        |> AgentRun.changeset(%{
+          state: state,
+          status_text:
+            if(state == "done",
+              do: "Completed #{action.action_key |> String.replace("_", " ")}.",
+              else: "The action failed; details are retained in PtcManager."
+            ),
+          last_heartbeat_at: now,
+          ended_at: now
+        })
+        |> Repo.update!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.#{state}",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{
+            "action_key" => action.action_key,
+            "attempt_count" => action.attempt_count,
+            "error" => error
+          }
+        })
+
+        completed
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_agent_action_run!(action, state, now) do
+    run =
+      AgentRun
+      |> where(
+        [run],
+        run.agent_action_id == ^action.id and run.fencing_token == ^action.attempt_count
+      )
+      |> order_by([run], desc: run.id)
+      |> limit(1)
+      |> Repo.one!()
+
+    run
+    |> AgentRun.changeset(%{
+      state: state,
+      status_text:
+        if(state == "done",
+          do: "Completed #{action.action_key |> String.replace("_", " ")}.",
+          else: "The action failed; GitHub reconciliation is still required."
+        ),
+      last_heartbeat_at: now,
+      ended_at: now
+    })
+    |> Repo.update!()
+  end
+
+  defp agent_action_execution_fields({:ok, result}) when is_map(result),
+    do: {"done", summarize_action_result(result), nil}
+
+  defp agent_action_execution_fields({:error, reason}),
+    do: {"failed", nil, "Execution failed: #{bounded_error(reason)}"}
+
+  defp sync_pending_error(execution_error, sync_reason) do
+    [execution_error, "GitHub synchronization pending: #{bounded_error(sync_reason)}"]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+    |> String.slice(0, 1_000)
+  end
+
+  defp execution_error_only(error) when is_binary(error) do
+    error
+    |> String.split("\n")
+    |> Enum.find(&String.starts_with?(&1, "Execution failed:"))
+  end
+
+  defp execution_error_only(_error), do: nil
+
+  defp next_sync_attempt_at(now, attempt_count) do
+    base = Application.get_env(:ptc_manager, :agent_action_sync_retry_base_ms, 5_000)
+    maximum = Application.get_env(:ptc_manager, :agent_action_sync_retry_max_ms, 300_000)
+    exponent = min(max(attempt_count - 1, 0), 20)
+    delay = min(round(base * :math.pow(2, exponent)), maximum)
+    DateTime.add(now, delay, :millisecond)
+  end
+
+  defp get_or_create_agent_action_worker!(now) do
+    attrs = %{
+      worker_key: "agent-actions:local",
+      name: "PtcManager maintainer",
+      status: "online",
+      capabilities: %{"codex" => true, "github_actions" => true},
+      last_heartbeat_at: now
+    }
+
+    case Repo.get_by(Worker, worker_key: attrs.worker_key) do
+      nil -> %Worker{} |> Worker.changeset(attrs) |> Repo.insert!()
+      worker -> worker |> Worker.changeset(attrs) |> Repo.update!()
+    end
+  end
+
+  defp summarize_action_result(result), do: Jason.encode!(result)
+
+  defp normalize_agent_action_insert(changeset) do
+    if changeset.errors[:action_key],
+      do: {:error, :agent_action_already_active},
+      else: {:error, changeset}
+  end
+
   defp get_or_create_dispatch_worker!(worker_key, dispatch, now) do
     case Repo.get_by(Worker, worker_key: worker_key) do
       nil ->
@@ -1147,6 +1774,16 @@ defmodule PtcManager.Operations do
 
   defp issue_is_open(%Issue{state: "open"}), do: :ok
   defp issue_is_open(%Issue{}), do: {:error, :issue_closed}
+
+  defp issue_workflow_allows_implementation(%Issue{
+         workflow_label_conflict: false,
+         workflow_label: label
+       })
+       when label in [nil, "ptc:ready"],
+       do: :ok
+
+  defp issue_workflow_allows_implementation(%Issue{}),
+    do: {:error, :issue_workflow_not_ready}
 
   defp proposal_is_ready(%Proposal{readiness: "ready"}), do: :ok
   defp proposal_is_ready(%Proposal{}), do: {:error, :proposal_not_ready}

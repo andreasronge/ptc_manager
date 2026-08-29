@@ -74,6 +74,21 @@ defmodule PtcManager.OperationsTest do
       assert {:error, :proposal_not_ready} = Operations.approve_issue(issue.id, "andreas")
       assert Repo.aggregate(Job, :count) == 0
     end
+
+    test "does not treat a blocked or conflicting GitHub label as dispatch authority" do
+      repository = repository_fixture()
+      blocked = issue_fixture(repository, %{workflow_label: "ptc:blocked"})
+      proposal_fixture(blocked)
+
+      assert {:error, :issue_workflow_not_ready} =
+               Operations.approve_issue(blocked.id, "andreas")
+
+      conflicting = issue_fixture(repository, %{workflow_label_conflict: true})
+      proposal_fixture(conflicting)
+
+      assert {:error, :issue_workflow_not_ready} =
+               Operations.approve_issue(conflicting.id, "andreas")
+    end
   end
 
   describe "create_agent_run/1" do

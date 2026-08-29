@@ -13,9 +13,9 @@ without replacing the user interface or GitHub integration.
 
 ## Product principles
 
-1. A person approves consequential actions. The manager may investigate and
-   propose, but it does not start issue work, close issues, or merge pull
-   requests without an approval tied to the current GitHub version.
+1. A person approves consequential actions. Pressing a named maintainer-action
+   button authorizes that one prompt to update GitHub; starting implementation
+   and merging a pull request remain separate human decisions.
 2. GitHub is the source of truth for issues, pull requests, checks, and commits.
    PtcManager stores private summaries, approvals, execution state, and an audit
    log; it does not turn GitHub labels into an internal job queue. An optional
@@ -23,10 +23,11 @@ without replacing the user interface or GitHub integration.
    is a display-only projection and never grants authority.
 3. Simplified explanations are private. They may be cached in PtcManager but
    are never written to GitHub issues or pull requests.
-4. Model output is a proposal, not authority. Deterministic code validates
-   state transitions. Implementation agents receive no GitHub credential. A
-   broker may publish only the exact fenced commit after verification; it may
-   not merge, rewrite issues, or change workflow policy.
+4. Model output is not authority by itself. Deterministic code validates queue
+   transitions. Implementation prompts forbid GitHub writes. In the first
+   deployment they share an OS identity with named maintainer actions that may
+   use `gh` after their button is pressed; technical credential separation is
+   deferred. A broker publishes only the exact fenced implementation commit.
 5. Public issue, pull-request, and comment text is untrusted data. It cannot
    grant tools, reveal secrets, or change policy.
 6. The manager, implementer, and reviewer are separate roles. An implementation
@@ -201,14 +202,14 @@ preference.
 Version one polls GitHub instead of exposing a webhook endpoint. At the current
 backlog size this is simpler to operate and lets the web server remain private.
 
-The initial manager credential is read-only and implementation workers have no
-GitHub identity. The generated implementation command names the approved job
-branch, runs tests, invokes the configured `codex-review` skill passes, fixes
-findings, and commits locally. Review execution is deliberately part of the
-coding-agent prompt, not a second orchestration system in PtcManager. Once the
-local result is verified, a credential-isolated GitHub App broker stages the
-bounded commit, rechecks the authoritative base and diff, pushes only the
-deterministic job branch, and creates or reconciles one PR.
+The initial private-manager credential is read-only. The generated
+implementation command names the approved job branch, runs tests, invokes the
+configured `codex-review` skill passes, fixes findings, and commits locally.
+Review execution is deliberately part of the coding-agent prompt, not a second
+orchestration system in PtcManager. Once the local result is verified, a
+credential-isolated GitHub App broker stages the bounded commit, rechecks the
+authoritative base and diff, pushes only the deterministic job branch, and
+creates or reconciles one PR.
 
 GitHub remains authoritative for the remote branch, PR, checks, conflicts, and
 merge result; PtcManager is authoritative for private approvals, prompt policy,
@@ -268,7 +269,9 @@ the worker protocol or UI concepts.
   reviewed base SHA, or diff digest changes.
 - Agent status never proves that work succeeded; GitHub branch, PR, review, and
   check state are authoritative.
-- An implementation agent receives no GitHub credential or merge authority.
+- An implementation agent receives no merge authority and its prompt forbids
+  GitHub writes. The first deployment does not technically isolate its `gh`
+  credentials from maintainer actions; that boundary is explicitly deferred.
 - All external effects are idempotent and carry an audit identity.
 - Labels and GitHub checks may reflect an approval, but the merge gate reads the
   SHA-bound approval record rather than trusting a mutable label.
@@ -326,7 +329,7 @@ GitHub mutation permission.
 - fencing tokens on worker state and external effects;
 - generate an implementation command that fixes the approved issue, runs tests,
   invokes the configured number of `codex-review` skill passes, fixes findings,
-  and commits without GitHub credentials;
+  and commits without using GitHub credentials;
 - treat reviews as coding-agent prompt policy rather than PtcManager state or
   authority; PtcManager neither launches reviewers nor records review evidence;
 - bounded local branch-result verification, followed by fenced exact-SHA
@@ -340,18 +343,22 @@ the complete execution history.
 ### Slice 3.5: maintainer issue preparation
 
 - GitHub issue content, open/closed state, and one `ptc:*` workflow label remain
-  the single source of truth; PtcManager stores only private recommendations,
-  approval records, and synchronization metadata;
-- ask a maintainer agent to investigate an issue and recommend exactly one
-  outcome: rewrite and mark ready, reject/close with a reason, wait because of a
-  named dependency or external condition, or request a human decision;
+  the single source of truth; PtcManager stores private explanations, queued
+  action runs, their prompts/results, and synchronization metadata;
+- introduce a generic durable agent-action queue rendered initially as a small
+  hard-coded action catalog. Pressing a button authorizes and queues exactly one
+  prompt; later versions may make the catalog configurable;
+- **Prepare issue** asks a maintainer agent to investigate and choose exactly
+  one outcome: rewrite and mark ready, reject/close with a reason, wait because
+  of a named dependency or external condition, or request a human decision;
 - keep the plain-language/ELI5 explanation private in PtcManager and never copy
   it into the GitHub issue;
-- show the proposed GitHub title/body, close reason, dependency, comment, and
-  label change for explicit maintainer approval before any write;
-- after approval, dispatch one credential-scoped maintainer agent whose prompt
-  uses `gh` to apply the approved mutation, then re-sync GitHub and treat the
-  returned issue state as authoritative;
+- **PR retrospective** asks an agent to inspect a finished PR and create only
+  concrete, non-duplicate investigation issues for bugs, risks, or worthwhile
+  improvements it discovered;
+- run one maintainer agent whose stored prompt uses `gh`, record its lifecycle
+  in the shared agent-activity view, then re-sync GitHub and treat the returned
+  state as authoritative;
 - use only mutually exclusive `ptc:ready`, `ptc:blocked`, and
   `ptc:needs-decision` labels. Rejected or outdated issues are closed rather
   than accumulating another label. Record dependencies visibly as
@@ -360,8 +367,8 @@ the complete execution history.
   authority to dispatch implementation; the label is a concise GitHub view of
   the current issue state.
 
-Exit criterion: a maintainer can privately review an agent recommendation,
-approve the exact proposed GitHub change, and see the authoritative result after
+Exit criterion: a maintainer can press a named action, see it queued and running
+with an audit trail, and see the authoritative GitHub result after
 re-synchronization without creating a second issue-state system.
 
 ### Slice 4: PR decision support
@@ -388,11 +395,11 @@ re-synchronization without creating a second issue-state system.
 
 ## Explicitly deferred
 
-- automatic issue closing or GitHub issue rewriting;
 - automatic recovery when an agent commits successfully but fails to push or
   create its PR;
 - public internet exposure;
 - GitHub webhooks;
 - multiple active coordinators or coordinator failover;
 - billing, organizations, or multiple human maintainers;
-- unrestricted shell or GitHub credentials in model sessions.
+- dedicated OS/GitHub credential separation between implementation agents and
+  maintainer-action agents;

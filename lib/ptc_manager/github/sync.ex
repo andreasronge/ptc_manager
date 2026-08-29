@@ -22,22 +22,36 @@ defmodule PtcManager.GitHub.Sync do
     end)
   end
 
+  def sync_issue(%Repository{} = repository, number, opts \\ [])
+      when is_integer(number) and number > 0 do
+    client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :github_client))
+
+    :global.trans({{__MODULE__, repository.id}, self()}, fn ->
+      case client.get_issue(repository, number) do
+        {:ok, remote_issue} -> persist_issue(repository, remote_issue)
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
+
   defp do_sync_repository(repository, client) do
     syncing_repository = mark_syncing(repository)
 
-    case client.list_open_issues(syncing_repository) do
-      {:ok, remote_issues} -> persist_snapshot(syncing_repository, remote_issues)
+    with {:ok, remote_issues} <- client.list_open_issues(syncing_repository),
+         {:ok, missing_issues} <- fetch_missing_issues(syncing_repository, remote_issues, client) do
+      persist_snapshot(syncing_repository, remote_issues, missing_issues)
+    else
       {:error, reason} -> mark_failed(syncing_repository, reason)
     end
   end
 
-  defp persist_snapshot(repository, remote_issues) do
+  defp persist_snapshot(repository, remote_issues, missing_issues) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
       Repo.transaction(fn ->
-        normalized = Enum.map(remote_issues, &IssueSnapshot.normalize!(&1, repository.id))
-        open_numbers = MapSet.new(normalized, & &1.number)
+        normalized =
+          Enum.map(remote_issues ++ missing_issues, &IssueSnapshot.normalize!(&1, repository.id))
 
         existing_issues =
           Issue
@@ -51,7 +65,7 @@ defmodule PtcManager.GitHub.Sync do
             upsert_issue(Map.get(issues_by_number, attrs.number), attrs) == :changed
           end)
 
-        closed_count = close_missing_issues(existing_issues, open_numbers)
+        closed_count = Enum.count(missing_issues, &(&1["state"] == "closed"))
 
         synced_repository =
           repository
@@ -66,7 +80,7 @@ defmodule PtcManager.GitHub.Sync do
 
         %{
           repository: synced_repository,
-          issue_count: length(normalized),
+          issue_count: length(remote_issues),
           changed_count: changed_count,
           closed_count: closed_count
         }
@@ -84,6 +98,28 @@ defmodule PtcManager.GitHub.Sync do
     error -> mark_failed(repository, error)
   end
 
+  defp persist_issue(repository, remote_issue) do
+    result =
+      Repo.transaction(fn ->
+        attrs = IssueSnapshot.normalize!(remote_issue, repository.id)
+        existing = Repo.get_by(Issue, repository_id: repository.id, number: attrs.number)
+        changed? = upsert_issue(existing, attrs) == :changed
+
+        %{repository: repository, issue_number: attrs.number, changed?: changed?}
+      end)
+
+    case result do
+      {:ok, summary} ->
+        Operations.notify_changed(__MODULE__)
+        {:ok, summary}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error -> {:error, error}
+  end
+
   defp upsert_issue(nil, attrs) do
     %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
     :changed
@@ -96,30 +132,26 @@ defmodule PtcManager.GitHub.Sync do
     :changed
   end
 
-  defp close_missing_issues(existing_issues, open_numbers) do
-    missing_issues =
-      Enum.reject(existing_issues, fn issue ->
-        issue.state != "open" or MapSet.member?(open_numbers, issue.number)
-      end)
+  defp fetch_missing_issues(repository, remote_issues, client) do
+    open_numbers = MapSet.new(remote_issues, & &1["number"])
 
-    Enum.each(missing_issues, fn issue ->
-      canonical = %{
-        "body" => issue.body,
-        "number" => issue.number,
-        "state" => "closed",
-        "title" => issue.title,
-        "updated_at" => DateTime.to_iso8601(issue.github_updated_at)
-      }
-
-      issue
-      |> Issue.changeset(%{
-        state: "closed",
-        content_digest: canonical |> Jason.encode!() |> IssueSnapshot.digest()
-      })
-      |> Repo.update!()
+    Issue
+    |> where(
+      [issue],
+      issue.repository_id == ^repository.id and issue.state == "open" and
+        issue.number not in ^MapSet.to_list(open_numbers)
+    )
+    |> Repo.all()
+    |> Enum.reduce_while({:ok, []}, fn issue, {:ok, snapshots} ->
+      case client.get_issue(repository, issue.number) do
+        {:ok, remote_issue} -> {:cont, {:ok, [remote_issue | snapshots]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
-
-    length(missing_issues)
+    |> case do
+      {:ok, snapshots} -> {:ok, Enum.reverse(snapshots)}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp mark_syncing(repository) do

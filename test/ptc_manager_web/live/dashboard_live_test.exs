@@ -2,7 +2,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Job, PrPublication}
+  alias PtcManager.Operations.{AgentAction, Job, PrPublication}
   alias PtcManager.Repo
 
   test "approves a fresh issue and displays the queued job", %{conn: conn} do
@@ -41,6 +41,29 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     send(view.pid, :tick)
 
     assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
+  end
+
+  test "queues the hard-coded prepare issue action from the generic action button", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Decide the issue outcome"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#agent-action-prepare_issue-issue-#{issue.id}",
+             "Prepare issue"
+           )
+
+    view
+    |> element("#agent-action-prepare_issue-issue-#{issue.id}")
+    |> render_click()
+
+    assert render(view) =~ "Prepare issue queued for an agent"
+    action = Repo.one!(AgentAction)
+    assert action.action_key == "prepare_issue"
+    assert action.target_id == issue.id
+    assert has_element?(view, "#issue-#{issue.id}", "Agent action queued")
   end
 
   test "reports publication writes and read-only PR tracking independently", %{conn: conn} do
@@ -152,6 +175,37 @@ defmodule PtcManagerWeb.DashboardLiveTest do
            )
 
     assert job.state == "pr_open"
+  end
+
+  test "offers a retrospective action after a pull request finishes", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Learn from completed work"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {job, publication} = publication_fixture(job, "published")
+
+    job
+    |> Job.changeset(%{state: "done", ended_at: DateTime.utc_now()})
+    |> Repo.update!()
+
+    publication
+    |> PrPublication.changeset(%{pr_state: "merged"})
+    |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#agent-action-pr_retrospective-pr-#{publication.id}",
+             "Run retrospective"
+           )
+
+    view
+    |> element("#agent-action-pr_retrospective-pr-#{publication.id}")
+    |> render_click()
+
+    assert render(view) =~ "PR retrospective queued for an agent"
+    assert Repo.get_by!(AgentAction, action_key: "pr_retrospective").target_id == publication.id
   end
 
   test "requeues a blocked publication from the dashboard", %{conn: conn} do

@@ -4,6 +4,9 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.GitHub.Sync, as: GitHubSync
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.Manager
+  alias PtcManager.MaintainerActions
+  alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
+  alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
   alias PtcManager.Publications
   alias PtcManager.PublisherPoller
@@ -60,6 +63,34 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  def handle_event(
+        "run-agent-action",
+        %{"action-key" => action_key, "target-id" => target_id},
+        socket
+      ) do
+    with {target_id, ""} <- Integer.parse(target_id),
+         {:ok, _action} <- MaintainerActions.enqueue(action_key, target_id, socket.assigns.actor) do
+      MaintainerActionPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "#{ActionCatalog.label(action_key)} queued for an agent.")
+       |> load_dashboard()}
+    else
+      {:error, :agent_action_already_active} ->
+        {:noreply, put_flash(socket, :error, "That action is already queued or running.")}
+
+      {:error, :pull_request_not_finished} ->
+        {:noreply, put_flash(socket, :error, "The pull request must be finished first.")}
+
+      {:error, :issue_closed} ->
+        {:noreply, put_flash(socket, :error, "The issue has already been closed.")}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "The agent action could not be queued.")}
+    end
+  end
+
   def handle_event("reconcile-result", %{"job-id" => job_id}, socket) do
     with {job_id, ""} <- Integer.parse(job_id),
          false <- MapSet.member?(socket.assigns.reconciling_results, job_id) do
@@ -109,6 +140,9 @@ defmodule PtcManagerWeb.DashboardLive do
 
       {:error, :proposal_not_ready} ->
         {:noreply, put_flash(socket, :error, "This issue is not ready to start.")}
+
+      {:error, :issue_workflow_not_ready} ->
+        {:noreply, put_flash(socket, :error, "GitHub does not mark this issue ready.")}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Approval failed: #{inspect(reason)}")}
@@ -240,11 +274,43 @@ defmodule PtcManagerWeb.DashboardLive do
   def approvable?(
         %{issue: %{state: "open"}, proposal: %{readiness: "ready"}, active_job: nil} = item
       ),
-      do: fresh?(item)
+      do:
+        fresh?(item) and not item.issue.workflow_label_conflict and
+          item.issue.workflow_label in [nil, "ptc:ready"]
 
   def approvable?(_item), do: false
 
   def investigating?(investigating, issue_id), do: MapSet.member?(investigating, issue_id)
+
+  def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
+    do: true
+
+  def active_agent_action?(_action), do: false
+  def agent_action_label(%{state: "queued"}), do: "Agent action queued"
+  def agent_action_label(%{state: "running"}), do: "Agent action running"
+  def agent_action_label(%{state: "sync_pending"}), do: "Waiting for GitHub sync"
+  def agent_action_label(%{state: "done"}), do: "Last agent action completed"
+  def agent_action_label(%{state: "failed"}), do: "Last agent action failed"
+  def agent_action_label(_action), do: nil
+
+  def agent_action_private_summary(action) do
+    action |> decode_agent_action_result() |> Map.get("private_summary")
+  end
+
+  def agent_action_outcome(action) do
+    action |> decode_agent_action_result() |> Map.get("outcome")
+  end
+
+  def agent_action_result_items(action, key) do
+    case Map.get(decode_agent_action_result(action), key) do
+      items when is_list(items) -> items
+      _items -> []
+    end
+  end
+
+  def agent_action_failure(%{state: "failed", last_error: error}) when is_binary(error), do: error
+  def agent_action_failure(_action), do: nil
+
   def reconciling_result?(jobs, job_id), do: MapSet.member?(jobs, job_id)
   def job_label("ready_for_pr"), do: "waiting for PR publication"
   def job_label("pr_open"), do: "PR open"
@@ -311,6 +377,9 @@ defmodule PtcManagerWeb.DashboardLive do
   def state_classes("lost"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
   def state_classes("reconciling"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
 
+  def state_classes("sync_pending"),
+    do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+
   def state_classes("awaiting_reconciliation"),
     do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
 
@@ -339,9 +408,19 @@ defmodule PtcManagerWeb.DashboardLive do
       agent_runs: Operations.list_agent_runs(),
       workers: Operations.list_workers_with_worktrees(),
       manager_enabled: Manager.enabled?(),
+      agent_actions_enabled: MaintainerActions.enabled?(),
       dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
       publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false),
       pr_reconcile_enabled: Application.get_env(:ptc_manager, :pr_reconcile_enabled, false)
     )
   end
+
+  defp decode_agent_action_result(%{result_summary: body}) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, result} when is_map(result) -> result
+      _result -> %{}
+    end
+  end
+
+  defp decode_agent_action_result(_action), do: %{}
 end

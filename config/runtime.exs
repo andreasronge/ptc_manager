@@ -27,6 +27,7 @@ herdr_sync_interval_ms =
   System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
 
 dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
+agent_actions_enabled = System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
 
 publication_enabled = System.get_env("PTC_PUBLICATION_ENABLED") == "true"
 pr_reconcile_enabled = System.get_env("PTC_PR_RECONCILE_ENABLED") == "true"
@@ -62,6 +63,17 @@ config :ptc_manager,
   herdr_stale_after_ms:
     System.get_env("PTC_HERDR_STALE_AFTER_MS", "60000") |> String.to_integer(),
   dispatch_enabled: dispatch_enabled,
+  agent_actions_enabled: agent_actions_enabled,
+  agent_action_interval_ms:
+    System.get_env("PTC_AGENT_ACTION_INTERVAL_MS", "5000") |> String.to_integer(),
+  agent_action_timeout_ms:
+    System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "1800000") |> String.to_integer(),
+  agent_action_sync_retry_base_ms:
+    System.get_env("PTC_AGENT_ACTION_SYNC_RETRY_BASE_MS", "5000") |> String.to_integer(),
+  agent_action_sync_retry_max_ms:
+    System.get_env("PTC_AGENT_ACTION_SYNC_RETRY_MAX_MS", "300000") |> String.to_integer(),
+  agent_action_run_as_user: System.get_env("PTC_AGENT_ACTION_RUN_AS_USER"),
+  agent_action_output_dir: System.get_env("PTC_AGENT_ACTION_OUTPUT_DIR"),
   dispatch_interval_ms: System.get_env("PTC_DISPATCH_INTERVAL_MS", "5000") |> String.to_integer(),
   dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
   dispatch_reconcile_after_ms:
@@ -141,6 +153,7 @@ end
 if config_env() == :test do
   config :ptc_manager,
     dispatch_enabled: false,
+    agent_actions_enabled: false,
     publication_enabled: false,
     pr_reconcile_enabled: false,
     worktree_reconcile_interval_ms: 0

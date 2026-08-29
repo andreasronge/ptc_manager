@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "outcome",
+    "private_summary",
+    "why_it_matters",
+    "scope",
+    "risk",
+    "technical_evidence",
+    "github_changes",
+    "evidence",
+    "created_issue_numbers"
+  ],
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["ready", "blocked", "needs-decision", "reject", "followups-created", "no-followups"]
+    },
+    "private_summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "why_it_matters": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "scope": {"type": "string", "enum": ["small", "medium", "large"]},
+    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "technical_evidence": {"type": "string", "minLength": 1, "maxLength": 10000},
+    "github_changes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+    },
+    "created_issue_numbers": {
+      "type": "array",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    }
+  }
+}

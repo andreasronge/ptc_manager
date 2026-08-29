@@ -8,7 +8,13 @@ defmodule PtcManager.GitHubSyncTest do
   defmodule FakeClient do
     @behaviour PtcManager.GitHub
     def list_open_issues(_repository), do: Process.get(:github_result)
-    def get_issue(_repository, _number), do: Process.get(:github_issue_result)
+
+    def get_issue(_repository, number) do
+      case Process.get(:github_issue_results) do
+        results when is_map(results) -> Map.fetch!(results, number)
+        _results -> Process.get(:github_issue_result)
+      end
+    end
   end
 
   defmodule CoordinatedClient do
@@ -47,6 +53,71 @@ defmodule PtcManager.GitHubSyncTest do
     assert Repo.get!(Repository, repository.id).sync_status == "ok"
   end
 
+  test "synchronizes the canonical managed workflow label" do
+    repository = repository_fixture()
+
+    remote =
+      remote_issue(46, "Prepared issue")
+      |> Map.put("labels", [%{"name" => "documentation"}, %{"name" => "ptc:ready"}])
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 46)
+    assert issue.workflow_label == "ptc:ready"
+  end
+
+  test "surfaces conflicting managed workflow labels instead of choosing one" do
+    repository = repository_fixture()
+
+    remote =
+      remote_issue(48, "Conflicting labels")
+      |> Map.put("labels", [
+        %{"name" => "ptc:ready"},
+        %{"name" => "ptc:blocked"}
+      ])
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 48)
+    refute issue.workflow_label
+    assert issue.workflow_label_conflict
+  end
+
+  test "targeted synchronization preserves an edited issue after it is closed" do
+    repository = repository_fixture()
+    Process.put(:github_result, {:ok, [remote_issue(49, "Old title")]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    repository =
+      repository
+      |> Repository.changeset(%{sync_status: "error", last_sync_error: "full snapshot failed"})
+      |> Repo.update!()
+
+    closed = %{
+      "number" => 49,
+      "title" => "Canonical closed title",
+      "html_url" => "https://github.com/example/repo/issues/49",
+      "body" => "The final close explanation.",
+      "state" => "closed",
+      "labels" => [],
+      "updated_at" => "2026-08-29T09:00:00Z"
+    }
+
+    Process.put(:github_issue_result, {:ok, closed})
+    assert {:ok, %{issue_number: 49}} = Sync.sync_issue(repository, 49, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 49)
+    assert issue.state == "closed"
+    assert issue.title == "Canonical closed title"
+    assert issue.body == "The final close explanation."
+
+    unchanged_health = Repo.get!(Repository, repository.id)
+    assert unchanged_health.sync_status == "error"
+    assert unchanged_health.last_sync_error == "full snapshot failed"
+  end
+
   test "updates changed content and closes issues missing from a complete snapshot" do
     repository = repository_fixture()
     Process.put(:github_result, {:ok, [remote_issue(44, "First"), remote_issue(45, "Gone")]})
@@ -58,7 +129,14 @@ defmodule PtcManager.GitHubSyncTest do
     changed = remote_issue(44, "Changed", "2026-08-29T08:30:00Z")
     Process.put(:github_result, {:ok, [changed]})
 
-    assert {:ok, %{changed_count: 1, closed_count: 1}} =
+    Process.put(:github_issue_results, %{
+      45 =>
+        {:ok,
+         remote_issue(45, "Gone", "2026-08-29T08:31:00Z")
+         |> Map.put("state", "closed")}
+    })
+
+    assert {:ok, %{changed_count: 2, closed_count: 1}} =
              Sync.sync_repository(repository, client: FakeClient)
 
     changed_issue = Repo.get_by!(Issue, repository_id: repository.id, number: 44)
@@ -72,6 +150,33 @@ defmodule PtcManager.GitHubSyncTest do
       |> Enum.filter(&(&1.issue.id == changed_issue.id))
 
     refute proposal.source_digest == changed_issue.content_digest
+  end
+
+  test "clears the projected workflow label when an issue disappears as closed" do
+    repository = repository_fixture()
+
+    remote =
+      remote_issue(47, "Will close")
+      |> Map.put("labels", [%{"name" => "ptc:blocked"}])
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    Process.put(:github_result, {:ok, []})
+
+    Process.put(:github_issue_results, %{
+      47 =>
+        {:ok,
+         remote_issue(47, "Will close", "2026-08-29T08:31:00Z")
+         |> Map.put("state", "closed")
+         |> Map.put("labels", [%{"name" => "ptc:blocked"}])}
+    })
+
+    assert {:ok, %{closed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    closed = Repo.get_by!(Issue, repository_id: repository.id, number: 47)
+    assert closed.state == "closed"
+    assert closed.workflow_label == "ptc:blocked"
   end
 
   test "records a bounded failure without changing issue state" do

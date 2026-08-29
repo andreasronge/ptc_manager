@@ -92,6 +92,12 @@
       <p :if={!@manager_enabled} class="mt-4 text-xs text-amber-300">
         Disabled until a local checkout and explicit server setting are configured
       </p>
+      <p :if={@agent_actions_enabled} class="mt-2 text-xs text-teal-300">
+        Maintainer actions enabled · durable prompt queue
+      </p>
+      <p :if={!@agent_actions_enabled} class="mt-2 text-xs text-amber-300">
+        Maintainer actions disabled · requests can be queued for later
+      </p>
     </div>
 
     <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
@@ -135,6 +141,18 @@
               ]}
             >
               {String.replace(item.proposal.readiness, "_", " ")}
+            </span>
+            <span
+              :if={item.issue.workflow_label}
+              class="w-fit rounded-full bg-violet-400/15 px-2.5 py-1 text-xs text-violet-300 ring-1 ring-violet-400/20"
+            >
+              {item.issue.workflow_label}
+            </span>
+            <span
+              :if={item.issue.workflow_label_conflict}
+              class="w-fit rounded-full bg-amber-400/15 px-2.5 py-1 text-xs text-amber-300 ring-1 ring-amber-400/20"
+            >
+              conflicting ptc labels
             </span>
           </div>
 
@@ -200,6 +218,27 @@
               <% end %>
             </button>
             <button
+              :for={action <- ActionCatalog.issue_actions(item.issue)}
+              id={"agent-action-#{action.key}-issue-#{item.issue.id}"}
+              phx-click="run-agent-action"
+              phx-value-action-key={action.key}
+              phx-value-target-id={item.issue.id}
+              disabled={active_agent_action?(item.issue_agent_action)}
+              title={action.description}
+              class="rounded-xl bg-violet-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            >
+              {action.label}
+            </button>
+            <span
+              :if={item.issue_agent_action}
+              class={[
+                "rounded-xl px-3 py-2 text-xs",
+                state_classes(item.issue_agent_action.state)
+              ]}
+            >
+              {agent_action_label(item.issue_agent_action)}
+            </span>
+            <button
               :if={!item.active_job}
               id={"approve-issue-#{item.issue.id}"}
               phx-click="approve"
@@ -254,6 +293,45 @@
               Summary is stale
             </span>
           </div>
+          <div
+            :if={agent_action_private_summary(item.issue_agent_action)}
+            class="mt-4 rounded-xl border border-violet-400/20 bg-violet-400/[0.06] p-4"
+          >
+            <p class="text-xs font-semibold uppercase tracking-wide text-violet-300">
+              Private agent result · {agent_action_outcome(item.issue_agent_action)}
+            </p>
+            <p class="mt-2 text-sm leading-6 text-slate-200">
+              {agent_action_private_summary(item.issue_agent_action)}
+            </p>
+            <details
+              :if={
+                agent_action_result_items(item.issue_agent_action, "github_changes") != [] or
+                  agent_action_result_items(item.issue_agent_action, "evidence") != []
+              }
+              class="mt-3 text-xs text-slate-400"
+            >
+              <summary class="cursor-pointer font-medium text-slate-300">Action details</summary>
+              <ul class="mt-2 list-disc space-y-1 pl-5">
+                <li :for={
+                  change <-
+                    agent_action_result_items(item.issue_agent_action, "github_changes")
+                }>
+                  {change}
+                </li>
+                <li :for={
+                  evidence <- agent_action_result_items(item.issue_agent_action, "evidence")
+                }>
+                  {evidence}
+                </li>
+              </ul>
+            </details>
+          </div>
+          <p
+            :if={agent_action_failure(item.issue_agent_action)}
+            class="mt-3 text-xs leading-5 text-amber-300"
+          >
+            {agent_action_failure(item.issue_agent_action)}
+          </p>
           <div
             :if={
               item.active_job &&
@@ -344,6 +422,40 @@
             >
               Open PR #{item.publication.pr_number} ↗
             </a>
+            <div class="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                :for={action <- ActionCatalog.pull_request_actions(item.publication)}
+                id={"agent-action-#{action.key}-pr-#{item.publication.id}"}
+                phx-click="run-agent-action"
+                phx-value-action-key={action.key}
+                phx-value-target-id={item.publication.id}
+                disabled={active_agent_action?(item.pr_agent_action)}
+                title={action.description}
+                class="rounded-lg bg-violet-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                {action.label}
+              </button>
+              <span
+                :if={item.pr_agent_action}
+                class={[
+                  "rounded-lg px-3 py-2 text-xs",
+                  state_classes(item.pr_agent_action.state)
+                ]}
+              >
+                {agent_action_label(item.pr_agent_action)}
+              </span>
+            </div>
+            <div
+              :if={agent_action_private_summary(item.pr_agent_action)}
+              class="mt-3 rounded-lg bg-violet-400/[0.06] p-3"
+            >
+              <p class="text-xs font-semibold text-violet-300">
+                Private retrospective · {agent_action_outcome(item.pr_agent_action)}
+              </p>
+              <p class="mt-1 text-xs leading-5 text-slate-300">
+                {agent_action_private_summary(item.pr_agent_action)}
+              </p>
+            </div>
           </div>
           <p
             :if={
@@ -442,7 +554,16 @@
             <p class="mt-1 text-sm leading-6 text-slate-200">{run.job.issue.title}</p>
           </div>
 
-          <p :if={!run.job} class="mt-4 text-sm text-slate-300">Repository maintenance</p>
+          <div :if={run.agent_action} class="mt-4">
+            <p class="text-xs text-slate-500">{run.agent_action.target_label}</p>
+            <p class="mt-1 text-sm capitalize leading-6 text-slate-200">
+              {String.replace(run.agent_action.action_key, "_", " ")}
+            </p>
+          </div>
+
+          <p :if={!run.job && !run.agent_action} class="mt-4 text-sm text-slate-300">
+            Repository maintenance
+          </p>
           <p :if={run.status_text} class="mt-3 text-sm leading-6 text-slate-400">
             {run.status_text}
           </p>
