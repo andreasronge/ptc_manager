@@ -89,6 +89,28 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#issue-#{issue.id}", "Agent action queued")
   end
 
+  test "queues an independent issue review from the second issue action", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Challenge the issue before implementation"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#agent-action-review_issue-issue-#{issue.id}",
+             "Review issue"
+           )
+
+    view
+    |> element("#agent-action-review_issue-issue-#{issue.id}")
+    |> render_click()
+
+    assert render(view) =~ "Review issue queued for an agent"
+    action = Repo.one!(AgentAction)
+    assert action.action_key == "review_issue"
+    assert action.target_id == issue.id
+  end
+
   test "reports publication writes and read-only PR tracking independently", %{conn: conn} do
     previous_publication = Application.get_env(:ptc_manager, :publication_enabled)
     previous_reconciliation = Application.get_env(:ptc_manager, :pr_reconcile_enabled)

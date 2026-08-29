@@ -84,9 +84,7 @@ defmodule PtcManager.Operations.AgentAction do
     |> validate_length(:actor, max: 120)
     |> validate_length(:attempt_token, max: 64)
     |> validate_length(:last_error, max: 1_000)
-    |> unique_constraint([:action_key, :target_type, :target_id],
-      name: :agent_actions_one_active_per_target
-    )
-    |> unique_constraint([:action_key, :target_type, :target_id])
+    |> unique_constraint(:action_key, name: :agent_actions_one_active_per_target)
+    |> unique_constraint(:action_key, name: :agent_actions_target_type_target_id_index)
   end
 end

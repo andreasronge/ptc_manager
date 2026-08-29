@@ -129,6 +129,10 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
 
+  defp validate_outcome("review_issue", outcome)
+       when outcome in ["ready", "blocked", "needs-decision", "reject"],
+       do: :ok
+
   defp validate_outcome("pr_retrospective", outcome)
        when outcome in ["followups-created", "no-followups"],
        do: :ok
@@ -155,6 +159,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   defp validate_github_changes(_action_key, _changes), do: :ok
 
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "no-followups", []), do: :ok
 

@@ -13,8 +13,9 @@ defmodule PtcManager.MaintainerActions do
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
-  def enqueue("prepare_issue" = action_key, issue_id, actor)
-      when is_integer(issue_id) and is_binary(actor) do
+  def enqueue(action_key, issue_id, actor)
+      when action_key in ["prepare_issue", "review_issue"] and
+             is_integer(issue_id) and is_binary(actor) do
     with %Issue{} = issue <- Issue |> Repo.get(issue_id) |> Repo.preload(:repository),
          :ok <- ensure_open(issue),
          {:ok, attrs} <- Catalog.build(action_key, %{issue: issue, repository: issue.repository}) do
@@ -171,10 +172,11 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp store_private_analysis(
-         %{action_key: "prepare_issue", target_id: issue_id},
+         %{action_key: action_key, target_id: issue_id},
          {:ok, result},
          _summary
-       ) do
+       )
+       when action_key in ["prepare_issue", "review_issue"] do
     issue = Repo.get!(Issue, issue_id)
 
     analysis = %{

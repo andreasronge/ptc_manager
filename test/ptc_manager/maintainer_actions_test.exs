@@ -219,6 +219,52 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.aggregate(AuditEvent, :count) == 1
   end
 
+  test "review issue prompt runs at most three independent Codex consultations" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{number: 43})
+
+    assert {:ok, action} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
+    assert action.action_key == "review_issue"
+    assert action.prompt =~ "`codex-review` skill in `consult` mode"
+    assert action.prompt =~ "Run at most 3 fresh review passes"
+    assert action.prompt =~ "Stop early when a pass reports no actionable findings"
+    assert action.prompt =~ "you, the primary maintainer, must sanity-check their findings"
+    assert action.prompt =~ "Do not invoke nested reviewers"
+    assert action.prompt =~ "leave exactly `ptc:ready`"
+    assert action.prompt =~ "Return an empty `created_issue_numbers` array"
+  end
+
+  test "serializes different maintainer actions for the same issue" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+
+    assert {:ok, _action} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+
+    assert {:error, :agent_action_already_active} =
+             MaintainerActions.enqueue("review_issue", issue.id, "andreas")
+
+    assert Repo.aggregate(AgentAction, :count) == 1
+  end
+
+  test "does not misreport target validation errors as active-action conflicts" do
+    repository = repository_fixture()
+
+    attrs = %{
+      repository_id: repository.id,
+      action_key: "invalid_target_test",
+      target_type: "unsupported",
+      target_id: 99,
+      target_label: "invalid",
+      prompt_version: 1,
+      prompt: "No operation",
+      actor: "andreas"
+    }
+
+    assert {:error, changeset} = Operations.enqueue_agent_action(attrs)
+    assert changeset.errors[:target_type]
+    refute changeset.errors[:action_key]
+  end
+
   test "runs a queued action, records agent activity, and resynchronizes GitHub" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
@@ -288,6 +334,7 @@ defmodule PtcManager.MaintainerActionsTest do
     }
 
     assert :ok = CodexAdapter.validate_result(result, "prepare_issue")
+    assert :ok = CodexAdapter.validate_result(result, "review_issue")
 
     assert {:error, :invalid_agent_action_outcome} =
              CodexAdapter.validate_result(result, "pr_retrospective")
@@ -297,6 +344,9 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert {:error, :invalid_agent_action_outcome} =
              CodexAdapter.validate_result(retrospective, "prepare_issue")
+
+    assert {:error, :invalid_agent_action_outcome} =
+             CodexAdapter.validate_result(retrospective, "review_issue")
 
     created =
       retrospective

@@ -33,8 +33,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - worker-advertised implementation capacity instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
 - canonical PR status and GitHub link in the dashboard.
-- a generic durable agent-action queue with initial **Prepare issue** and
-  **PR retrospective** buttons;
+- a generic durable agent-action queue with **Prepare issue**, **Review issue**,
+  **PR retrospective**, and **Prepare merge decision** buttons;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
   `ptc:needs-decision` GitHub labels;
 - agent-action attempts, results, and elapsed time in the shared activity view.
@@ -131,6 +131,9 @@ catalog contains:
 
 - **Prepare issue**, which rewrites or closes the issue and leaves exactly one
   of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
+- **Review issue**, which uses up to three fresh independent `codex-review`
+  consultations to challenge and improve the issue, stopping early after a
+  clean pass and applying the same canonical label rules as **Prepare issue**;
 - **PR retrospective**, shown after a PR finishes, which may create concrete,
   non-duplicate follow-up issues. New follow-ups intentionally start without a
   managed `ptc:*` label;

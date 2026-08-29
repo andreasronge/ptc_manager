@@ -356,6 +356,12 @@ the complete execution history.
 - **Prepare issue** asks a maintainer agent to investigate and choose exactly
   one outcome: rewrite and mark ready, reject/close with a reason, wait because
   of a named dependency or external condition, or request a human decision;
+- **Review issue** asks the primary maintainer agent to run at most three fresh
+  independent `codex-review consult` passes, apply valid findings between
+  passes, stop early on a clean pass, and leave the same canonical outcome and
+  mutually exclusive workflow label as **Prepare issue**;
+- serialize maintainer actions per GitHub target so preparation and review can
+  never edit the same issue concurrently;
 - keep the plain-language/ELI5 explanation private in PtcManager and never copy
   it into the GitHub issue;
 - **PR retrospective** asks an agent to inspect a finished PR and create only
