@@ -18,8 +18,10 @@
           <span class="text-slate-500">issues</span>
         </div>
         <div class="rounded-xl border border-white/10 bg-white/5 px-4 py-3">
-          <span class="block text-2xl font-semibold">{length(@agent_runs)}</span>
-          <span class="text-slate-500">agents</span>
+          <span id="active-agent-count" class="block text-2xl font-semibold">
+            {length(@active_agent_runs)}
+          </span>
+          <span class="text-slate-500">active agents</span>
         </div>
       </div>
     </div>
@@ -116,7 +118,7 @@
   </section>
 
   <div class="grid gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
-    <section aria-labelledby="issue-inbox-title">
+    <section aria-labelledby="issue-inbox-title" class="min-w-0">
       <div class="mb-4 flex items-center justify-between">
         <h2 id="issue-inbox-title" class="text-lg font-semibold">Issue inbox</h2>
         <span class="text-xs text-slate-500">Newest GitHub update first</span>
@@ -569,7 +571,7 @@
       </div>
     </section>
 
-    <aside aria-labelledby="agent-activity-title">
+    <aside aria-labelledby="agent-activity-title" class="min-w-0">
       <div class="mb-4 flex items-center justify-between">
         <h2 id="agent-activity-title" class="text-lg font-semibold">Agent activity</h2>
         <span class="size-2 rounded-full bg-teal-400 shadow-[0_0_12px_rgba(45,212,191,0.8)]">
@@ -618,8 +620,13 @@
           </p>
         </article>
 
+        <div class="flex items-center justify-between pt-2">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Active now</h3>
+          <span class="text-xs text-slate-600">{length(@active_agent_runs)}</span>
+        </div>
+
         <article
-          :for={run <- @agent_runs}
+          :for={run <- @active_agent_runs}
           id={"agent-run-#{run.id}"}
           class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
         >
@@ -675,11 +682,68 @@
         </article>
 
         <div
-          :if={@agent_runs == []}
+          :if={@active_agent_runs == []}
           class="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500"
         >
-          No agents have reported yet.
+          No agents are working right now.
         </div>
+
+        <section id="agent-history" aria-labelledby="agent-history-title" class="pt-4">
+          <div class="mb-3 flex items-center justify-between">
+            <h3
+              id="agent-history-title"
+              class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+            >
+              Recent history
+            </h3>
+            <span class="text-xs text-slate-600">Latest {length(@recent_agent_runs)}</span>
+          </div>
+
+          <div class="space-y-2">
+            <article
+              :for={run <- @recent_agent_runs}
+              id={"agent-history-run-#{run.id}"}
+              class="rounded-xl border border-white/10 bg-slate-900/50 px-4 py-3"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="truncate text-sm text-slate-300">
+                    <%= cond do %>
+                      <% run.job -> %>
+                        #{run.job.issue.number} · {run.job.issue.title}
+                      <% run.agent_action -> %>
+                        {run.agent_action.target_label} · {String.replace(
+                          run.agent_action.action_key,
+                          "_",
+                          " "
+                        )}
+                      <% true -> %>
+                        Repository maintenance
+                    <% end %>
+                  </p>
+                  <p class="mt-1 text-xs text-slate-600">
+                    {run.worker.name} · {elapsed(run.ended_at, run.started_at)} · ended {short_time(
+                      run.ended_at
+                    )}
+                  </p>
+                </div>
+                <span class={[
+                  "shrink-0 rounded-full px-2 py-0.5 text-[11px] ring-1",
+                  state_classes(run.state)
+                ]}>
+                  {run.state}
+                </span>
+              </div>
+            </article>
+
+            <p
+              :if={@recent_agent_runs == []}
+              class="rounded-xl border border-dashed border-white/10 px-4 py-5 text-center text-xs text-slate-600"
+            >
+              No completed agent runs yet.
+            </p>
+          </div>
+        </section>
       </div>
     </aside>
   </div>

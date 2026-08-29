@@ -999,6 +999,23 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  def list_active_agent_runs do
+    AgentRun
+    |> where([run], run.state in ~w(queued starting working blocked unknown))
+    |> order_by([run], asc: run.started_at, asc: run.id)
+    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
+  def list_recent_agent_runs(limit \\ 5) when is_integer(limit) and limit > 0 do
+    AgentRun
+    |> where([run], run.state in ~w(done failed lost))
+    |> order_by([run], desc: run.ended_at, desc: run.id)
+    |> limit(^limit)
+    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
   def list_workers_with_worktrees do
     Worker
     |> order_by([worker], asc: worker.id)

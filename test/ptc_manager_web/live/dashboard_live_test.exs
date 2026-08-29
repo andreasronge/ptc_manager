@@ -176,6 +176,63 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert html =~ "Working for"
   end
 
+  test "shows only active agents and limits recent history to five ended runs", %{conn: conn} do
+    worker = worker_fixture(%{name: "Hetzner build one"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, idle_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        role: "implementer",
+        state: "idle",
+        status_text: "Waiting for work",
+        started_at: DateTime.add(now, -300, :second),
+        last_heartbeat_at: now
+      })
+
+    {:ok, active_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        role: "implementer",
+        state: "working",
+        status_text: "Fixing the selected issue",
+        started_at: DateTime.add(now, -60, :second),
+        last_heartbeat_at: now
+      })
+
+    historical_runs =
+      for number <- 1..6 do
+        ended_at = DateTime.add(now, -number, :second)
+
+        {:ok, run} =
+          Operations.create_agent_run(%{
+            worker_id: worker.id,
+            role: "implementer",
+            state: "done",
+            status_text: "Historical run #{number}",
+            started_at: DateTime.add(ended_at, -30, :second),
+            last_heartbeat_at: ended_at,
+            ended_at: ended_at
+          })
+
+        run
+      end
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#active-agent-count", "1")
+    assert has_element?(view, "#agent-run-#{active_run.id}", "Fixing the selected issue")
+    refute has_element?(view, "#agent-run-#{idle_run.id}")
+
+    for run <- Enum.take(historical_runs, 5) do
+      assert has_element?(view, "#agent-history-run-#{run.id}")
+    end
+
+    oldest_run = List.last(historical_runs)
+    refute has_element?(view, "#agent-history-run-#{oldest_run.id}")
+    assert has_element?(view, "#agent-history", "Latest 5")
+  end
+
   test "rejects a malformed approval target without crashing", %{conn: conn} do
     {:ok, view, _html} =
       conn
@@ -459,7 +516,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> live(~p"/")
 
     assert view
-           |> element("#agent-run-#{run.id}")
+           |> element("#agent-history-run-#{run.id}")
            |> render() =~ "2m 0s"
   end
 
