@@ -1,0 +1,405 @@
+#!/bin/sh
+set -eu
+
+release_id=${1:-}
+source_archive=${2:-}
+
+case "$release_id" in
+  *[!A-Za-z0-9.-]*|'')
+    echo "invalid release id" >&2
+    exit 2
+    ;;
+esac
+
+case "$source_archive" in
+  /tmp/ptc-manager-*.tar) ;;
+  *)
+    echo "invalid source archive path" >&2
+    exit 2
+    ;;
+esac
+
+service_name=ptc_manager
+application_dir=/opt/ptc_manager
+build_dir="/home/agent/src/ptc_manager-build-${release_id}"
+new_release="$build_dir/_build/prod/rel/ptc_manager"
+release_backup="/opt/ptc_manager-before-${release_id}"
+failed_release="/opt/ptc_manager-failed-${release_id}"
+database_path=
+database_backup=
+failed_database=
+health_url=
+mise_binary=/home/agent/.local/bin/mise
+manual_herdr=/home/agent/.local/bin/herdr
+worker_herdr=/usr/local/bin/herdr
+agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
+environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
+coordinator_environment_files=
+coordinator_session=
+worker_session=
+remote_script=$0
+swapped=false
+service_stopped=false
+
+cleanup_remote() {
+  rm -f -- "$source_archive" "$remote_script" "$agent_filter" "$environment_file_parser"
+
+  case "$build_dir" in
+    /home/agent/src/ptc_manager-build-*) rm -rf -- "$build_dir" ;;
+  esac
+}
+
+health_check() {
+  attempt=1
+
+  while [ "$attempt" -le 30 ]; do
+    if curl -fsS -o /dev/null "$health_url"; then
+      return 0
+    fi
+
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+read_process_setting() {
+  process_id=$1
+  setting_name=$2
+  default_value=$3
+  setting_value=$(
+    sudo cat "/proc/${process_id}/environ" |
+      tr '\000' '\n' |
+      awk -F= -v setting="$setting_name" '
+        $1 == setting {
+          sub(/^[^=]*=/, "")
+          print
+          found = 1
+          exit
+        }
+        END { if (!found) print "" }
+      '
+  )
+
+  if [ -n "$setting_value" ]; then
+    printf '%s\n' "$setting_value"
+  else
+    printf '%s\n' "$default_value"
+  fi
+}
+
+read_environment_setting() {
+  setting_name=$1
+  shift
+
+  sudo awk -v setting="$setting_name" '
+    /^[[:space:]]*($|#)/ { next }
+    {
+      equals = index($0, "=")
+      if (equals == 0) next
+
+      key = substr($0, 1, equals - 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+
+      if (key == setting) {
+        value = substr($0, equals + 1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+
+        if ((value ~ /^".*"$/) || (value ~ /^\047.*\047$/)) {
+          value = substr(value, 2, length(value) - 2)
+        }
+
+        result = value
+      }
+    }
+    END { print result }
+  ' "$@"
+}
+
+active_managed_runs() {
+  sudo sqlite3 -readonly "$database_path" \
+    "select count(*) from agent_runs where state not in ('done','failed','lost');"
+}
+
+ensure_no_managed_runs() {
+  active_runs=$(active_managed_runs)
+
+  if [ "$active_runs" -ne 0 ]; then
+    echo "refusing to deploy while $active_runs managed agent run(s) are active" >&2
+    return 1
+  fi
+}
+
+busy_agent_count() {
+  jq -f "$agent_filter"
+}
+
+ensure_no_busy_herdr_agents() {
+  manual_session_running=$(
+    "$manual_herdr" session list --json |
+      jq --arg session "$coordinator_session" \
+        '[.sessions[]? | select(.name == $session and .running == true)] | length'
+  )
+
+  if [ "$manual_session_running" -gt 0 ]; then
+    manual_busy=$(
+      "$manual_herdr" --session "$coordinator_session" agent list | busy_agent_count
+    )
+  else
+    manual_busy=0
+  fi
+
+  if [ -n "$worker_session" ]; then
+    worker_busy=$(
+      sudo -u ptc-manager-worker -H "$worker_herdr" --session "$worker_session" agent list |
+        busy_agent_count
+    )
+  else
+    worker_busy=0
+  fi
+
+  busy_total=$((manual_busy + worker_busy))
+
+  if [ "$busy_total" -ne 0 ]; then
+    echo "refusing to deploy while $busy_total Herdr agent(s) are not idle" >&2
+    return 1
+  fi
+}
+
+prune_successful_backups() {
+  sudo find /opt -maxdepth 1 -type d -name 'ptc_manager-before-*' -printf '%T@ %p\n' |
+    sort -nr |
+    awk 'NR > 3 {print $2}' |
+    while IFS= read -r old_release; do
+      case "$old_release" in
+        /opt/ptc_manager-before-*) ;;
+        *) continue ;;
+      esac
+
+      old_release_id=${old_release#/opt/ptc_manager-before-}
+      old_database_backup="${database_path}-before-${old_release_id}"
+      sudo rm -rf -- "$old_release"
+      sudo rm -f -- "$old_database_backup"
+    done
+}
+
+rollback() {
+  swapped=false
+  service_stopped=false
+  rollback_status=0
+  echo "New release did not become healthy; restoring the previous release and database." >&2
+  sudo systemctl stop "$service_name" || rollback_status=1
+
+  if [ -d "$application_dir" ]; then
+    sudo mv "$application_dir" "$failed_release" || rollback_status=1
+  fi
+
+  sudo mv "$release_backup" "$application_dir" || rollback_status=1
+
+  if [ -f "$database_path" ]; then
+    sudo mv "$database_path" "$failed_database" || rollback_status=1
+  fi
+
+  if [ -f "${database_path}-wal" ]; then
+    sudo mv "${database_path}-wal" "${failed_database}-wal" || rollback_status=1
+  fi
+
+  if [ -f "${database_path}-shm" ]; then
+    sudo mv "${database_path}-shm" "${failed_database}-shm" || rollback_status=1
+  fi
+
+  sudo install -o ptc-manager -g ptc-manager -m 0600 "$database_backup" "$database_path" ||
+    rollback_status=1
+  sudo systemctl start "$service_name" || rollback_status=1
+
+  if [ "$rollback_status" -eq 0 ] && health_check; then
+    echo "Rollback succeeded. Failed artifacts were retained with suffix ${release_id}." >&2
+  else
+    echo "Rollback did not restore service health; inspect systemd immediately." >&2
+  fi
+}
+
+finish() {
+  exit_status=$?
+  trap - EXIT HUP INT TERM
+
+  if [ "$swapped" = true ]; then
+    rollback
+  elif [ "$service_stopped" = true ]; then
+    echo "Deployment stopped before the release swap; restarting the existing release." >&2
+    sudo systemctl start "$service_name" || true
+  fi
+
+  cleanup_remote
+  exit "$exit_status"
+}
+trap finish EXIT
+trap 'exit 130' HUP INT TERM
+
+command -v git >/dev/null
+command -v tar >/dev/null
+command -v curl >/dev/null
+command -v sqlite3 >/dev/null
+command -v flock >/dev/null
+command -v jq >/dev/null
+[ -x "$mise_binary" ]
+[ -x "$manual_herdr" ]
+[ -x "$worker_herdr" ]
+[ -f "$source_archive" ]
+[ -d "$application_dir" ]
+[ ! -e "$build_dir" ]
+[ ! -e "$release_backup" ]
+sudo -n true
+tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
+tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
+
+coordinator_environment_files=$(
+  sudo systemctl show -p EnvironmentFiles --value "$service_name" |
+    awk -f "$environment_file_parser"
+)
+
+if [ -z "$coordinator_environment_files" ]; then
+  echo "PtcManager systemd unit does not declare an environment file" >&2
+  exit 1
+fi
+
+# EnvironmentFile paths are root-controlled systemd configuration and this
+# installation uses paths without whitespace.
+# shellcheck disable=SC2086
+for environment_file in $coordinator_environment_files; do
+  if ! sudo test -f "$environment_file"; then
+    echo "configured systemd environment file is missing: $environment_file" >&2
+    exit 1
+  fi
+done
+
+service_pid=$(sudo systemctl show -p MainPID --value "$service_name")
+case "$service_pid" in
+  *[!0-9]*|''|0)
+    echo "PtcManager service does not have a running process" >&2
+    exit 1
+    ;;
+esac
+
+# shellcheck disable=SC2086
+configured_database_path=$(read_environment_setting DATABASE_PATH $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_health_port=$(read_environment_setting PORT $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_coordinator_session=$(read_environment_setting PTC_HERDR_SESSION $coordinator_environment_files)
+
+running_database_path=$(read_process_setting "$service_pid" DATABASE_PATH "")
+running_health_port=$(read_process_setting "$service_pid" PORT 4000)
+running_coordinator_session=$(read_process_setting "$service_pid" PTC_HERDR_SESSION default)
+
+configured_health_port=${configured_health_port:-4000}
+configured_coordinator_session=${configured_coordinator_session:-default}
+
+if [ "$running_database_path" != "$configured_database_path" ] ||
+  [ "$running_health_port" != "$configured_health_port" ] ||
+  [ "$running_coordinator_session" != "$configured_coordinator_session" ]; then
+  echo "systemd environment files differ from the running services; restart them before deploying" >&2
+  exit 1
+fi
+
+coordinator_session=$configured_coordinator_session
+
+if sudo systemctl is-active --quiet ptc_manager-herdr; then
+  worker_service_pid=$(sudo systemctl show -p MainPID --value ptc_manager-herdr)
+
+  case "$worker_service_pid" in
+    *[!0-9]*|''|0)
+      echo "active PtcManager Herdr service does not have a running process" >&2
+      exit 1
+      ;;
+  esac
+
+  worker_session=$(read_process_setting "$worker_service_pid" HERDR_SESSION default)
+fi
+
+database_path=$configured_database_path
+health_port=$configured_health_port
+
+case "$database_path" in
+  /*) ;;
+  *)
+    echo "running service does not expose an absolute DATABASE_PATH" >&2
+    exit 1
+    ;;
+esac
+
+case "$health_port" in
+  *[!0-9]*|'')
+    echo "running service exposes an invalid PORT" >&2
+    exit 1
+    ;;
+esac
+
+database_backup="${database_path}-before-${release_id}"
+failed_database="${database_path}-failed-${release_id}"
+health_url="http://127.0.0.1:${health_port}/"
+
+if ! sudo test -f "$database_path"; then
+  echo "configured SQLite database is missing: $database_path" >&2
+  exit 1
+fi
+
+if sudo test -e "$database_backup"; then
+  echo "database backup path already exists: $database_backup" >&2
+  exit 1
+fi
+
+exec 9>/run/lock/ptc-manager-deploy.lock
+if ! flock -n 9; then
+  echo "another PtcManager deployment is already running" >&2
+  exit 1
+fi
+
+ensure_no_managed_runs
+ensure_no_busy_herdr_agents
+
+mkdir -p "$build_dir"
+tar -xf "$source_archive" -C "$build_dir"
+cd "$build_dir"
+
+echo "Building production release..."
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+  env MIX_ENV=prod mix deps.get
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+  env MIX_ENV=prod mix compile
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+  env MIX_ENV=prod mix assets.deploy
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+  env MIX_ENV=prod mix release
+
+[ -x "$new_release/bin/ptc_manager" ]
+ensure_no_busy_herdr_agents
+
+echo "Stopping service and backing up SQLite..."
+service_stopped=true
+sudo systemctl stop "$service_name"
+ensure_no_managed_runs
+sudo sqlite3 "$database_path" ".backup '$database_backup'"
+sudo chown ptc-manager:ptc-manager "$database_backup"
+sudo chmod 0600 "$database_backup"
+
+sudo mv "$application_dir" "$release_backup"
+swapped=true
+sudo mv "$new_release" "$application_dir"
+sudo chown -R root:root "$application_dir"
+
+echo "Starting release; startup applies pending database migrations..."
+sudo systemctl start "$service_name"
+
+health_check
+
+swapped=false
+service_stopped=false
+migration_version=$(sudo sqlite3 -readonly "$database_path" \
+  "select coalesce(max(version), 0) from schema_migrations;")
+
+echo "Service is healthy. Latest database migration: $migration_version"
+echo "Release backup: $release_backup"
+echo "Database backup: $database_backup"
+prune_successful_backups

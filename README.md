@@ -205,6 +205,41 @@ MIX_ENV=prod mix assets.deploy
 MIX_ENV=prod mix release
 ```
 
+For subsequent deployments to the configured Herdr machine, deploy the exact
+clean Git commit with:
+
+```sh
+mix ptc.deploy
+```
+
+The target defaults to the `herdr-box` SSH host from the local SSH config. Use
+`mix ptc.deploy --target another-host` to select a different SSH alias, or
+`mix ptc.deploy --dry-run` to show the resolved commit and release identifier
+without running checks or changing either machine.
+
+The task runs `mix precommit`, uploads a Git archive rather than uncommitted
+files, and builds the production release on the server with its mise-managed
+Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
+checks both managed runs and the manual and worker Herdr sessions. Non-idle
+agents make deployment stop safely; idle Herdr sessions continue running and
+are not restarted. Immediately before the release swap, the task stops the
+coordinator and checks the database again so no new managed work can race the
+deployment. Queued work resumes after startup.
+
+The task discovers the coordinator's active systemd environment files and
+checks the configured manual Herdr session. If the optional
+`ptc_manager-herdr` worker service is running, its live session is checked too;
+observation-only installations do not require that worker service.
+
+The task reads the actual `DATABASE_PATH` and `PORT` from the running systemd
+service, creates a consistent SQLite backup, and replaces `/opt/ptc_manager`.
+Starting the new release applies all pending Ecto migrations before the web
+endpoint starts. The task then checks the local HTTP endpoint and reports both
+the release and database backup paths. If the new service does not become
+healthy, it restores both backups automatically and retains the failed
+artifacts for investigation. Successful deployments retain the three newest
+release/database backup pairs and prune older successful backups.
+
 ## Hetzner systemd and Tailscale
 
 Build the release, copy `_build/prod/rel/ptc_manager` to `/opt/ptc_manager`, and

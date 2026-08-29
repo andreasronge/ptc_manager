@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: mix ptc.deploy [--target SSH_TARGET] [--dry-run]
+
+Deploy a clean PtcManager Git commit to the Herdr machine. Defaults:
+  SSH target: herdr-box
+
+The command runs `mix precommit`, builds the release remotely, backs up the
+SQLite database, installs the release, lets release startup run migrations,
+and checks http://127.0.0.1:4000/ before reporting success.
+EOF
+}
+
+deploy_target=${PTC_DEPLOY_TARGET:-herdr-box}
+dry_run=false
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)
+      [ "$#" -ge 2 ] || { echo "--target requires a value" >&2; exit 2; }
+      deploy_target=$2
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$deploy_target" in
+  *[!A-Za-z0-9_.@-]*|'')
+    echo "invalid SSH target: $deploy_target" >&2
+    exit 2
+    ;;
+esac
+
+project_root=$(git rev-parse --show-toplevel)
+cd "$project_root"
+
+commit_sha=$(git rev-parse --verify "HEAD^{commit}")
+short_sha=$(git rev-parse --short=12 "$commit_sha")
+timestamp=$(date -u +%Y%m%d%H%M%S)
+release_id="${short_sha}-${timestamp}"
+remote_archive="/tmp/ptc-manager-${release_id}.tar"
+remote_script="/tmp/ptc-manager-deploy-${release_id}"
+
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "refusing to deploy a dirty worktree; commit or stash all changes first" >&2
+  exit 1
+fi
+
+echo "PtcManager deployment"
+echo "  target:   $deploy_target"
+echo "  commit:   $commit_sha"
+echo "  release:  $release_id"
+
+if [ "$dry_run" = true ]; then
+  echo "Dry run complete; no local checks, upload, build, database, or service changes were made."
+  exit 0
+fi
+
+echo "Running local verification..."
+env MIX_ENV=test mix precommit
+
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "local verification changed the worktree; review and commit those changes first" >&2
+  exit 1
+fi
+
+deploy_tmp=$(mktemp -d "${TMPDIR:-/tmp}/ptc-manager-deploy.XXXXXX")
+local_archive="$deploy_tmp/source.tar"
+local_remote_script="$deploy_tmp/remote-deploy-herdr"
+
+cleanup_local() {
+  rm -f -- "$local_archive" "$local_remote_script"
+  rmdir -- "$deploy_tmp" 2>/dev/null || true
+}
+
+finish_local() {
+  exit_status=$?
+  trap - EXIT HUP INT TERM
+  cleanup_local
+  exit "$exit_status"
+}
+trap finish_local EXIT
+trap 'exit 130' HUP INT TERM
+
+git archive --format=tar --output="$local_archive" "$commit_sha"
+tar -xOf "$local_archive" deploy/remote-deploy-herdr >"$local_remote_script"
+
+echo "Uploading committed source..."
+scp -q "$local_archive" "$deploy_target:$remote_archive"
+scp -q "$local_remote_script" "$deploy_target:$remote_script"
+
+echo "Building and installing on $deploy_target..."
+# Values interpolated below are locally generated or restricted to a safe SSH alias.
+# shellcheck disable=SC2029
+ssh "$deploy_target" "chmod 700 '$remote_script' && '$remote_script' '$release_id' '$remote_archive'"
+
+echo "Deployment complete: $release_id"
