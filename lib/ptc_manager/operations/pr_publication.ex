@@ -74,7 +74,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_inclusion(:state, @states)
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> validate_number(:attempt_count, greater_than_or_equal_to: 0)
-    |> validate_inclusion(:source, ["broker"])
+    |> validate_inclusion(:source, ["broker", "agent"])
     |> validate_number(:pr_number, greater_than: 0)
     |> validate_length(:idempotency_key, is: 64)
     |> validate_length(:branch_name, max: 240)

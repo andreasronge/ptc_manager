@@ -30,7 +30,12 @@ dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
 agent_actions_enabled = System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
 
 publication_enabled = System.get_env("PTC_PUBLICATION_ENABLED") == "true"
-pr_reconcile_enabled = System.get_env("PTC_PR_RECONCILE_ENABLED") == "true"
+
+implementation_agent_publishes_pr =
+  System.get_env("PTC_IMPLEMENTATION_AGENT_PUBLISHES_PR", "false") == "true"
+
+pr_reconcile_enabled =
+  System.get_env("PTC_PR_RECONCILE_ENABLED") == "true" or implementation_agent_publishes_pr
 
 required_pre_pr_reviews_override =
   case System.get_env("PTC_REQUIRED_PRE_PR_REVIEWS") do
@@ -135,6 +140,7 @@ config :ptc_manager,
   implementation_agent_start_timeout_ms:
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),
+  implementation_agent_publishes_pr: implementation_agent_publishes_pr,
   required_pre_pr_reviews_override: required_pre_pr_reviews_override,
   implementation_test_command: System.get_env("PTC_IMPLEMENTATION_TEST_COMMAND"),
   manager_enabled: System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",

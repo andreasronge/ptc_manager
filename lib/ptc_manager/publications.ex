@@ -15,6 +15,36 @@ defmodule PtcManager.Publications do
 
   alias PtcManager.Repo
 
+  @agent_reconciliation_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
+
+  def agent_reconciliation_needed? do
+    Repo.exists?(
+      from job in Job,
+        where:
+          job.publication_source == "agent" and
+            job.state in ^@agent_reconciliation_job_states
+    )
+  end
+
+  def next_agent_for_discovery(now \\ now()) do
+    PrPublication
+    |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
+    |> where(
+      [publication, job],
+      publication.source == "agent" and publication.state == "queued" and
+        job.state == "ready_for_pr" and
+        (is_nil(publication.next_attempt_at) or publication.next_attempt_at <= ^now)
+    )
+    |> order_by([publication],
+      asc: publication.next_attempt_at,
+      asc: publication.inserted_at,
+      asc: publication.id
+    )
+    |> limit(1)
+    |> preload([_publication, job], job: {job, [:issue, :repository, :worktree_allocation]})
+    |> Repo.one()
+  end
+
   def next_open_for_status do
     PrPublication
     |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
@@ -243,6 +273,197 @@ defmodule PtcManager.Publications do
       else
         {:error, :invalid_publication_result}
       end
+
+    notify(outcome)
+  end
+
+  def record_agent_publication(publication_id, result)
+      when is_integer(publication_id) and is_map(result) do
+    now = now()
+
+    outcome =
+      if valid_agent_result?(result) do
+        Repo.transaction(fn ->
+          publication =
+            PrPublication
+            |> preload(job: [:repository, :worktree_allocation])
+            |> Repo.get!(publication_id)
+
+          job = publication.job
+          repository = job.repository
+
+          cond do
+            publication.source != "agent" ->
+              Repo.rollback(:wrong_publication_source)
+
+            publication.state == "published" and
+                published_matches?(publication, publication.fencing_token, result) ->
+              load(publication.id)
+
+            publication.state != "queued" or job.state != "ready_for_pr" ->
+              Repo.rollback(:invalid_publication_state)
+
+            result.head_sha != publication.head_sha or result.head_ref != publication.branch_name ->
+              block_agent_publication!(
+                publication,
+                job,
+                result,
+                "GitHub reports a different agent branch or head commit.",
+                now
+              )
+
+            String.downcase(result.head_repository) !=
+                String.downcase("#{repository.github_owner}/#{repository.github_name}") ->
+              block_agent_publication!(
+                publication,
+                job,
+                result,
+                "GitHub reports the agent pull request from a different repository.",
+                now
+              )
+
+            not intended_base?(result, repository) ->
+              block_agent_publication!(
+                publication,
+                job,
+                result,
+                "GitHub reports a different pull-request base.",
+                now
+              )
+
+            result.state != "open" ->
+              block_agent_publication!(
+                publication,
+                job,
+                result,
+                "The discovered agent pull request is not open.",
+                now
+              )
+
+            true ->
+              publication
+              |> PrPublication.changeset(%{
+                state: "published",
+                pr_number: result.pr_number,
+                pr_url: result.pr_url,
+                remote_head_sha: result.head_sha,
+                remote_base_sha: result.base_sha,
+                published_at: now,
+                pr_state: "open",
+                pr_checked_at: now,
+                last_error: nil
+              })
+              |> Repo.update!()
+
+              job
+              |> Job.changeset(%{state: "pr_open", last_error: nil})
+              |> Repo.update!()
+
+              WorktreeAllocation
+              |> where(
+                [allocation],
+                allocation.job_id == ^job.id and
+                  allocation.state not in ["cleaning", "removed"]
+              )
+              |> Repo.update_all(
+                set: [
+                  state: "reclaimable",
+                  head_sha: result.head_sha,
+                  pr_number: result.pr_number,
+                  pr_url: result.pr_url,
+                  last_used_at: now,
+                  last_error: nil,
+                  updated_at: now
+                ]
+              )
+
+              insert_audit!(%{
+                actor: "github-reconciler",
+                action: "pr_publication.discovered",
+                target_type: "pr_publication",
+                target_id: publication.id,
+                details: %{
+                  "fencing_token" => publication.fencing_token,
+                  "head_sha" => result.head_sha,
+                  "pr_number" => result.pr_number,
+                  "pr_url" => result.pr_url
+                }
+              })
+
+              load(publication.id)
+          end
+        end)
+      else
+        {:error, :invalid_pull_request_status}
+      end
+
+    notify(outcome)
+  end
+
+  def record_agent_discovery_retry(publication_id, reason, delay_ms)
+      when is_integer(publication_id) and is_integer(delay_ms) and delay_ms > 0 do
+    now = now()
+    message = bounded_error(reason)
+    next_attempt_at = DateTime.add(now, delay_ms, :millisecond)
+
+    outcome =
+      PrPublication
+      |> where(
+        [publication],
+        publication.id == ^publication_id and publication.source == "agent" and
+          publication.state == "queued"
+      )
+      |> Repo.update_all(
+        set: [
+          next_attempt_at: next_attempt_at,
+          last_error: message,
+          updated_at: now
+        ],
+        inc: [attempt_count: 1]
+      )
+      |> case do
+        {1, _rows} -> {:ok, Repo.get!(PrPublication, publication_id)}
+        {0, _rows} -> {:error, :invalid_publication_state}
+      end
+
+    notify(outcome)
+  end
+
+  def block_agent_discovery(publication_id, reason) when is_integer(publication_id) do
+    now = now()
+    message = bounded_error(reason)
+
+    outcome =
+      Repo.transaction(fn ->
+        publication = Repo.get!(PrPublication, publication_id)
+        job = Repo.get!(Job, publication.job_id)
+
+        if publication.source != "agent" or publication.state != "queued" or
+             job.state != "ready_for_pr" do
+          Repo.rollback(:invalid_publication_state)
+        end
+
+        publication
+        |> PrPublication.changeset(%{
+          state: "blocked",
+          next_attempt_at: nil,
+          last_error: message
+        })
+        |> Repo.update!()
+
+        job |> Job.changeset(%{state: "publish_blocked", last_error: message}) |> Repo.update!()
+        mark_worktree_attention(job.id, message, now)
+
+        insert_audit!(%{
+          actor: "github-reconciler",
+          action: "pr_publication.discovery_blocked",
+          target_type: "pr_publication",
+          target_id: publication.id,
+          details: %{"reason" => message}
+        })
+
+        load(publication.id)
+      end)
 
     notify(outcome)
   end
@@ -617,6 +838,11 @@ defmodule PtcManager.Publications do
       is_binary(result[:base_ref]) and is_binary(result[:base_repository])
   end
 
+  defp valid_agent_result?(result) do
+    valid_remote_status?(result) and is_integer(result[:pr_number]) and result.pr_number > 0 and
+      is_binary(result[:head_ref]) and is_binary(result[:head_repository])
+  end
+
   defp intended_base?(result, repository) do
     result.base_ref == repository.default_branch and
       String.downcase(result.base_repository) ==
@@ -634,6 +860,27 @@ defmodule PtcManager.Publications do
     publication.state == "published" and publication.fencing_token == fencing_token and
       publication.pr_number == result.pr_number and publication.pr_url == result.pr_url and
       publication.remote_head_sha == result.head_sha
+  end
+
+  defp block_agent_publication!(publication, job, result, message, now) do
+    publication
+    |> PrPublication.changeset(%{
+      state: "blocked",
+      pr_number: result.pr_number,
+      pr_url: result.pr_url,
+      remote_head_sha: result.head_sha,
+      remote_base_sha: result.base_sha,
+      pr_state: result.state,
+      pr_checked_at: now,
+      last_error: message
+    })
+    |> Repo.update!()
+
+    job |> Job.changeset(%{state: "publish_blocked", last_error: message}) |> Repo.update!()
+    mark_worktree_attention(job.id, message, now)
+
+    insert_status_audit!(publication, "pr_publication.agent_mismatch", result, now)
+    load(publication.id)
   end
 
   defp attempt_failure(publication, fencing_token, attempt_token, now) do

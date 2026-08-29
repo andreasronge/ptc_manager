@@ -73,6 +73,7 @@ config :ptc_manager,
   implementation_agent_kind: "codex",
   implementation_agent_args: ["--full-auto"],
   implementation_agent_start_timeout_ms: 60_000,
+  implementation_agent_publishes_pr: false,
   required_pre_pr_reviews_default: 2,
   required_pre_pr_reviews_override: nil,
   implementation_test_command: nil

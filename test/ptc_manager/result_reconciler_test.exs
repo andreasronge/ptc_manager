@@ -4,7 +4,7 @@ defmodule PtcManager.ResultReconcilerTest do
   import Ecto.Query
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AuditEvent, Job}
+  alias PtcManager.Operations.{AuditEvent, Job, PrPublication}
   alias PtcManager.Repo
   alias PtcManager.ResultReconciler
 
@@ -51,6 +51,33 @@ defmodule PtcManager.ResultReconcilerTest do
            )
 
     assert {:error, :already_active} = Operations.approve_issue(job.issue_id, "andreas")
+  end
+
+  test "publication ownership remains the mode captured when the job was leased" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+    {_repository, _issue, job} = awaiting_job_fixture()
+    assert job.publication_source == "agent"
+
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, false)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    Process.put(
+      :result_probe_result,
+      {:ok,
+       %{
+         base_sha: String.duplicate("a", 40),
+         head_sha: String.duplicate("b", 40),
+         diff_digest: String.duplicate("c", 64),
+         commit_count: 1
+       }}
+    )
+
+    assert {:ok, _ready} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    assert Repo.get_by!(PrPublication, job_id: job.id).source == "agent"
   end
 
   test "a missing branch stays active and can be retried without GitHub writes" do
@@ -224,7 +251,12 @@ defmodule PtcManager.ResultReconcilerTest do
         state: "awaiting_reconciliation",
         fencing_token: 3,
         lease_owner: "herdr:default",
-        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+        publication_source:
+          if(Application.get_env(:ptc_manager, :implementation_agent_publishes_pr, false),
+            do: "agent",
+            else: "broker"
+          )
       })
       |> Repo.update!()
 

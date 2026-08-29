@@ -10,6 +10,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
   alias PtcManager.Publications
+  alias PtcManager.PublicationStatusPoller
   alias PtcManager.PublisherPoller
   alias PtcManager.ResultReconciler
 
@@ -109,6 +110,7 @@ defmodule PtcManagerWeb.DashboardLive do
          {:ok, _publication} <-
            Publications.retry_blocked(publication_id, socket.assigns.actor) do
       PublisherPoller.wake()
+      PublicationStatusPoller.wake()
 
       {:noreply,
        socket
@@ -454,6 +456,10 @@ defmodule PtcManagerWeb.DashboardLive do
   def state_classes("done"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
   def state_classes(_state), do: "bg-slate-400/10 text-slate-300 ring-white/10"
 
+  def agent_publication?(%{publication: %{source: "agent"}}), do: true
+  def agent_publication?(%{active_job: %{publication_source: "agent"}}), do: true
+  def agent_publication?(_item), do: false
+
   defp load_dashboard(socket) do
     assign(socket,
       repositories: Operations.list_repositories(),
@@ -463,8 +469,12 @@ defmodule PtcManagerWeb.DashboardLive do
       manager_enabled: Manager.enabled?(),
       agent_actions_enabled: MaintainerActions.enabled?(),
       dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
+      agent_pr_enabled:
+        Application.get_env(:ptc_manager, :implementation_agent_publishes_pr, false),
       publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false),
-      pr_reconcile_enabled: Application.get_env(:ptc_manager, :pr_reconcile_enabled, false)
+      pr_reconcile_enabled:
+        Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
+          Publications.agent_reconciliation_needed?()
     )
   end
 

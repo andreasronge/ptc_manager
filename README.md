@@ -43,7 +43,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - explicit stale-approval display when the observed head, base, or diff changes.
 
 Dispatch, maintainer actions, and publishing are disabled by default. The
-implementation prompt forbids GitHub writes. In this initial version the worker
+implementation prompt forbids GitHub writes unless the explicit agent-publication
+trial mode is enabled. In this initial version the worker
 identity also hosts explicitly queued maintainer actions and therefore has an
 authenticated `gh` session; technical separation is deferred. The broker can
 publish only the fenced, verified job branch and one PR; it does **not** merge,
@@ -89,14 +90,24 @@ Store its private key outside the repository, readable only by the coordinator.
 Configure the App ID, installation ID, and PEM path, then set
 `PTC_PUBLICATION_ENABLED=true`.
 
-The generated task tells the implementation agent to run the configured tests,
-invoke the `codex-review` skill the configured number of times, fix findings,
-and commit without using GitHub credentials. This review loop is agent-owned
+In broker mode, the generated task tells the implementation agent to run the
+configured tests, invoke the `codex-review` skill the configured number of
+times, fix findings, and commit without using GitHub credentials. This review loop is agent-owned
 prompt policy: PtcManager does not launch reviewers or store review evidence.
 The broker stages untrusted Git data separately, re-verifies the base, head, and
 diff, pushes only the deterministic job branch, and creates or reconciles one
 draft PR. Codex, Claude, Herdr, and the worker never receive its short-lived
 GitHub token.
+
+For a small trial that intentionally reuses the worker's authenticated `gh`
+session, set `PTC_IMPLEMENTATION_AGENT_PUBLISHES_PR=true` and leave
+`PTC_PUBLICATION_ENABLED=false`. Agent mode automatically enables the required
+read-only PR discovery/status poller. The prompt then authorizes the coding agent to
+push only its deterministic job branch and create or reuse one PR, while still
+forbidding issue edits, unrelated GitHub writes, and merging. PtcManager
+discovers that PR through its read-only client and accepts it only when the
+repository, base, branch, and exact verified head match. This mode does not
+weaken the explicit maintainer approval required before merge.
 
 Private Codex investigation is off by default. Once Codex is authenticated on
 the machine and the configured repository path exists, enable it explicitly:
@@ -241,8 +252,9 @@ sudo systemctl status ptc_manager
 The coordinator, implementation worker, private manager, and Git verifier run
 as four different OS identities. Herdr, implementation agents, and the initial
 maintainer-action runner use `ptc-manager-worker`; that account has the
-authenticated `gh` session needed by explicitly queued maintainer actions.
-The implementation prompt still instructs coding agents not to use it. A later
+authenticated `gh` session needed by explicitly queued maintainer actions and
+the optional agent-publication trial. Outside that explicit mode, the
+implementation prompt instructs coding agents not to use it. A later
 credential broker can enforce that separation technically. Private read-only manager investigations run as
 `ptc-manager-codex`. Bounded branch verification runs as
 `ptc-manager-verifier` with an empty environment and no credentials. None of

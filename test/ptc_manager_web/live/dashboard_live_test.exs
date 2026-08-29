@@ -108,6 +108,20 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     refute html =~ "without GitHub writes"
   end
 
+  test "reports agent-owned PR creation as an enabled GitHub write path", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert html =~ "New jobs use agent publication · authenticated worker creates the PR"
+    refute html =~ "without GitHub writes"
+  end
+
   test "shows who an agent is working for and since when", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Explain remote failures"})

@@ -14,6 +14,7 @@ defmodule PtcManager.Operations.Job do
     field :started_at, :utc_datetime_usec
     field :ended_at, :utc_datetime_usec
     field :branch_name, :string
+    field :publication_source, :string
     field :last_error, :string
     field :reconciling_at, :utc_datetime_usec
     field :absence_observed_at, :utc_datetime_usec
@@ -49,6 +50,7 @@ defmodule PtcManager.Operations.Job do
       :started_at,
       :ended_at,
       :branch_name,
+      :publication_source,
       :last_error,
       :reconciling_at,
       :absence_observed_at,
@@ -71,6 +73,7 @@ defmodule PtcManager.Operations.Job do
     ])
     |> validate_inclusion(:kind, ["implementation"])
     |> validate_inclusion(:state, @states)
+    |> validate_inclusion(:publication_source, ["broker", "agent"])
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> validate_length(:lease_owner, max: 120)
     |> validate_length(:branch_name, max: 240)

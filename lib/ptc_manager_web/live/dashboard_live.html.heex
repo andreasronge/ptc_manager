@@ -66,10 +66,13 @@
       <p class="mt-1 text-sm text-slate-300">
         Prompted test/review workflow → verified commit → PR
       </p>
-      <p :if={@publication_enabled} class="mt-4 text-xs text-teal-300">
+      <p :if={@agent_pr_enabled} class="mt-4 text-xs text-teal-300">
+        New jobs use agent publication · authenticated worker creates the PR
+      </p>
+      <p :if={!@agent_pr_enabled && @publication_enabled} class="mt-4 text-xs text-teal-300">
         Publication enabled · exact-SHA GitHub App broker
       </p>
-      <p :if={!@publication_enabled} class="mt-4 text-xs text-amber-300">
+      <p :if={!@agent_pr_enabled && !@publication_enabled} class="mt-4 text-xs text-amber-300">
         Publication disabled · verified work waits safely without GitHub writes
       </p>
       <p :if={@pr_reconcile_enabled} class="mt-1 text-xs text-teal-300">
@@ -408,6 +411,10 @@
               <% item.publication && item.publication.state == "publishing" -> %>
                 <p class="mt-2 text-xs text-slate-500">
                   PtcManager is publishing the exact verified commit through its isolated broker.
+                </p>
+              <% agent_publication?(item) -> %>
+                <p class="mt-2 text-xs text-slate-500">
+                  Waiting for GitHub to report the agent-created PR for this exact branch and commit.
                 </p>
               <% @publication_enabled -> %>
                 <p class="mt-2 text-xs text-slate-500">

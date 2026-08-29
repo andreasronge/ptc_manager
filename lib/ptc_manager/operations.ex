@@ -515,6 +515,7 @@ defmodule PtcManager.Operations do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     capacity = Keyword.get(opts, :capacity, configured_agent_capacity())
     agent_kind = Keyword.get(opts, :agent_kind, configured_agent_kind())
+    publication_source = configured_publication_source()
 
     result =
       Repo.transaction(fn ->
@@ -544,6 +545,7 @@ defmodule PtcManager.Operations do
                 lease_expires_at: lease_expires_at,
                 started_at: now,
                 branch_name: branch_name,
+                publication_source: publication_source,
                 last_error: nil,
                 updated_at: now
               ]
@@ -576,6 +578,7 @@ defmodule PtcManager.Operations do
                 "branch_name" => branch_name,
                 "worktree_path" => worktree_path,
                 "agent_kind" => agent_kind,
+                "publication_source" => publication_source,
                 "lease_expires_at" => DateTime.to_iso8601(lease_expires_at)
               }
             })
@@ -823,7 +826,7 @@ defmodule PtcManager.Operations do
               diff_digest: result.diff_digest,
               attempt_count: 0,
               next_attempt_at: nil,
-              source: "broker"
+              source: job.publication_source || "broker"
             })
             |> Repo.insert!()
 
@@ -1176,6 +1179,12 @@ defmodule PtcManager.Operations do
 
   defp job_is_queued(%Job{state: "queued"}), do: :ok
   defp job_is_queued(%Job{}), do: {:error, :already_leased}
+
+  defp configured_publication_source do
+    if Application.get_env(:ptc_manager, :implementation_agent_publishes_pr, false),
+      do: "agent",
+      else: "broker"
+  end
 
   defp dispatch_capacity_available(_repo, _worker, capacity)
        when not is_integer(capacity) or capacity < 1,

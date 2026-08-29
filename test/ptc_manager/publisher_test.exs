@@ -42,6 +42,11 @@ defmodule PtcManager.PublisherTest do
       send(Process.get(:publisher_test_pid), {:status_called, publication.id})
       Process.get(:publisher_status_result)
     end
+
+    def discover(publication) do
+      send(Process.get(:publisher_test_pid), {:discovery_called, publication.id})
+      Process.get(:publisher_discovery_result)
+    end
   end
 
   setup do
@@ -77,6 +82,171 @@ defmodule PtcManager.PublisherTest do
              ),
              :count
            ) == 1
+  end
+
+  test "discovers an agent-created PR only at the exact verified branch and head" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+    assert publication.source == "agent"
+
+    worker = worker_fixture(%{worker_key: "agent-publication-worker"})
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "awaiting_pr",
+        path: "/tmp/agent-publication-worktree",
+        head_sha: result.head_sha,
+        herdr_workspace: "agent-publication-workspace",
+        last_used_at: DateTime.utc_now()
+      })
+      |> Repo.insert!()
+
+    Process.put(:publisher_discovery_result, {
+      :ok,
+      %{
+        pr_number: 91,
+        pr_url: "https://github.com/owner/repo/pull/91",
+        state: "open",
+        draft: false,
+        head_sha: result.head_sha,
+        head_ref: publication.branch_name,
+        head_repository: base_repository(job),
+        base_sha: String.duplicate("d", 40),
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, discovered} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert_receive {:discovery_called, publication_id}
+    assert publication_id == publication.id
+    assert discovered.state == "published"
+    assert discovered.source == "agent"
+    assert discovered.pr_number == 91
+    assert discovered.remote_head_sha == result.head_sha
+    assert Repo.get!(Job, job.id).state == "pr_open"
+
+    allocation = Repo.get!(WorktreeAllocation, allocation.id)
+    assert allocation.state == "reclaimable"
+    assert allocation.pr_number == 91
+
+    assert Repo.exists?(
+             from audit in AuditEvent,
+               where:
+                 audit.target_id == ^publication.id and
+                   audit.action == "pr_publication.discovered"
+           )
+
+    refute_receive :probe_called
+    assert {:ok, :empty} = Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+  end
+
+  test "blocks an agent-created PR whose head does not match the verified commit" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, _result} = verified_publication_fixture()
+
+    Process.put(:publisher_discovery_result, {
+      :ok,
+      %{
+        pr_number: 92,
+        pr_url: "https://github.com/owner/repo/pull/92",
+        state: "open",
+        draft: false,
+        head_sha: String.duplicate("e", 40),
+        head_ref: publication.branch_name,
+        head_repository: base_repository(job),
+        base_sha: String.duplicate("d", 40),
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, blocked} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert blocked.state == "blocked"
+    assert blocked.last_error =~ "head commit"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+  end
+
+  test "a missing agent PR is delayed without starving existing PR status" do
+    {open_job, open_publication, open_result} = published_publication_fixture()
+
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {_agent_job, agent_publication, _agent_result} = verified_publication_fixture()
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "open",
+        pr_url: open_publication.pr_url,
+        head_sha: open_result.head_sha,
+        base_sha: String.duplicate("a", 40),
+        base_ref: "main",
+        base_repository: base_repository(open_job)
+      }
+    })
+
+    Process.put(:publisher_discovery_result, {:retry, :agent_pull_request_not_found})
+
+    assert {:retry_after, 60_000} =
+             PublicationStatusReconciler.run_once(client: FakeBroker)
+
+    assert_receive {:status_called, status_publication_id}
+    assert status_publication_id == open_publication.id
+    assert_receive {:discovery_called, discovery_publication_id}
+    assert discovery_publication_id == agent_publication.id
+
+    delayed = Repo.get!(PrPublication, agent_publication.id)
+    assert delayed.state == "queued"
+    assert delayed.next_attempt_at
+    assert delayed.last_error =~ "agent_pull_request_not_found"
+    assert Publications.next_agent_for_discovery() == nil
+  end
+
+  test "retry wakes agent discovery after agent publication mode is disabled" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, _result} = verified_publication_fixture()
+    assert publication.source == "agent"
+
+    assert {:ok, blocked} = Publications.block_agent_discovery(publication.id, :needs_retry)
+    assert blocked.state == "blocked"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, false)
+    assert {:ok, retried} = Publications.retry_blocked(publication.id, "andreas")
+    assert retried.state == "queued"
+    assert Publications.agent_reconciliation_needed?()
+
+    assert {:noreply, %{timer_ref: nil}} =
+             PublicationStatusPoller.handle_cast(:wake, %{task_ref: nil, timer_ref: nil})
+
+    assert_receive :reconcile_pr
   end
 
   test "a transient broker failure stays queued with bounded backoff" do
@@ -357,6 +527,16 @@ defmodule PtcManager.PublisherTest do
 
   test "PR status rate limits delay the status poller" do
     {_job, publication, _result} = published_publication_fixture()
+
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {_agent_job, _agent_publication, _agent_result} = verified_publication_fixture()
+
     reason = {:after, 3_600_000, {:github_http_error, 403, "rate limit", 3_600_000}}
     Process.put(:publisher_status_result, {:retry, reason})
 
@@ -364,7 +544,13 @@ defmodule PtcManager.PublisherTest do
              PublicationStatusReconciler.run_once(client: FakeBroker)
 
     assert Repo.get!(PrPublication, publication.id).last_error =~ "rate limit"
+    refute_receive {:discovery_called, _publication_id}
     assert PublicationStatusPoller.next_delay({:retry_after, 3_600_000}) == 3_600_000
+
+    assert PublicationStatusReconciler.combine_results(
+             {:retry_after, 3_600_000},
+             {:retry_after, 60_000}
+           ) == {:retry_after, 3_600_000}
   end
 
   test "a publication claim is renewed before remote mutation" do
@@ -485,7 +671,12 @@ defmodule PtcManager.PublisherTest do
       |> Job.changeset(%{
         state: "awaiting_reconciliation",
         fencing_token: 1,
-        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+        publication_source:
+          if(Application.get_env(:ptc_manager, :implementation_agent_publishes_pr, false),
+            do: "agent",
+            else: "broker"
+          )
       })
       |> Repo.update!()
 

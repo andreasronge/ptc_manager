@@ -27,6 +27,36 @@ defmodule PtcManager.GitHub.PullRequestClient do
     end
   end
 
+  @impl true
+  def discover(%PrPublication{branch_name: branch, job: %{repository: repository}})
+      when is_binary(branch) do
+    head = URI.encode_www_form("#{repository.github_owner}:#{branch}")
+    url = repository_url(repository, "/pulls?state=all&head=#{head}&per_page=10")
+
+    case Client.get_json(url) do
+      {:ok, [pull]} when is_map(pull) ->
+        case normalize(pull) do
+          {:ok, result} -> {:ok, result}
+          {:error, reason} -> {:blocked, reason}
+        end
+
+      {:ok, []} ->
+        {:retry, :agent_pull_request_not_found}
+
+      {:ok, pulls} when is_list(pulls) ->
+        {:blocked, :multiple_agent_pull_requests}
+
+      {:ok, _unexpected} ->
+        {:blocked, :unexpected_github_response}
+
+      {:error, reason} ->
+        case classify_error(reason) do
+          {:retry, retry_reason} -> {:retry, retry_reason}
+          {:error, blocked_reason} -> {:blocked, blocked_reason}
+        end
+    end
+  end
+
   @doc false
   def classify_error({:github_http_error, _status, _message, delay_ms} = reason)
       when is_integer(delay_ms),

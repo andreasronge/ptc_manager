@@ -80,6 +80,7 @@ defmodule PtcManager.DispatchTest do
     assert leased.state == "starting"
     assert leased.fencing_token == 1
     assert leased.branch_name == "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    assert leased.publication_source == "broker"
 
     assert working.state == "working"
     assert working.repository_id == repository.id
@@ -255,6 +256,41 @@ defmodule PtcManager.DispatchTest do
     assert prompt =~ "PtcManager does not run or verify these reviews"
     assert prompt =~ "Do not use GitHub credentials"
     assert prompt =~ "credential-isolated broker"
+  end
+
+  test "can assign fenced branch push and PR creation to the coding agent" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    repository = repository_fixture(%{required_pre_pr_reviews: 2})
+    remote = remote_issue(1627) |> Map.put("title", "Correct MCP documentation")
+    issue = issue_fixture(repository, IssueSnapshot.normalize!(remote, repository.id))
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    assert is_nil(job.publication_source)
+
+    canonical = IssueSnapshot.normalize!(remote, repository.id)
+    assert {:ok, job} = Operations.lease_job(job.id, "herdr:default", canonical, 60_000)
+    assert job.publication_source == "agent"
+
+    job =
+      job
+      |> Job.changeset(%{branch_name: "ptc-manager/issue-1627-job-#{job.id}"})
+      |> Repo.update!()
+
+    prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, issue, job)
+
+    assert prompt =~ "push the existing job branch and create one pull request"
+    assert prompt =~ "Use GitHub credentials only to push `#{job.branch_name}`"
+    assert prompt =~ "include `Closes #1627`"
+    assert prompt =~ "do not merge anything"
+    assert prompt =~ "pull-request URL"
+    refute prompt =~ "Do not use GitHub credentials"
   end
 
   defp approved_job_fixture do
