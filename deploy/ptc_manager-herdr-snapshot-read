@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -eu
+
+snapshot_path="${HERDR_SNAPSHOT_PATH:-/var/lib/ptc_manager-output/herdr-agents.json}"
+
+if [ "$#" -ne 4 ] ||
+  [ "$1" != "--session" ] ||
+  [ "$3" != "agent" ] ||
+  [ "$4" != "list" ]; then
+  echo "snapshot reader only supports: --session NAME agent list" >&2
+  exit 64
+fi
+
+exec /bin/cat "$snapshot_path"

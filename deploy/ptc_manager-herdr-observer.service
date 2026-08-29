@@ -1,0 +1,16 @@
+[Unit]
+Description=Export a read-only Herdr agent snapshot for PtcManager
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+SupplementaryGroups=ptc-manager-output
+EnvironmentFile=/etc/ptc_manager/herdr-observer.env
+ExecStart=/usr/local/bin/ptc-manager-herdr-snapshot-write
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ptc_manager-output
+NoNewPrivileges=true

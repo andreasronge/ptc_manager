@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the PtcManager Herdr agent snapshot
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=5s
+AccuracySec=1s
+Unit=ptc_manager-herdr-observer.service
+
+[Install]
+WantedBy=timers.target

@@ -281,6 +281,15 @@ switching OS identity, so it does not depend on `sudo` preserving environment
 variables. An existing Herdr session owned by `root`, `agent`,
 or another login account is deliberately not used by automated dispatch;
 recreate it under `ptc-manager-worker` before enabling dispatch.
+
+For an observation-only trial, an existing session can instead be exported as
+a JSON snapshot. Install `ptc_manager-herdr-observer.service` and its timer as
+the session owner, and configure the coordinator with
+`PTC_HERDR_BINARY=/usr/local/bin/ptc-manager-herdr-snapshot-read` and no
+`PTC_HERDR_RUN_AS_USER`. The coordinator can then list agent status but has no
+socket or CLI path with which to prompt or control the observed session. Keep
+`PTC_DISPATCH_ENABLED=false` while using this mode.
+
 The CLI is bounded by `PTC_HERDR_TIMEOUT_MS`; after
 `PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
 shown as `lost`, while managed agents become `unknown` and their jobs remain in
