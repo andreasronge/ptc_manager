@@ -16,7 +16,7 @@ TimeoutStopSec=30
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/ptc_manager-worker /srv/ptc_runner
+ReadWritePaths=/var/lib/ptc_manager-worker /srv/ptc_runner /srv/ptc_manager-worktrees
 
 [Install]
 WantedBy=multi-user.target

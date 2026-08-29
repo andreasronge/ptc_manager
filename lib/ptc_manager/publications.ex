@@ -1,10 +1,18 @@
 defmodule PtcManager.Publications do
-  @moduledoc "Durable, fenced state transitions for automatic draft-PR publication."
+  @moduledoc "Durable, fenced state transitions for verified implementation PRs."
 
   import Ecto.Query
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AuditEvent, Job, PrPublication, Repository}
+
+  alias PtcManager.Operations.{
+    AuditEvent,
+    Job,
+    PrPublication,
+    Repository,
+    WorktreeAllocation
+  }
+
   alias PtcManager.Repo
 
   def next_open_for_status do
@@ -46,7 +54,11 @@ defmodule PtcManager.Publications do
 
     outcome =
       Repo.transaction(fn ->
-        publication = Repo.get!(PrPublication, publication_id)
+        publication =
+          PrPublication
+          |> preload(job: :repository)
+          |> Repo.get!(publication_id)
+
         max_attempts = Application.get_env(:ptc_manager, :publication_max_attempts, 5)
 
         if eligible_record?(publication, now) and publication.attempt_count >= max_attempts do
@@ -193,6 +205,24 @@ defmodule PtcManager.Publications do
                 |> Repo.update_all(set: [state: "pr_open", last_error: nil, updated_at: now])
 
               if job_updated != 1, do: Repo.rollback(:stale_verified_result)
+
+              WorktreeAllocation
+              |> where(
+                [allocation],
+                allocation.job_id == ^publication.job_id and
+                  allocation.state not in ["cleaning", "removed"]
+              )
+              |> Repo.update_all(
+                set: [
+                  state: "warm",
+                  head_sha: result.head_sha,
+                  pr_number: result.pr_number,
+                  pr_url: result.pr_url,
+                  last_used_at: now,
+                  last_error: nil,
+                  updated_at: now
+                ]
+              )
 
               insert_audit!(%{
                 actor: "github-broker",
@@ -384,6 +414,8 @@ defmodule PtcManager.Publications do
               |> Job.changeset(%{state: "publish_blocked", last_error: message})
               |> Repo.update!()
 
+              mark_worktree_attention(job.id, message, now)
+
               insert_status_audit!(publication, "pr_publication.base_changed", result, now)
               load(publication.id)
 
@@ -403,6 +435,8 @@ defmodule PtcManager.Publications do
               |> Job.changeset(%{state: "publish_blocked", last_error: message})
               |> Repo.update!()
 
+              mark_worktree_attention(job.id, message, now)
+
               insert_status_audit!(publication, "pr_publication.head_changed", result, now)
               load(publication.id)
 
@@ -415,6 +449,22 @@ defmodule PtcManager.Publications do
                 last_error: nil
               })
               |> Repo.update!()
+
+              WorktreeAllocation
+              |> where(
+                [allocation],
+                allocation.job_id == ^job.id and allocation.state in ["warm", "reclaimable"]
+              )
+              |> Repo.update_all(
+                set: [
+                  state: "reclaimable",
+                  head_sha: result.head_sha,
+                  pr_url: result.pr_url,
+                  last_used_at: now,
+                  last_error: nil,
+                  updated_at: now
+                ]
+              )
 
               load(publication.id)
 
@@ -437,6 +487,16 @@ defmodule PtcManager.Publications do
                 last_error: nil
               })
               |> Repo.update!()
+
+              WorktreeAllocation
+              |> where(
+                [allocation],
+                allocation.job_id == ^job.id and
+                  allocation.state not in ["cleaning", "removed"]
+              )
+              |> Repo.update_all(
+                set: [state: "terminal", last_used_at: now, last_error: nil, updated_at: now]
+              )
 
               insert_status_audit!(
                 publication,
@@ -476,7 +536,7 @@ defmodule PtcManager.Publications do
 
   defp load(id) do
     PrPublication
-    |> preload(job: [:issue, :repository])
+    |> preload(job: [:issue, :repository, :worktree_allocation])
     |> Repo.get!(id)
   end
 
@@ -484,19 +544,21 @@ defmodule PtcManager.Publications do
     where(
       query,
       [publication],
-      (publication.state == "queued" and
-         (is_nil(publication.next_attempt_at) or publication.next_attempt_at <= ^now)) or
-        (publication.state == "publishing" and not is_nil(publication.attempt_expires_at) and
-           publication.attempt_expires_at <= ^now)
+      publication.source == "broker" and
+        ((publication.state == "queued" and
+            (is_nil(publication.next_attempt_at) or publication.next_attempt_at <= ^now)) or
+           (publication.state == "publishing" and not is_nil(publication.attempt_expires_at) and
+              publication.attempt_expires_at <= ^now))
     )
   end
 
   defp eligible_record?(publication, now) do
-    (publication.state == "queued" and
-       (is_nil(publication.next_attempt_at) or
-          DateTime.compare(publication.next_attempt_at, now) != :gt)) or
-      (publication.state == "publishing" and not is_nil(publication.attempt_expires_at) and
-         DateTime.compare(publication.attempt_expires_at, now) != :gt)
+    publication.source == "broker" and
+      ((publication.state == "queued" and
+          (is_nil(publication.next_attempt_at) or
+             DateTime.compare(publication.next_attempt_at, now) != :gt)) or
+         (publication.state == "publishing" and not is_nil(publication.attempt_expires_at) and
+            DateTime.compare(publication.attempt_expires_at, now) != :gt))
   end
 
   defp block_exhausted!(publication, now) do
@@ -593,9 +655,20 @@ defmodule PtcManager.Publications do
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
 
+  defp mark_worktree_attention(job_id, message, now) do
+    WorktreeAllocation
+    |> where(
+      [allocation],
+      allocation.job_id == ^job_id and allocation.state not in ["cleaning", "removed"]
+    )
+    |> Repo.update_all(
+      set: [state: "attention", last_used_at: now, last_error: message, updated_at: now]
+    )
+  end
+
   defp insert_status_audit!(publication, action, result, now) do
     insert_audit!(%{
-      actor: "github-broker",
+      actor: "github-reconciler",
       action: action,
       target_type: "pr_publication",
       target_id: publication.id,

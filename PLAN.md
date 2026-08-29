@@ -19,13 +19,14 @@ without replacing the user interface or GitHub integration.
 2. GitHub is the source of truth for issues, pull requests, checks, and commits.
    PtcManager stores private summaries, approvals, execution state, and an audit
    log; it does not turn GitHub labels into an internal job queue. An optional
-   `ptc:approved` label is a display-only projection and never grants authority.
+   mutually exclusive `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` label
+   is a display-only projection and never grants authority.
 3. Simplified explanations are private. They may be cached in PtcManager but
    are never written to GitHub issues or pull requests.
 4. Model output is a proposal, not authority. Deterministic code validates
-   state transitions. An implementation agent may push only its approved work
-   branch and open its pull request through a narrowly scoped `gh` identity; it
-   may not merge, rewrite issues, or change workflow policy.
+   state transitions. Implementation agents receive no GitHub credential. A
+   broker may publish only the exact fenced commit after verification; it may
+   not merge, rewrite issues, or change workflow policy.
 5. Public issue, pull-request, and comment text is untrusted data. It cannot
    grant tools, reveal secrets, or change policy.
 6. The manager, implementer, and reviewer are separate roles. An implementation
@@ -200,29 +201,24 @@ preference.
 Version one polls GitHub instead of exposing a webhook endpoint. At the current
 backlog size this is simpler to operate and lets the web server remain private.
 
-The initial manager credential is read-only. An implementation worker uses a
-separate, narrowly scoped `gh` identity that can push branches and create pull
-requests only in configured repositories. The generated implementation command
-names the approved repository, issue, and job-derived branch; tells the agent to
-run the configured tests and independent review-and-fix passes; then instructs
-it to push and create or reconcile one pull request. It explicitly forbids
-merging and unrelated GitHub mutation.
+The initial manager credential is read-only and implementation workers have no
+GitHub identity. The generated implementation command names the approved job
+branch, runs tests, invokes the configured `codex-review` skill passes, fixes
+findings, and commits locally. Review execution is deliberately part of the
+coding-agent prompt, not a second orchestration system in PtcManager. Once the
+local result is verified, a credential-isolated GitHub App broker stages the
+bounded commit, rechecks the authoritative base and diff, pushes only the
+deterministic job branch, and creates or reconciles one PR.
 
-The normal path is therefore agent-owned Git work, not coordinator-owned
-publishing. The agent reports the PR URL and exact head SHA. PtcManager then
-reconciles those claims directly with GitHub and accepts success only when the
-repository, issue, branch, base, and commit match the approved job. Repeated
-execution must find and update the existing job PR rather than create a
-duplicate. GitHub remains authoritative for the remote branch, PR, checks,
-conflicts, and merge result; PtcManager is authoritative for private approvals,
-review policy, queue leases, worktree allocation, agent affinity, and its audit
-log.
+GitHub remains authoritative for the remote branch, PR, checks, conflicts, and
+merge result; PtcManager is authoritative for private approvals, prompt policy,
+queue leases, publication fencing, worktree allocation, and its audit log.
 
 The pre-PR quality policy is repository-configurable. Its initial default is
 two independent review-and-fix passes, but the required count, reviewer tools,
-test commands, and clean-review requirement are stored as policy rather than
-embedded in prompts or code. PtcManager records and verifies bounded review
-evidence before presenting the resulting PR as ready for a merge decision.
+test commands, and clean-review requirement are rendered into the coding-agent
+prompt rather than hard-coded. The coding agent owns that skill workflow;
+PtcManager does not record or verify review evidence.
 
 ### Web access
 
@@ -243,8 +239,7 @@ The initial SQLite database contains:
 - `proposals`: immutable manager analyses and private simplified summaries;
 - `approvals`: immutable decisions bound to a proposal and source version;
 - `jobs`: durable requested work and state transitions;
-- `pr_publications`: existing disabled recovery records reserved for a future
-  failed-push recovery mechanism, not the normal publishing path;
+- `pr_publications`: durable exact-SHA broker claims, retry state, and PR identity;
 - `worktree_allocations`: worker-local paths, lifecycle state, ownership,
   verified PR/head, last use, and reclaimability evidence;
 - `workers`: stable execution nodes, capabilities, and last heartbeat;
@@ -273,9 +268,7 @@ the worker protocol or UI concepts.
   reviewed base SHA, or diff digest changes.
 - Agent status never proves that work succeeded; GitHub branch, PR, review, and
   check state are authoritative.
-- An implementation agent receives only the repository-scoped GitHub capability
-  needed to push its job branch and create or update its PR; it never receives
-  merge authority.
+- An implementation agent receives no GitHub credential or merge authority.
 - All external effects are idempotent and carry an audit identity.
 - Labels and GitHub checks may reflect an approval, but the merge gate reads the
   SHA-bound approval record rather than trusting a mutable label.
@@ -332,15 +325,44 @@ GitHub mutation permission.
   cleanup and reconstruction from a verified PR branch;
 - fencing tokens on worker state and external effects;
 - generate an implementation command that fixes the approved issue, runs tests,
-  completes the configured independent review-and-fix passes, pushes through
-  the worker's scoped `gh` identity, and creates or reconciles one PR;
-- bounded local branch-result and review-evidence verification plus GitHub-side
-  PR reconciliation;
+  invokes the configured number of `codex-review` skill passes, fixes findings,
+  and commits without GitHub credentials;
+- treat reviews as coding-agent prompt policy rather than PtcManager state or
+  authority; PtcManager neither launches reviewers nor records review evidence;
+- bounded local branch-result verification, followed by fenced exact-SHA
+  publication through the GitHub App broker;
 - failure, blocked, cancellation, and recovery controls;
 - optional additional worker registration using mutually authenticated HTTPS.
 
 Exit criterion: one approved issue safely reaches a draft PR while the UI shows
 the complete execution history.
+
+### Slice 3.5: maintainer issue preparation
+
+- GitHub issue content, open/closed state, and one `ptc:*` workflow label remain
+  the single source of truth; PtcManager stores only private recommendations,
+  approval records, and synchronization metadata;
+- ask a maintainer agent to investigate an issue and recommend exactly one
+  outcome: rewrite and mark ready, reject/close with a reason, wait because of a
+  named dependency or external condition, or request a human decision;
+- keep the plain-language/ELI5 explanation private in PtcManager and never copy
+  it into the GitHub issue;
+- show the proposed GitHub title/body, close reason, dependency, comment, and
+  label change for explicit maintainer approval before any write;
+- after approval, dispatch one credential-scoped maintainer agent whose prompt
+  uses `gh` to apply the approved mutation, then re-sync GitHub and treat the
+  returned issue state as authoritative;
+- use only mutually exclusive `ptc:ready`, `ptc:blocked`, and
+  `ptc:needs-decision` labels. Rejected or outdated issues are closed rather
+  than accumulating another label. Record dependencies visibly as
+  `Blocked by #<issue>` in the issue body or an approved comment;
+- never infer commands merely from a label. A PtcManager approval is the
+  authority to dispatch implementation; the label is a concise GitHub view of
+  the current issue state.
+
+Exit criterion: a maintainer can privately review an agent recommendation,
+approve the exact proposed GitHub change, and see the authoritative result after
+re-synchronization without creating a second issue-state system.
 
 ### Slice 4: PR decision support
 

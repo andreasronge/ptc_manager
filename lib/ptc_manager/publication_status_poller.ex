@@ -50,6 +50,6 @@ defmodule PtcManager.PublicationStatusPoller do
 
   def next_delay(_result), do: interval()
 
-  defp enabled?, do: Application.get_env(:ptc_manager, :publication_enabled, false)
+  defp enabled?, do: Application.get_env(:ptc_manager, :pr_reconcile_enabled, false)
   defp interval, do: Application.get_env(:ptc_manager, :publication_status_interval_ms, 60_000)
 end

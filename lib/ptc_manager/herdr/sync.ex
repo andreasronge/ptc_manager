@@ -4,9 +4,16 @@ defmodule PtcManager.Herdr.Sync do
   import Ecto.Query
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentRun, AuditEvent, Job, Worker}
-  alias PtcManager.Repo
 
+  alias PtcManager.Operations.{
+    AgentRun,
+    AuditEvent,
+    Job,
+    Worker,
+    WorktreeAllocation
+  }
+
+  alias PtcManager.Repo
   @terminal_states ~w(done failed lost)
 
   def sync(opts \\ []) do
@@ -41,7 +48,12 @@ defmodule PtcManager.Herdr.Sync do
     end
   end
 
-  defp persist_snapshot(session, remote_agents, stale_after_ms, reconcile_after_ms) do
+  defp persist_snapshot(
+         session,
+         remote_agents,
+         stale_after_ms,
+         reconcile_after_ms
+       ) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
@@ -68,6 +80,7 @@ defmodule PtcManager.Herdr.Sync do
           Enum.map(normalized, fn attrs ->
             existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
             run = upsert_agent_run(worker, existing_run, attrs)
+            reconcile_worktree_identity(run, attrs, now)
             reconcile_job(run, attrs.state, now)
             run.id
           end)
@@ -212,7 +225,11 @@ defmodule PtcManager.Herdr.Sync do
       worker_key: key,
       name: "Herdr #{session}",
       status: status,
-      capabilities: %{"herdr" => true}
+      capabilities: %{
+        "herdr" => true,
+        "implementation_slots" =>
+          Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+      }
     }
 
     attrs = if heartbeat_at, do: Map.put(attrs, :last_heartbeat_at, heartbeat_at), else: attrs
@@ -357,6 +374,11 @@ defmodule PtcManager.Herdr.Sync do
       end
 
     job |> Job.changeset(attrs) |> Repo.update!()
+
+    if state in ~w(failed lost) do
+      mark_worktree_attention(job.id, "The implementation agent ended in state #{state}.", now)
+    end
+
     :ok
   end
 
@@ -411,6 +433,12 @@ defmodule PtcManager.Herdr.Sync do
           last_error: "Herdr transport is unavailable; remote activity must be reconciled."
         })
         |> Repo.update!()
+
+        mark_worktree_attention(
+          job.id,
+          "Herdr transport is unavailable; remote activity must be reconciled.",
+          now
+        )
 
       _job ->
         :ok
@@ -482,6 +510,12 @@ defmodule PtcManager.Herdr.Sync do
       )
 
     if updated == 1 do
+      mark_worktree_attention(
+        job.id,
+        "Herdr confirmed that no managed agent exists for this attempt.",
+        now
+      )
+
       insert_reconciliation_audit!(job, "job.absent_agent_confirmed")
 
       true
@@ -501,6 +535,44 @@ defmodule PtcManager.Herdr.Sync do
     })
     |> Repo.insert!()
   end
+
+  defp mark_worktree_attention(job_id, message, now) do
+    WorktreeAllocation
+    |> where(
+      [allocation],
+      allocation.job_id == ^job_id and allocation.state not in ["cleaning", "removed"]
+    )
+    |> Repo.update_all(
+      set: [state: "attention", last_used_at: now, last_error: message, updated_at: now]
+    )
+  end
+
+  defp reconcile_worktree_identity(
+         %AgentRun{job_id: job_id},
+         %{herdr_workspace: workspace, state: state},
+         now
+       )
+       when is_integer(job_id) and is_binary(workspace) and workspace != "" do
+    updates =
+      [herdr_workspace: workspace, last_used_at: now, updated_at: now]
+      |> maybe_mark_worktree_active(state)
+
+    WorktreeAllocation
+    |> where(
+      [allocation],
+      allocation.job_id == ^job_id and allocation.state not in ["cleaning", "removed"]
+    )
+    |> Repo.update_all(set: updates)
+
+    :ok
+  end
+
+  defp reconcile_worktree_identity(_run, _attrs, _now), do: :ok
+
+  defp maybe_mark_worktree_active(updates, state) when state in ["working", "idle", "blocked"],
+    do: Keyword.merge(updates, state: "active", last_error: nil)
+
+  defp maybe_mark_worktree_active(updates, _state), do: updates
 
   defp owned_job(%AgentRun{} = run) do
     with %Job{} = job <- Repo.get(Job, run.job_id),

@@ -27,7 +27,27 @@ herdr_sync_interval_ms =
   System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
 
 dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
+
 publication_enabled = System.get_env("PTC_PUBLICATION_ENABLED") == "true"
+pr_reconcile_enabled = System.get_env("PTC_PR_RECONCILE_ENABLED") == "true"
+
+required_pre_pr_reviews_override =
+  case System.get_env("PTC_REQUIRED_PRE_PR_REVIEWS") do
+    nil ->
+      nil
+
+    value ->
+      case String.trim(value) do
+        "" ->
+          nil
+
+        trimmed ->
+          case Integer.parse(trimmed) do
+            {count, ""} when count in 0..10 -> count
+            _ -> raise "PTC_REQUIRED_PRE_PR_REVIEWS must be an integer from 0 through 10"
+          end
+      end
+  end
 
 config :ptc_manager,
   github_read_token: System.get_env("GITHUB_READ_TOKEN"),
@@ -46,11 +66,15 @@ config :ptc_manager,
   dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
   dispatch_reconcile_after_ms:
     System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
-  dispatch_concurrency: System.get_env("PTC_DISPATCH_CONCURRENCY", "1") |> String.to_integer(),
+  implementation_agent_capacity:
+    System.get_env("PTC_IMPLEMENTATION_AGENT_CAPACITY", "1") |> String.to_integer(),
+  worktree_reconcile_interval_ms:
+    System.get_env("PTC_WORKTREE_RECONCILE_INTERVAL_MS", "30000") |> String.to_integer(),
   result_reconcile_interval_ms:
     System.get_env("PTC_RESULT_RECONCILE_INTERVAL_MS", "0") |> String.to_integer(),
   result_claim_timeout_ms:
     System.get_env("PTC_RESULT_CLAIM_TIMEOUT_MS", "180000") |> String.to_integer(),
+  pr_reconcile_enabled: pr_reconcile_enabled,
   publication_enabled: publication_enabled,
   publication_interval_ms:
     System.get_env("PTC_PUBLICATION_INTERVAL_MS", "5000") |> String.to_integer(),
@@ -75,7 +99,9 @@ config :ptc_manager,
   github_push_timeout_ms:
     System.get_env("PTC_GITHUB_PUSH_TIMEOUT_MS", "60000") |> String.to_integer(),
   publication_status_interval_ms:
-    System.get_env("PTC_PUBLICATION_STATUS_INTERVAL_MS", "60000") |> String.to_integer(),
+    (System.get_env("PTC_PR_STATUS_INTERVAL_MS") ||
+       System.get_env("PTC_PUBLICATION_STATUS_INTERVAL_MS", "60000"))
+    |> String.to_integer(),
   git_binary: System.get_env("PTC_GIT_BINARY", "git"),
   git_run_as_user: System.get_env("PTC_GIT_RUN_AS_USER"),
   git_verifier_home: System.get_env("PTC_GIT_VERIFIER_HOME"),
@@ -97,6 +123,8 @@ config :ptc_manager,
   implementation_agent_start_timeout_ms:
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),
+  required_pre_pr_reviews_override: required_pre_pr_reviews_override,
+  implementation_test_command: System.get_env("PTC_IMPLEMENTATION_TEST_COMMAND"),
   manager_enabled: System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
   manager_concurrency:
     System.get_env("PTC_CODEX_MANAGER_CONCURRENCY", "1") |> String.to_integer(),
@@ -105,6 +133,18 @@ config :ptc_manager,
   manager_output_dir: System.get_env("PTC_CODEX_OUTPUT_DIR"),
   manager_timeout_ms:
     System.get_env("PTC_CODEX_MANAGER_TIMEOUT_MS", "120000") |> String.to_integer()
+
+if worktree_root = System.get_env("PTC_WORKTREE_ROOT") do
+  config :ptc_manager, :worktree_root, worktree_root
+end
+
+if config_env() == :test do
+  config :ptc_manager,
+    dispatch_enabled: false,
+    publication_enabled: false,
+    pr_reconcile_enabled: false,
+    worktree_reconcile_interval_ms: 0
+end
 
 if config_env() == :prod do
   raw_admin_password = System.get_env("PTC_MANAGER_PASSWORD")

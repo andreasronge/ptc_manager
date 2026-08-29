@@ -43,6 +43,25 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
   end
 
+  test "reports publication writes and read-only PR tracking independently", %{conn: conn} do
+    previous_publication = Application.get_env(:ptc_manager, :publication_enabled)
+    previous_reconciliation = Application.get_env(:ptc_manager, :pr_reconcile_enabled)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :publication_enabled, previous_publication)
+      Application.put_env(:ptc_manager, :pr_reconcile_enabled, previous_reconciliation)
+    end)
+
+    Application.put_env(:ptc_manager, :publication_enabled, true)
+    Application.put_env(:ptc_manager, :pr_reconcile_enabled, false)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert html =~ "Publication enabled · exact-SHA GitHub App broker"
+    assert html =~ "Read-only PR status tracking disabled"
+    refute html =~ "without GitHub writes"
+  end
+
   test "shows who an agent is working for and since when", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Explain remote failures"})
@@ -85,7 +104,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
              "That issue could not be found."
   end
 
-  test "shows verified branch evidence before the draft PR gate", %{conn: conn} do
+  test "shows verified branch evidence while waiting for publication", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Prepare a safe draft PR"})
     proposal_fixture(issue)
@@ -107,12 +126,12 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
-    assert has_element?(view, "#issue-#{issue.id}", "Draft PR queued")
+    assert has_element?(view, "#issue-#{issue.id}", "Waiting for publication")
     assert render(view) =~ "2 committed change(s) verified"
-    assert render(view) =~ "Safely queued until the GitHub App publisher is enabled"
+    assert render(view) =~ "Waiting safely until automatic publication is enabled"
   end
 
-  test "links the canonical draft PR after automatic publication", %{conn: conn} do
+  test "links the canonical PR after publication", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Publish without another approval"})
     proposal_fixture(issue)
@@ -124,12 +143,12 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
-    assert has_element?(view, "#issue-#{issue.id}", "Draft PR published")
+    assert has_element?(view, "#issue-#{issue.id}", "PR published")
 
     assert has_element?(
              view,
              "#publication-pr-#{publication.id}[href='#{publication.pr_url}']",
-             "Open draft PR #73"
+             "Open PR #73"
            )
 
     assert job.state == "pr_open"
@@ -153,9 +172,24 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     |> element("#retry-publication-#{publication.id}")
     |> render_click()
 
-    assert render(view) =~ "Draft PR publishing is queued again"
+    assert render(view) =~ "PR publication is queued again"
     assert Repo.get!(PrPublication, publication.id).state == "queued"
     assert Repo.get!(Job, job.id).state == "ready_for_pr"
+  end
+
+  test "shows dynamic worktree usage against advertised implementation capacity", %{conn: conn} do
+    worker =
+      worker_fixture(%{
+        name: "Hetzner agent pool",
+        capabilities: %{"herdr" => true, "implementation_slots" => 3}
+      })
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert html =~ "Hetzner agent pool"
+    assert html =~ "Implementation worktrees"
+    assert html =~ "0 / 3"
+    assert Repo.get!(Operations.Worker, worker.id)
   end
 
   test "offers a safe manual retry while branch verification is pending", %{conn: conn} do
@@ -272,7 +306,8 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       pr_number: if(state == "published", do: 73),
       pr_url: if(state == "published", do: "https://github.com/owner/repo/pull/73"),
       remote_head_sha: if(state == "published", do: head_sha),
-      published_at: if(state == "published", do: now)
+      published_at: if(state == "published", do: now),
+      source: "broker"
     }
 
     publication = %PrPublication{} |> PrPublication.changeset(attrs) |> Repo.insert!()

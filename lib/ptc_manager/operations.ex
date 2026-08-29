@@ -20,7 +20,8 @@ defmodule PtcManager.Operations do
     PrPublication,
     Proposal,
     Repository,
-    Worker
+    Worker,
+    WorktreeAllocation
   }
 
   @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked)
@@ -124,16 +125,21 @@ defmodule PtcManager.Operations do
     count
   end
 
-  def lease_job(job_id, worker_key, remote_issue, lease_ms)
-      when is_integer(job_id) and is_binary(worker_key) and is_map(remote_issue) do
+  def lease_job(job_id, worker_key, remote_issue, lease_ms, opts \\ [])
+      when is_integer(job_id) and is_binary(worker_key) and is_map(remote_issue) and
+             is_list(opts) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    capacity = Keyword.get(opts, :capacity, configured_agent_capacity())
+    agent_kind = Keyword.get(opts, :agent_kind, configured_agent_kind())
 
     result =
       Repo.transaction(fn ->
         job = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
-             :ok <- dispatch_capacity_available(Repo),
+             {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, now),
+             :ok <- dispatch_capacity_available(Repo, worker, capacity),
+             {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
              :ok <- remote_issue_matches_approval(remote_issue, job.approval) do
           fencing_token = job.fencing_token + 1
           branch_name = "ptc-manager/issue-#{job.issue.number}-job-#{job.id}"
@@ -160,7 +166,21 @@ defmodule PtcManager.Operations do
             )
 
           if updated == 1 do
-            leased = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job.id)
+            %WorktreeAllocation{}
+            |> WorktreeAllocation.changeset(%{
+              worker_id: worker.id,
+              job_id: job.id,
+              state: "reserved",
+              path: worktree_path,
+              agent_kind: agent_kind,
+              last_used_at: now
+            })
+            |> Repo.insert!()
+
+            leased =
+              Job
+              |> preload([:approval, :issue, :repository, :worktree_allocation])
+              |> Repo.get!(job.id)
 
             insert_audit!(%{
               actor: "worker:#{worker_key}",
@@ -170,6 +190,8 @@ defmodule PtcManager.Operations do
               details: %{
                 "fencing_token" => fencing_token,
                 "branch_name" => branch_name,
+                "worktree_path" => worktree_path,
+                "agent_kind" => agent_kind,
                 "lease_expires_at" => DateTime.to_iso8601(lease_expires_at)
               }
             })
@@ -184,6 +206,15 @@ defmodule PtcManager.Operations do
 
           {:error, :dispatch_capacity} ->
             Repo.rollback(:dispatch_capacity)
+
+          {:error, :invalid_agent_capacity} ->
+            Repo.rollback(:invalid_agent_capacity)
+
+          {:error, reason} when reason in [:worker_unavailable, :worker_capacity_changed] ->
+            Repo.rollback(reason)
+
+          {:error, :worktree_root_unavailable} ->
+            Repo.rollback(:worktree_root_unavailable)
 
           {:error, reason} ->
             rejected = reject_job!(job, reason, now)
@@ -211,6 +242,19 @@ defmodule PtcManager.Operations do
             job
             |> Job.changeset(%{state: "working", lease_expires_at: dispatch.lease_expires_at})
             |> Repo.update!()
+
+          allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
+
+          allocation
+          |> WorktreeAllocation.changeset(%{
+            state: "active",
+            herdr_workspace: dispatch.workspace_id,
+            path: Map.get(dispatch, :worktree_path) || allocation.path,
+            agent_kind: Map.get(dispatch, :agent_kind) || allocation.agent_kind,
+            last_used_at: now,
+            last_error: nil
+          })
+          |> Repo.update!()
 
           run =
             %AgentRun{}
@@ -273,6 +317,8 @@ defmodule PtcManager.Operations do
             })
             |> Repo.update!()
 
+          mark_allocation!(job.id, %{state: "removed", removed_at: now, last_used_at: now})
+
           insert_audit!(%{
             actor: "worker:#{worker_key}",
             action: "job.dispatch_failed",
@@ -312,6 +358,12 @@ defmodule PtcManager.Operations do
               last_error: message
             })
             |> Repo.update!()
+
+          mark_allocation!(job.id, %{
+            state: "attention",
+            last_used_at: now,
+            last_error: message
+          })
 
           insert_audit!(%{
             actor: "worker:#{worker_key}",
@@ -368,6 +420,13 @@ defmodule PtcManager.Operations do
           if updated == 1 do
             job = Repo.get!(Job, job_id)
 
+            mark_allocation!(job.id, %{
+              state: "awaiting_pr",
+              head_sha: result.head_sha,
+              last_used_at: now,
+              last_error: nil
+            })
+
             %PrPublication{}
             |> PrPublication.changeset(%{
               job_id: job.id,
@@ -379,7 +438,8 @@ defmodule PtcManager.Operations do
               head_sha: result.head_sha,
               diff_digest: result.diff_digest,
               attempt_count: 0,
-              next_attempt_at: now
+              next_attempt_at: nil,
+              source: "broker"
             })
             |> Repo.insert!()
 
@@ -447,6 +507,12 @@ defmodule PtcManager.Operations do
 
         cond do
           updated == 1 ->
+            mark_allocation!(job_id, %{
+              state: "attention",
+              last_used_at: now,
+              last_error: message
+            })
+
             if previous.last_error != message do
               insert_audit!(%{
                 actor: "coordinator",
@@ -514,6 +580,124 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  def list_workers_with_worktrees do
+    Worker
+    |> order_by([worker], asc: worker.id)
+    |> preload(worktree_allocations: [job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
+  def list_occupying_worktrees(worker_key) when is_binary(worker_key) do
+    WorktreeAllocation
+    |> join(:inner, [allocation], worker in assoc(allocation, :worker))
+    |> where(
+      [allocation, worker],
+      worker.worker_key == ^worker_key and allocation.state != "removed"
+    )
+    |> order_by([allocation], asc: allocation.last_used_at, asc: allocation.id)
+    |> preload([allocation, worker], worker: worker, job: [:issue, :repository])
+    |> Repo.all()
+  end
+
+  def dispatch_capacity(worker_key) when is_binary(worker_key) do
+    case Repo.get_by(Worker, worker_key: worker_key) do
+      %Worker{status: "online", capabilities: capabilities} ->
+        case capabilities["implementation_slots"] do
+          capacity when is_integer(capacity) and capacity > 0 -> {:ok, capacity}
+          _capacity -> {:error, :worker_has_no_implementation_capacity}
+        end
+
+      %Worker{} ->
+        {:error, :worker_unavailable}
+
+      nil ->
+        {:error, :worker_unavailable}
+    end
+  end
+
+  def mark_worktree_attention(allocation_id, reason, actor \\ "coordinator")
+      when is_integer(allocation_id) do
+    transition_worktree(allocation_id, "attention", actor, bounded_error(reason),
+      from: ~w(reserved active awaiting_pr warm reclaimable attention terminal)
+    )
+  end
+
+  def claim_worktree_cleanup(
+        allocation_id,
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      )
+      when is_integer(allocation_id) do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    expires_at = DateTime.add(now, 300, :second)
+
+    {updated, _rows} =
+      WorktreeAllocation
+      |> where(
+        [allocation],
+        allocation.id == ^allocation_id and
+          (allocation.state in ["terminal", "reclaimable"] or
+             (allocation.state == "cleaning" and allocation.cleanup_expires_at <= ^now))
+      )
+      |> Repo.update_all(
+        set: [
+          state: "cleaning",
+          cleanup_token: token,
+          cleanup_expires_at: expires_at,
+          last_error: nil,
+          updated_at: now
+        ]
+      )
+
+    if updated == 1 do
+      notify_changed(__MODULE__)
+
+      claimed =
+        WorktreeAllocation
+        |> preload(job: [:issue, :repository])
+        |> Repo.get!(allocation_id)
+
+      {:ok, claimed, token}
+    else
+      {:error, :worktree_cleanup_already_claimed}
+    end
+  end
+
+  def complete_worktree_cleanup(allocation_id, token)
+      when is_integer(allocation_id) and is_binary(token) do
+    cleanup_transition(allocation_id, token, "removed", nil)
+  end
+
+  def fail_worktree_cleanup(allocation_id, token, reason)
+      when is_integer(allocation_id) and is_binary(token) do
+    cleanup_transition(allocation_id, token, "attention", bounded_error(reason))
+  end
+
+  def mark_worktree_reclaimable(job_id, head_sha)
+      when is_integer(job_id) and is_binary(head_sha) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      case Repo.get_by(WorktreeAllocation, job_id: job_id) do
+        nil ->
+          {:error, :worktree_allocation_missing}
+
+        allocation when allocation.state in ["warm", "reclaimable"] ->
+          allocation
+          |> WorktreeAllocation.changeset(%{
+            state: "reclaimable",
+            head_sha: head_sha,
+            last_used_at: now,
+            last_error: nil
+          })
+          |> Repo.update()
+
+        _allocation ->
+          {:error, :worktree_not_warm}
+      end
+
+    broadcast_change(outcome)
+  end
+
   def approve_issue(issue_id, actor) when is_integer(issue_id) and is_binary(actor) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -576,15 +760,85 @@ defmodule PtcManager.Operations do
   defp job_is_queued(%Job{state: "queued"}), do: :ok
   defp job_is_queued(%Job{}), do: {:error, :already_leased}
 
-  defp dispatch_capacity_available(repo) do
-    max = Application.get_env(:ptc_manager, :dispatch_concurrency, 1)
+  defp dispatch_capacity_available(_repo, _worker, capacity)
+       when not is_integer(capacity) or capacity < 1,
+       do: {:error, :invalid_agent_capacity}
 
-    active_count =
-      Job
-      |> where([job], job.state in ^@capacity_job_states)
+  defp dispatch_capacity_available(repo, worker, capacity) do
+    allocation_count =
+      WorktreeAllocation
+      |> where(
+        [allocation],
+        allocation.worker_id == ^worker.id and allocation.state != "removed"
+      )
       |> repo.aggregate(:count)
 
-    if active_count < max, do: :ok, else: {:error, :dispatch_capacity}
+    legacy_count =
+      from(job in Job,
+        as: :job,
+        where:
+          job.lease_owner == ^worker.worker_key and job.state in ^@capacity_job_states and
+            not exists(
+              from allocation in WorktreeAllocation,
+                where: allocation.job_id == parent_as(:job).id
+            )
+      )
+      |> repo.aggregate(:count)
+
+    if allocation_count + legacy_count < capacity,
+      do: :ok,
+      else: {:error, :dispatch_capacity}
+  end
+
+  defp ensure_capacity_worker(_repo, _worker_key, capacity, _now)
+       when not is_integer(capacity) or capacity < 1,
+       do: {:error, :invalid_agent_capacity}
+
+  defp ensure_capacity_worker(repo, worker_key, capacity, now) do
+    attrs = %{
+      worker_key: worker_key,
+      name: "Herdr #{String.replace_prefix(worker_key, "herdr:", "")}",
+      status: "online",
+      capabilities: %{
+        "herdr" => true,
+        "dispatch" => true,
+        "implementation_slots" => capacity
+      },
+      last_heartbeat_at: now
+    }
+
+    case repo.get_by(Worker, worker_key: worker_key) do
+      nil ->
+        {:ok, %Worker{} |> Worker.changeset(attrs) |> repo.insert!()}
+
+      %Worker{status: "online", capabilities: capabilities} = worker ->
+        if capabilities["implementation_slots"] == capacity,
+          do: {:ok, worker},
+          else: {:error, :worker_capacity_changed}
+
+      %Worker{} ->
+        {:error, :worker_unavailable}
+    end
+  end
+
+  defp worktree_path(repository, job_id, fencing_token) do
+    repository_path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
+
+    root =
+      Application.get_env(:ptc_manager, :worktree_root) ||
+        if(is_binary(repository_path),
+          do: Path.join(Path.dirname(Path.expand(repository_path)), ".ptc-manager-worktrees")
+        )
+
+    if is_binary(root) and Path.type(root) == :absolute do
+      slug =
+        "#{repository.github_owner}-#{repository.github_name}"
+        |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+
+      {:ok, Path.join(Path.expand(root), "#{slug}-job-#{job_id}-f#{fencing_token}")}
+    else
+      {:error, :worktree_root_unavailable}
+    end
   end
 
   defp remote_issue_matches_approval(remote, approval) do
@@ -733,17 +987,100 @@ defmodule PtcManager.Operations do
   end
 
   defp get_or_create_dispatch_worker!(worker_key, dispatch, now) do
-    attrs = %{
-      worker_key: worker_key,
-      name: "Herdr #{dispatch.session}",
-      status: "online",
-      capabilities: %{"herdr" => true, "dispatch" => true},
-      last_heartbeat_at: now
-    }
-
     case Repo.get_by(Worker, worker_key: worker_key) do
-      nil -> %Worker{} |> Worker.changeset(attrs) |> Repo.insert!()
-      worker -> worker |> Worker.changeset(attrs) |> Repo.update!()
+      nil ->
+        capacity = configured_agent_capacity()
+
+        %Worker{}
+        |> Worker.changeset(%{
+          worker_key: worker_key,
+          name: "Herdr #{dispatch.session}",
+          status: "online",
+          capabilities: %{
+            "herdr" => true,
+            "dispatch" => true,
+            "implementation_slots" => capacity
+          },
+          last_heartbeat_at: now
+        })
+        |> Repo.insert!()
+
+      worker ->
+        worker
+    end
+  end
+
+  defp mark_allocation!(job_id, attrs) do
+    case Repo.get_by(WorktreeAllocation, job_id: job_id) do
+      nil -> nil
+      allocation -> allocation |> WorktreeAllocation.changeset(attrs) |> Repo.update!()
+    end
+  end
+
+  defp transition_worktree(allocation_id, state, actor, error, opts) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        allocation = Repo.get!(WorktreeAllocation, allocation_id)
+        allowed_from = Keyword.get(opts, :from)
+
+        if allowed_from && allocation.state not in allowed_from,
+          do: Repo.rollback(:invalid_worktree_transition)
+
+        attrs = %{
+          state: state,
+          last_used_at: now,
+          last_error: error,
+          removed_at: if(state == "removed", do: now)
+        }
+
+        updated = allocation |> WorktreeAllocation.changeset(attrs) |> Repo.update!()
+
+        insert_audit!(%{
+          actor: actor,
+          action: "worktree.#{state}",
+          target_type: "worktree_allocation",
+          target_id: allocation.id,
+          details: %{
+            "job_id" => allocation.job_id,
+            "reason" => error
+          }
+        })
+
+        updated
+      end)
+
+    broadcast_change(outcome)
+  end
+
+  defp cleanup_transition(allocation_id, token, state, error) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {updated, _rows} =
+      WorktreeAllocation
+      |> where(
+        [allocation],
+        allocation.id == ^allocation_id and allocation.state == "cleaning" and
+          allocation.cleanup_token == ^token
+      )
+      |> Repo.update_all(
+        set: [
+          state: state,
+          last_used_at: now,
+          last_error: error,
+          removed_at: if(state == "removed", do: now),
+          cleanup_token: nil,
+          cleanup_expires_at: nil,
+          updated_at: now
+        ]
+      )
+
+    if updated == 1 do
+      notify_changed(__MODULE__)
+      {:ok, Repo.get!(WorktreeAllocation, allocation_id)}
+    else
+      {:error, :stale_worktree_cleanup_claim}
     end
   end
 
@@ -769,6 +1106,12 @@ defmodule PtcManager.Operations do
         )
 
       if updated == 1 do
+        mark_allocation!(job.id, %{
+          state: "attention",
+          last_used_at: now,
+          last_error: "The worker lease expired; remote activity must be reconciled."
+        })
+
         insert_audit!(%{
           actor: "coordinator",
           action: "job.lease_reconciliation_required",
@@ -790,6 +1133,12 @@ defmodule PtcManager.Operations do
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)
+
+  defp configured_agent_capacity,
+    do: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+
+  defp configured_agent_kind,
+    do: Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
 
   defp notify_and_return(result) do
     notify_changed(__MODULE__)

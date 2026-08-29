@@ -4,7 +4,8 @@ defmodule PtcManager.PublicationStatusReconciler do
   alias PtcManager.Publications
 
   def run_once(opts \\ []) do
-    client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :publish_broker))
+    client =
+      Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :pull_request_client))
 
     case Publications.next_open_for_status() do
       nil ->
@@ -13,7 +14,9 @@ defmodule PtcManager.PublicationStatusReconciler do
       publication ->
         case client.status(publication) do
           {:ok, result} ->
-            Publications.record_remote_status(publication.id, result)
+            outcome = Publications.record_remote_status(publication.id, result)
+            if result.state in ["merged", "closed"], do: PtcManager.WorktreePoller.wake()
+            outcome
 
           {:retry, {:after, delay_ms, _reason} = reason} when is_integer(delay_ms) ->
             case record_error(publication.id, reason) do

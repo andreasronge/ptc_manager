@@ -20,10 +20,20 @@ defmodule PtcManager.DispatchTest do
       send(Process.get(:dispatch_test_pid), {:dispatch_context, context})
       Process.get(:dispatch_adapter_result)
     end
+
+    def remove_worktree(_allocation), do: :ok
   end
 
   setup do
     Process.put(:dispatch_test_pid, self())
+
+    {:ok, _worker} =
+      Operations.create_worker(%{
+        worker_key: "herdr:default",
+        name: "Herdr default",
+        status: "online",
+        capabilities: %{"herdr" => true, "implementation_slots" => 1}
+      })
 
     Process.put(
       :dispatch_adapter_result,
@@ -37,6 +47,20 @@ defmodule PtcManager.DispatchTest do
     )
 
     :ok
+  end
+
+  test "leaves work queued when the synchronized worker is degraded" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    worker = Repo.get_by!(Operations.Worker, worker_key: "herdr:default")
+    worker |> Operations.Worker.changeset(%{status: "degraded"}) |> Repo.update!()
+
+    assert {:error, :worker_unavailable} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    assert Repo.get!(Job, job.id).state == "queued"
+    refute_receive {:dispatch_context, _context}
   end
 
   test "fresh approved work is leased once and attached to a fenced Herdr attempt" do
@@ -205,6 +229,32 @@ defmodule PtcManager.DispatchTest do
       })
 
     assert {:ok, "w12", "w12:p1"} = PtcManager.Dispatch.HerdrAdapter.decode_worktree(output)
+  end
+
+  test "builds the configurable test, prompt-only review, and broker contract" do
+    repository =
+      repository_fixture(%{
+        required_pre_pr_reviews: 2,
+        implementation_test_command: "mix precommit"
+      })
+
+    issue = issue_fixture(repository, %{number: 42, title: "Fix the queue"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job =
+      job
+      |> Job.changeset(%{branch_name: "ptc-manager/issue-42-job-#{job.id}", fencing_token: 3})
+      |> Repo.update!()
+
+    prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, issue, job)
+
+    assert prompt =~ "Fix GitHub issue #42"
+    assert prompt =~ "Run this configured test command exactly: mix precommit"
+    assert prompt =~ "invoke the `codex-review` skill 2 time(s)"
+    assert prompt =~ "PtcManager does not run or verify these reviews"
+    assert prompt =~ "Do not use GitHub credentials"
+    assert prompt =~ "credential-isolated broker"
   end
 
   defp approved_job_fixture do

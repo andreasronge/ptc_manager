@@ -4,7 +4,14 @@ defmodule PtcManager.PublisherTest do
   import Ecto.Query
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AuditEvent, Job, PrPublication, Repository}
+
+  alias PtcManager.Operations.{
+    AuditEvent,
+    Job,
+    PrPublication,
+    Repository,
+    WorktreeAllocation
+  }
 
   alias PtcManager.{
     PublicationStatusPoller,
@@ -236,6 +243,71 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(Job, closed_job.id).state == "cancelled"
   end
 
+  test "terminal PR reconciliation cannot overwrite an active cleanup claim" do
+    {job, publication, result} = published_publication_fixture()
+    worker = worker_fixture(%{worker_key: "cleanup-race"})
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "terminal",
+        path: "/tmp/cleanup-race",
+        head_sha: result.head_sha,
+        last_used_at: DateTime.utc_now()
+      })
+      |> Repo.insert!()
+
+    assert {:ok, _claimed, _token} = Operations.claim_worktree_cleanup(allocation.id)
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "merged",
+        pr_url: publication.pr_url,
+        head_sha: result.head_sha,
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, _merged} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "cleaning"
+  end
+
+  test "canonical open PR status promotes a warm worktree to reclaimable" do
+    {job, publication, result} = published_publication_fixture()
+    worker = worker_fixture(%{worker_key: "open-pr-worker"})
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "warm",
+        path: "/tmp/open-pr-worktree",
+        head_sha: result.head_sha,
+        herdr_workspace: "open-pr-workspace",
+        last_used_at: DateTime.utc_now()
+      })
+      |> Repo.insert!()
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "open",
+        pr_url: publication.pr_url,
+        head_sha: result.head_sha,
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, _open} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
+  end
+
   test "a changed GitHub PR head blocks the publication lineage" do
     {job, publication, _result} = published_publication_fixture()
 
@@ -397,6 +469,7 @@ defmodule PtcManager.PublisherTest do
 
   defp verified_publication_fixture do
     repository = repository_fixture(%{local_path: "/tmp/repository"})
+
     issue = issue_fixture(repository)
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
@@ -427,7 +500,11 @@ defmodule PtcManager.PublisherTest do
                result
              )
 
-    publication = Repo.get_by!(PrPublication, job_id: job.id)
+    publication =
+      Repo.get_by!(PrPublication, job_id: job.id)
+      |> PrPublication.changeset(%{next_attempt_at: DateTime.utc_now()})
+      |> Repo.update!()
+
     {verified, publication, result}
   end
 

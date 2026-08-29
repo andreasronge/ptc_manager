@@ -32,7 +32,10 @@ defmodule PtcManager.ResultReconciler do
               result
             )
 
-          if match?({:ok, _job}, outcome), do: PtcManager.PublisherPoller.wake()
+          if match?({:ok, _job}, outcome) do
+            PtcManager.PublisherPoller.wake()
+          end
+
           outcome
         else
           record_failure(job, {:invalid_probe_result, result})

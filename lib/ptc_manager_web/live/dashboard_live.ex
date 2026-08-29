@@ -80,11 +80,11 @@ defmodule PtcManagerWeb.DashboardLive do
 
       {:noreply,
        socket
-       |> put_flash(:info, "Draft PR publishing is queued again.")
+       |> put_flash(:info, "PR publication is queued again.")
        |> load_dashboard()}
     else
-      _failure ->
-        {:noreply, put_flash(socket, :error, "That publication could not be retried.")}
+      _ ->
+        {:noreply, put_flash(socket, :error, "Publication could not be retried safely.")}
     end
   end
 
@@ -193,7 +193,11 @@ defmodule PtcManagerWeb.DashboardLive do
     case result do
       {:ok, _job} ->
         {:noreply,
-         put_flash(socket, :info, "Committed branch verified and ready for a draft PR.")}
+         put_flash(
+           socket,
+           :info,
+           "Committed branch verified. Waiting for publication."
+         )}
 
       {:error, :result_already_claimed} ->
         {:noreply, put_flash(socket, :info, "This branch is already being checked.")}
@@ -203,7 +207,7 @@ defmodule PtcManagerWeb.DashboardLive do
          put_flash(
            socket,
            :error,
-           "The committed branch is not ready yet. No GitHub write occurred."
+           "The committed branch is not ready yet."
          )}
     end
   end
@@ -242,6 +246,8 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def investigating?(investigating, issue_id), do: MapSet.member?(investigating, issue_id)
   def reconciling_result?(jobs, job_id), do: MapSet.member?(jobs, job_id)
+  def job_label("ready_for_pr"), do: "waiting for PR publication"
+  def job_label("pr_open"), do: "PR open"
   def job_label(state), do: state |> String.replace("_", " ")
 
   def sync_label(%{sync_status: "syncing"}), do: "syncing"
@@ -256,12 +262,12 @@ defmodule PtcManagerWeb.DashboardLive do
   def short_time(nil), do: "never"
   def short_time(datetime), do: Calendar.strftime(datetime, "%Y-%m-%d %H:%M UTC")
 
-  def publication_error(nil), do: "The publisher needs attention."
+  def publication_error(nil), do: "PR verification needs attention."
 
   def publication_error(error) do
     cond do
       String.contains?(error, "github_app_not_configured") ->
-        "The GitHub App publisher is not configured."
+        "The GitHub App publication broker is not configured."
 
       String.contains?(error, "remote_branch_diverged") ->
         "The remote job branch contains a different commit."
@@ -273,8 +279,30 @@ defmodule PtcManagerWeb.DashboardLive do
         "The GitHub-base diff no longer matches the verified result."
 
       true ->
-        "The last publisher attempt failed safely; details are in the audit log."
+        "The last PR verification failed safely; details are in the audit log."
     end
+  end
+
+  def worker_capacity(worker) do
+    case worker.capabilities["implementation_slots"] do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      _value ->
+        if worker.capabilities["herdr"],
+          do: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1),
+          else: 0
+    end
+  end
+
+  def occupied_worktrees(worker),
+    do: Enum.count(worker.worktree_allocations, &(&1.state != "removed"))
+
+  def worktree_state_label(state), do: state |> String.replace("_", " ")
+
+  def required_reviews(repository) do
+    Application.get_env(:ptc_manager, :required_pre_pr_reviews_override) ||
+      repository.required_pre_pr_reviews
   end
 
   def state_classes("working"), do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
@@ -309,9 +337,11 @@ defmodule PtcManagerWeb.DashboardLive do
       repositories: Operations.list_repositories(),
       issues: Operations.dashboard_issues(),
       agent_runs: Operations.list_agent_runs(),
+      workers: Operations.list_workers_with_worktrees(),
       manager_enabled: Manager.enabled?(),
       dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
-      publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false)
+      publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false),
+      pr_reconcile_enabled: Application.get_env(:ptc_manager, :pr_reconcile_enabled, false)
     )
   end
 end

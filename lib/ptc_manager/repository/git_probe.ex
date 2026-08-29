@@ -41,6 +41,23 @@ defmodule PtcManager.Repository.GitProbe do
     end
   end
 
+  @doc "Proves that a worktree is clean, on the expected branch, and at the verified PR head."
+  def reclaimable(path, branch, expected_head)
+      when is_binary(path) and is_binary(branch) and is_binary(expected_head) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         {:ok, ^branch} <- git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+         {:ok, ^expected_head} <- revision(path, "HEAD^{commit}"),
+         {:ok, ""} <- git(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]) do
+      :ok
+    else
+      false -> {:error, :worktree_path_unavailable}
+      {:ok, _other} -> {:error, :worktree_changed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def reclaimable(_path, _branch, _expected_head), do: {:error, :invalid_worktree_identity}
+
   defp repository_path(repository) do
     path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
 

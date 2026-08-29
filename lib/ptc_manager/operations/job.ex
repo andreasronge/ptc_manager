@@ -31,7 +31,7 @@ defmodule PtcManager.Operations.Job do
     belongs_to :approval, PtcManager.Operations.Approval
     has_many :agent_runs, PtcManager.Operations.AgentRun
     has_one :pr_publication, PtcManager.Operations.PrPublication
-
+    has_one :worktree_allocation, PtcManager.Operations.WorktreeAllocation
     timestamps(type: :utc_datetime_usec)
   end
 

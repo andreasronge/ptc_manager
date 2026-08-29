@@ -10,6 +10,7 @@ defmodule PtcManager.Operations.Worker do
     field :last_heartbeat_at, :utc_datetime_usec
 
     has_many :agent_runs, PtcManager.Operations.AgentRun
+    has_many :worktree_allocations, PtcManager.Operations.WorktreeAllocation
 
     timestamps(type: :utc_datetime_usec)
   end

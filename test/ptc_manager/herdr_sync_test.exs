@@ -5,7 +5,7 @@ defmodule PtcManager.HerdrSyncTest do
 
   alias PtcManager.Herdr.{Client, Sync}
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentRun, Job, Worker}
+  alias PtcManager.Operations.{AgentRun, Job, Worker, WorktreeAllocation}
   alias PtcManager.Repo
 
   defmodule FakeClient do
@@ -166,12 +166,26 @@ defmodule PtcManager.HerdrSyncTest do
     })
     |> Repo.update!()
 
+    worker = worker_fixture(%{worker_key: "herdr:managed"})
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "attention",
+        path: "/tmp/recovered-worktree",
+        last_used_at: DateTime.utc_now()
+      })
+      |> Repo.insert!()
+
     Process.put(
       :herdr_result,
       {:ok,
        [
          remote_agent("working")
          |> Map.put("name", "impl_j#{job.id}_f1")
+         |> Map.put("workspace_id", "recovered-workspace")
          |> Map.put("agent_session", %{"value" => "managed-agent"})
        ]}
     )
@@ -181,6 +195,9 @@ defmodule PtcManager.HerdrSyncTest do
     run = Repo.one!(from run in AgentRun, where: run.job_id == ^job.id)
     assert run.fencing_token == 1
     assert Repo.get!(Job, job.id).state == "working"
+    recovered_allocation = Repo.get!(WorktreeAllocation, allocation.id)
+    assert recovered_allocation.herdr_workspace == "recovered-workspace"
+    assert recovered_allocation.state == "active"
 
     Process.put(
       :herdr_result,
@@ -203,7 +220,7 @@ defmodule PtcManager.HerdrSyncTest do
     proposal_fixture(second_issue)
     {:ok, second_job} = Operations.approve_issue(second_issue.id, "andreas")
 
-    assert {:ok, _leased} =
+    assert {:error, :dispatch_capacity} =
              Operations.lease_job(
                second_job.id,
                "herdr:managed",
@@ -214,6 +231,8 @@ defmodule PtcManager.HerdrSyncTest do
                },
                60_000
              )
+
+    assert Repo.get!(Job, second_job.id).state == "queued"
   end
 
   test "a successful empty snapshot terminates an old uncertain launch" do

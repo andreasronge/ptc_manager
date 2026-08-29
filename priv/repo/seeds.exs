@@ -10,7 +10,10 @@ if Repo.aggregate(Repository, :count) == 0 do
       github_owner: "andreasronge",
       github_name: "ptc_runner",
       default_branch: "main",
-      local_path: System.get_env("PTC_REPOSITORY_PATH")
+      local_path: System.get_env("PTC_REPOSITORY_PATH"),
+      required_pre_pr_reviews:
+        Application.get_env(:ptc_manager, :required_pre_pr_reviews_default, 2),
+      implementation_test_command: Application.get_env(:ptc_manager, :implementation_test_command)
     })
 
   issue_attrs = fn number, title, minutes_ago ->
@@ -91,7 +94,13 @@ if Repo.aggregate(Repository, :count) == 0 do
       worker_key: "hetzner-primary",
       name: "Hetzner primary",
       status: "online",
-      capabilities: %{"herdr" => true, "codex" => true, "claude" => true},
+      capabilities: %{
+        "herdr" => true,
+        "codex" => true,
+        "claude" => true,
+        "implementation_slots" =>
+          Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+      },
       last_heartbeat_at: now
     })
 

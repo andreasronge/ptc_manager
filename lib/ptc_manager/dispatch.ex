@@ -3,6 +3,7 @@ defmodule PtcManager.Dispatch do
 
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations
+  alias PtcManager.Worktrees
 
   def run_once(opts \\ []) do
     github = Keyword.get(opts, :github, Application.fetch_env!(:ptc_manager, :github_client))
@@ -17,14 +18,18 @@ defmodule PtcManager.Dispatch do
         {:ok, :empty}
 
       job ->
-        dispatch_job(job, github, adapter, worker_key, lease_ms)
+        with {:ok, capacity} <- dispatch_capacity(worker_key, opts),
+             :ok <- Worktrees.ensure_slot(worker_key, capacity, adapter) do
+          dispatch_job(job, github, adapter, worker_key, lease_ms, capacity)
+        end
     end
   end
 
-  defp dispatch_job(job, github, adapter, worker_key, lease_ms) do
+  defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity) do
     with {:ok, remote} <- github.get_issue(job.repository, job.issue.number),
          {:ok, canonical} <- normalize_remote(remote, job.repository.id),
-         {:ok, leased} <- Operations.lease_job(job.id, worker_key, canonical, lease_ms) do
+         {:ok, leased} <-
+           Operations.lease_job(job.id, worker_key, canonical, lease_ms, capacity: capacity) do
       context = %{
         job: leased,
         issue: leased.issue,
@@ -91,4 +96,12 @@ defmodule PtcManager.Dispatch do
 
   defp configured_lease_ms,
     do: Application.get_env(:ptc_manager, :dispatch_lease_ms, 1_800_000)
+
+  defp dispatch_capacity(worker_key, opts) do
+    case Keyword.fetch(opts, :capacity) do
+      {:ok, capacity} when is_integer(capacity) and capacity > 0 -> {:ok, capacity}
+      {:ok, _capacity} -> {:error, :invalid_agent_capacity}
+      :error -> Operations.dispatch_capacity(worker_key)
+    end
+  end
 end

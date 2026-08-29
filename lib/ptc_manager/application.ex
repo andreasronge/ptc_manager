@@ -19,6 +19,7 @@ defmodule PtcManager.Application do
       PtcManager.GitHub.Poller,
       PtcManager.Herdr.Poller,
       PtcManager.Dispatch.Poller,
+      PtcManager.WorktreePoller,
       PtcManager.ResultPoller,
       PtcManager.PublisherPoller,
       PtcManager.PublicationStatusPoller,

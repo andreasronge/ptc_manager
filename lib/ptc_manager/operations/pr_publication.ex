@@ -1,4 +1,5 @@
 defmodule PtcManager.Operations.PrPublication do
+  @moduledoc "Durable identity and canonical status for one implementation PR."
   use Ecto.Schema
   import Ecto.Changeset
 
@@ -24,6 +25,7 @@ defmodule PtcManager.Operations.PrPublication do
     field :published_at, :utc_datetime_usec
     field :pr_state, :string
     field :pr_checked_at, :utc_datetime_usec
+    field :source, :string, default: "broker"
 
     belongs_to :job, PtcManager.Operations.Job
 
@@ -51,7 +53,8 @@ defmodule PtcManager.Operations.PrPublication do
       :remote_head_sha,
       :published_at,
       :pr_state,
-      :pr_checked_at
+      :pr_checked_at,
+      :source
     ])
     |> validate_required([
       :job_id,
@@ -67,6 +70,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_inclusion(:state, @states)
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> validate_number(:attempt_count, greater_than_or_equal_to: 0)
+    |> validate_inclusion(:source, ["broker"])
     |> validate_number(:pr_number, greater_than: 0)
     |> validate_length(:idempotency_key, is: 64)
     |> validate_length(:branch_name, max: 240)

@@ -25,6 +25,17 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
+  @doc false
+  def get_json(url) when is_binary(url) do
+    with {:ok, body} <- get(url),
+         {:ok, decoded} <- Jason.decode(body) do
+      {:ok, decoded}
+    else
+      {:error, %Jason.DecodeError{} = reason} -> {:error, {:invalid_github_json, reason}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp fetch_pages(_repository, page, _issues) when page > @max_pages,
     do: {:error, :pagination_limit_reached}
 
@@ -69,14 +80,14 @@ defmodule PtcManager.GitHub.Client do
       {:ok, {{_version, 200, _reason}, _headers, body}} ->
         {:ok, body}
 
-      {:ok, {{_version, status, _reason}, _headers, body}} ->
+      {:ok, {{_version, status, _reason}, response_headers, body}} ->
         message =
           case Jason.decode(body) do
             {:ok, %{"message" => value}} when is_binary(value) -> value
             _ -> "GitHub returned HTTP #{status}"
           end
 
-        {:error, {:github_http_error, status, message}}
+        {:error, {:github_http_error, status, message, retry_delay_ms(response_headers)}}
 
       {:error, reason} ->
         {:error, {:github_transport_error, reason}}
@@ -91,6 +102,32 @@ defmodule PtcManager.GitHub.Client do
   end
 
   defp maybe_add_token(headers, _token), do: headers
+
+  @doc false
+  def retry_delay_ms(headers, now_seconds \\ System.system_time(:second)) when is_list(headers) do
+    normalized =
+      Map.new(headers, fn {key, value} ->
+        {key |> to_string() |> String.downcase(), value |> to_string() |> String.trim()}
+      end)
+
+    with nil <- seconds_delay(normalized["retry-after"]),
+         "0" <- normalized["x-ratelimit-remaining"],
+         {reset_at, ""} <- Integer.parse(normalized["x-ratelimit-reset"] || "") do
+      max(reset_at - now_seconds, 1) * 1_000
+    else
+      delay when is_integer(delay) -> delay
+      _ -> nil
+    end
+  end
+
+  defp seconds_delay(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {seconds, ""} when seconds >= 0 -> max(seconds, 1) * 1_000
+      _ -> nil
+    end
+  end
+
+  defp seconds_delay(_value), do: nil
 
   defp decode_items(body) do
     case Jason.decode(body) do
