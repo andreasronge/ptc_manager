@@ -27,6 +27,7 @@ herdr_sync_interval_ms =
   System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
 
 dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
+publication_enabled = System.get_env("PTC_PUBLICATION_ENABLED") == "true"
 
 config :ptc_manager,
   github_read_token: System.get_env("GITHUB_READ_TOKEN"),
@@ -50,6 +51,31 @@ config :ptc_manager,
     System.get_env("PTC_RESULT_RECONCILE_INTERVAL_MS", "0") |> String.to_integer(),
   result_claim_timeout_ms:
     System.get_env("PTC_RESULT_CLAIM_TIMEOUT_MS", "180000") |> String.to_integer(),
+  publication_enabled: publication_enabled,
+  publication_interval_ms:
+    System.get_env("PTC_PUBLICATION_INTERVAL_MS", "5000") |> String.to_integer(),
+  publication_claim_timeout_ms:
+    System.get_env("PTC_PUBLICATION_CLAIM_TIMEOUT_MS", "180000") |> String.to_integer(),
+  publication_max_attempts:
+    System.get_env("PTC_PUBLICATION_MAX_ATTEMPTS", "5") |> String.to_integer(),
+  publication_retry_base_ms:
+    System.get_env("PTC_PUBLICATION_RETRY_BASE_MS", "5000") |> String.to_integer(),
+  publication_retry_max_ms:
+    System.get_env("PTC_PUBLICATION_RETRY_MAX_MS", "300000") |> String.to_integer(),
+  github_app_id: System.get_env("PTC_GITHUB_APP_ID"),
+  github_app_installation_id: System.get_env("PTC_GITHUB_APP_INSTALLATION_ID"),
+  github_app_private_key_path: System.get_env("PTC_GITHUB_APP_PRIVATE_KEY_PATH"),
+  github_broker_home: System.get_env("PTC_GITHUB_BROKER_HOME"),
+  github_publish_staging_root: System.get_env("PTC_GITHUB_PUBLISH_STAGING_ROOT"),
+  github_publish_staging_stale_ms:
+    System.get_env("PTC_GITHUB_PUBLISH_STAGING_STALE_MS", "3600000") |> String.to_integer(),
+  github_publish_bundle_max_bytes:
+    System.get_env("PTC_GITHUB_PUBLISH_BUNDLE_MAX_BYTES", "250000000") |> String.to_integer(),
+  github_push_timeout_binary: System.get_env("PTC_GITHUB_PUSH_TIMEOUT_BINARY"),
+  github_push_timeout_ms:
+    System.get_env("PTC_GITHUB_PUSH_TIMEOUT_MS", "60000") |> String.to_integer(),
+  publication_status_interval_ms:
+    System.get_env("PTC_PUBLICATION_STATUS_INTERVAL_MS", "60000") |> String.to_integer(),
   git_binary: System.get_env("PTC_GIT_BINARY", "git"),
   git_run_as_user: System.get_env("PTC_GIT_RUN_AS_USER"),
   git_verifier_home: System.get_env("PTC_GIT_VERIFIER_HOME"),

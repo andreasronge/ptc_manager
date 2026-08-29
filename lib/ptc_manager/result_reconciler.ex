@@ -24,12 +24,16 @@ defmodule PtcManager.ResultReconciler do
     case probe.verify(job.repository, job) do
       {:ok, result} ->
         if valid_result?(result) do
-          Operations.mark_result_verified(
-            job.id,
-            job.fencing_token,
-            job.result_attempt_token,
-            result
-          )
+          outcome =
+            Operations.mark_result_verified(
+              job.id,
+              job.fencing_token,
+              job.result_attempt_token,
+              result
+            )
+
+          if match?({:ok, _job}, outcome), do: PtcManager.PublisherPoller.wake()
+          outcome
         else
           record_failure(job, {:invalid_probe_result, result})
         end

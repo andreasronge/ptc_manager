@@ -2,7 +2,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.Job
+  alias PtcManager.Operations.{Job, PrPublication}
   alias PtcManager.Repo
 
   test "approves a fresh issue and displays the queued job", %{conn: conn} do
@@ -107,9 +107,55 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
-    assert has_element?(view, "#issue-#{issue.id}", "Ready for a draft PR")
+    assert has_element?(view, "#issue-#{issue.id}", "Draft PR queued")
     assert render(view) =~ "2 committed change(s) verified"
-    assert render(view) =~ "GitHub is still unchanged"
+    assert render(view) =~ "Safely queued until the GitHub App publisher is enabled"
+  end
+
+  test "links the canonical draft PR after automatic publication", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Publish without another approval"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {job, publication} = publication_fixture(job, "published")
+
+    {:ok, view, _html} =
+      conn
+      |> authenticated_conn()
+      |> live(~p"/")
+
+    assert has_element?(view, "#issue-#{issue.id}", "Draft PR published")
+
+    assert has_element?(
+             view,
+             "#publication-pr-#{publication.id}[href='#{publication.pr_url}']",
+             "Open draft PR #73"
+           )
+
+    assert job.state == "pr_open"
+  end
+
+  test "requeues a blocked publication from the dashboard", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Recover publishing safely"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {job, publication} = publication_fixture(job, "blocked")
+
+    {:ok, view, _html} =
+      conn
+      |> authenticated_conn()
+      |> live(~p"/")
+
+    assert has_element?(view, "#retry-publication-#{publication.id}", "Retry publishing")
+
+    view
+    |> element("#retry-publication-#{publication.id}")
+    |> render_click()
+
+    assert render(view) =~ "Draft PR publishing is queued again"
+    assert Repo.get!(PrPublication, publication.id).state == "queued"
+    assert Repo.get!(Job, job.id).state == "ready_for_pr"
   end
 
   test "offers a safe manual retry while branch verification is pending", %{conn: conn} do
@@ -188,5 +234,48 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
   defp authenticated_conn(conn) do
     init_test_session(conn, %{authenticated: true, actor: "maintainer"})
+  end
+
+  defp publication_fixture(job, state) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    base_sha = String.duplicate("a", 40)
+    head_sha = String.duplicate("b", 40)
+    diff_digest = String.duplicate("c", 64)
+    job_state = if state == "published", do: "pr_open", else: "publish_blocked"
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: job_state,
+        fencing_token: 1,
+        branch_name: "ptc-manager/issue-job-#{job.id}",
+        result_base_sha: base_sha,
+        result_head_sha: head_sha,
+        result_diff_digest: diff_digest,
+        result_commit_count: 2,
+        result_verified_at: now,
+        last_error: if(state == "blocked", do: ":github_app_not_configured")
+      })
+      |> Repo.update!()
+
+    attrs = %{
+      job_id: job.id,
+      state: state,
+      idempotency_key: String.duplicate("d", 64),
+      fencing_token: job.fencing_token,
+      branch_name: job.branch_name,
+      base_sha: base_sha,
+      head_sha: head_sha,
+      diff_digest: diff_digest,
+      attempt_count: 1,
+      last_error: if(state == "blocked", do: ":github_app_not_configured"),
+      pr_number: if(state == "published", do: 73),
+      pr_url: if(state == "published", do: "https://github.com/owner/repo/pull/73"),
+      remote_head_sha: if(state == "published", do: head_sha),
+      published_at: if(state == "published", do: now)
+    }
+
+    publication = %PrPublication{} |> PrPublication.changeset(attrs) |> Repo.insert!()
+    {job, publication}
   end
 end

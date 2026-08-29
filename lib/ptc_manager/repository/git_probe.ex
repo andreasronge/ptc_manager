@@ -10,7 +10,14 @@ defmodule PtcManager.Repository.GitProbe do
 
   @impl true
   def verify(%Repository{} = repository, %Job{} = job) do
-    with {:ok, path} <- repository_path(repository),
+    with {:ok, path} <- repository_path(repository) do
+      verify_at(repository, job, path)
+    end
+  end
+
+  @doc false
+  def verify_at(%Repository{} = repository, %Job{} = job, path) when is_binary(path) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
          :ok <- valid_branch(job),
          {:ok, head_sha} <- revision(path, "refs/heads/#{job.branch_name}^{commit}"),
          {:ok, base_ref} <- base_ref(path, repository.default_branch),
@@ -28,6 +35,9 @@ defmodule PtcManager.Repository.GitProbe do
          diff_digest: diff_digest,
          commit_count: commit_count
        }}
+    else
+      false -> {:error, :repository_path_unavailable}
+      error -> error
     end
   end
 

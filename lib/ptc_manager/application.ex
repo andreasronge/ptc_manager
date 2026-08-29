@@ -20,6 +20,8 @@ defmodule PtcManager.Application do
       PtcManager.Herdr.Poller,
       PtcManager.Dispatch.Poller,
       PtcManager.ResultPoller,
+      PtcManager.PublisherPoller,
+      PtcManager.PublicationStatusPoller,
       # Start a worker by calling: PtcManager.Worker.start_link(arg)
       # {PtcManager.Worker, arg},
       # Start to serve requests, typically the last entry

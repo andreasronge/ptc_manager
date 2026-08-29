@@ -5,6 +5,8 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.Manager
   alias PtcManager.Operations
+  alias PtcManager.Publications
+  alias PtcManager.PublisherPoller
   alias PtcManager.ResultReconciler
 
   @impl true
@@ -67,6 +69,22 @@ defmodule PtcManagerWeb.DashboardLive do
        |> start_async({:reconcile_result, job_id}, fn -> ResultReconciler.run_job(job_id) end)}
     else
       _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("retry-publication", %{"publication-id" => publication_id}, socket) do
+    with {publication_id, ""} <- Integer.parse(publication_id),
+         {:ok, _publication} <-
+           Publications.retry_blocked(publication_id, socket.assigns.actor) do
+      PublisherPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "Draft PR publishing is queued again.")
+       |> load_dashboard()}
+    else
+      _failure ->
+        {:noreply, put_flash(socket, :error, "That publication could not be retried.")}
     end
   end
 
@@ -238,6 +256,27 @@ defmodule PtcManagerWeb.DashboardLive do
   def short_time(nil), do: "never"
   def short_time(datetime), do: Calendar.strftime(datetime, "%Y-%m-%d %H:%M UTC")
 
+  def publication_error(nil), do: "The publisher needs attention."
+
+  def publication_error(error) do
+    cond do
+      String.contains?(error, "github_app_not_configured") ->
+        "The GitHub App publisher is not configured."
+
+      String.contains?(error, "remote_branch_diverged") ->
+        "The remote job branch contains a different commit."
+
+      String.contains?(error, "pull_request_already_closed") ->
+        "A pull request for this job branch was already closed."
+
+      String.contains?(error, "authoritative_diff_changed") ->
+        "The GitHub-base diff no longer matches the verified result."
+
+      true ->
+        "The last publisher attempt failed safely; details are in the audit log."
+    end
+  end
+
   def state_classes("working"), do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
   def state_classes("blocked"), do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
   def state_classes("failed"), do: "bg-rose-400/15 text-rose-300 ring-rose-400/20"
@@ -253,6 +292,15 @@ defmodule PtcManagerWeb.DashboardLive do
   def state_classes("ready_for_pr"),
     do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
 
+  def state_classes("publishing_pr"),
+    do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+
+  def state_classes("pr_open"),
+    do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
+
+  def state_classes("publish_blocked"),
+    do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+
   def state_classes("done"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
   def state_classes(_state), do: "bg-slate-400/10 text-slate-300 ring-white/10"
 
@@ -262,7 +310,8 @@ defmodule PtcManagerWeb.DashboardLive do
       issues: Operations.dashboard_issues(),
       agent_runs: Operations.list_agent_runs(),
       manager_enabled: Manager.enabled?(),
-      dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false)
+      dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
+      publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false)
     )
   end
 end

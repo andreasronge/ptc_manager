@@ -2,10 +2,12 @@
 
 PtcManager is a private maintainer console for reviewing GitHub work, approving
 agent jobs, and seeing what Codex or Claude agents are doing and how long they
-have been running.
+have been running. After an approved implementation is verified, it can publish
+the exact branch and create a draft pull request automatically; the maintainer's
+next consequential decision is whether that reviewed PR may merge.
 
-The current Slice 3 increment keeps GitHub read-only while adding the approved
-execution path and its local result-verification gate:
+The current Slice 3 increment adds the approved execution path, its local
+result-verification gate, and the first credential-isolated GitHub write path:
 
 - a responsive issue inbox with private plain-language summaries;
 - an **Approve and start** workflow backed by SQLite transactions;
@@ -24,11 +26,16 @@ execution path and its local result-verification gate:
 - bounded, credential-free verification of a non-empty committed branch diff;
 - fenced reconciliation claims that are safe to retry after interruption;
 - verified base, head, commit count, and diff digest visible before any PR write.
+- one durable, idempotent publication record per verified implementation;
+- automatic exact-SHA branch push and draft-PR creation through a GitHub App;
+- bounded retries, expiring claims, remote reconciliation, and blocked recovery;
+- published draft-PR status and canonical GitHub link in the dashboard.
 
-Dispatch is disabled by default. This increment does **not** push branches,
-create pull requests, close issues, or write to GitHub. A credential-isolated
-draft-PR broker and GitHub-side PR reconciliation remain before Slice 3 is complete.
-See [PLAN.md](PLAN.md).
+Dispatch and publishing are disabled by default. Enabling dispatch alone does
+not grant GitHub mutation access. Publishing additionally requires a narrowly
+installed GitHub App; it pushes only the verified commit to the deterministic
+job branch and creates or reconciles one draft PR. It does **not** merge, close
+issues, edit issue text, or trust labels as commands. See [PLAN.md](PLAN.md).
 
 ## Run locally
 
@@ -60,6 +67,25 @@ mix phx.server
 For a public repository, manual GitHub synchronization works without a token.
 For a private repository or higher rate limits, set `GITHUB_READ_TOKEN` to a
 fine-grained token with repository metadata and Issues read access only.
+
+Automatic draft-PR publishing is a separate, off-by-default capability. Create
+a GitHub App installed only on the managed repository with repository
+**Contents: Read and write** and **Pull requests: Read and write** permissions.
+Store its generated private key outside the repository, owned by root and
+readable only by the `ptc-manager` group. Configure the App ID, installation ID,
+and PEM path, then set `PTC_PUBLICATION_ENABLED=true`. GitHub documents the
+[installation-token flow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app)
+and [private-key handling](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps).
+
+The broker generates a short-lived installation token for each attempt. The
+credential-free verifier exports the worker branch as a bounded Git bundle;
+the coordinator copies that untrusted bundle into a coordinator-owned staging
+repository before parsing it. It then fetches and verifies GitHub's
+authoritative base, renews the fenced claim immediately before each possible
+remote write, pushes the exact verified object ID, and reconciles an existing
+PR before creating one. Only Git commands operating on coordinator-owned
+staging receive the short-lived header. Codex, Claude, Herdr, and the
+implementation worker never receive the App key or installation token.
 
 Private Codex investigation is off by default. Once Codex is authenticated on
 the machine and the configured repository path exists, enable it explicitly:
@@ -133,15 +159,17 @@ sudo groupadd --system ptc-manager-codex
 sudo groupadd --system ptc-manager-output
 sudo groupadd --system ptc-manager-worker
 sudo groupadd --system ptc-manager-repo
-sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager
+sudo groupadd --system ptc-manager-publish
+sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output,ptc-manager-repo,ptc-manager-publish --shell /usr/sbin/nologin ptc-manager
 sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output,ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-codex
 sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-worker
-sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-verifier
+sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --groups ptc-manager-publish --shell /usr/sbin/nologin ptc-manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_manager-codex
 sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
 sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
+sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
 sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner
 sudo chmod -R g+rX,o-rwx /srv/ptc_runner
 sudo find /srv/ptc_runner -type d -exec chmod g+s {} +
@@ -149,6 +177,8 @@ sudo install -d -o root -g root -m 0755 /etc/ptc_manager
 sudo install -o root -g root -m 0644 deploy/ptc_manager.service /etc/systemd/system/ptc_manager.service
 sudo install -o root -g root -m 0644 deploy/ptc_manager-herdr.service /etc/systemd/system/ptc_manager-herdr.service
 sudo install -o root -g root -m 0600 deploy/ptc_manager.env.example /etc/ptc_manager/ptc_manager.env
+# After downloading the GitHub App PEM to a safe temporary location:
+sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_manager/github-app.pem
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
 sudo install -o root -g root -m 0440 deploy/ptc_manager-codex.sudoers /etc/sudoers.d/ptc_manager-codex
 sudo visudo -cf /etc/sudoers.d/ptc_manager-codex
@@ -178,9 +208,13 @@ sudo -u ptc-manager-worker -H codex login
 ```
 
 The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
-The `ptc-manager-repo` group gives the manager and verifier read/execute access
-without write access. The coordinator never reads the worker-controlled Git
-repository directly. The coordinator and private manager share only the setgid
+The `ptc-manager-repo` group gives the coordinator, manager, and verifier
+read/execute access without filesystem write access. The separate
+`ptc-manager-publish` group lets only the coordinator and credential-free
+verifier exchange a bounded bundle; the worker cannot access publication
+staging. The coordinator never invokes Git against the worker-owned repository.
+Stale coordinator-owned staging directories are reaped before later attempts.
+The coordinator and private manager share only the setgid
 `ptc-manager-output` directory at `PTC_CODEX_OUTPUT_DIR`; the
 coordinator database directory is `0700`, and the coordinator creates each
 `0660` output file before launching Codex.
@@ -203,6 +237,14 @@ shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After
 `PTC_DISPATCH_RECONCILE_AFTER_MS`, a successful Herdr snapshot that confirms a
 managed attempt never appeared can safely release that attempt.
+
+Publication records live in SQLite and survive process or server restarts. A
+transient GitHub or network failure returns the record to its queue with bounded
+exponential backoff; GitHub rate-limit reset times are honored without consuming
+the failure budget. A changed local result, divergent remote branch, closed
+existing PR, invalid target, or exhausted retry budget becomes `blocked` and is
+shown in the dashboard; a maintainer can correct the cause and safely requeue
+the same idempotent publication. No second PR identity is created locally.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

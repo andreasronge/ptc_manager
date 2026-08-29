@@ -8,6 +8,9 @@ config :ptc_manager,
   manager_enabled: false,
   dispatch_enabled: false,
   result_reconcile_interval_ms: 0,
+  publication_enabled: false,
+  publish_broker: PtcManager.GitHub.DisabledPublishBroker,
+  github_publish_staging_root: System.tmp_dir!(),
   git_run_as_user: nil,
   git_verifier_home: System.tmp_dir!()
 

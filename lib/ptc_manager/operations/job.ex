@@ -2,7 +2,7 @@ defmodule PtcManager.Operations.Job do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr done failed cancelled lost)
+  @states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked done failed cancelled lost)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   schema "jobs" do
@@ -30,6 +30,7 @@ defmodule PtcManager.Operations.Job do
     belongs_to :issue, PtcManager.Operations.Issue
     belongs_to :approval, PtcManager.Operations.Approval
     has_many :agent_runs, PtcManager.Operations.AgentRun
+    has_one :pr_publication, PtcManager.Operations.PrPublication
 
     timestamps(type: :utc_datetime_usec)
   end

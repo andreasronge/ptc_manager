@@ -7,7 +7,8 @@ After=network-online.target tailscaled.service
 Type=simple
 User=ptc-manager
 Group=ptc-manager
-SupplementaryGroups=ptc-manager-output
+SupplementaryGroups=ptc-manager-output ptc-manager-repo ptc-manager-publish
+UMask=0027
 WorkingDirectory=/opt/ptc_manager
 Environment=PHX_SERVER=true
 EnvironmentFile=/etc/ptc_manager/ptc_manager.env
@@ -18,7 +19,7 @@ TimeoutStopSec=30
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-output
+ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-output /var/lib/ptc_manager-publish
 
 [Install]
 WantedBy=multi-user.target

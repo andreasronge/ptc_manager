@@ -18,7 +18,8 @@ without replacing the user interface or GitHub integration.
    requests without an approval tied to the current GitHub version.
 2. GitHub is the source of truth for issues, pull requests, checks, and commits.
    PtcManager stores private summaries, approvals, execution state, and an audit
-   log; it does not turn GitHub labels into an internal job queue.
+   log; it does not turn GitHub labels into an internal job queue. An optional
+   `ptc:approved` label is a display-only projection and never grants authority.
 3. Simplified explanations are private. They may be cached in PtcManager but
    are never written to GitHub issues or pull requests.
 4. Model output is a proposal, not authority. Deterministic code validates
@@ -67,11 +68,14 @@ Each pull request shows:
 - expandable technical review evidence;
 - the exact reviewed head commit.
 
-The first product release supports **Approve for merge**, not automatic merge.
-The approval is bound to the pull request head SHA, base repository and ref,
-reviewed base SHA, and diff digest. A later release may add a merge executor
-that rechecks all of those values, required checks, mergeability, and review
-state immediately before merging.
+**Approve for merge** enables automatic merging once every required check is
+green. The approval is bound to the pull request head SHA, base repository and
+ref, reviewed base SHA, and diff digest. The merge executor rechecks all of
+those values, required checks, mergeability, and review state immediately
+before merging. Any code or effective-base change invalidates the approval.
+Transient checks may be retried without changing the approval; a code fix or
+conflict resolution creates a new reviewable version and requires approval
+again.
 
 ### Agent activity
 
@@ -146,6 +150,15 @@ Remote workers are not required for the first release. The protocol must not
 assume a shared filesystem, shared Herdr socket, or globally unique pane IDs.
 Coordinator job IDs and worker IDs provide global identity.
 
+Jobs are durable database records, not in-memory tasks. If no compatible agent
+or worker is available, work remains queued across coordinator and server
+restarts. A scheduler records why a job is waiting, its priority, next attempt,
+and retry count. Expired leases are reconciled before a job can be reassigned.
+CI repair and conflict-resolution jobs prefer the original agent and worktree;
+after a bounded affinity window they may be handed to another compatible agent
+with the prior run, PR, review, and failure context. Only one fenced lease may
+modify a branch at a time.
+
 ### Model adapters
 
 - Codex investigations run non-interactively with read-only repository access
@@ -172,6 +185,14 @@ dedicated branch, base, and permitted operation from that job and rejects every
 caller-supplied target or protected-branch write. No worker or model process
 receives the write credential.
 
+After a committed result passes local verification, publishing is automatic:
+the coordinator creates one durable, idempotent publish effect, revalidates the
+exact head and diff, pushes only that commit to the job-derived branch, and
+creates or reconciles one draft pull request. The user does not approve the push
+or PR creation. GitHub remains authoritative for the remote branch, PR, checks,
+conflicts, and merge result; PtcManager is authoritative for private approvals,
+queue leases, agent affinity, and its audit log.
+
 ### Web access
 
 The application binds to loopback on the Hetzner server and is exposed only to
@@ -191,6 +212,7 @@ The initial SQLite database contains:
 - `proposals`: immutable manager analyses and private simplified summaries;
 - `approvals`: immutable decisions bound to a proposal and source version;
 - `jobs`: durable requested work and state transitions;
+- `pr_publications`: idempotent, retryable branch-push and draft-PR effects;
 - `workers`: stable execution nodes, capabilities, and last heartbeat;
 - `agent_runs`: one execution attempt with worker-local Herdr identifiers;
 - `audit_events`: append-only actor, action, target, timestamp, and safe detail.
@@ -219,6 +241,8 @@ the worker protocol or UI concepts.
   check state are authoritative.
 - No model process receives the GitHub write credential.
 - All external effects are idempotent and carry an audit identity.
+- Labels and GitHub checks may reflect an approval, but the merge gate reads the
+  SHA-bound approval record rather than trusting a mutable label.
 
 ## Technology choice
 
@@ -271,6 +295,8 @@ GitHub mutation permission.
 - bounded local branch-result verification and GitHub-side PR reconciliation;
 - a GitHub App write broker limited to fenced branch pushes and draft-PR
   creation, with no credential exposed to workers or model processes;
+- durable publishing retries that survive a restart and wait safely when the
+  broker is unavailable;
 - failure, blocked, cancellation, and recovery controls;
 - optional additional worker registration using mutually authenticated HTTPS.
 
@@ -284,9 +310,10 @@ the complete execution history.
 - independent reviewer dispatch;
 - **Approve for merge** records bound to head SHA, base repository/ref,
   reviewed base SHA, and diff digest;
+- same-agent-first CI repair and merge-conflict resolution with fenced handoff;
+- automatic merge after approval when the approved version remains current and
+  every required check and review gate is green;
 - notifications for ready, blocked, failed, or stale work.
-
-Automatic merging remains a separately reviewed feature.
 
 ## Testing and review gates
 
@@ -301,7 +328,6 @@ Automatic merging remains a separately reviewed feature.
 ## Explicitly deferred
 
 - automatic issue closing or GitHub issue rewriting;
-- automatic PR merging;
 - public internet exposure;
 - GitHub webhooks;
 - multiple active coordinators or coordinator failover;

@@ -17,12 +17,13 @@ defmodule PtcManager.Operations do
     AuditEvent,
     Issue,
     Job,
+    PrPublication,
     Proposal,
     Repository,
     Worker
   }
 
-  @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr)
+  @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked)
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @topic "operations"
 
@@ -365,6 +366,23 @@ defmodule PtcManager.Operations do
             )
 
           if updated == 1 do
+            job = Repo.get!(Job, job_id)
+
+            %PrPublication{}
+            |> PrPublication.changeset(%{
+              job_id: job.id,
+              state: "queued",
+              idempotency_key: publication_key(job, result),
+              fencing_token: fencing_token,
+              branch_name: job.branch_name,
+              base_sha: result.base_sha,
+              head_sha: result.head_sha,
+              diff_digest: result.diff_digest,
+              attempt_count: 0,
+              next_attempt_at: now
+            })
+            |> Repo.insert!()
+
             insert_audit!(%{
               actor: "coordinator",
               action: "job.result_verified",
@@ -379,7 +397,7 @@ defmodule PtcManager.Operations do
               }
             })
 
-            Repo.get!(Job, job_id)
+            job
           else
             job = Repo.get!(Job, job_id)
 
@@ -471,13 +489,20 @@ defmodule PtcManager.Operations do
     proposals = latest_proposals(issue_ids)
     jobs = active_jobs(issue_ids)
     latest_jobs = latest_jobs(issue_ids)
+    publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
 
     Enum.map(issues, fn issue ->
       %{
         issue: issue,
         proposal: Map.get(proposals, issue.id),
         active_job: Map.get(jobs, issue.id),
-        latest_job: Map.get(latest_jobs, issue.id)
+        latest_job: Map.get(latest_jobs, issue.id),
+        publication:
+          publication_for_issue(
+            publications,
+            Map.get(jobs, issue.id),
+            Map.get(latest_jobs, issue.id)
+          )
       }
     end)
   end
@@ -679,6 +704,32 @@ defmodule PtcManager.Operations do
         (job.state == "verifying_result" and not is_nil(job.result_attempt_expires_at) and
            job.result_attempt_expires_at <= ^now)
     )
+  end
+
+  defp publication_key(job, result) do
+    "#{job.id}:#{job.fencing_token}:#{job.branch_name}:#{result.head_sha}:#{result.diff_digest}"
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp publications_for_jobs(jobs) do
+    job_ids = jobs |> Enum.reject(&is_nil/1) |> Enum.map(& &1.id) |> Enum.uniq()
+
+    case job_ids do
+      [] ->
+        %{}
+
+      ids ->
+        PrPublication
+        |> where([publication], publication.job_id in ^ids)
+        |> Repo.all()
+        |> Map.new(&{&1.job_id, &1})
+    end
+  end
+
+  defp publication_for_issue(publications, active_job, latest_job) do
+    job = active_job || latest_job
+    if job, do: Map.get(publications, job.id)
   end
 
   defp get_or_create_dispatch_worker!(worker_key, dispatch, now) do
