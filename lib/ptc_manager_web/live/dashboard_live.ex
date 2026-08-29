@@ -176,6 +176,9 @@ defmodule PtcManagerWeb.DashboardLive do
       {:error, :issue_workflow_not_ready} ->
         {:noreply, put_flash(socket, :error, "GitHub does not mark this issue ready.")}
 
+      {:error, :issue_dependencies_unresolved} ->
+        {:noreply, put_flash(socket, :error, "This issue still has an unresolved dependency.")}
+
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Approval failed: #{inspect(reason)}")}
     end
@@ -308,7 +311,10 @@ defmodule PtcManagerWeb.DashboardLive do
       ),
       do:
         fresh?(item) and not item.issue.workflow_label_conflict and
-          item.issue.workflow_label in [nil, "ptc:ready"]
+          item.issue.workflow_label in [nil, "ptc:ready"] and
+          item.issue.dependencies_projected and
+          not item.issue.dependency_overflow and
+          implementation_dependencies_resolved?(item.dependencies)
 
   def approvable?(_item), do: false
 
@@ -459,6 +465,35 @@ defmodule PtcManagerWeb.DashboardLive do
   def agent_publication?(%{publication: %{source: "agent"}}), do: true
   def agent_publication?(%{active_job: %{publication_source: "agent"}}), do: true
   def agent_publication?(_item), do: false
+
+  def agent_name(run) do
+    case run.agent_name do
+      name when is_binary(name) and name != "" -> name
+      _name -> "Agent"
+    end
+  end
+
+  def dependency_status(%{issue: nil}), do: "not synchronized"
+  def dependency_status(%{issue: %{state: "closed"}}), do: "completed"
+
+  def dependency_status(%{active_job: %{state: state}}),
+    do: job_label(state)
+
+  def dependency_status(%{issue: %{state: "open"}}), do: "open"
+
+  def dependencies_resolved?(dependencies) do
+    dependencies != [] and Enum.all?(dependencies, &match?(%{issue: %{state: "closed"}}, &1))
+  end
+
+  defp implementation_dependencies_resolved?(dependencies) do
+    Enum.all?(dependencies, &match?(%{issue: %{state: "closed"}}, &1))
+  end
+
+  def dependency_url(_repository, %{issue: %{html_url: html_url}}), do: html_url
+
+  def dependency_url(repository, %{number: number}) do
+    "https://github.com/#{repository.github_owner}/#{repository.github_name}/issues/#{number}"
+  end
 
   defp load_dashboard(socket) do
     assign(socket,

@@ -2,7 +2,7 @@ defmodule PtcManager.OperationsTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Approval, AuditEvent, Issue, Job}
+  alias PtcManager.Operations.{Approval, AuditEvent, Issue, IssueDependency, Job}
   alias PtcManager.Repo
 
   describe "approve_issue/2" do
@@ -88,6 +88,57 @@ defmodule PtcManager.OperationsTest do
 
       assert {:error, :issue_workflow_not_ready} =
                Operations.approve_issue(conflicting.id, "andreas")
+    end
+
+    test "does not approve an issue while a projected blocker remains open" do
+      repository = repository_fixture()
+      blocker = issue_fixture(repository, %{number: 81})
+      dependent = issue_fixture(repository, %{number: 82, workflow_label: "ptc:ready"})
+      proposal_fixture(dependent)
+
+      %IssueDependency{}
+      |> IssueDependency.changeset(%{
+        issue_id: dependent.id,
+        blocking_issue_id: blocker.id,
+        blocking_issue_number: blocker.number
+      })
+      |> Repo.insert!()
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(dependent.id, "andreas")
+
+      blocker |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+
+      assert {:ok, job} = Operations.approve_issue(dependent.id, "andreas")
+      assert job.state == "queued"
+    end
+
+    test "generic issue creation defaults to unprojected and cannot be approved" do
+      repository = repository_fixture()
+      number = System.unique_integer([:positive])
+      body = "Blocked by #999"
+      body_digest = digest(body)
+
+      assert {:ok, issue} =
+               Operations.create_issue(%{
+                 repository_id: repository.id,
+                 number: number,
+                 title: "Issue #{number}",
+                 html_url:
+                   "https://github.com/#{repository.github_owner}/#{repository.github_name}/issues/#{number}",
+                 body: body,
+                 state: "open",
+                 body_digest: body_digest,
+                 content_digest: digest("Issue #{number}:#{body_digest}"),
+                 github_updated_at: now()
+               })
+
+      proposal_fixture(issue)
+
+      refute issue.dependencies_projected
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(issue.id, "andreas")
     end
   end
 

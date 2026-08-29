@@ -43,6 +43,7 @@ defmodule PtcManager.HerdrSyncTest do
     assert worker.status == "online"
     assert run.role == "manager"
     assert run.state == "working"
+    assert run.agent_name == "Codex manager"
     assert run.external_key == "test:agent-123"
 
     Process.put(:herdr_result, {:ok, []})
@@ -227,7 +228,9 @@ defmodule PtcManager.HerdrSyncTest do
                %{
                  state: "open",
                  content_digest: second_issue.content_digest,
-                 github_updated_at: second_issue.github_updated_at
+                 github_updated_at: second_issue.github_updated_at,
+                 blocking_issue_numbers: [],
+                 dependency_overflow: false
                },
                60_000
              )

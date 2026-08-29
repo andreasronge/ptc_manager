@@ -178,7 +178,9 @@ defmodule PtcManager.WorktreesTest do
     remote = %{
       state: "open",
       content_digest: issue.content_digest,
-      github_updated_at: issue.github_updated_at
+      github_updated_at: issue.github_updated_at,
+      blocking_issue_numbers: [],
+      dependency_overflow: false
     }
 
     {repository, job, remote}

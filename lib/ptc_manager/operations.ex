@@ -17,6 +17,7 @@ defmodule PtcManager.Operations do
     Approval,
     AuditEvent,
     Issue,
+    IssueDependency,
     Job,
     MergeApproval,
     PrAnalysis,
@@ -522,6 +523,8 @@ defmodule PtcManager.Operations do
         job = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
+             :ok <- issue_dependencies_resolved(Repo, job.issue),
              {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, now),
              :ok <- dispatch_capacity_available(Repo, worker, capacity),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
@@ -650,6 +653,7 @@ defmodule PtcManager.Operations do
               job_id: job.id,
               role: "implementer",
               state: "working",
+              agent_name: Map.get(dispatch, :agent_name),
               status_text: "Implementing the approved issue in an isolated worktree.",
               started_at: now,
               last_heartbeat_at: now,
@@ -941,6 +945,7 @@ defmodule PtcManager.Operations do
     issue_ids = Enum.map(issues, & &1.id)
     proposals = latest_proposals(issue_ids)
     jobs = active_jobs(issue_ids)
+    dependencies = dashboard_dependencies(issue_ids, jobs)
     latest_jobs = latest_jobs(issue_ids)
     publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
     publication_ids = publications |> Map.values() |> Enum.map(& &1.id)
@@ -951,6 +956,7 @@ defmodule PtcManager.Operations do
     Enum.map(issues, fn issue ->
       %{
         issue: issue,
+        dependencies: Map.get(dependencies, issue.id, []),
         proposal: Map.get(proposals, issue.id),
         active_job: Map.get(jobs, issue.id),
         latest_job: Map.get(latest_jobs, issue.id),
@@ -1185,6 +1191,7 @@ defmodule PtcManager.Operations do
          %Proposal{} = proposal <- latest_proposal(repo, issue_id),
          :ok <- issue_is_open(issue),
          :ok <- issue_workflow_allows_implementation(issue),
+         :ok <- issue_dependencies_resolved(repo, issue),
          :ok <- proposal_is_ready(proposal),
          :ok <- proposal_matches_issue(proposal, issue) do
       {:ok, {issue, proposal}}
@@ -1923,6 +1930,48 @@ defmodule PtcManager.Operations do
   defp issue_workflow_allows_implementation(%Issue{}),
     do: {:error, :issue_workflow_not_ready}
 
+  defp issue_dependencies_resolved(_repo, %Issue{dependencies_projected: false}),
+    do: {:error, :issue_dependencies_unresolved}
+
+  defp issue_dependencies_resolved(_repo, %Issue{dependency_overflow: true}),
+    do: {:error, :issue_dependencies_unresolved}
+
+  defp issue_dependencies_resolved(repo, %Issue{} = issue) do
+    unresolved_count =
+      IssueDependency
+      |> where([dependency], dependency.issue_id == ^issue.id)
+      |> join(:left, [dependency], blocker in Issue,
+        on: blocker.id == dependency.blocking_issue_id
+      )
+      |> where([_dependency, blocker], is_nil(blocker.id) or blocker.state != "closed")
+      |> repo.aggregate(:count)
+
+    if unresolved_count == 0, do: :ok, else: {:error, :issue_dependencies_unresolved}
+  end
+
+  defp issue_dependency_projection_matches(
+         _repo,
+         %Issue{dependencies_projected: false},
+         _remote
+       ),
+       do: {:error, :issue_dependencies_unresolved}
+
+  defp issue_dependency_projection_matches(_repo, _issue, %{dependency_overflow: true}),
+    do: {:error, :issue_dependencies_unresolved}
+
+  defp issue_dependency_projection_matches(repo, issue, remote) do
+    projected_numbers =
+      IssueDependency
+      |> where([dependency], dependency.issue_id == ^issue.id)
+      |> order_by([dependency], asc: dependency.blocking_issue_number)
+      |> select([dependency], dependency.blocking_issue_number)
+      |> repo.all()
+
+    if projected_numbers == remote.blocking_issue_numbers,
+      do: :ok,
+      else: {:error, :issue_dependencies_unresolved}
+  end
+
   defp proposal_is_ready(%Proposal{readiness: "ready"}), do: :ok
   defp proposal_is_ready(%Proposal{}), do: {:error, :proposal_not_ready}
 
@@ -1966,6 +2015,23 @@ defmodule PtcManager.Operations do
     |> order_by([job], desc: job.inserted_at)
     |> Repo.all()
     |> Map.new(&{&1.issue_id, &1})
+  end
+
+  defp dashboard_dependencies([], _jobs), do: %{}
+
+  defp dashboard_dependencies(issue_ids, jobs) do
+    IssueDependency
+    |> where([dependency], dependency.issue_id in ^issue_ids)
+    |> order_by([dependency], asc: dependency.blocking_issue_number)
+    |> preload(:blocking_issue)
+    |> Repo.all()
+    |> Enum.group_by(& &1.issue_id, fn dependency ->
+      %{
+        number: dependency.blocking_issue_number,
+        issue: dependency.blocking_issue,
+        active_job: dependency.blocking_issue && Map.get(jobs, dependency.blocking_issue.id)
+      }
+    end)
   end
 
   defp latest_jobs([]), do: %{}

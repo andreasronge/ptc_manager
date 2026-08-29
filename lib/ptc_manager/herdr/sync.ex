@@ -133,7 +133,7 @@ defmodule PtcManager.Herdr.Sync do
       herdr_workspace: value(agent, ["workspace_id", "workspace"]),
       herdr_pane: pane,
       herdr_session: session,
-      agent_name: value(agent, ["name", "agent_name"])
+      agent_name: value(agent, ["display_agent", "name", "agent_name", "agent"])
     }
   end
 

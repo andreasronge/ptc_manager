@@ -4,7 +4,7 @@ defmodule PtcManager.DispatchTest do
   alias PtcManager.Dispatch
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentRun, AuditEvent, Job}
+  alias PtcManager.Operations.{AgentRun, AuditEvent, IssueDependency, Job}
   alias PtcManager.Repo
 
   defmodule FakeGitHub do
@@ -42,7 +42,8 @@ defmodule PtcManager.DispatchTest do
          workspace_id: "w-job",
          pane_id: "w-job:p1",
          session: "default",
-         external_key: "default:w-job:p1"
+         external_key: "default:w-job:p1",
+         agent_name: "impl_j1_f1"
        }}
     )
 
@@ -86,6 +87,7 @@ defmodule PtcManager.DispatchTest do
     assert working.repository_id == repository.id
     assert run.job_id == job.id
     assert run.fencing_token == 1
+    assert run.agent_name == "impl_j1_f1"
     assert run.herdr_workspace == "w-job"
     assert run.herdr_pane == "w-job:p1"
     assert Repo.aggregate(AgentRun, :count) == 1
@@ -108,6 +110,45 @@ defmodule PtcManager.DispatchTest do
     assert rejected.state == "cancelled"
     assert rejected.fencing_token == 0
     assert rejected.last_error == "stale_approval"
+  end
+
+  test "an unresolved dependency cancels a queued job before agent dispatch" do
+    {repository, issue, _proposal, job, remote} = approved_job_fixture()
+    blocker = issue_fixture(repository, %{number: issue.number + 1})
+
+    %IssueDependency{}
+    |> IssueDependency.changeset(%{
+      issue_id: issue.id,
+      blocking_issue_id: blocker.id,
+      blocking_issue_number: blocker.number
+    })
+    |> Repo.insert!()
+
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, :issue_dependencies_unresolved} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    refute_receive {:dispatch_context, _context}
+    assert Repo.get!(Job, job.id).state == "cancelled"
+  end
+
+  test "dispatch rejects a dependency projection that has not been synchronized" do
+    repository = repository_fixture()
+
+    remote =
+      remote_issue(System.unique_integer([:positive])) |> Map.put("body", "Blocked by #999")
+
+    issue = issue_fixture(repository, IssueSnapshot.normalize!(remote, repository.id))
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, :issue_dependencies_unresolved} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    refute_receive {:dispatch_context, _context}
+    assert Repo.get!(Job, job.id).state == "cancelled"
   end
 
   test "a GitHub read failure leaves the approved job queued" do
@@ -287,7 +328,7 @@ defmodule PtcManager.DispatchTest do
     Application.put_env(:ptc_manager, :dispatch_enabled, true)
     Application.delete_env(:ptc_manager, :herdr_run_as_user)
     Application.put_env(:ptc_manager, :herdr_timeout_ms, 500)
-    Application.put_env(:ptc_manager, :implementation_agent_start_timeout_ms, 1_500)
+    Application.put_env(:ptc_manager, :implementation_agent_start_timeout_ms, 3_000)
 
     repository = repository_fixture(%{local_path: repository_path})
     remote = remote_issue(unique)

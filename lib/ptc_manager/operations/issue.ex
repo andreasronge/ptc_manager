@@ -10,6 +10,8 @@ defmodule PtcManager.Operations.Issue do
     field :state, :string, default: "open"
     field :workflow_label, :string
     field :workflow_label_conflict, :boolean, default: false
+    field :dependency_overflow, :boolean, default: false
+    field :dependencies_projected, :boolean, default: false
     field :body_digest, :string
     field :content_digest, :string
     field :github_updated_at, :utc_datetime_usec
@@ -17,6 +19,7 @@ defmodule PtcManager.Operations.Issue do
     belongs_to :repository, PtcManager.Operations.Repository
     has_many :proposals, PtcManager.Operations.Proposal
     has_many :jobs, PtcManager.Operations.Job
+    has_many :dependencies, PtcManager.Operations.IssueDependency
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -32,6 +35,8 @@ defmodule PtcManager.Operations.Issue do
       :state,
       :workflow_label,
       :workflow_label_conflict,
+      :dependency_overflow,
+      :dependencies_projected,
       :body_digest,
       :content_digest,
       :github_updated_at

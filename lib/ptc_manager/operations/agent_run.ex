@@ -10,6 +10,7 @@ defmodule PtcManager.Operations.AgentRun do
     field :role, :string
     field :state, :string
     field :status_text, :string
+    field :agent_name, :string
     field :started_at, :utc_datetime_usec
     field :last_heartbeat_at, :utc_datetime_usec
     field :ended_at, :utc_datetime_usec
@@ -35,6 +36,7 @@ defmodule PtcManager.Operations.AgentRun do
       :role,
       :state,
       :status_text,
+      :agent_name,
       :started_at,
       :last_heartbeat_at,
       :ended_at,

@@ -161,6 +161,52 @@
             </span>
           </div>
 
+          <div
+            :if={
+              item.dependencies != [] or item.issue.dependency_overflow or
+                not item.issue.dependencies_projected
+            }
+            id={"issue-dependencies-#{item.issue.id}"}
+            class="mt-4 rounded-xl border border-amber-400/15 bg-amber-400/[0.05] p-4"
+          >
+            <p class="text-xs font-semibold uppercase tracking-wide text-amber-300">
+              Dependencies
+            </p>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <a
+                :for={dependency <- item.dependencies}
+                id={"issue-#{item.issue.id}-blocked-by-#{dependency.number}"}
+                href={dependency_url(item.issue.repository, dependency)}
+                target="_blank"
+                rel="noreferrer"
+                class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300 ring-1 ring-white/10 hover:bg-white/10"
+              >
+                Blocked by #{dependency.number} · {dependency_status(dependency)} ↗
+              </a>
+            </div>
+            <p
+              :if={not item.issue.dependencies_projected}
+              class="mt-3 text-xs text-amber-300"
+            >
+              Dependency state has not been synchronized yet. Run GitHub sync before approval.
+            </p>
+            <p
+              :if={item.issue.dependency_overflow}
+              class="mt-3 text-xs text-amber-300"
+            >
+              More than 100 blockers were declared. Simplify the dependency list before approval.
+            </p>
+            <p
+              :if={
+                item.issue.dependencies_projected and not item.issue.dependency_overflow and
+                  dependencies_resolved?(item.dependencies)
+              }
+              class="mt-3 text-xs text-teal-300"
+            >
+              All recorded blockers are complete. Run Prepare issue again before approval.
+            </p>
+          </div>
+
           <div :if={item.proposal} class="mt-5 grid gap-4 sm:grid-cols-2">
             <div class="rounded-xl bg-white/[0.035] p-4 sm:col-span-2">
               <p class="text-xs font-semibold uppercase tracking-wide text-teal-300">
@@ -632,8 +678,10 @@
         >
           <div class="flex items-start justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold">{run.worker.name}</p>
-              <p class="mt-0.5 text-xs capitalize text-slate-500">{run.role} agent</p>
+              <p class="text-sm font-semibold capitalize">{agent_name(run)}</p>
+              <p class="mt-0.5 text-xs text-slate-500">
+                {run.worker.name} · <span class="capitalize">{run.role} agent</span>
+              </p>
             </div>
             <span class={["rounded-full px-2.5 py-1 text-xs ring-1", state_classes(run.state)]}>
               {run.state}
@@ -722,9 +770,11 @@
                     <% end %>
                   </p>
                   <p class="mt-1 text-xs text-slate-600">
-                    {run.worker.name} · {elapsed(run.ended_at, run.started_at)} · ended {short_time(
-                      run.ended_at
-                    )}
+                    <span class="capitalize">{agent_name(run)}</span>
+                    · {run.worker.name} · {elapsed(
+                      run.ended_at,
+                      run.started_at
+                    )} · ended {short_time(run.ended_at)}
                   </p>
                 </div>
                 <span class={[

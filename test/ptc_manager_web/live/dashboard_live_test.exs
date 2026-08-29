@@ -2,7 +2,17 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, Job, MergeApproval, PrAnalysis, PrPublication}
+
+  alias PtcManager.Operations.{
+    AgentAction,
+    Issue,
+    IssueDependency,
+    Job,
+    MergeApproval,
+    PrAnalysis,
+    PrPublication
+  }
+
   alias PtcManager.Repo
 
   defmodule MergeApprovalClient do
@@ -158,6 +168,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
         job_id: job.id,
         role: "implementer",
         state: "working",
+        agent_name: "codex",
         status_text: "Tracing the failure envelope.",
         started_at: DateTime.add(now, -90, :second),
         last_heartbeat_at: now,
@@ -171,9 +182,121 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> live(~p"/")
 
     assert html =~ "Hetzner build one"
+    assert html =~ "codex"
     assert html =~ "Explain remote failures"
     assert html =~ "Tracing the failure envelope"
     assert html =~ "Working for"
+  end
+
+  test "shows linked dependency state and prompts re-review after completion", %{conn: conn} do
+    repository = repository_fixture()
+    blocker = issue_fixture(repository, %{number: 91, title: "Build the prerequisite"})
+
+    dependent =
+      issue_fixture(repository, %{
+        number: 92,
+        title: "Use the prerequisite",
+        workflow_label: "ptc:blocked"
+      })
+
+    proposal_fixture(dependent, %{readiness: "needs_information"})
+
+    dependency =
+      %IssueDependency{}
+      |> IssueDependency.changeset(%{
+        issue_id: dependent.id,
+        blocking_issue_id: blocker.id,
+        blocking_issue_number: blocker.number
+      })
+      |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-#{dependent.id}-blocked-by-#{blocker.number}",
+             "Blocked by ##{blocker.number} · open"
+           )
+
+    refute has_element?(view, "#issue-dependencies-#{dependent.id}", "All recorded blockers")
+
+    blocker |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+    Operations.notify_changed(:test)
+
+    assert has_element?(
+             view,
+             "#issue-#{dependent.id}-blocked-by-#{blocker.number}",
+             "Blocked by ##{blocker.number} · completed"
+           )
+
+    assert has_element?(
+             view,
+             "#issue-dependencies-#{dependent.id}",
+             "Run Prepare issue again before approval"
+           )
+
+    assert dependency.blocking_issue_id == blocker.id
+  end
+
+  test "keeps approval disabled while a structured blocker is open", %{conn: conn} do
+    repository = repository_fixture()
+    blocker = issue_fixture(repository, %{number: 93})
+    dependent = issue_fixture(repository, %{number: 94, workflow_label: "ptc:ready"})
+    proposal_fixture(dependent)
+
+    %IssueDependency{}
+    |> IssueDependency.changeset(%{
+      issue_id: dependent.id,
+      blocking_issue_id: blocker.id,
+      blocking_issue_number: blocker.number
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
+
+    blocker |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+    Operations.notify_changed(:test)
+
+    refute has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
+  end
+
+  test "shows dependency overflow and keeps approval disabled", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{dependency_overflow: true, workflow_label: "ptc:ready"})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-dependencies-#{issue.id}",
+             "More than 100 blockers were declared"
+           )
+
+    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+  end
+
+  test "shows an unsynchronized dependency projection and keeps approval disabled", %{conn: conn} do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        dependencies_projected: false,
+        workflow_label: "ptc:ready"
+      })
+
+    proposal_fixture(issue)
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-dependencies-#{issue.id}",
+             "Dependency state has not been synchronized yet"
+           )
+
+    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
   end
 
   test "shows only active agents and limits recent history to five ended runs", %{conn: conn} do

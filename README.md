@@ -14,8 +14,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - a responsive issue inbox with private plain-language summaries;
 - an **Approve and start** workflow backed by SQLite transactions;
 - one active implementation job per issue, enforced by the database;
-- a live agent-activity panel with worker, role, task, start time, elapsed time,
-  heartbeat, and Herdr identifiers;
+- a live agent-activity panel with agent name, worker, role, task, start time,
+  elapsed time, heartbeat, and Herdr identifiers, plus five recent ended runs;
 - password authentication, CSRF protection, and approval audit events;
 - deterministic demo data so the UI works without GitHub or model credentials;
 - manual or periodic read-only GitHub issue synchronization;
@@ -37,6 +37,10 @@ the approved execution, publication, worktree, and maintainer-action workflows:
   **PR retrospective**, and **Prepare merge decision** buttons;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
   `ptc:needs-decision` GitHub labels;
+- structured projection of canonical `Blocked by #<number>` issue dependencies,
+  with blocker links and status in the dashboard;
+- approval and dispatch checks that prevent unresolved dependencies from
+  starting implementation;
 - agent-action attempts, results, and elapsed time in the shared activity view.
 - private, phone-friendly PR summaries fenced by GitHub head and base SHAs;
 - an **Approve for merge** decision bound to the exact analyzed PR version;
@@ -141,6 +145,22 @@ catalog contains:
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
   verified diff still match. This increment records approval but does not merge.
+
+For issue dependencies, GitHub remains authoritative. Maintainer actions write
+the canonical `Blocked by #<number>` marker into the dependent issue and apply
+`ptc:blocked`. GitHub synchronization projects those markers into local
+dependency rows for display and safety checks. An unresolved or unknown blocker
+prevents approval; if it appears after approval, dispatch cancels that stale job
+before starting an agent. Closing every blocker does not auto-start the dependent
+issue: the dashboard asks the maintainer to run **Prepare issue** again and make
+a fresh approval decision. At most 100 dependency rows are projected per issue,
+and one repository sync performs at most 100 lookups for blockers that are not
+already known locally. An issue declaring more than 100 blockers gets a visible
+overflow warning and remains ineligible for approval until its dependency list
+is simplified. Definitive missing or pull-request references remain visible as
+**not synchronized** instead of failing the whole sync. Rows that predate this
+projection remain approval- and dispatch-ineligible until their first successful
+GitHub synchronization.
 
 Prepare merge decision is instructed to be read-only, but it currently shares
 the unrestricted authenticated maintainer-action runner. The result is fenced

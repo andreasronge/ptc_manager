@@ -373,7 +373,8 @@ the complete execution history.
 - use only mutually exclusive `ptc:ready`, `ptc:blocked`, and
   `ptc:needs-decision` labels. Rejected or outdated issues are closed rather
   than accumulating another label. Record dependencies visibly as
-  `Blocked by #<issue>` in the issue body or an approved comment;
+  `Blocked by #<issue>` in the issue body. Body-only markers keep projection
+  deterministic without requiring comment approval semantics;
 - never infer commands merely from a label. A PtcManager approval is the
   authority to dispatch implementation; the label is a concise GitHub view of
   the current issue state.
