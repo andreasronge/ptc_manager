@@ -2,6 +2,11 @@ import Config
 
 config :ptc_manager, :admin_password, "test-password"
 
+config :ptc_manager,
+  github_sync_interval_ms: 0,
+  herdr_sync_interval_ms: 0,
+  manager_enabled: false
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used

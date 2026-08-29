@@ -27,6 +27,17 @@ defmodule PtcManager.Operations do
 
   def subscribe, do: Phoenix.PubSub.subscribe(PtcManager.PubSub, @topic)
 
+  def notify_changed(source) do
+    Phoenix.PubSub.broadcast(PtcManager.PubSub, @topic, {:operations_changed, source})
+  end
+
+  def list_repositories,
+    do: Repository |> order_by([repository], asc: repository.id) |> Repo.all()
+
+  def get_repository!(id), do: Repo.get!(Repository, id)
+
+  def get_issue!(id), do: Issue |> preload(:repository) |> Repo.get!(id)
+
   def create_repository(attrs),
     do: %Repository{} |> Repository.changeset(attrs) |> Repo.insert() |> broadcast_change()
 
@@ -191,7 +202,7 @@ defmodule PtcManager.Operations do
   defp normalize_approval_result({:error, _step, reason, _changes}), do: {:error, reason}
 
   defp broadcast_change({:ok, record} = result) do
-    Phoenix.PubSub.broadcast(PtcManager.PubSub, @topic, {:operations_changed, record.__struct__})
+    notify_changed(record.__struct__)
     result
   end
 

@@ -3,7 +3,7 @@ defmodule PtcManager.Operations.AgentRun do
   import Ecto.Changeset
 
   @roles ~w(manager implementer reviewer)
-  @states ~w(queued starting working idle blocked done failed lost)
+  @states ~w(queued starting working idle blocked unknown done failed lost)
   @terminal_states ~w(done failed lost)
 
   schema "agent_runs" do
@@ -16,6 +16,7 @@ defmodule PtcManager.Operations.AgentRun do
     field :herdr_workspace, :string
     field :herdr_pane, :string
     field :herdr_session, :string
+    field :external_key, :string
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
@@ -36,7 +37,8 @@ defmodule PtcManager.Operations.AgentRun do
       :ended_at,
       :herdr_workspace,
       :herdr_pane,
-      :herdr_session
+      :herdr_session,
+      :external_key
     ])
     |> validate_required([:worker_id, :role, :state, :started_at, :last_heartbeat_at])
     |> validate_inclusion(:role, @roles)

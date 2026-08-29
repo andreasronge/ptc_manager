@@ -6,6 +6,7 @@ defmodule PtcManager.Operations.Issue do
     field :number, :integer
     field :title, :string
     field :html_url, :string
+    field :body, :string, default: ""
     field :state, :string, default: "open"
     field :body_digest, :string
     field :content_digest, :string
@@ -25,6 +26,7 @@ defmodule PtcManager.Operations.Issue do
       :number,
       :title,
       :html_url,
+      :body,
       :state,
       :body_digest,
       :content_digest,

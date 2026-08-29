@@ -7,6 +7,10 @@ defmodule PtcManager.Operations.Repository do
     field :github_name, :string
     field :default_branch, :string, default: "main"
     field :enabled, :boolean, default: true
+    field :local_path, :string
+    field :sync_status, :string, default: "never"
+    field :last_synced_at, :utc_datetime_usec
+    field :last_sync_error, :string
 
     has_many :issues, PtcManager.Operations.Issue
     has_many :jobs, PtcManager.Operations.Job
@@ -16,8 +20,18 @@ defmodule PtcManager.Operations.Repository do
 
   def changeset(repository, attrs) do
     repository
-    |> cast(attrs, [:github_owner, :github_name, :default_branch, :enabled])
+    |> cast(attrs, [
+      :github_owner,
+      :github_name,
+      :default_branch,
+      :enabled,
+      :local_path,
+      :sync_status,
+      :last_synced_at,
+      :last_sync_error
+    ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
+    |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
     |> unique_constraint([:github_owner, :github_name])
   end
 end

@@ -1,0 +1,1 @@
+ptc-manager ALL=(ptc-manager-codex) NOPASSWD: /usr/local/bin/codex

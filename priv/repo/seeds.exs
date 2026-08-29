@@ -9,7 +9,8 @@ if Repo.aggregate(Repository, :count) == 0 do
     Operations.create_repository(%{
       github_owner: "andreasronge",
       github_name: "ptc_runner",
-      default_branch: "main"
+      default_branch: "main",
+      local_path: System.get_env("PTC_REPOSITORY_PATH")
     })
 
   issue_attrs = fn number, title, minutes_ago ->
@@ -21,6 +22,7 @@ if Repo.aggregate(Repository, :count) == 0 do
       number: number,
       title: title,
       html_url: "https://github.com/andreasronge/ptc_runner/issues/#{number}",
+      body: "Demo issue body for local interface testing.",
       state: "open",
       body_digest: body_digest,
       content_digest:

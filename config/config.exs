@@ -9,7 +9,16 @@ import Config
 
 config :ptc_manager,
   ecto_repos: [PtcManager.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  github_client: PtcManager.GitHub.Client,
+  repository_path: nil,
+  github_sync_interval_ms: 0,
+  herdr_client: PtcManager.Herdr.Client,
+  herdr_sync_interval_ms: 0,
+  manager_adapter: PtcManager.Manager.CodexAdapter,
+  manager_concurrency: 1,
+  manager_output_dir: nil,
+  manager_enabled: false
 
 # Configures the endpoint
 config :ptc_manager, PtcManagerWeb.Endpoint,

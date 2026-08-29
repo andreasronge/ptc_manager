@@ -20,6 +20,32 @@ if System.get_env("PHX_SERVER") do
   config :ptc_manager, PtcManagerWeb.Endpoint, server: true
 end
 
+github_sync_interval_ms =
+  System.get_env("PTC_GITHUB_SYNC_INTERVAL_MS", "0") |> String.to_integer()
+
+herdr_sync_interval_ms =
+  System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
+
+config :ptc_manager,
+  github_read_token: System.get_env("GITHUB_READ_TOKEN"),
+  repository_path: System.get_env("PTC_REPOSITORY_PATH"),
+  github_sync_interval_ms: github_sync_interval_ms,
+  herdr_sync_interval_ms: herdr_sync_interval_ms,
+  herdr_session: System.get_env("PTC_HERDR_SESSION", "default"),
+  herdr_binary: System.get_env("PTC_HERDR_BINARY", "herdr"),
+  herdr_socket_path: System.get_env("PTC_HERDR_SOCKET_PATH"),
+  herdr_timeout_ms: System.get_env("PTC_HERDR_TIMEOUT_MS", "15000") |> String.to_integer(),
+  herdr_stale_after_ms:
+    System.get_env("PTC_HERDR_STALE_AFTER_MS", "60000") |> String.to_integer(),
+  manager_enabled: System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
+  manager_concurrency:
+    System.get_env("PTC_CODEX_MANAGER_CONCURRENCY", "1") |> String.to_integer(),
+  codex_binary: System.get_env("PTC_CODEX_BINARY", "codex"),
+  codex_run_as_user: System.get_env("PTC_CODEX_RUN_AS_USER"),
+  manager_output_dir: System.get_env("PTC_CODEX_OUTPUT_DIR"),
+  manager_timeout_ms:
+    System.get_env("PTC_CODEX_MANAGER_TIMEOUT_MS", "120000") |> String.to_integer()
+
 if config_env() == :prod do
   raw_admin_password = System.get_env("PTC_MANAGER_PASSWORD")
 

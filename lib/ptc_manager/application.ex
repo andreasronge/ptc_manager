@@ -14,6 +14,10 @@ defmodule PtcManager.Application do
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
       {DNSCluster, query: Application.get_env(:ptc_manager, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: PtcManager.PubSub},
+      {Task.Supervisor, name: PtcManager.TaskSupervisor},
+      PtcManager.Manager.Gate,
+      PtcManager.GitHub.Poller,
+      PtcManager.Herdr.Poller,
       # Start a worker by calling: PtcManager.Worker.start_link(arg)
       # {PtcManager.Worker, arg},
       # Start to serve requests, typically the last entry

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plain_summary",
+    "why_it_matters",
+    "scope",
+    "risk",
+    "readiness",
+    "technical_evidence"
+  ],
+  "properties": {
+    "plain_summary": {"type": "string"},
+    "why_it_matters": {"type": "string"},
+    "scope": {"type": "string", "enum": ["small", "medium", "large"]},
+    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "readiness": {
+      "type": "string",
+      "enum": ["ready", "needs_information", "needs_breakdown", "outdated", "duplicate"]
+    },
+    "technical_evidence": {"type": "string"}
+  }
+}
