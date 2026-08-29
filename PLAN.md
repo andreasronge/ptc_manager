@@ -23,7 +23,9 @@ without replacing the user interface or GitHub integration.
 3. Simplified explanations are private. They may be cached in PtcManager but
    are never written to GitHub issues or pull requests.
 4. Model output is a proposal, not authority. Deterministic code validates
-   state transitions and performs any external write.
+   state transitions. An implementation agent may push only its approved work
+   branch and open its pull request through a narrowly scoped `gh` identity; it
+   may not merge, rewrite issues, or change workflow policy.
 5. Public issue, pull-request, and comment text is untrusted data. It cannot
    grant tools, reveal secrets, or change policy.
 6. The manager, implementer, and reviewer are separate roles. An implementation
@@ -88,6 +90,12 @@ The dashboard shows every known agent with:
 - start time, elapsed time, and last heartbeat;
 - Herdr workspace, pane, and session when available;
 - a link to the related work item and recent bounded status text.
+
+It also shows each worker's currently advertised implementation capacity and
+its worktree allocations: active owner, issue or PR, lifecycle state, age, and
+whether the allocation is safe to reclaim. Capacity disappearing because a
+worker or agent misses a heartbeat is shown as degraded availability, not as a
+cleanup instruction.
 
 The interface distinguishes `lost` from `failed`: a worker that stops sending
 heartbeats has an unknown outcome until the coordinator reconciles Herdr and
@@ -159,6 +167,23 @@ after a bounded affinity window they may be handed to another compatible agent
 with the prior run, PR, review, and failure context. Only one fenced lease may
 modify a branch at a time.
 
+Each worker also advertises its healthy, implementation-capable agent slots.
+That advertised capacity determines the worker's worktree limit; the product
+does not hard-code a fixed number of worktrees. A worker never creates more
+simultaneous implementation worktrees than it has usable implementation slots,
+and a transient loss of capacity never authorizes deletion of active work.
+
+Worktrees have an explicit lifecycle: `active` while an agent owns them, `warm`
+after a verified PR exists, `reclaimable` when the clean local HEAD exactly
+matches the GitHub PR branch, and `terminal` after the PR is merged or closed.
+Terminal worktrees are removed promptly. When all current slots are occupied,
+the least-recently-used reclaimable worktree may be removed before a new one is
+created. Active worktrees are never removed, and a dirty worktree or one without
+a verified remote PR is retained and marked for attention. If no allocation is
+safe to reclaim, the next job remains durably queued. Repair work can recreate
+a worktree from the authoritative PR branch while retaining same-agent
+preference.
+
 ### Model adapters
 
 - Codex investigations run non-interactively with read-only repository access
@@ -170,28 +195,34 @@ modify a branch at a time.
   coordinator so the manager can recover even when the target repository or a
   model provider is broken.
 
-### GitHub adapter
+### GitHub workflow
 
 Version one polls GitHub instead of exposing a webhook endpoint. At the current
 backlog size this is simpler to operate and lets the web server remain private.
 
-The initial GitHub credential is read-only. Before issue updates, branch pushes,
-pull-request creation, or merging are implemented, introduce a GitHub App and a
-separate write broker with narrowly scoped, short-lived tokens. Workers and
-model processes never choose write targets or call the broker. A worker reports
-its bounded result to the coordinator; the coordinator derives a fenced,
-idempotent effect from the approved job. The broker loads the repository,
-dedicated branch, base, and permitted operation from that job and rejects every
-caller-supplied target or protected-branch write. No worker or model process
-receives the write credential.
+The initial manager credential is read-only. An implementation worker uses a
+separate, narrowly scoped `gh` identity that can push branches and create pull
+requests only in configured repositories. The generated implementation command
+names the approved repository, issue, and job-derived branch; tells the agent to
+run the configured tests and independent review-and-fix passes; then instructs
+it to push and create or reconcile one pull request. It explicitly forbids
+merging and unrelated GitHub mutation.
 
-After a committed result passes local verification, publishing is automatic:
-the coordinator creates one durable, idempotent publish effect, revalidates the
-exact head and diff, pushes only that commit to the job-derived branch, and
-creates or reconciles one draft pull request. The user does not approve the push
-or PR creation. GitHub remains authoritative for the remote branch, PR, checks,
+The normal path is therefore agent-owned Git work, not coordinator-owned
+publishing. The agent reports the PR URL and exact head SHA. PtcManager then
+reconciles those claims directly with GitHub and accepts success only when the
+repository, issue, branch, base, and commit match the approved job. Repeated
+execution must find and update the existing job PR rather than create a
+duplicate. GitHub remains authoritative for the remote branch, PR, checks,
 conflicts, and merge result; PtcManager is authoritative for private approvals,
-queue leases, agent affinity, and its audit log.
+review policy, queue leases, worktree allocation, agent affinity, and its audit
+log.
+
+The pre-PR quality policy is repository-configurable. Its initial default is
+two independent review-and-fix passes, but the required count, reviewer tools,
+test commands, and clean-review requirement are stored as policy rather than
+embedded in prompts or code. PtcManager records and verifies bounded review
+evidence before presenting the resulting PR as ready for a merge decision.
 
 ### Web access
 
@@ -212,7 +243,10 @@ The initial SQLite database contains:
 - `proposals`: immutable manager analyses and private simplified summaries;
 - `approvals`: immutable decisions bound to a proposal and source version;
 - `jobs`: durable requested work and state transitions;
-- `pr_publications`: idempotent, retryable branch-push and draft-PR effects;
+- `pr_publications`: existing disabled recovery records reserved for a future
+  failed-push recovery mechanism, not the normal publishing path;
+- `worktree_allocations`: worker-local paths, lifecycle state, ownership,
+  verified PR/head, last use, and reclaimability evidence;
 - `workers`: stable execution nodes, capabilities, and last heartbeat;
 - `agent_runs`: one execution attempt with worker-local Herdr identifiers;
 - `audit_events`: append-only actor, action, target, timestamp, and safe detail.
@@ -239,7 +273,9 @@ the worker protocol or UI concepts.
   reviewed base SHA, or diff digest changes.
 - Agent status never proves that work succeeded; GitHub branch, PR, review, and
   check state are authoritative.
-- No model process receives the GitHub write credential.
+- An implementation agent receives only the repository-scoped GitHub capability
+  needed to push its job branch and create or update its PR; it never receives
+  merge authority.
 - All external effects are idempotent and carry an audit identity.
 - Labels and GitHub checks may reflect an approval, but the merge gate reads the
   SHA-bound approval record rather than trusting a mutable label.
@@ -290,13 +326,16 @@ GitHub mutation permission.
 ### Slice 3: approved implementation dispatch
 
 - turn an approved job into a Herdr worktree and implementation agent;
-- bounded concurrency and worker leases;
+- derive bounded concurrency and worktree capacity from each worker's healthy,
+  implementation-capable agent slots;
+- manage active, warm, reclaimable, and terminal worktrees, including safe
+  cleanup and reconstruction from a verified PR branch;
 - fencing tokens on worker state and external effects;
-- bounded local branch-result verification and GitHub-side PR reconciliation;
-- a GitHub App write broker limited to fenced branch pushes and draft-PR
-  creation, with no credential exposed to workers or model processes;
-- durable publishing retries that survive a restart and wait safely when the
-  broker is unavailable;
+- generate an implementation command that fixes the approved issue, runs tests,
+  completes the configured independent review-and-fix passes, pushes through
+  the worker's scoped `gh` identity, and creates or reconciles one PR;
+- bounded local branch-result and review-evidence verification plus GitHub-side
+  PR reconciliation;
 - failure, blocked, cancellation, and recovery controls;
 - optional additional worker registration using mutually authenticated HTTPS.
 
@@ -328,6 +367,8 @@ the complete execution history.
 ## Explicitly deferred
 
 - automatic issue closing or GitHub issue rewriting;
+- automatic recovery when an agent commits successfully but fails to push or
+  create its PR;
 - public internet exposure;
 - GitHub webhooks;
 - multiple active coordinators or coordinator failover;
