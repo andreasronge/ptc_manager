@@ -5,6 +5,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   alias PtcManager.Herdr.Command
 
+  @agent_start_command_grace_ms 5_000
+
   @impl true
   def dispatch(%{job: job, issue: issue, repository: repository}) do
     with :ok <- enabled?(),
@@ -100,19 +102,23 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
     agent_args = Application.get_env(:ptc_manager, :implementation_agent_args, ["--full-auto"])
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
+    command_timeout = timeout + @agent_start_command_grace_ms
 
-    case run([
-           "agent",
-           "start",
-           name,
-           "--kind",
-           kind,
-           "--pane",
-           pane_id,
-           "--timeout",
-           to_string(timeout),
-           "--" | agent_args
-         ]) do
+    case run(
+           [
+             "agent",
+             "start",
+             name,
+             "--kind",
+             kind,
+             "--pane",
+             pane_id,
+             "--timeout",
+             to_string(timeout),
+             "--" | agent_args
+           ],
+           command_timeout
+         ) do
       {:ok, output} -> {:ok, decode_agent_key(output, pane_id)}
       {:error, reason} -> {:error, reason}
     end
@@ -198,7 +204,5 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   defp agent_name(job), do: "impl_j#{job.id}_f#{job.fencing_token}"
 
-  defp run(args) do
-    Command.run(args)
-  end
+  defp run(args, timeout \\ nil), do: Command.run(args, timeout)
 end

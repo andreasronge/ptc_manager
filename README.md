@@ -305,7 +305,10 @@ the session owner, and configure the coordinator with
 socket or CLI path with which to prompt or control the observed session. Keep
 `PTC_DISPATCH_ENABLED=false` while using this mode.
 
-The CLI is bounded by `PTC_HERDR_TIMEOUT_MS`; after
+Ordinary Herdr CLI calls are bounded by `PTC_HERDR_TIMEOUT_MS`. Agent startup
+instead uses Herdr's `PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS` readiness
+limit plus five seconds for the outer command to return its result; the generic
+timeout must not cut that longer startup wait short. After
 `PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
 shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After

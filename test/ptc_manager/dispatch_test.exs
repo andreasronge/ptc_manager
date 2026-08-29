@@ -232,6 +232,89 @@ defmodule PtcManager.DispatchTest do
     assert {:ok, "w12", "w12:p1"} = PtcManager.Dispatch.HerdrAdapter.decode_worktree(output)
   end
 
+  test "agent startup may outlive the generic Herdr command timeout" do
+    unique = System.unique_integer([:positive])
+    test_root = Path.join(System.tmp_dir!(), "ptc-manager-slow-herdr-#{unique}")
+    repository_path = Path.join(test_root, "repository")
+    fake_herdr = Path.join(test_root, "herdr")
+
+    File.mkdir_p!(repository_path)
+
+    File.write!(
+      fake_herdr,
+      """
+      #!/bin/sh
+      case "$*" in
+        *"worktree create"*)
+          printf '%s' '{"result":{"workspace":{"workspace_id":"w-slow"},"root_pane":{"pane_id":"w-slow:p1"}}}'
+          ;;
+        *"agent start"*)
+          sleep 1
+          printf '%s' '{"result":{"agent":{"agent_session":{"value":"impl-slow"}}}}'
+          ;;
+        *"agent prompt"*)
+          printf '%s' '{"result":{}}'
+          ;;
+        *)
+          exit 2
+          ;;
+      esac
+      """
+    )
+
+    File.chmod!(fake_herdr, 0o700)
+
+    keys = [
+      :dispatch_enabled,
+      :herdr_binary,
+      :herdr_run_as_user,
+      :herdr_timeout_ms,
+      :implementation_agent_start_timeout_ms
+    ]
+
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, nil} -> Application.delete_env(:ptc_manager, key)
+        {key, value} -> Application.put_env(:ptc_manager, key, value)
+      end)
+
+      File.rm_rf!(test_root)
+    end)
+
+    Application.put_env(:ptc_manager, :herdr_binary, fake_herdr)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.delete_env(:ptc_manager, :herdr_run_as_user)
+    Application.put_env(:ptc_manager, :herdr_timeout_ms, 500)
+    Application.put_env(:ptc_manager, :implementation_agent_start_timeout_ms, 1_500)
+
+    repository = repository_fixture(%{local_path: repository_path})
+    remote = remote_issue(unique)
+    issue = issue_fixture(repository, IssueSnapshot.normalize!(remote, repository.id))
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    assert {:ok, leased} =
+             Operations.lease_job(
+               job.id,
+               "herdr:default",
+               IssueSnapshot.normalize!(remote, repository.id),
+               60_000
+             )
+
+    assert {:ok, dispatch} =
+             PtcManager.Dispatch.HerdrAdapter.dispatch(%{
+               job: leased,
+               issue: leased.issue,
+               repository: leased.repository
+             })
+
+    assert dispatch.workspace_id == "w-slow"
+    assert dispatch.pane_id == "w-slow:p1"
+    assert dispatch.external_key == "default:impl-slow"
+  end
+
   test "builds the configurable test, prompt-only review, and broker contract" do
     repository =
       repository_fixture(%{
