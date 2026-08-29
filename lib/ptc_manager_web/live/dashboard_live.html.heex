@@ -189,8 +189,27 @@
               :if={item.active_job}
               class="rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm text-sky-300"
             >
-              Job {item.active_job.state}
+              Job {job_label(item.active_job.state)}
             </span>
+            <button
+              :if={
+                item.active_job &&
+                  item.active_job.state in ["awaiting_reconciliation", "verifying_result"]
+              }
+              id={"reconcile-job-#{item.active_job.id}"}
+              phx-click="reconcile-result"
+              phx-value-job-id={item.active_job.id}
+              disabled={reconciling_result?(@reconciling_results, item.active_job.id)}
+              class="rounded-xl bg-white/10 px-4 py-2.5 text-sm font-semibold text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
+            >
+              {if reconciling_result?(@reconciling_results, item.active_job.id),
+                do: "Checking branch…",
+                else:
+                  if(item.active_job.state == "verifying_result",
+                    do: "Check verification status",
+                    else: "Check committed branch"
+                  )}
+            </button>
             <span
               :if={!item.active_job && item.latest_job}
               class={[
@@ -211,6 +230,28 @@
               Summary is stale
             </span>
           </div>
+          <div
+            :if={item.active_job && item.active_job.state == "ready_for_pr"}
+            class="mt-4 rounded-xl border border-teal-400/20 bg-teal-400/[0.06] p-4 text-sm"
+          >
+            <p class="font-semibold text-teal-300">Ready for a draft PR</p>
+            <p class="mt-1 text-slate-400">
+              {item.active_job.result_commit_count} committed change(s) verified against <span class="font-mono">{String.slice(item.active_job.result_base_sha, 0, 8)}</span>.
+              Head <span class="font-mono">{String.slice(item.active_job.result_head_sha, 0, 8)}</span>.
+            </p>
+            <p class="mt-2 text-xs text-slate-500">
+              GitHub is still unchanged; the credential-isolated draft-PR broker is the next gate.
+            </p>
+          </div>
+          <p
+            :if={
+              item.active_job && item.active_job.state == "awaiting_reconciliation" &&
+                item.active_job.last_error
+            }
+            class="mt-3 text-xs text-amber-300"
+          >
+            Branch verification is pending. You can retry safely; no GitHub write has occurred.
+          </p>
           <p
             :if={!item.active_job && item.latest_job && item.latest_job.last_error}
             class="mt-3 text-xs text-rose-300"

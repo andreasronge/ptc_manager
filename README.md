@@ -4,8 +4,8 @@ PtcManager is a private maintainer console for reviewing GitHub work, approving
 agent jobs, and seeing what Codex or Claude agents are doing and how long they
 have been running.
 
-The current Slice 3 dispatch increment keeps GitHub read-only while adding the
-first approved execution path:
+The current Slice 3 increment keeps GitHub read-only while adding the approved
+execution path and its local result-verification gate:
 
 - a responsive issue inbox with private plain-language summaries;
 - an **Approve and start** workflow backed by SQLite transactions;
@@ -16,15 +16,18 @@ first approved execution path:
 - deterministic demo data so the UI works without GitHub or model credentials;
 - manual or periodic read-only GitHub issue synchronization;
 - read-only Herdr agent reconciliation with lost-agent detection;
-- optional private Codex investigations in an ephemeral read-only sandbox.
+- optional private Codex investigations in an ephemeral read-only sandbox;
 - synchronous GitHub freshness checks immediately before dispatch;
 - durable worker leases and monotonically increasing fencing tokens;
 - isolated Herdr worktrees and named Codex or Claude implementation agents;
-- safe failure and lost-lease states visible in the dashboard.
+- safe failure and lost-lease states visible in the dashboard;
+- bounded, credential-free verification of a non-empty committed branch diff;
+- fenced reconciliation claims that are safe to retry after interruption;
+- verified base, head, commit count, and diff digest visible before any PR write.
 
 Dispatch is disabled by default. This increment does **not** push branches,
 create pull requests, close issues, or write to GitHub. A credential-isolated
-draft-PR broker and branch reconciliation remain before Slice 3 is complete.
+draft-PR broker and GitHub-side PR reconciliation remain before Slice 3 is complete.
 See [PLAN.md](PLAN.md).
 
 ## Run locally
@@ -129,13 +132,19 @@ sudo groupadd --system ptc-manager
 sudo groupadd --system ptc-manager-codex
 sudo groupadd --system ptc-manager-output
 sudo groupadd --system ptc-manager-worker
+sudo groupadd --system ptc-manager-repo
 sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager
-sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager-codex
-sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --shell /usr/sbin/nologin ptc-manager-worker
+sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output,ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-codex
+sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-worker
+sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_manager-codex
 sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
+sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
+sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner
+sudo chmod -R g+rX,o-rwx /srv/ptc_runner
+sudo find /srv/ptc_runner -type d -exec chmod g+s {} +
 sudo install -d -o root -g root -m 0755 /etc/ptc_manager
 sudo install -o root -g root -m 0644 deploy/ptc_manager.service /etc/systemd/system/ptc_manager.service
 sudo install -o root -g root -m 0644 deploy/ptc_manager-herdr.service /etc/systemd/system/ptc_manager-herdr.service
@@ -154,23 +163,33 @@ sudo systemctl enable --now ptc_manager-herdr ptc_manager
 sudo systemctl status ptc_manager
 ```
 
-The coordinator, implementation worker, and private manager run as three
-different OS identities. Herdr and implementation agents run as
+The coordinator, implementation worker, private manager, and Git verifier run
+as four different OS identities. Herdr and implementation agents run as
 `ptc-manager-worker`; that account must not have a GitHub token or authenticated
 `gh` session. Private read-only manager investigations run as
-`ptc-manager-codex`. Neither account can read the root-only coordinator
-environment or inspect its process. Authenticate the two agent accounts:
+`ptc-manager-codex`. Bounded branch verification runs as
+`ptc-manager-verifier` with an empty environment and no credentials. None of
+these accounts can read the root-only coordinator environment or inspect its
+process. Authenticate the two agent accounts:
 
 ```sh
 sudo -u ptc-manager-codex -H codex login
 sudo -u ptc-manager-worker -H codex login
 ```
 
-The checkout at `PTC_REPOSITORY_PATH` must be readable by
-`ptc-manager-codex`, but it does not need to be writable. The two accounts share
-only the setgid `ptc-manager-output` directory at `PTC_CODEX_OUTPUT_DIR`; the
+The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
+The `ptc-manager-repo` group gives the manager and verifier read/execute access
+without write access. The coordinator never reads the worker-controlled Git
+repository directly. The coordinator and private manager share only the setgid
+`ptc-manager-output` directory at `PTC_CODEX_OUTPUT_DIR`; the
 coordinator database directory is `0700`, and the coordinator creates each
 `0660` output file before launching Codex.
+
+The verifier runs each fixed Git command with an empty environment, a wall-clock
+timeout, a Linux address-space limit, and preflight limits for commits, changed
+paths, individual blobs, total blob bytes, and generated diff bytes. A result
+outside those limits remains pending for maintainer review; it never becomes PR
+eligible automatically.
 
 Use the same Herdr session name in the coordinator and dedicated Herdr service.
 The coordinator selects it with Herdr's explicit `--session` option after

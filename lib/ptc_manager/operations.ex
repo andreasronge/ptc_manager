@@ -22,7 +22,7 @@ defmodule PtcManager.Operations do
     Worker
   }
 
-  @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation)
+  @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr)
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @topic "operations"
 
@@ -61,6 +61,51 @@ defmodule PtcManager.Operations do
     |> limit(1)
     |> preload([:approval, :issue, :repository])
     |> Repo.one()
+  end
+
+  def claim_next_result_job do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    candidate =
+      Job
+      |> eligible_result_jobs(now)
+      |> order_by([job], asc: job.result_checked_at, asc: job.inserted_at, asc: job.id)
+      |> limit(1)
+      |> Repo.one()
+
+    case candidate do
+      nil -> {:ok, nil}
+      job -> claim_result_job(job.id, now)
+    end
+  end
+
+  def claim_result_job(job_id, now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond))
+      when is_integer(job_id) do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    timeout_ms = Application.get_env(:ptc_manager, :result_claim_timeout_ms, 180_000)
+    expires_at = DateTime.add(now, timeout_ms, :millisecond)
+
+    {updated, _rows} =
+      Job
+      |> where([job], job.id == ^job_id)
+      |> eligible_result_jobs(now)
+      |> Repo.update_all(
+        set: [
+          state: "verifying_result",
+          result_attempt_token: token,
+          result_attempt_expires_at: expires_at,
+          result_checked_at: now,
+          updated_at: now
+        ]
+      )
+
+    if updated == 1 do
+      job = Job |> preload([:issue, :repository]) |> Repo.get!(job_id)
+      notify_changed(__MODULE__)
+      {:ok, job}
+    else
+      {:error, :result_already_claimed}
+    end
   end
 
   def expire_job_leases(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
@@ -287,6 +332,133 @@ defmodule PtcManager.Operations do
     end
   end
 
+  def mark_result_verified(job_id, fencing_token, attempt_token, result)
+      when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) and
+             is_map(result) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      if valid_result_fields?(result) do
+        Repo.transaction(fn ->
+          {updated, _rows} =
+            Job
+            |> where(
+              [job],
+              job.id == ^job_id and job.state == "verifying_result" and
+                job.fencing_token == ^fencing_token and
+                job.result_attempt_token == ^attempt_token and
+                not is_nil(job.result_attempt_expires_at) and
+                job.result_attempt_expires_at > ^now
+            )
+            |> Repo.update_all(
+              set: [
+                state: "ready_for_pr",
+                result_base_sha: result.base_sha,
+                result_head_sha: result.head_sha,
+                result_diff_digest: result.diff_digest,
+                result_commit_count: result.commit_count,
+                result_verified_at: now,
+                result_attempt_expires_at: nil,
+                last_error: nil,
+                updated_at: now
+              ]
+            )
+
+          if updated == 1 do
+            insert_audit!(%{
+              actor: "coordinator",
+              action: "job.result_verified",
+              target_type: "job",
+              target_id: job_id,
+              details: %{
+                "fencing_token" => fencing_token,
+                "base_sha" => result.base_sha,
+                "head_sha" => result.head_sha,
+                "diff_digest" => result.diff_digest,
+                "commit_count" => result.commit_count
+              }
+            })
+
+            Repo.get!(Job, job_id)
+          else
+            job = Repo.get!(Job, job_id)
+
+            if verified_result_matches?(job, fencing_token, attempt_token, result),
+              do: job,
+              else: Repo.rollback(result_attempt_failure(job, fencing_token, attempt_token, now))
+          end
+        end)
+      else
+        {:error, :invalid_result}
+      end
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def record_result_error(job_id, fencing_token, attempt_token, reason)
+      when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) do
+    message = bounded_error(reason)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        previous = Repo.get!(Job, job_id)
+
+        {updated, _rows} =
+          Job
+          |> where(
+            [job],
+            job.id == ^job_id and job.state == "verifying_result" and
+              job.fencing_token == ^fencing_token and
+              job.result_attempt_token == ^attempt_token and
+              not is_nil(job.result_attempt_expires_at) and
+              job.result_attempt_expires_at > ^now
+          )
+          |> Repo.update_all(
+            set: [
+              state: "awaiting_reconciliation",
+              result_attempt_expires_at: nil,
+              result_checked_at: now,
+              last_error: message,
+              updated_at: now
+            ]
+          )
+
+        cond do
+          updated == 1 ->
+            if previous.last_error != message do
+              insert_audit!(%{
+                actor: "coordinator",
+                action: "job.result_reconciliation_pending",
+                target_type: "job",
+                target_id: job_id,
+                details: %{
+                  "fencing_token" => fencing_token,
+                  "reason" => message,
+                  "observed_at" => DateTime.to_iso8601(now)
+                }
+              })
+            end
+
+            Repo.get!(Job, job_id)
+
+          result_error_matches?(previous, fencing_token, attempt_token, message) ->
+            previous
+
+          true ->
+            Repo.rollback(result_attempt_failure(previous, fencing_token, attempt_token, now))
+        end
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, failure} -> {:error, failure}
+    end
+  end
+
   def dashboard_issues do
     issues =
       Issue
@@ -442,6 +614,71 @@ defmodule PtcManager.Operations do
       DateTime.compare(job.lease_expires_at, now) == :lt -> {:error, :lease_expired}
       true -> :ok
     end
+  end
+
+  defp valid_result_attempt(job, fencing_token, attempt_token, now) do
+    cond do
+      job.state != "verifying_result" ->
+        {:error, :invalid_job_state}
+
+      job.fencing_token != fencing_token ->
+        {:error, :stale_fencing_token}
+
+      job.result_attempt_token != attempt_token ->
+        {:error, :stale_result_attempt}
+
+      not is_binary(job.branch_name) ->
+        {:error, :missing_branch}
+
+      is_nil(job.result_attempt_expires_at) ->
+        {:error, :result_claim_expired}
+
+      DateTime.compare(job.result_attempt_expires_at, now) != :gt ->
+        {:error, :result_claim_expired}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp verified_result_matches?(job, fencing_token, attempt_token, result) do
+    job.state == "ready_for_pr" and job.fencing_token == fencing_token and
+      job.result_attempt_token == attempt_token and job.result_base_sha == result.base_sha and
+      job.result_head_sha == result.head_sha and
+      job.result_diff_digest == result.diff_digest and
+      job.result_commit_count == result.commit_count
+  end
+
+  defp result_error_matches?(job, fencing_token, attempt_token, message) do
+    job.state == "awaiting_reconciliation" and job.fencing_token == fencing_token and
+      job.result_attempt_token == attempt_token and job.last_error == message
+  end
+
+  defp result_attempt_failure(job, fencing_token, attempt_token, now) do
+    case valid_result_attempt(job, fencing_token, attempt_token, now) do
+      :ok -> :result_race
+      {:error, reason} -> reason
+    end
+  end
+
+  defp valid_result_fields?(result) do
+    sha = ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
+
+    is_binary(result[:base_sha]) and Regex.match?(sha, result.base_sha) and
+      is_binary(result[:head_sha]) and Regex.match?(sha, result.head_sha) and
+      is_binary(result[:diff_digest]) and
+      Regex.match?(~r/\A[0-9a-f]{64}\z/, result.diff_digest) and
+      is_integer(result[:commit_count]) and result.commit_count > 0
+  end
+
+  defp eligible_result_jobs(query, now) do
+    where(
+      query,
+      [job],
+      job.state == "awaiting_reconciliation" or
+        (job.state == "verifying_result" and not is_nil(job.result_attempt_expires_at) and
+           job.result_attempt_expires_at <= ^now)
+    )
   end
 
   defp get_or_create_dispatch_worker!(worker_key, dispatch, now) do

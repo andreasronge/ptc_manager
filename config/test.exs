@@ -6,7 +6,10 @@ config :ptc_manager,
   github_sync_interval_ms: 0,
   herdr_sync_interval_ms: 0,
   manager_enabled: false,
-  dispatch_enabled: false
+  dispatch_enabled: false,
+  result_reconcile_interval_ms: 0,
+  git_run_as_user: nil,
+  git_verifier_home: System.tmp_dir!()
 
 # Configure your database
 #

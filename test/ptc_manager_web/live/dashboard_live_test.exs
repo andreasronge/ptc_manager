@@ -85,6 +85,57 @@ defmodule PtcManagerWeb.DashboardLiveTest do
              "That issue could not be found."
   end
 
+  test "shows verified branch evidence before the draft PR gate", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Prepare a safe draft PR"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job
+    |> Job.changeset(%{
+      state: "ready_for_pr",
+      result_base_sha: String.duplicate("a", 40),
+      result_head_sha: String.duplicate("b", 40),
+      result_diff_digest: String.duplicate("c", 64),
+      result_commit_count: 2,
+      result_verified_at: DateTime.utc_now()
+    })
+    |> Repo.update!()
+
+    {:ok, view, _html} =
+      conn
+      |> authenticated_conn()
+      |> live(~p"/")
+
+    assert has_element?(view, "#issue-#{issue.id}", "Ready for a draft PR")
+    assert render(view) =~ "2 committed change(s) verified"
+    assert render(view) =~ "GitHub is still unchanged"
+  end
+
+  test "offers a safe manual retry while branch verification is pending", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job
+    |> Job.changeset(%{
+      state: "awaiting_reconciliation",
+      fencing_token: 1,
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+      last_error: ":branch_missing"
+    })
+    |> Repo.update!()
+
+    {:ok, view, _html} =
+      conn
+      |> authenticated_conn()
+      |> live(~p"/")
+
+    assert has_element?(view, "#reconcile-job-#{job.id}", "Check committed branch")
+    assert render(view) =~ "Branch verification is pending"
+  end
+
   test "reloads agent activity after an external database change", %{conn: conn} do
     worker = worker_fixture()
 

@@ -268,7 +268,7 @@ GitHub mutation permission.
 - turn an approved job into a Herdr worktree and implementation agent;
 - bounded concurrency and worker leases;
 - fencing tokens on worker state and external effects;
-- branch and PR reconciliation;
+- bounded local branch-result verification and GitHub-side PR reconciliation;
 - a GitHub App write broker limited to fenced branch pushes and draft-PR
   creation, with no credential exposed to workers or model processes;
 - failure, blocked, cancellation, and recovery controls;

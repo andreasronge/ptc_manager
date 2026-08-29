@@ -295,7 +295,7 @@ defmodule PtcManager.Herdr.Sync do
     case owned_job(run) do
       %Job{fencing_token: token, state: state} = job
       when token == run.fencing_token and
-             state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
+             state in ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr) ->
         job
         |> Job.changeset(%{
           state: "reconciling",
@@ -376,7 +376,8 @@ defmodule PtcManager.Herdr.Sync do
          {fencing_token, ""} <- Integer.parse(fencing_token),
          %Job{fencing_token: ^fencing_token, state: state, lease_owner: ^worker_key} = job <-
            Repo.get(Job, job_id),
-         true <- state in ~w(starting working idle blocked reconciling awaiting_reconciliation) do
+         true <-
+           state in ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr) do
       managed_run = Repo.get_by(AgentRun, job_id: job.id, fencing_token: fencing_token)
 
       attrs

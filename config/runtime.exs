@@ -46,6 +46,25 @@ config :ptc_manager,
   dispatch_reconcile_after_ms:
     System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
   dispatch_concurrency: System.get_env("PTC_DISPATCH_CONCURRENCY", "1") |> String.to_integer(),
+  result_reconcile_interval_ms:
+    System.get_env("PTC_RESULT_RECONCILE_INTERVAL_MS", "0") |> String.to_integer(),
+  result_claim_timeout_ms:
+    System.get_env("PTC_RESULT_CLAIM_TIMEOUT_MS", "180000") |> String.to_integer(),
+  git_binary: System.get_env("PTC_GIT_BINARY", "git"),
+  git_run_as_user: System.get_env("PTC_GIT_RUN_AS_USER"),
+  git_verifier_home: System.get_env("PTC_GIT_VERIFIER_HOME"),
+  git_timeout_ms: System.get_env("PTC_GIT_TIMEOUT_MS", "15000") |> String.to_integer(),
+  git_timeout_binary: System.get_env("PTC_GIT_TIMEOUT_BINARY"),
+  git_diff_max_bytes: System.get_env("PTC_GIT_DIFF_MAX_BYTES", "50000000") |> String.to_integer(),
+  git_max_commits: System.get_env("PTC_GIT_MAX_COMMITS", "100") |> String.to_integer(),
+  git_max_changed_paths:
+    System.get_env("PTC_GIT_MAX_CHANGED_PATHS", "100") |> String.to_integer(),
+  git_max_blob_bytes: System.get_env("PTC_GIT_MAX_BLOB_BYTES", "10000000") |> String.to_integer(),
+  git_max_total_blob_bytes:
+    System.get_env("PTC_GIT_MAX_TOTAL_BLOB_BYTES", "50000000") |> String.to_integer(),
+  git_memory_limit_binary: System.get_env("PTC_GIT_MEMORY_LIMIT_BINARY"),
+  git_memory_limit_bytes:
+    System.get_env("PTC_GIT_MEMORY_LIMIT_BYTES", "268435456") |> String.to_integer(),
   implementation_agent_kind: System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex"),
   implementation_agent_args:
     System.get_env("PTC_IMPLEMENTATION_AGENT_ARGS", "--full-auto") |> OptionParser.split(),

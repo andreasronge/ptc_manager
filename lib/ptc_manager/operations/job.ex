@@ -2,7 +2,8 @@ defmodule PtcManager.Operations.Job do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @states ~w(queued starting working idle blocked reconciling awaiting_reconciliation done failed cancelled lost)
+  @states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr done failed cancelled lost)
+  @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   schema "jobs" do
     field :kind, :string, default: "implementation"
@@ -16,6 +17,14 @@ defmodule PtcManager.Operations.Job do
     field :last_error, :string
     field :reconciling_at, :utc_datetime_usec
     field :absence_observed_at, :utc_datetime_usec
+    field :result_base_sha, :string
+    field :result_head_sha, :string
+    field :result_diff_digest, :string
+    field :result_commit_count, :integer
+    field :result_verified_at, :utc_datetime_usec
+    field :result_checked_at, :utc_datetime_usec
+    field :result_attempt_token, :string
+    field :result_attempt_expires_at, :utc_datetime_usec
 
     belongs_to :repository, PtcManager.Operations.Repository
     belongs_to :issue, PtcManager.Operations.Issue
@@ -41,7 +50,15 @@ defmodule PtcManager.Operations.Job do
       :branch_name,
       :last_error,
       :reconciling_at,
-      :absence_observed_at
+      :absence_observed_at,
+      :result_base_sha,
+      :result_head_sha,
+      :result_diff_digest,
+      :result_commit_count,
+      :result_verified_at,
+      :result_checked_at,
+      :result_attempt_token,
+      :result_attempt_expires_at
     ])
     |> validate_required([
       :repository_id,
@@ -57,6 +74,11 @@ defmodule PtcManager.Operations.Job do
     |> validate_length(:lease_owner, max: 120)
     |> validate_length(:branch_name, max: 240)
     |> validate_length(:last_error, max: 500)
+    |> validate_length(:result_attempt_token, max: 64)
+    |> validate_format(:result_base_sha, @sha)
+    |> validate_format(:result_head_sha, @sha)
+    |> validate_format(:result_diff_digest, ~r/\A[0-9a-f]{64}\z/)
+    |> validate_number(:result_commit_count, greater_than: 0)
     |> unique_constraint(:issue_id, name: :jobs_one_active_per_issue)
     |> unique_constraint(:issue_id, name: :jobs_issue_id_index)
   end

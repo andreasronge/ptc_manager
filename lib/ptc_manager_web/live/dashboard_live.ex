@@ -5,6 +5,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.Manager
   alias PtcManager.Operations
+  alias PtcManager.ResultReconciler
 
   @impl true
   def mount(_params, session, socket) do
@@ -20,6 +21,7 @@ defmodule PtcManagerWeb.DashboardLive do
      |> assign(:now, DateTime.utc_now())
      |> assign(:github_syncing, false)
      |> assign(:investigating, MapSet.new())
+     |> assign(:reconciling_results, MapSet.new())
      |> load_dashboard()}
   end
 
@@ -53,6 +55,18 @@ defmodule PtcManagerWeb.DashboardLive do
       approve_issue(issue_id, socket)
     else
       _ -> {:noreply, put_flash(socket, :error, "That issue could not be found.")}
+    end
+  end
+
+  def handle_event("reconcile-result", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         false <- MapSet.member?(socket.assigns.reconciling_results, job_id) do
+      {:noreply,
+       socket
+       |> update(:reconciling_results, &MapSet.put(&1, job_id))
+       |> start_async({:reconcile_result, job_id}, fn -> ResultReconciler.run_job(job_id) end)}
+    else
+      _ -> {:noreply, socket}
     end
   end
 
@@ -152,6 +166,38 @@ defmodule PtcManagerWeb.DashboardLive do
      |> put_flash(:error, "The private analysis stopped unexpectedly.")}
   end
 
+  def handle_async({:reconcile_result, job_id}, {:ok, result}, socket) do
+    socket =
+      socket
+      |> update(:reconciling_results, &MapSet.delete(&1, job_id))
+      |> load_dashboard()
+
+    case result do
+      {:ok, _job} ->
+        {:noreply,
+         put_flash(socket, :info, "Committed branch verified and ready for a draft PR.")}
+
+      {:error, :result_already_claimed} ->
+        {:noreply, put_flash(socket, :info, "This branch is already being checked.")}
+
+      {:error, _reason} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The committed branch is not ready yet. No GitHub write occurred."
+         )}
+    end
+  end
+
+  def handle_async({:reconcile_result, job_id}, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> update(:reconciling_results, &MapSet.delete(&1, job_id))
+     |> put_flash(:error, "Branch verification stopped unexpectedly.")
+     |> load_dashboard()}
+  end
+
   def elapsed(now, started_at) do
     seconds = max(DateTime.diff(now, started_at, :second), 0)
 
@@ -177,6 +223,8 @@ defmodule PtcManagerWeb.DashboardLive do
   def approvable?(_item), do: false
 
   def investigating?(investigating, issue_id), do: MapSet.member?(investigating, issue_id)
+  def reconciling_result?(jobs, job_id), do: MapSet.member?(jobs, job_id)
+  def job_label(state), do: state |> String.replace("_", " ")
 
   def sync_label(%{sync_status: "syncing"}), do: "syncing"
   def sync_label(%{sync_status: "ok"}), do: "connected"
@@ -198,6 +246,12 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def state_classes("awaiting_reconciliation"),
     do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+
+  def state_classes("verifying_result"),
+    do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+
+  def state_classes("ready_for_pr"),
+    do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
 
   def state_classes("done"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
   def state_classes(_state), do: "bg-slate-400/10 text-slate-300 ring-white/10"
