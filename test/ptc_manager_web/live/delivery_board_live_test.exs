@@ -24,6 +24,12 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     review_job = approved_job("Wait for CI") |> set_job_state("pr_open")
     _review_publication = publication_fixture(review_job, "pending", "mergeable")
 
+    blocked_while_running_job =
+      approved_job("Wait for required checks") |> set_job_state("pr_open")
+
+    _blocked_while_running_publication =
+      publication_fixture(blocked_while_running_job, "pending", "blocked")
+
     stuck_job = approved_job("Resolve conflicts") |> set_job_state("pr_open")
     _stuck_publication = publication_fixture(stuck_job, "success", "conflicting")
 
@@ -34,6 +40,13 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#lane-review #board-job-#{review_job.id}", "CI is still running")
+
+    assert has_element?(
+             view,
+             "#lane-review #board-job-#{blocked_while_running_job.id}",
+             "CI is still running"
+           )
+
     assert has_element?(view, "#lane-stuck #board-job-#{stuck_job.id}", "Merge conflicts")
 
     assert has_element?(

@@ -289,7 +289,11 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     item.active_job.state in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
       match?(%{checks_state: "failure"}, item.publication) or
       match?(%{mergeability: "conflicting"}, item.publication) or
-      match?(%{draft: false, mergeability: "blocked"}, item.publication) or
+      match?(
+        %{draft: false, checks_state: checks_state, mergeability: "blocked"}
+        when checks_state in ["success", "none"],
+        item.publication
+      ) or
       match?(
         %{outcome: outcome} when outcome in ["merge-blocked", "merge-needs-decision"],
         item.pr_analysis
