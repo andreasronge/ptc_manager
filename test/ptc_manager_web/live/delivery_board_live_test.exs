@@ -149,8 +149,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
              ])
 
     failing = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 901)
-    ready = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 902)
-    analysis_fixture(ready)
+    clean = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 902)
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
@@ -159,12 +158,13 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert has_element?(
              view,
-             "#lane-ready #board-pr-#{ready.id}",
-             "All observed gates are clean"
+             "#lane-review #board-pr-#{clean.id}",
+             "Review and merge this imported PR directly on GitHub"
            )
 
-    refute has_element?(view, "#retro-pr-#{ready.id}")
-    assert has_element?(view, "#approve-merge-board-#{ready.id}", "Approve merge")
+    refute has_element?(view, "#retro-pr-#{clean.id}")
+    refute has_element?(view, "#review-for-merge-#{clean.id}")
+    refute has_element?(view, "#approve-merge-board-#{clean.id}")
 
     view |> element("#repair-pr-#{failing.id}") |> render_click()
 

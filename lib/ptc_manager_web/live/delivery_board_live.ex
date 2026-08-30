@@ -210,7 +210,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def merge_decision_needed?(item) do
-    (item.publication && not item.publication.draft) and
+    item.managed? and (item.publication && not item.publication.draft) and
       item.publication.checks_state in ["success", "none"] and
       item.publication.mergeability == "mergeable" and
       (is_nil(item.pr_analysis) or not analysis_fresh?(item))
@@ -387,6 +387,9 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       match?(%{publication: %{checks_state: "unknown"}}, item) ->
         "Waiting for GitHub check status."
 
+      item.managed? == false ->
+        "Checks are clean. Review and merge this imported PR directly on GitHub."
+
       is_nil(item.pr_analysis) ->
         "Prepare a private merge decision from Planning."
 
@@ -503,7 +506,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   defp ready?(item) do
-    open_pull_request?(item) and
+    item.managed? and open_pull_request?(item) and
       match?(%{state: "published", pr_state: "open", draft: false}, item.publication) and
       item.publication.checks_state in ["success", "none"] and
       item.publication.mergeability == "mergeable" and
