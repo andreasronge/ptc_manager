@@ -153,6 +153,70 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
              "#board-job-#{job.id} [data-work-state=queued]",
              "Priority merge queued"
            )
+
+    assert has_element?(
+             view,
+             "#queue-feedback-#{action.id}",
+             "Safely stored in the priority merge queue"
+           )
+  end
+
+  test "explains which running merge blocks a queued fix-and-merge action", %{conn: conn} do
+    job = approved_job("Queue behind the current merge") |> set_job_state("pr_open")
+    publication = publication_fixture(job, "failure", "conflicting")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    blocker =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: job.repository_id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: publication.id + 10_000,
+        target_label: "owner/repo#1716",
+        prompt_version: 1,
+        prompt: "Fix and merge the earlier pull request",
+        actor: "maintainer",
+        state: "running",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now
+      })
+      |> Repo.insert!()
+
+    worker =
+      worker_fixture(%{
+        worker_key: "herdr:queue-feedback",
+        name: "Herdr queue feedback",
+        status: "online"
+      })
+
+    assert {:ok, _run} =
+             Operations.create_agent_run(%{
+               worker_id: worker.id,
+               agent_action_id: blocker.id,
+               role: "implementer",
+               state: "working",
+               status_text: "Fixing and merging PR #1716",
+               started_at: now,
+               last_heartbeat_at: now,
+               fencing_token: 1
+             })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    view
+    |> element("#repair-and-merge-pr-#{publication.id}")
+    |> render_click()
+
+    queued =
+      Repo.get_by!(AgentAction,
+        action_key: "repair_and_merge_pr",
+        target_id: publication.id
+      )
+
+    assert has_element?(view, "#queue-feedback-#{queued.id}", "Waiting for PR #1716")
+    assert has_element?(view, "#queue-feedback-#{queued.id}", "one at a time")
   end
 
   test "shows a private retro on merge-ready work and creates only an approved suggestion", %{

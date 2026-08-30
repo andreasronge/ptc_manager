@@ -314,6 +314,30 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   def work_label(_item), do: nil
 
+  def queue_feedback(%{
+        pr_agent_action: %{action_key: "repair_and_merge_pr", state: "queued"},
+        queue_blocker: %{target_label: target_label}
+      }) do
+    "Waiting for #{short_action_target(target_label)} to finish its fix-and-merge run. " <>
+      "PtcManager starts merge work one at a time in this repository to avoid creating new conflicts."
+  end
+
+  def queue_feedback(%{
+        pr_agent_action: %{action_key: "repair_and_merge_pr", state: "queued"}
+      }) do
+    "Safely stored in the priority merge queue. It will start when earlier repository work finishes and a Herdr slot is available."
+  end
+
+  def queue_feedback(%{pr_agent_action: %{action_key: "repair_pr", state: "queued"}}) do
+    "Safely stored in the repair queue. It will start when a Herdr implementation slot is available."
+  end
+
+  def queue_feedback(%{pr_agent_action: %{state: "queued"}}) do
+    "Safely stored in the agent queue. It will start when the work ahead of it finishes."
+  end
+
+  def queue_feedback(_item), do: nil
+
   def retrospective_suggestions(%{state: "done", result_summary: body})
       when is_binary(body) do
     with {:ok, result} <- Jason.decode(body),
@@ -499,6 +523,24 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   defp load_board(socket) do
     current_runs = Operations.list_current_agent_runs()
 
+    active_merge_actions_by_repository =
+      Enum.reduce(current_runs, %{}, fn
+        %{
+          agent_action:
+            %{
+              action_key: "repair_and_merge_pr",
+              repository_id: repository_id,
+              state: state
+            } = action
+        },
+        blockers
+        when state in ["running", "sync_pending"] ->
+          Map.put_new(blockers, repository_id, action)
+
+        _run, blockers ->
+          blockers
+      end)
+
     active_runs_by_job =
       current_runs
       |> Enum.reject(&is_nil(&1.job_id))
@@ -519,7 +561,18 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
             true -> nil
           end
 
-        Map.put(item, :agent_run, run)
+        queue_blocker =
+          case item.pr_agent_action do
+            %{action_key: "repair_and_merge_pr", state: "queued", repository_id: repository_id} ->
+              Map.get(active_merge_actions_by_repository, repository_id)
+
+            _action ->
+              nil
+          end
+
+        item
+        |> Map.put(:agent_run, run)
+        |> Map.put(:queue_blocker, queue_blocker)
       end)
 
     lanes =
@@ -528,6 +581,13 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       |> Map.merge(Enum.group_by(items, &lane_for/1))
 
     assign(socket, lanes: lanes, item_count: length(items))
+  end
+
+  defp short_action_target(target_label) when is_binary(target_label) do
+    case Regex.run(~r/#(\d+)$/, target_label) do
+      [_, number] -> "PR ##{number}"
+      _match -> target_label
+    end
   end
 
   defp lane_for(item) do
