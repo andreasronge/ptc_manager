@@ -6,6 +6,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @project_root Path.expand("../../..", __DIR__)
   @local_script Path.join(@project_root, "deploy/deploy-herdr")
   @remote_script Path.join(@project_root, "deploy/remote-deploy-herdr")
+  @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
   @environment_file_parser Path.join(
                              @project_root,
@@ -13,7 +14,7 @@ defmodule Mix.Tasks.PtcDeployTest do
                            )
 
   test "deployment scripts have valid POSIX shell syntax" do
-    for script <- [@local_script, @remote_script] do
+    for script <- [@local_script, @remote_script, @worker_git] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
   end

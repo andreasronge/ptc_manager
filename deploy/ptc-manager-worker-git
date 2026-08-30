@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+# PtcManager invokes this root-owned wrapper through its narrowly scoped sudo
+# rule when it must prepare or inspect a worktree owned by the Herdr worker.
+# GitHub credentials, when required by the assigned agent, remain those of the
+# worker account.
+exec /usr/bin/git "$@" </dev/null

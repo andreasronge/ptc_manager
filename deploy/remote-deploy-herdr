@@ -34,6 +34,8 @@ manual_herdr=/home/agent/.local/bin/herdr
 worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
 environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
+worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
+sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 coordinator_environment_files=
 coordinator_session=
 worker_session=
@@ -42,7 +44,8 @@ swapped=false
 service_stopped=false
 
 cleanup_remote() {
-  rm -f -- "$source_archive" "$remote_script" "$agent_filter" "$environment_file_parser"
+  rm -f -- "$source_archive" "$remote_script" "$agent_filter" "$environment_file_parser" \
+    "$worker_git_candidate" "$sudoers_candidate"
 
   case "$build_dir" in
     /home/agent/src/ptc_manager-build-*) rm -rf -- "$build_dir" ;;
@@ -253,6 +256,11 @@ command -v jq >/dev/null
 sudo -n true
 tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-codex.sudoers >"$sudoers_candidate"
+chmod 0755 "$worker_git_candidate"
+chmod 0440 "$sudoers_candidate"
+sudo visudo -cf "$sudoers_candidate" >/dev/null
 
 coordinator_environment_files=$(
   sudo systemctl show -p EnvironmentFiles --value "$service_name" |
@@ -358,6 +366,13 @@ fi
 
 ensure_no_managed_runs
 ensure_no_busy_herdr_agents
+
+# Keep the worker Git bridge and its exact sudo authorization versioned with
+# the release so a fresh deploy cannot leave runtime code ahead of host setup.
+sudo install -o root -g root -m 0755 "$worker_git_candidate" \
+  /usr/local/bin/ptc-manager-worker-git
+sudo install -o root -g root -m 0440 "$sudoers_candidate" \
+  /etc/sudoers.d/ptc_manager-codex
 
 mkdir -p "$build_dir"
 tar -xf "$source_archive" -C "$build_dir"

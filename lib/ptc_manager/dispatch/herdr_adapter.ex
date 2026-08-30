@@ -295,15 +295,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  defp git_command(args) do
-    binary = Application.get_env(:ptc_manager, :git_binary, "git")
-
-    {command, command_args} =
-      PrivateCodexAdapter.codex_command(
-        binary,
-        args,
-        Application.get_env(:ptc_manager, :herdr_run_as_user)
-      )
+  @doc false
+  def git_command(args) do
+    {command, command_args} = git_command_spec(args)
 
     System.cmd(command, command_args,
       env: PrivateCodexAdapter.command_environment(),
@@ -311,6 +305,22 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     )
   rescue
     error -> {inspect(error.__struct__), 127}
+  end
+
+  @doc false
+  def git_command_spec(args) do
+    binary =
+      Application.get_env(
+        :ptc_manager,
+        :herdr_git_binary,
+        Application.get_env(:ptc_manager, :git_binary, "git")
+      )
+
+    PrivateCodexAdapter.codex_command(
+      binary,
+      args,
+      Application.get_env(:ptc_manager, :herdr_run_as_user)
+    )
   end
 
   defp start_agent(name, pane_id) do

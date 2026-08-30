@@ -26,6 +26,16 @@ github_sync_interval_ms =
 herdr_sync_interval_ms =
   System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
 
+herdr_run_as_user = System.get_env("PTC_HERDR_RUN_AS_USER")
+
+herdr_git_binary =
+  System.get_env("PTC_HERDR_GIT_BINARY") ||
+    if herdr_run_as_user in [nil, ""] do
+      System.get_env("PTC_GIT_BINARY", "git")
+    else
+      "/usr/local/bin/ptc-manager-worker-git"
+    end
+
 dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
 agent_actions_enabled = System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
 
@@ -69,7 +79,8 @@ config :ptc_manager,
   herdr_sync_interval_ms: herdr_sync_interval_ms,
   herdr_session: System.get_env("PTC_HERDR_SESSION", "default"),
   herdr_binary: System.get_env("PTC_HERDR_BINARY", "herdr"),
-  herdr_run_as_user: System.get_env("PTC_HERDR_RUN_AS_USER"),
+  herdr_run_as_user: herdr_run_as_user,
+  herdr_git_binary: herdr_git_binary,
   herdr_socket_path: System.get_env("PTC_HERDR_SOCKET_PATH"),
   herdr_timeout_ms: System.get_env("PTC_HERDR_TIMEOUT_MS", "15000") |> String.to_integer(),
   herdr_stale_after_ms:

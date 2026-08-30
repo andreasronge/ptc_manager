@@ -304,6 +304,44 @@ defmodule PtcManager.DispatchTest do
     assert {:ok, "w12", "w12:p1"} = PtcManager.Dispatch.HerdrAdapter.decode_worktree(output)
   end
 
+  test "Herdr worktree Git runs through the authorized worker helper" do
+    previous_binary = Application.get_env(:ptc_manager, :herdr_git_binary)
+    previous_user = Application.get_env(:ptc_manager, :herdr_run_as_user)
+
+    on_exit(fn ->
+      restore_env(:herdr_git_binary, previous_binary)
+      restore_env(:herdr_run_as_user, previous_user)
+    end)
+
+    Application.put_env(
+      :ptc_manager,
+      :herdr_git_binary,
+      "/usr/local/bin/ptc-manager-worker-git"
+    )
+
+    Application.put_env(:ptc_manager, :herdr_run_as_user, "ptc-manager-worker")
+
+    assert {"/usr/bin/sudo",
+            [
+              "-n",
+              "-H",
+              "-u",
+              "ptc-manager-worker",
+              "--",
+              "/usr/local/bin/ptc-manager-worker-git",
+              "-C",
+              "/srv/ptc_runner",
+              "rev-parse",
+              "HEAD"
+            ]} =
+             PtcManager.Dispatch.HerdrAdapter.git_command_spec([
+               "-C",
+               "/srv/ptc_runner",
+               "rev-parse",
+               "HEAD"
+             ])
+  end
+
   test "terminal merged and closed PR worktrees use forced Herdr removal" do
     for {job_state, pr_state} <- [{"done", "merged"}, {"cancelled", "closed"}] do
       allocation = %{
@@ -498,4 +536,7 @@ defmodule PtcManager.DispatchTest do
       "updated_at" => "2026-08-29T09:00:00Z"
     }
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
+  defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
 end
