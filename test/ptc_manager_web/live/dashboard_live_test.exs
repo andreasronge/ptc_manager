@@ -53,11 +53,17 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#approve-issue-#{issue.id}")
 
     view
-    |> element("#approve-issue-#{issue.id}")
-    |> render_click()
+    |> form("#approve-form-issue-#{issue.id}", %{
+      "issue-id" => Integer.to_string(issue.id),
+      "review-count" => "3"
+    })
+    |> render_submit()
 
     assert render(view) =~ "Job queued"
-    assert Repo.one!(Job).issue_id == issue.id
+    job = Repo.one!(Job)
+    assert job.issue_id == issue.id
+    assert job.required_review_count == 3
+    assert has_element?(view, "#job-review-count-#{job.id}", "3 review passes")
   end
 
   test "preserves the browser-managed technical evidence state across ticks", %{conn: conn} do
@@ -538,7 +544,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#pr-analysis-#{analysis.id}", "ready to merge")
   end
 
-  test "offers a retrospective action after a pull request finishes", %{conn: conn} do
+  test "does not queue a separate retrospective after a pull request finishes", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Learn from completed work"})
     proposal_fixture(issue)
@@ -555,18 +561,8 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
-    assert has_element?(
-             view,
-             "#agent-action-pr_retrospective-pr-#{publication.id}",
-             "Run retrospective"
-           )
-
-    view
-    |> element("#agent-action-pr_retrospective-pr-#{publication.id}")
-    |> render_click()
-
-    assert render(view) =~ "PR retrospective queued for an agent"
-    assert Repo.get_by!(AgentAction, action_key: "pr_retrospective").target_id == publication.id
+    refute has_element?(view, "#agent-action-pr_retrospective-pr-#{publication.id}")
+    refute Repo.get_by(AgentAction, action_key: "pr_retrospective")
   end
 
   test "requeues a blocked publication from the dashboard", %{conn: conn} do

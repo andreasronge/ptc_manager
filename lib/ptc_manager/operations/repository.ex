@@ -40,7 +40,7 @@ defmodule PtcManager.Operations.Repository do
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,
-      less_than_or_equal_to: 10
+      less_than_or_equal_to: 3
     )
     |> validate_length(:implementation_test_command, max: 2_000)
     |> unique_constraint([:github_owner, :github_name])

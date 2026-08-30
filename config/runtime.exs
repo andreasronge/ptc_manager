@@ -54,24 +54,6 @@ pr_reconcile_enabled =
 
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
-required_pre_pr_reviews_override =
-  case System.get_env("PTC_REQUIRED_PRE_PR_REVIEWS") do
-    nil ->
-      nil
-
-    value ->
-      case String.trim(value) do
-        "" ->
-          nil
-
-        trimmed ->
-          case Integer.parse(trimmed) do
-            {count, ""} when count in 0..10 -> count
-            _ -> raise "PTC_REQUIRED_PRE_PR_REVIEWS must be an integer from 0 through 10"
-          end
-      end
-  end
-
 config :ptc_manager,
   github_read_token: System.get_env("GITHUB_READ_TOKEN"),
   repository_path: System.get_env("PTC_REPOSITORY_PATH"),
@@ -182,7 +164,6 @@ config :ptc_manager,
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),
   implementation_agent_publishes_pr: implementation_agent_publishes_pr,
-  required_pre_pr_reviews_override: required_pre_pr_reviews_override,
   implementation_test_command: System.get_env("PTC_IMPLEMENTATION_TEST_COMMAND"),
   manager_enabled: System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
   manager_concurrency:

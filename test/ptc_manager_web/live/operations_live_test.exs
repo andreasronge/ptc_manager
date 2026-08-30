@@ -48,7 +48,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
 
     queued_issue = issue_fixture(repository, %{title: "Queue the next bounded change"})
     proposal_fixture(queued_issue)
-    {:ok, queued_job} = Operations.approve_issue(queued_issue.id, "maintainer")
+    {:ok, queued_job} = Operations.approve_issue(queued_issue.id, "maintainer", 3)
 
     %WorktreeAllocation{}
     |> WorktreeAllocation.changeset(%{
@@ -104,6 +104,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#work-queue")
     assert has_element?(view, "#queued-action-#{priority_action.id}", "Merge priority")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "Implementation")
+    assert has_element?(view, "#queued-job-#{queued_job.id}", "3 review passes")
 
     view
     |> element("#timeline-run-#{run.id} a")

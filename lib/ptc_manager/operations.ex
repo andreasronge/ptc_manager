@@ -10,6 +10,7 @@ defmodule PtcManager.Operations do
   import Ecto.Query
   alias Ecto.Multi
   alias PtcManager.Repo
+  alias PtcManager.ReviewPolicy
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -1510,12 +1511,19 @@ defmodule PtcManager.Operations do
     broadcast_change(outcome)
   end
 
-  def approve_issue(issue_id, actor) when is_integer(issue_id) and is_binary(actor) do
+  def approve_issue(issue_id, actor, requested_review_count \\ nil)
+      when is_integer(issue_id) and is_binary(actor) do
+    with :ok <- valid_requested_review_count(requested_review_count) do
+      do_approve_issue(issue_id, actor, requested_review_count)
+    end
+  end
+
+  defp do_approve_issue(issue_id, actor, requested_review_count) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     Multi.new()
     |> Multi.run(:snapshot, fn repo, _changes -> current_approvable_snapshot(repo, issue_id) end)
-    |> Multi.insert(:approval, fn %{snapshot: {issue, proposal}} ->
+    |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}} ->
       Approval.changeset(%Approval{}, %{
         proposal_id: proposal.id,
         decision: "start_implementation",
@@ -1526,17 +1534,24 @@ defmodule PtcManager.Operations do
         approved_at: now
       })
     end)
-    |> Multi.insert(:job, fn %{snapshot: {issue, _proposal}, approval: approval} ->
+    |> Multi.insert(:job, fn %{
+                               snapshot: {issue, _proposal, repository},
+                               approval: approval
+                             } ->
       Job.changeset(%Job{}, %{
         repository_id: issue.repository_id,
         issue_id: issue.id,
         approval_id: approval.id,
         kind: "implementation",
         state: "queued",
-        fencing_token: 0
+        fencing_token: 0,
+        required_review_count: requested_review_count || ReviewPolicy.default_count(repository)
       })
     end)
-    |> Multi.insert(:audit_event, fn %{snapshot: {issue, proposal}, job: job} ->
+    |> Multi.insert(:audit_event, fn %{
+                                       snapshot: {issue, proposal, _repository},
+                                       job: job
+                                     } ->
       AuditEvent.changeset(%AuditEvent{}, %{
         actor: actor,
         action: "issue.approved_for_implementation",
@@ -1546,6 +1561,7 @@ defmodule PtcManager.Operations do
           "issue_id" => issue.id,
           "issue_number" => issue.number,
           "proposal_id" => proposal.id,
+          "required_review_count" => job.required_review_count,
           "proposal_digest" => proposal.proposal_digest,
           "source_digest" => issue.content_digest
         }
@@ -1565,12 +1581,16 @@ defmodule PtcManager.Operations do
          :ok <- issue_dependencies_resolved(repo, issue),
          :ok <- proposal_is_ready(proposal),
          :ok <- proposal_matches_issue(proposal, issue) do
-      {:ok, {issue, proposal}}
+      {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp valid_requested_review_count(nil), do: :ok
+  defp valid_requested_review_count(count) when count in 0..3, do: :ok
+  defp valid_requested_review_count(_count), do: {:error, :invalid_review_count}
 
   defp job_is_queued(%Job{state: "queued"}), do: :ok
   defp job_is_queued(%Job{}), do: {:error, :already_leased}

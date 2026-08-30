@@ -6,6 +6,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Herdr.Command
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.PromptConfiguration
+  alias PtcManager.ReviewPolicy
 
   @agent_start_command_grace_ms 5_000
   @agent_action_command_grace_ms 5_000
@@ -374,10 +375,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   @doc false
   def build_prompt(repository, issue, job) do
-    required_reviews =
-      Application.get_env(:ptc_manager, :required_pre_pr_reviews_override) ||
-        repository.required_pre_pr_reviews ||
-        Application.get_env(:ptc_manager, :required_pre_pr_reviews_default, 2)
+    required_reviews = ReviewPolicy.job_count(job, repository)
 
     test_instruction =
       case repository.implementation_test_command ||
@@ -391,7 +389,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
     review_instruction =
       if required_reviews == 0 do
-        "No Codex review-skill pass is required for this repository."
+        "No independent Codex review-skill pass is required for this task. Still run the configured tests and inspect your own diff before publishing."
       else
         "After committing, invoke the `codex-review` skill #{required_reviews} time(s) as independent review-and-fix passes. Apply every actionable finding, rerun the relevant tests, and commit any fixes before the next pass. Finish only after the final pass reports no findings. PtcManager does not run or verify these reviews; they are part of your assigned workflow."
       end
@@ -399,15 +397,15 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     {publication_instruction, github_safety_instruction, finish_instruction} =
       if job.publication_source == "agent" do
         {
-          "After the final successful review, push the existing job branch and create one pull request with the authenticated `gh` CLI.",
-          "Use GitHub credentials only to push `#{job.branch_name}` and create or inspect its pull request. Do not edit issues, labels, comments, other branches or pull requests, and do not merge anything. Create the PR against `#{repository.default_branch}` in `#{repository.github_owner}/#{repository.github_name}` and include `Closes ##{issue.number}` in its body.",
+          "After the configured test and review workflow, push the existing job branch and create one pull request with the authenticated `gh` CLI.",
+          "Use GitHub credentials only to push `#{job.branch_name}` and create or inspect its pull request. Do not edit issues, labels, comments, other branches or pull requests, and do not merge anything. Create the PR against `#{repository.default_branch}` in `#{repository.github_owner}/#{repository.github_name}` and include `Closes ##{issue.number}` in its body. Also include a concise `## Agent retrospective` section in the PR description: note surprises, potential bugs, flaky tests, or worthwhile refactoring discovered during implementation; write `No follow-up suggested` when there is nothing concrete.",
           "Finish by reporting the exact local head SHA and pull-request URL. If a PR for this branch already exists, reuse it instead of creating a duplicate."
         }
       else
         {
           "Do not push or create a pull request; PtcManager's credential-isolated broker publishes the exact verified commit.",
           "Do not use GitHub credentials, push branches, edit issues or pull requests, or merge anything.",
-          "Finish by reporting the exact local head SHA. If blocked, explain the blocker without requesting credentials."
+          "Before finishing, include the retrospective in the final commit message body between exact lines `PTC-AGENT-RETROSPECTIVE-BEGIN` and `PTC-AGENT-RETROSPECTIVE-END`. Note surprises, potential bugs, flaky tests, or worthwhile refactoring; write `No follow-up suggested` when there is nothing concrete. The broker copies only this bounded section into the PR description. Finish by reporting the exact local head SHA. If blocked, explain the blocker without requesting credentials."
         }
       end
 

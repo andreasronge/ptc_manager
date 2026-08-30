@@ -121,7 +121,9 @@
             Implementation
           </span>
         </div>
-        <p class="mt-3 text-xs text-slate-500">Waiting {queue_age(@now, job.inserted_at)}</p>
+        <p class="mt-3 text-xs text-slate-500">
+          Waiting {queue_age(@now, job.inserted_at)} · {job_review_label(job)}
+        </p>
       </article>
 
       <p

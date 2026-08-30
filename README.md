@@ -16,7 +16,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
   **Delivery** for the approval-to-merge Kanban, **Operations** for machine
   capacity plus the agent/task timeline, and **Configuration** for button-prompt
   instructions;
-- an **Approve and start** workflow backed by SQLite transactions;
+- an **Approve and start** workflow backed by SQLite transactions, with a
+  per-task choice of zero to three independent Codex review passes;
 - one active implementation job per issue, enforced by the database;
 - a live agent-activity panel with agent name, worker, role, task, start time,
   elapsed time, heartbeat, and Herdr identifiers, plus five recent ended runs;
@@ -32,7 +33,7 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - bounded, credential-free verification of a non-empty committed branch diff;
 - fenced reconciliation claims that are safe to retry after interruption;
 - verified base, head, commit count, and diff digest visible before PR acceptance;
-- a configurable test command and prompt-only Codex review-skill pass count;
+- a configurable test command and a review-skill pass count frozen per task;
 - exact-SHA branch push and draft-PR creation through a GitHub App broker;
 - worker-advertised implementation capacity instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
@@ -41,15 +42,16 @@ the approved execution, publication, worktree, and maintainer-action workflows:
   that import every open repository PR and place it in Review & CI, Needs
   attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
-  **Fix**, **Fix and merge**, **PR retrospective**, and **Prepare merge decision**
+  **Fix**, **Fix and merge**, and **Prepare merge decision**
   buttons, all visible alongside queued implementation jobs on **Operations**;
 - durable per-button prompt customizations, including private issue analysis,
-  Approve-and-start implementation, and every maintainer action. PtcManager appends the saved
+  Approve-and-start implementation, and every active maintainer action. PtcManager appends the saved
   maintainer instructions while continuing to inject and protect the exact
   repository, target, branch, SHA, and authorization boundary. Queued and
   running actions keep their frozen prompt when configuration changes;
 - a Delivery-board **Review for merge** action once CI and mergeability are
-  clean, followed by a private **Retro** that proposes simple follow-up choices;
+  clean. New implementation agents include a configurable retrospective in the
+  PR description rather than starting a separate retrospective agent;
 - one shared clock/spinner status language for queued and actively running work
   across Planning, Delivery, and Operations;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
@@ -62,6 +64,10 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - private, phone-friendly PR summaries fenced by GitHub head and base SHAs;
 - an **Approve for merge** decision bound to the exact analyzed PR version;
 - explicit stale-approval display when the observed head, base, or diff changes.
+
+Upgrades still honor the former `PTC_REQUIRED_PRE_PR_REVIEWS` value when this
+release first backfills already-existing jobs. It no longer overrides new
+per-task choices after that migration.
 
 Dispatch, maintainer actions, and publishing are disabled by default. The
 implementation prompt forbids GitHub writes unless the explicit agent-publication
@@ -129,6 +135,8 @@ In broker mode, the generated task tells the implementation agent to run the
 configured tests, invoke the `codex-review` skill the configured number of
 times, fix findings, and commit without using GitHub credentials. This review loop is agent-owned
 prompt policy: PtcManager does not launch reviewers or store review evidence.
+The agent places its bounded retrospective in the final commit message, and the
+broker copies that section into the draft PR description.
 The broker stages untrusted Git data separately, re-verifies the base, head, and
 diff, pushes only the deterministic job branch, and creates or reconciles one
 draft PR. Codex, Claude, Herdr, and the worker never receive its short-lived
@@ -169,13 +177,6 @@ catalog contains:
 - **Review issue**, which uses up to three fresh independent `codex-review`
   consultations to challenge and improve the issue, stopping early after a
   clean pass and applying the same canonical label rules as **Prepare issue**;
-- **PR retrospective**, shown only on merge-ready and finished PRs created by
-  PtcManager, which performs a
-  read-only investigation and presents up to five concrete follow-up suggestions
-  in simple language. It creates nothing until the maintainer approves an
-  individual suggestion. The follow-up creation action searches for duplicates,
-  creates at most one issue, and leaves it without a managed `ptc:*` label so it
-  enters the normal planning inbox;
 - **Prepare merge decision**, shown for an open PR, which returns a private
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
@@ -192,8 +193,9 @@ catalog contains:
   agent—not PtcManager—repairs and pushes the branch, watches required CI,
   resolves any newly introduced conflict, and merges that exact PR with the
   authenticated `gh` CLI. PtcManager verifies the resulting GitHub state and
-  retains the session until the PR is merged or closed. Imported PRs deliberately
-  have no **Retro** button because they lack the original implementation context.
+  retains the session until the PR is merged or closed. Imported PRs can still
+  be reviewed and repaired, but do not receive a generated implementation
+  retrospective because PtcManager did not start their agent.
 
 For issue dependencies, GitHub remains authoritative. Maintainer actions write
 the canonical `Blocked by #<number>` marker into the dependent issue and apply

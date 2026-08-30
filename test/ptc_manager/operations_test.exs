@@ -16,6 +16,7 @@ defmodule PtcManager.OperationsTest do
       assert job.repository_id == repository.id
       assert job.state == "queued"
       assert job.fencing_token == 0
+      assert job.required_review_count == 2
 
       approval = Repo.get!(Approval, job.approval_id)
       assert approval.proposal_id == proposal.id
@@ -27,6 +28,24 @@ defmodule PtcManager.OperationsTest do
       assert audit.target_id == job.id
       assert audit.details["issue_number"] == issue.number
       assert audit.details["proposal_digest"] == proposal.proposal_digest
+      assert audit.details["required_review_count"] == 2
+    end
+
+    test "freezes a per-task review count between zero and three" do
+      repository = repository_fixture(%{required_pre_pr_reviews: 2})
+      easy = issue_fixture(repository, %{number: 501})
+      tricky = issue_fixture(repository, %{number: 502})
+      proposal_fixture(easy)
+      proposal_fixture(tricky)
+
+      assert {:ok, easy_job} = Operations.approve_issue(easy.id, "andreas", 0)
+      assert easy_job.required_review_count == 0
+
+      assert {:ok, tricky_job} = Operations.approve_issue(tricky.id, "andreas", 3)
+      assert tricky_job.required_review_count == 3
+
+      assert {:error, :invalid_review_count} =
+               Operations.approve_issue(tricky.id, "andreas", 4)
     end
 
     test "fails closed when the latest proposal no longer matches the issue" do

@@ -142,7 +142,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#lane-ready #board-job-#{job.id}")
-    assert has_element?(view, "#retro-pr-#{publication.id}", "Retro")
+    refute has_element?(view, "#retro-pr-#{publication.id}")
     assert has_element?(view, "#approve-merge-board-#{publication.id}", "Approve merge")
 
     assert has_element?(

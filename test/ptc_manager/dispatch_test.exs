@@ -479,6 +479,27 @@ defmodule PtcManager.DispatchTest do
     assert prompt =~ "PtcManager does not run or verify these reviews"
     assert prompt =~ "Do not use GitHub credentials"
     assert prompt =~ "credential-isolated broker"
+    assert prompt =~ "PTC-AGENT-RETROSPECTIVE-BEGIN"
+  end
+
+  test "uses the review count frozen on the individual implementation job" do
+    repository = repository_fixture(%{required_pre_pr_reviews: 2})
+    easy_issue = issue_fixture(repository, %{number: 601})
+    tricky_issue = issue_fixture(repository, %{number: 602})
+    proposal_fixture(easy_issue)
+    proposal_fixture(tricky_issue)
+
+    assert {:ok, easy_job} = Operations.approve_issue(easy_issue.id, "andreas", 0)
+    assert {:ok, tricky_job} = Operations.approve_issue(tricky_issue.id, "andreas", 3)
+
+    easy_prompt =
+      PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, easy_issue, easy_job)
+
+    tricky_prompt =
+      PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, tricky_issue, tricky_job)
+
+    assert easy_prompt =~ "No independent Codex review-skill pass is required for this task"
+    assert tricky_prompt =~ "invoke the `codex-review` skill 3 time(s)"
   end
 
   test "can assign fenced branch push and PR creation to the coding agent" do
@@ -511,6 +532,8 @@ defmodule PtcManager.DispatchTest do
     assert prompt =~ "push the existing job branch and create one pull request"
     assert prompt =~ "Use GitHub credentials only to push `#{job.branch_name}`"
     assert prompt =~ "include `Closes #1627`"
+    assert prompt =~ "## Agent retrospective"
+    assert prompt =~ "No follow-up suggested"
     assert prompt =~ "do not merge anything"
     assert prompt =~ "pull-request URL"
     refute prompt =~ "Do not use GitHub credentials"

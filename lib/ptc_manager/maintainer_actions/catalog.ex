@@ -19,7 +19,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
       key: "implement_issue",
       label: "Implement issue",
       button: "Approve and start",
-      description: "Implement, test, review, commit, push, and create the issue pull request."
+      description:
+        "Implement, test, review, commit, push, and create the issue pull request, including its Agent retrospective section."
     },
     %{
       key: "prepare_issue",
@@ -50,18 +51,6 @@ defmodule PtcManager.MaintainerActions.Catalog do
       label: "Fix and merge pull request",
       button: "Fix and merge",
       description: "Repair, verify, push, wait for CI, and merge the exact PR."
-    },
-    %{
-      key: "pr_retrospective",
-      label: "Pull request retrospective",
-      button: "Retro / Run retrospective",
-      description: "Find concrete follow-up work without creating issues automatically."
-    },
-    %{
-      key: "create_retrospective_issue",
-      label: "Create retrospective issue",
-      button: "Create issue",
-      description: "Create one approved follow-up issue from a retrospective suggestion."
     }
   ]
 
@@ -87,20 +76,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   def issue_actions(%Issue{}), do: []
 
-  def pull_request_actions(%PrPublication{pr_state: state} = publication)
-      when state in ["merged", "closed"] do
-    if PrPublication.managed?(publication) do
-      [
-        %{
-          key: "pr_retrospective",
-          label: "Run retrospective",
-          description: "Find concrete follow-up work"
-        }
-      ]
-    else
-      []
-    end
-  end
+  def pull_request_actions(%PrPublication{pr_state: state}) when state in ["merged", "closed"],
+    do: []
 
   def pull_request_actions(%PrPublication{state: "published", pr_state: "open"} = publication) do
     publication_actions =
@@ -114,20 +91,6 @@ defmodule PtcManager.MaintainerActions.Catalog do
         ]
       else
         []
-      end
-
-    publication_actions =
-      if retrospective_ready?(publication) do
-        publication_actions ++
-          [
-            %{
-              key: "pr_retrospective",
-              label: "Retro",
-              description: "Find worthwhile follow-up work without creating issues"
-            }
-          ]
-      else
-        publication_actions
       end
 
     if repair_needed?(publication) do
@@ -550,6 +513,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
         String.downcase("#{repository.github_owner}/#{repository.github_name}")
   end
 
+  # Kept for legacy retrospective actions already present in durable history.
   defp retrospective_ready?(%PrPublication{} = publication) do
     PrPublication.managed?(publication) and not publication.draft and
       publication.checks_state in ["success", "none"] and

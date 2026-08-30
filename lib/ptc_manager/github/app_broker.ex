@@ -11,6 +11,7 @@ defmodule PtcManager.GitHub.AppBroker do
   @api_version "2022-11-28"
   @output_limit 65_536
   @staging_prefix "ptc-manager-publish-"
+  @retrospective_limit 4_000
 
   import Bitwise, only: [band: 2]
 
@@ -39,7 +40,8 @@ defmodule PtcManager.GitHub.AppBroker do
                       token,
                       repository,
                       issue,
-                      publication
+                      publication,
+                      trusted_path
                     ) do
                normalize_pull_request(pull_request, publication.head_sha, repository)
              end
@@ -550,26 +552,30 @@ defmodule PtcManager.GitHub.AppBroker do
     end
   end
 
-  defp existing_pull_request_or_create(nil, token, repository, issue, publication),
-    do: create_pull_request(token, repository, issue, publication)
+  defp existing_pull_request_or_create(
+         nil,
+         token,
+         repository,
+         issue,
+         publication,
+         trusted_path
+       ),
+       do: create_pull_request(token, repository, issue, publication, trusted_path)
 
   defp existing_pull_request_or_create(
          pull_request,
          _token,
          _repository,
          _issue,
-         _publication
+         _publication,
+         _trusted_path
        ),
        do: {:ok, pull_request}
 
-  defp create_pull_request(token, repository, issue, publication) do
+  defp create_pull_request(token, repository, issue, publication, trusted_path) do
     title = "Implement ##{issue.number}: #{String.slice(issue.title, 0, 180)}"
-
-    body = """
-    Automated implementation for ##{issue.number}.
-
-    Ptc Manager verified the committed branch before publishing it. This pull request remains a draft until review is complete.
-    """
+    retrospective = agent_retrospective(trusted_path, publication.head_sha)
+    body = pull_request_body(issue.number, retrospective)
 
     request(
       :post,
@@ -584,6 +590,37 @@ defmodule PtcManager.GitHub.AppBroker do
       }
     )
   end
+
+  @doc false
+  def pull_request_body(issue_number, retrospective) do
+    """
+    Automated implementation for ##{issue_number}.
+
+    Ptc Manager verified the committed branch before publishing it. This pull request remains a draft until review is complete.
+
+    ## Agent retrospective
+
+    #{retrospective}
+    """
+  end
+
+  @doc false
+  def agent_retrospective(path, head_sha) when is_binary(path) and is_binary(head_sha) do
+    with true <- Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, head_sha),
+         {:ok, message} <- run_git(path, ["show", "-s", "--format=%B", head_sha]),
+         [_, retrospective] <-
+           Regex.run(
+             ~r/PTC-AGENT-RETROSPECTIVE-BEGIN\s*\n(.*?)\nPTC-AGENT-RETROSPECTIVE-END/s,
+             message
+           ),
+         retrospective when retrospective != "" <- String.trim(retrospective) do
+      String.slice(retrospective, 0, @retrospective_limit)
+    else
+      _missing -> "No agent retrospective was supplied."
+    end
+  end
+
+  def agent_retrospective(_path, _head_sha), do: "No agent retrospective was supplied."
 
   defp normalize_pull_request(
          %{

@@ -1456,8 +1456,7 @@ defmodule PtcManager.MaintainerActionsTest do
     issue = issue_fixture(repository)
     publication = retrospective_publication_fixture(issue)
 
-    assert {:ok, queued} =
-             MaintainerActions.enqueue("pr_retrospective", publication.id, "andreas")
+    assert {:ok, queued} = enqueue_legacy_retrospective(publication, "andreas")
 
     assert queued.baseline_issue_numbers == %{"numbers" => []}
     issue_fixture(repository, %{number: 901, body: "Created while this action was queued."})
@@ -1494,7 +1493,7 @@ defmodule PtcManager.MaintainerActionsTest do
     second_publication = retrospective_publication_fixture(second_issue)
 
     assert {:ok, _queued_without_issue} =
-             MaintainerActions.enqueue("pr_retrospective", second_publication.id, "andreas")
+             enqueue_legacy_retrospective(second_publication, "andreas")
 
     assert {:ok, proposal} =
              MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: NoopSync)
@@ -1518,8 +1517,7 @@ defmodule PtcManager.MaintainerActionsTest do
     third_issue = issue_fixture(third_repository)
     third_publication = retrospective_publication_fixture(third_issue)
 
-    assert {:ok, no_followups} =
-             MaintainerActions.enqueue("pr_retrospective", third_publication.id, "andreas")
+    assert {:ok, no_followups} = enqueue_legacy_retrospective(third_publication, "andreas")
 
     assert {:ok, unexpected_creation} =
              MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: RetrospectiveSync)
@@ -1529,13 +1527,21 @@ defmodule PtcManager.MaintainerActionsTest do
     assert unexpected_creation.last_error =~ "canonical_retrospective_proposal_mismatch"
   end
 
+  test "does not accept new retrospective actions after the workflow is retired" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = retrospective_publication_fixture(issue)
+
+    assert {:error, :unknown_agent_action} =
+             MaintainerActions.enqueue("pr_retrospective", publication.id, "andreas")
+  end
+
   test "defers a retrospective when its immediate pre-action GitHub sync fails" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
     publication = retrospective_publication_fixture(issue)
 
-    assert {:ok, queued} =
-             MaintainerActions.enqueue("pr_retrospective", publication.id, "andreas")
+    assert {:ok, queued} = enqueue_legacy_retrospective(publication, "andreas")
 
     assert {:ok, deferred} =
              MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: AlwaysFailSync)
@@ -1846,6 +1852,24 @@ defmodule PtcManager.MaintainerActionsTest do
       last_used_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
     })
     |> Repo.insert!()
+  end
+
+  defp enqueue_legacy_retrospective(publication, actor) do
+    publication =
+      Repo.preload(publication, [:repository, job: [:issue, :repository, :worktree_allocation]])
+
+    repository = publication.repository || publication.job.repository
+
+    with {:ok, attrs} <-
+           Catalog.build("pr_retrospective", %{
+             publication: publication,
+             issue: publication.job.issue,
+             repository: repository
+           }) do
+      Operations.enqueue_agent_action(
+        Map.merge(attrs, %{action_key: "pr_retrospective", actor: actor})
+      )
+    end
   end
 
   defp retain_real_repair_worktree(publication, issue) do

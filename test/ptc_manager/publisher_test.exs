@@ -654,6 +654,46 @@ defmodule PtcManager.PublisherTest do
              })
   end
 
+  test "the broker copies the bounded final-commit retrospective into its PR body" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-manager-retrospective-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+    git!(path, ["init", "--initial-branch=main"])
+    git!(path, ["config", "user.name", "Agent"])
+    git!(path, ["config", "user.email", "agent@example.test"])
+    File.write!(Path.join(path, "README.md"), "retrospective test\n")
+    git!(path, ["add", "README.md"])
+
+    git!(path, [
+      "commit",
+      "-m",
+      "Implement the bounded change",
+      "-m",
+      "PTC-AGENT-RETROSPECTIVE-BEGIN\nA flaky retry test surprised me.\nPTC-AGENT-RETROSPECTIVE-END"
+    ])
+
+    previous_timeout = Application.get_env(:ptc_manager, :github_push_timeout_binary)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :github_push_timeout_binary, previous_timeout)
+    end)
+
+    Application.put_env(:ptc_manager, :github_push_timeout_binary, timeout_binary!())
+    head_sha = git!(path, ["rev-parse", "HEAD"]) |> String.trim()
+
+    retrospective = PtcManager.GitHub.AppBroker.agent_retrospective(path, head_sha)
+    assert retrospective == "A flaky retry test surprised me."
+
+    body = PtcManager.GitHub.AppBroker.pull_request_body(42, retrospective)
+    assert body =~ "## Agent retrospective"
+    assert body =~ retrospective
+  end
+
   test "trusted staging does not inherit worker-controlled Git configuration" do
     unique = System.unique_integer([:positive])
     test_root = Path.join(System.tmp_dir!(), "ptc-manager-broker-test-#{unique}")

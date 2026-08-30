@@ -12,6 +12,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.Publications
   alias PtcManager.PublicationStatusPoller
   alias PtcManager.PublisherPoller
+  alias PtcManager.ReviewPolicy
   alias PtcManager.ResultReconciler
 
   @impl true
@@ -57,11 +58,16 @@ defmodule PtcManagerWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("approve", %{"issue-id" => issue_id}, socket) do
-    with {issue_id, ""} <- Integer.parse(issue_id) do
-      approve_issue(issue_id, socket)
+  def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
+    with {:ok, issue_id} <- parse_issue_id(issue_id),
+         {:ok, review_count} <- parse_review_count(params["review-count"]) do
+      approve_issue(issue_id, review_count, socket)
     else
-      _ -> {:noreply, put_flash(socket, :error, "That issue could not be found.")}
+      {:error, :invalid_issue_id} ->
+        {:noreply, put_flash(socket, :error, "That issue could not be found.")}
+
+      {:error, :invalid_review_count} ->
+        {:noreply, put_flash(socket, :error, "Choose between zero and three reviews.")}
     end
   end
 
@@ -151,14 +157,24 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
-  defp approve_issue(issue_id, socket) do
-    case Operations.approve_issue(issue_id, socket.assigns.actor) do
+  defp approve_issue(issue_id, review_count, socket) do
+    case Operations.approve_issue(issue_id, socket.assigns.actor, review_count) do
       {:ok, _job} ->
         DispatchPoller.wake()
 
+        review_message =
+          if is_integer(review_count) do
+            "#{review_count} review #{if(review_count == 1, do: "pass", else: "passes")}"
+          else
+            "the repository's default review count"
+          end
+
         {:noreply,
          socket
-         |> put_flash(:info, "Approved. One implementation job is now queued.")
+         |> put_flash(
+           :info,
+           "Approved with #{review_message}. One implementation job is now queued."
+         )
          |> load_dashboard()}
 
       {:error, :already_active} ->
@@ -185,8 +201,27 @@ defmodule PtcManagerWeb.DashboardLive do
       {:error, :issue_dependencies_unresolved} ->
         {:noreply, put_flash(socket, :error, "This issue still has an unresolved dependency.")}
 
+      {:error, :invalid_review_count} ->
+        {:noreply, put_flash(socket, :error, "Choose between zero and three reviews.")}
+
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Approval failed: #{inspect(reason)}")}
+    end
+  end
+
+  defp parse_review_count(nil), do: {:ok, nil}
+
+  defp parse_review_count(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {count, ""} when count in 0..3 -> {:ok, count}
+      _ -> {:error, :invalid_review_count}
+    end
+  end
+
+  defp parse_issue_id(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {issue_id, ""} -> {:ok, issue_id}
+      _ -> {:error, :invalid_issue_id}
     end
   end
 
@@ -455,9 +490,11 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def worktree_state_label(state), do: state |> String.replace("_", " ")
 
-  def required_reviews(repository) do
-    Application.get_env(:ptc_manager, :required_pre_pr_reviews_override) ||
-      repository.required_pre_pr_reviews
+  def required_reviews(repository), do: ReviewPolicy.default_count(repository)
+
+  def job_review_label(job, repository) do
+    count = ReviewPolicy.job_count(job, repository)
+    "#{count} review #{if(count == 1, do: "pass", else: "passes")}"
   end
 
   def state_classes("working"), do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"

@@ -50,7 +50,8 @@ Each issue card shows:
 
 Available actions in the first product release:
 
-- **Approve and start** creates one queued implementation job;
+- **Approve and start** creates one queued implementation job and freezes the
+  maintainer's choice of zero to three independent review passes;
 - **Investigate more** requests a deeper manager pass;
 - **Needs changes** records private guidance for a new analysis;
 - **Skip** dismisses the current proposal without changing GitHub;

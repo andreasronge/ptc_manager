@@ -314,22 +314,52 @@
               label={agent_action_label(item.issue_agent_action)}
               class="rounded-xl px-3 py-2"
             />
-            <button
+            <form
               :if={!item.active_job}
-              id={"approve-issue-#{item.issue.id}"}
-              phx-click="approve"
-              phx-value-issue-id={item.issue.id}
-              disabled={!approvable?(item)}
-              class="rounded-xl bg-teal-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              id={"approve-form-issue-#{item.issue.id}"}
+              phx-submit="approve"
+              class="flex flex-wrap items-end gap-2"
             >
-              Approve and start
-            </button>
+              <input type="hidden" name="issue-id" value={item.issue.id} />
+              <label class="text-xs font-medium text-slate-400">
+                Reviews
+                <select
+                  id={"review-count-issue-#{item.issue.id}"}
+                  name="review-count"
+                  disabled={!approvable?(item)}
+                  class="mt-1 block rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5 text-sm font-semibold text-white outline-none focus:border-teal-400/60"
+                >
+                  <option
+                    :for={count <- 0..3}
+                    value={count}
+                    selected={count == required_reviews(item.issue.repository)}
+                  >
+                    {count}{if(count == 0, do: " · none", else: "")}
+                  </option>
+                </select>
+              </label>
+              <button
+                id={"approve-issue-#{item.issue.id}"}
+                type="submit"
+                disabled={!approvable?(item)}
+                class="rounded-xl bg-teal-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                Approve and start
+              </button>
+            </form>
             <.work_status
               :if={item.active_job}
               state={item.active_job.state}
               label={"Job #{job_label(item.active_job.state)}"}
               class="rounded-xl px-4 py-2.5 text-sm"
             />
+            <span
+              :if={item.active_job}
+              id={"job-review-count-#{item.active_job.id}"}
+              class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-xs font-medium text-slate-400"
+            >
+              {job_review_label(item.active_job, item.issue.repository)}
+            </span>
             <button
               :if={
                 item.active_job &&

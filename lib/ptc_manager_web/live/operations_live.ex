@@ -4,6 +4,7 @@ defmodule PtcManagerWeb.OperationsLive do
   alias PtcManager.HostMetrics
   alias PtcManager.Herdr.Transcript
   alias PtcManager.Operations
+  alias PtcManager.ReviewPolicy
 
   @impl true
   def mount(_params, _session, socket) do
@@ -177,6 +178,12 @@ defmodule PtcManagerWeb.OperationsLive do
       value when is_binary(value) and value != "" -> value
       _value -> String.capitalize(run.role) <> " agent"
     end
+  end
+
+  def job_review_label(job) do
+    count = ReviewPolicy.job_count(job, job.repository)
+
+    "#{count} review #{if(count == 1, do: "pass", else: "passes")}"
   end
 
   def run_task(%{job: %{issue: issue, repository: repository}}) do

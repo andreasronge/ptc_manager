@@ -16,8 +16,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "#prompt-review_issue", "Button: Review issue")
     assert has_element?(view, "#prompt-repair_pr", "Button: Fix")
     assert has_element?(view, "#prompt-repair_and_merge_pr", "Button: Fix and merge")
-    assert has_element?(view, "#prompt-pr_retrospective", "Retro / Run retrospective")
-    assert has_element?(view, "#prompt-create_retrospective_issue", "Button: Create issue")
+    assert has_element?(view, "#prompt-implement_issue", "Agent retrospective")
 
     view
     |> form("#prompt-repair_and_merge_pr form", %{
