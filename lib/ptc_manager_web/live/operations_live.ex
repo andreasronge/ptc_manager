@@ -204,6 +204,9 @@ defmodule PtcManagerWeb.OperationsLive do
   def state_classes(state) when state in ["working", "done"],
     do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
 
+  def state_classes("waiting"),
+    do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
+
   def state_classes(state) when state in ["blocked", "unknown"],
     do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
 
@@ -215,12 +218,16 @@ defmodule PtcManagerWeb.OperationsLive do
   def slot_markers(total) when is_integer(total) and total > 0, do: 1..total
   def slot_markers(_total), do: []
 
+  def terminal_refresh_label(%{state: "waiting"}),
+    do: "Retained session · refreshes every 5 seconds"
+
   def terminal_refresh_label(%{ended_at: nil}), do: "Auto-refreshes every 5 seconds"
   def terminal_refresh_label(_run), do: "Final retained terminal snapshot"
 
   defp load_operations(socket) do
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()
+    waiting_runs = Operations.list_waiting_agent_runs()
     timeline = Operations.list_agent_timeline(40)
 
     selected_run =
@@ -230,13 +237,17 @@ defmodule PtcManagerWeb.OperationsLive do
       end
 
     active_slot_count =
-      Enum.count(active_runs, &(&1.role == "implementer" and not is_nil(&1.job_id)))
+      workers
+      |> Enum.filter(&(&1.status == "online"))
+      |> Enum.flat_map(& &1.worktree_allocations)
+      |> Enum.count(&Operations.worktree_consumes_execution_slot?/1)
 
     total_slots = Enum.sum(Enum.map(workers, &worker_capacity/1))
 
     assign(socket,
       workers: workers,
       active_runs: active_runs,
+      waiting_runs: waiting_runs,
       active_slot_count: active_slot_count,
       timeline: timeline,
       selected_run: selected_run,

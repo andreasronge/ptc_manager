@@ -6,6 +6,7 @@ defmodule PtcManager.Publications do
   alias PtcManager.Operations
 
   alias PtcManager.Operations.{
+    AgentRun,
     AuditEvent,
     Job,
     PrPublication,
@@ -244,7 +245,7 @@ defmodule PtcManager.Publications do
               )
               |> Repo.update_all(
                 set: [
-                  state: "warm",
+                  state: "waiting",
                   head_sha: result.head_sha,
                   pr_number: result.pr_number,
                   pr_url: result.pr_url,
@@ -253,6 +254,8 @@ defmodule PtcManager.Publications do
                   updated_at: now
                 ]
               )
+
+              mark_implementation_agent_waiting(publication.job_id, now)
 
               insert_audit!(%{
                 actor: "github-broker",
@@ -372,7 +375,7 @@ defmodule PtcManager.Publications do
               )
               |> Repo.update_all(
                 set: [
-                  state: "reclaimable",
+                  state: "waiting",
                   head_sha: result.head_sha,
                   pr_number: result.pr_number,
                   pr_url: result.pr_url,
@@ -381,6 +384,8 @@ defmodule PtcManager.Publications do
                   updated_at: now
                 ]
               )
+
+              mark_implementation_agent_waiting(job.id, now)
 
               insert_audit!(%{
                 actor: "github-reconciler",
@@ -687,11 +692,12 @@ defmodule PtcManager.Publications do
               WorktreeAllocation
               |> where(
                 [allocation],
-                allocation.job_id == ^job.id and allocation.state in ["warm", "reclaimable"]
+                allocation.job_id == ^job.id and
+                  allocation.state in ["warm", "waiting", "reclaimable"]
               )
               |> Repo.update_all(
                 set: [
-                  state: "reclaimable",
+                  state: "waiting",
                   head_sha: result.head_sha,
                   pr_url: result.pr_url,
                   last_used_at: now,
@@ -699,6 +705,8 @@ defmodule PtcManager.Publications do
                   updated_at: now
                 ]
               )
+
+              mark_implementation_agent_waiting(job.id, now)
 
               load(publication.id)
 
@@ -737,6 +745,8 @@ defmodule PtcManager.Publications do
               |> Repo.update_all(
                 set: [state: "terminal", last_used_at: now, last_error: nil, updated_at: now]
               )
+
+              finish_retained_implementation_agent(job.id, result.state, now)
 
               insert_status_audit!(
                 publication,
@@ -827,7 +837,7 @@ defmodule PtcManager.Publications do
               )
               |> Repo.update_all(
                 set: [
-                  state: "reclaimable",
+                  state: "waiting",
                   head_sha: verified.head_sha,
                   pr_number: result.pr_number,
                   pr_url: result.pr_url,
@@ -836,6 +846,8 @@ defmodule PtcManager.Publications do
                   updated_at: now
                 ]
               )
+
+              mark_implementation_agent_waiting(job.id, now)
 
               insert_audit!(%{
                 actor: "repair-agent",
@@ -1060,6 +1072,47 @@ defmodule PtcManager.Publications do
   defp requested_retry_delay_ms(_reason), do: nil
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
+
+  defp mark_implementation_agent_waiting(job_id, now) do
+    AgentRun
+    |> where(
+      [run],
+      run.job_id == ^job_id and run.role == "implementer" and
+        run.state in ["idle", "done", "waiting"]
+    )
+    |> Repo.update_all(
+      set: [
+        state: "waiting",
+        status_text: "Retained with its PR context; waiting for CI or maintainer action.",
+        last_heartbeat_at: now,
+        ended_at: nil,
+        updated_at: now
+      ]
+    )
+  end
+
+  defp finish_retained_implementation_agent(job_id, pr_state, now) do
+    status_text =
+      if pr_state == "merged",
+        do: "PR merged; the retained session is ready for cleanup.",
+        else: "PR closed; the retained session is ready for cleanup."
+
+    AgentRun
+    |> where(
+      [run],
+      run.job_id == ^job_id and run.role == "implementer" and
+        run.state not in ["failed", "lost"]
+    )
+    |> Repo.update_all(
+      set: [
+        state: "done",
+        status_text: status_text,
+        last_heartbeat_at: now,
+        ended_at: now,
+        updated_at: now
+      ]
+    )
+  end
 
   defp mark_worktree_attention(job_id, message, now) do
     WorktreeAllocation

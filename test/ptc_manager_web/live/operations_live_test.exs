@@ -2,6 +2,8 @@ defmodule PtcManagerWeb.OperationsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.Operations
+  alias PtcManager.Operations.{Job, WorktreeAllocation}
+  alias PtcManager.Repo
   alias PtcManagerWeb.OperationsLive
 
   defmodule FakeTranscript do
@@ -39,6 +41,20 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       status: "offline",
       capabilities: %{"herdr" => true, "implementation_slots" => 8}
     })
+
+    job
+    |> Job.changeset(%{state: "working", lease_owner: worker.worker_key})
+    |> Repo.update!()
+
+    %WorktreeAllocation{}
+    |> WorktreeAllocation.changeset(%{
+      worker_id: worker.id,
+      job_id: job.id,
+      state: "attention",
+      path: "/tmp/uncertain-operations-slot",
+      last_used_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 

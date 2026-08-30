@@ -204,6 +204,12 @@ defmodule PtcManager.MaintainerActions do
               {:ok, _allocation} ->
                 {:ok, prepared}
 
+              {:error, :dispatch_capacity} ->
+                case Operations.defer_agent_action_preflight(action.id, :dispatch_capacity) do
+                  {:ok, deferred} -> {:deferred, deferred}
+                  {:error, defer_reason} -> {:error, defer_reason}
+                end
+
               {:error, reason} ->
                 fail_preflight(action.id, reason)
             end

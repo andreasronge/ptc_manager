@@ -136,7 +136,7 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(Job, job.id).state == "pr_open"
 
     allocation = Repo.get!(WorktreeAllocation, allocation.id)
-    assert allocation.state == "reclaimable"
+    assert allocation.state == "waiting"
     assert allocation.pr_number == 91
 
     assert Repo.exists?(
@@ -449,7 +449,7 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "cleaning"
   end
 
-  test "canonical open PR status promotes a warm worktree to reclaimable" do
+  test "canonical open PR status retains a warm worktree in waiting state" do
     {job, publication, result} = published_publication_fixture()
     worker = worker_fixture(%{worker_key: "open-pr-worker"})
 
@@ -479,7 +479,7 @@ defmodule PtcManager.PublisherTest do
     })
 
     assert {:ok, _open} = PublicationStatusReconciler.run_once(client: FakeBroker)
-    assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "waiting"
   end
 
   test "a changed GitHub PR head blocks the publication lineage" do

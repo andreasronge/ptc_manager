@@ -1,13 +1,19 @@
 defmodule PtcManager.MaintainerActions.CodexAdapter do
-  @moduledoc "Runs an authorized maintainer action through ephemeral Codex and authenticated gh."
+  @moduledoc "Runs maintainer actions through Codex or a retained Herdr implementation session."
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
+  alias PtcManager.MaintainerActions.RetainedHerdrAdapter
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
 
   @impl true
+  def run(%AgentAction{action_key: "repair_pr"} = action) do
+    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, RetainedHerdrAdapter)
+    adapter.run(action)
+  end
+
   def run(%AgentAction{repository: repository} = action) do
     with {:ok, path} <- repository_path(action, repository) do
       run_codex(action, path)

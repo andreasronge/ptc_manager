@@ -3,7 +3,7 @@ defmodule PtcManager.Operations.AgentRun do
   import Ecto.Changeset
 
   @roles ~w(manager implementer reviewer)
-  @states ~w(queued starting working idle blocked unknown done failed lost)
+  @states ~w(queued starting working idle blocked waiting unknown done failed lost)
   @terminal_states ~w(done failed lost)
 
   schema "agent_runs" do

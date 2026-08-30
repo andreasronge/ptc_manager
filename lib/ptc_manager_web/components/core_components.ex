@@ -455,6 +455,7 @@ defmodule PtcManagerWeb.CoreComponents do
       state in ~w(starting working running reconciling awaiting_reconciliation verifying_result publishing_pr sync_pending)
 
   defp work_status_icon("queued"), do: "hero-clock-mini"
+  defp work_status_icon("waiting"), do: "hero-pause-mini"
   defp work_status_icon(state) when state in ~w(done ready_for_pr pr_open), do: "hero-check-mini"
 
   defp work_status_icon(state) when state in ~w(failed lost blocked publish_blocked),
@@ -463,6 +464,7 @@ defmodule PtcManagerWeb.CoreComponents do
   defp work_status_icon(_state), do: "hero-arrow-path-mini"
 
   defp work_status_tone("queued"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+  defp work_status_tone("waiting"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
 
   defp work_status_tone(state)
        when state in ~w(starting working running reconciling awaiting_reconciliation verifying_result publishing_pr sync_pending),

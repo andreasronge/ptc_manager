@@ -15,8 +15,11 @@ defmodule PtcManager.Herdr.Sync do
 
   alias PtcManager.Repo
   @terminal_states ~w(done failed lost)
+  @recoverable_attention_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation)
+  @missing_retained_error "Herdr confirmed that the retained managed agent is no longer present."
 
   def sync(opts \\ []) do
+    snapshot_started_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :herdr_client))
 
     session =
@@ -38,7 +41,13 @@ defmodule PtcManager.Herdr.Sync do
 
     case client.list_agents() do
       {:ok, agents} when is_list(agents) ->
-        persist_snapshot(session, agents, stale_after_ms, reconcile_after_ms)
+        persist_snapshot(
+          session,
+          agents,
+          stale_after_ms,
+          reconcile_after_ms,
+          snapshot_started_at
+        )
 
       {:error, reason} ->
         mark_degraded(session, reason, stale_after_ms)
@@ -52,7 +61,8 @@ defmodule PtcManager.Herdr.Sync do
          session,
          remote_agents,
          stale_after_ms,
-         reconcile_after_ms
+         reconcile_after_ms,
+         snapshot_started_at
        ) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -64,6 +74,7 @@ defmodule PtcManager.Herdr.Sync do
           Enum.map(remote_agents, fn agent ->
             agent
             |> normalize_agent(session, now)
+            |> Map.put(:snapshot_started_at, snapshot_started_at)
             |> maybe_attach_managed_attempt(worker.worker_key)
           end)
 
@@ -79,14 +90,26 @@ defmodule PtcManager.Herdr.Sync do
         observed_run_ids =
           Enum.map(normalized, fn attrs ->
             existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
-            run = upsert_agent_run(worker, existing_run, attrs)
-            reconcile_worktree_identity(run, attrs, now)
-            reconcile_job(run, attrs.state, now)
-            run.id
+
+            if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
+              run = upsert_agent_run(worker, existing_run, attrs)
+              reconcile_worktree_identity(run, attrs, now)
+              reconcile_job(run, attrs.state, now)
+              run.id
+            else
+              existing_run.id
+            end
           end)
           |> MapSet.new()
 
-        lost_count = mark_missing_runs_lost(existing_runs, observed_keys, observed_run_ids, now)
+        lost_count =
+          mark_missing_runs_lost(
+            existing_runs,
+            observed_keys,
+            observed_run_ids,
+            now,
+            snapshot_started_at
+          )
 
         absent_count =
           resolve_absent_reconciling_jobs(worker, normalized, now, reconcile_after_ms)
@@ -144,6 +167,36 @@ defmodule PtcManager.Herdr.Sync do
   defp upsert_agent_run(
          _worker,
          %AgentRun{job_id: job_id, state: previous_state} = run,
+         %{state: "waiting"} = attrs
+       )
+       when not is_nil(job_id) and previous_state in @terminal_states do
+    attrs =
+      attrs
+      |> Map.put(:started_at, run.started_at)
+      |> Map.put(:ended_at, nil)
+      |> preserve_identity(run)
+
+    run |> AgentRun.changeset(attrs) |> Repo.update!()
+  end
+
+  defp upsert_agent_run(
+         _worker,
+         %AgentRun{state: "lost"} = run,
+         %{recover_retained: true, state: state} = attrs
+       )
+       when state in ["working", "blocked"] do
+    attrs =
+      attrs
+      |> Map.put(:started_at, run.started_at)
+      |> Map.put(:ended_at, nil)
+      |> preserve_identity(run)
+
+    run |> AgentRun.changeset(attrs) |> Repo.update!()
+  end
+
+  defp upsert_agent_run(
+         _worker,
+         %AgentRun{job_id: job_id, state: previous_state} = run,
          %{state: state}
        )
        when not is_nil(job_id) and previous_state in @terminal_states and
@@ -182,8 +235,15 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp upsert_agent_run(_worker, %AgentRun{} = run, attrs) do
-    attrs = Map.put(attrs, :started_at, run.started_at)
+    attrs = attrs |> Map.put(:started_at, run.started_at) |> preserve_identity(run)
     run |> AgentRun.changeset(attrs) |> Repo.update!()
+  end
+
+  defp preserve_identity(attrs, run) do
+    Enum.reduce([:agent_name, :herdr_workspace, :herdr_pane, :herdr_session], attrs, fn key,
+                                                                                        acc ->
+      if Map.get(acc, key) in [nil, ""], do: Map.put(acc, key, Map.get(run, key)), else: acc
+    end)
   end
 
   defp insert_agent_run(worker, attrs) do
@@ -192,13 +252,25 @@ defmodule PtcManager.Herdr.Sync do
     |> Repo.insert!()
   end
 
-  defp mark_missing_runs_lost(existing_runs, observed_keys, observed_run_ids, now) do
+  defp snapshot_fresh_for_run?(nil, _snapshot_started_at), do: true
+
+  defp snapshot_fresh_for_run?(%AgentRun{updated_at: updated_at}, snapshot_started_at),
+    do: DateTime.compare(updated_at, snapshot_started_at) != :gt
+
+  defp mark_missing_runs_lost(
+         existing_runs,
+         observed_keys,
+         observed_run_ids,
+         now,
+         snapshot_started_at
+       ) do
     missing_runs =
       existing_runs
       |> Map.values()
       |> Enum.reject(
         &(&1.state in @terminal_states or MapSet.member?(observed_keys, &1.external_key) or
-            MapSet.member?(observed_run_ids, &1.id))
+            MapSet.member?(observed_run_ids, &1.id) or
+            not snapshot_fresh_for_run?(&1, snapshot_started_at))
       )
 
     Enum.each(missing_runs, fn run ->
@@ -211,6 +283,14 @@ defmodule PtcManager.Herdr.Sync do
           ended_at: now
         })
         |> Repo.update!()
+
+      if lost.job_id do
+        mark_worktree_attention(
+          lost.job_id,
+          @missing_retained_error,
+          now
+        )
+      end
 
       reconcile_job(lost, "lost", now)
     end)
@@ -399,13 +479,30 @@ defmodule PtcManager.Herdr.Sync do
          %Job{fencing_token: ^fencing_token, state: state, lease_owner: ^worker_key} = job <-
            Repo.get(Job, job_id),
          true <-
-           state in ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr) do
+           state in ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr pr_open) do
       managed_run = Repo.get_by(AgentRun, job_id: job.id, fencing_token: fencing_token)
 
-      attrs
-      |> Map.put(:job_id, job.id)
-      |> Map.put(:fencing_token, fencing_token)
-      |> Map.put(:managed_run, managed_run)
+      attrs =
+        attrs
+        |> Map.put(:job_id, job.id)
+        |> Map.put(:fencing_token, fencing_token)
+        |> Map.put(:managed_run, managed_run)
+        |> Map.put(
+          :recover_retained,
+          state == "pr_open" and match?(%AgentRun{state: "lost"}, managed_run)
+        )
+
+      if state == "pr_open" and attrs.state in ["done", "idle"] do
+        attrs
+        |> Map.put(:state, "waiting")
+        |> Map.put(:ended_at, nil)
+        |> Map.put(
+          :status_text,
+          "Retained with its PR context; waiting for CI or maintainer action."
+        )
+      else
+        attrs
+      end
     else
       _ -> attrs
     end
@@ -540,7 +637,8 @@ defmodule PtcManager.Herdr.Sync do
     WorktreeAllocation
     |> where(
       [allocation],
-      allocation.job_id == ^job_id and allocation.state not in ["cleaning", "removed"]
+      allocation.job_id == ^job_id and
+        allocation.state not in ["attention", "terminal", "cleaning", "removed"]
     )
     |> Repo.update_all(
       set: [state: "attention", last_used_at: now, last_error: message, updated_at: now]
@@ -548,31 +646,114 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp reconcile_worktree_identity(
-         %AgentRun{job_id: job_id},
-         %{herdr_workspace: workspace, state: state},
+         %AgentRun{job_id: job_id, herdr_workspace: retained_workspace},
+         %{herdr_workspace: observed_workspace, state: state} = attrs,
          now
        )
-       when is_integer(job_id) and is_binary(workspace) and workspace != "" do
-    updates =
-      [herdr_workspace: workspace, last_used_at: now, updated_at: now]
-      |> maybe_mark_worktree_active(state)
+       when is_integer(job_id) do
+    workspace =
+      if is_binary(observed_workspace) and observed_workspace != "",
+        do: observed_workspace,
+        else: retained_workspace
 
-    WorktreeAllocation
-    |> where(
-      [allocation],
-      allocation.job_id == ^job_id and allocation.state not in ["cleaning", "removed"]
-    )
-    |> Repo.update_all(set: updates)
+    if is_binary(workspace) and workspace != "" do
+      WorktreeAllocation
+      |> where(
+        [allocation],
+        allocation.job_id == ^job_id and
+          allocation.state not in ["terminal", "cleaning", "removed"]
+      )
+      |> Repo.update_all(set: [herdr_workspace: workspace, last_used_at: now, updated_at: now])
+
+      reconcile_worktree_state(job_id, state, now, Map.get(attrs, :recover_retained, false))
+    end
 
     :ok
   end
 
   defp reconcile_worktree_identity(_run, _attrs, _now), do: :ok
 
-  defp maybe_mark_worktree_active(updates, state) when state in ["working", "idle", "blocked"],
-    do: Keyword.merge(updates, state: "active", last_error: nil)
+  defp reconcile_worktree_state(job_id, state, now, recovered_retained?)
+       when state in ["working", "idle"] do
+    mark_worktree_active(job_id, now, recovered_retained?)
+  end
 
-  defp maybe_mark_worktree_active(updates, _state), do: updates
+  defp reconcile_worktree_state(job_id, "blocked", now, recovered_retained?) do
+    case Repo.get(Job, job_id) do
+      %Job{state: "pr_open"} ->
+        transition_observed_worktree(
+          job_id,
+          ~w(reserved active awaiting_pr warm waiting reclaimable attention),
+          "waiting",
+          now,
+          recovered_retained?
+        )
+
+      _job ->
+        mark_worktree_active(job_id, now, recovered_retained?)
+    end
+  end
+
+  defp reconcile_worktree_state(job_id, "waiting", now, recovered_retained?) do
+    transition_observed_worktree(
+      job_id,
+      ~w(reserved active awaiting_pr warm waiting reclaimable attention),
+      "waiting",
+      now,
+      recovered_retained?
+    )
+  end
+
+  defp reconcile_worktree_state(job_id, "done", now, _recovered_retained?) do
+    transition_observed_worktree(
+      job_id,
+      ~w(reserved active awaiting_pr warm waiting reclaimable),
+      "awaiting_pr",
+      now,
+      false
+    )
+  end
+
+  defp reconcile_worktree_state(job_id, state, now, _recovered_retained?)
+       when state in ["failed", "lost"] do
+    mark_worktree_attention(job_id, "The retained Herdr agent ended in state #{state}.", now)
+  end
+
+  defp reconcile_worktree_state(_job_id, _state, _now, _recovered_retained?), do: :ok
+
+  defp mark_worktree_active(job_id, now, recovered_retained?) do
+    WorktreeAllocation
+    |> join(:inner, [allocation], job in Job, on: job.id == allocation.job_id)
+    |> where(
+      [allocation, job],
+      allocation.job_id == ^job_id and
+        allocation.state not in ["terminal", "cleaning", "removed"] and
+        (allocation.state != "attention" or
+           job.state in ^@recoverable_attention_job_states or
+           (^recovered_retained? and allocation.last_error == ^@missing_retained_error))
+    )
+    |> Repo.update_all(
+      set: [state: "active", last_error: nil, last_used_at: now, updated_at: now]
+    )
+  end
+
+  defp transition_observed_worktree(
+         job_id,
+         from_states,
+         state,
+         now,
+         recover_missing_attention?
+       ) do
+    WorktreeAllocation
+    |> where(
+      [allocation],
+      allocation.job_id == ^job_id and allocation.state in ^from_states and
+        (allocation.state != "attention" or
+           (^recover_missing_attention? and
+              allocation.last_error == ^@missing_retained_error))
+    )
+    |> Repo.update_all(set: [state: state, last_error: nil, last_used_at: now, updated_at: now])
+  end
 
   defp owned_job(%AgentRun{} = run) do
     with %Job{} = job <- Repo.get(Job, run.job_id),

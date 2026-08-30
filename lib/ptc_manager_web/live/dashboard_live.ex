@@ -443,8 +443,15 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
-  def occupied_worktrees(worker),
-    do: Enum.count(worker.worktree_allocations, &(&1.state != "removed"))
+  def active_worktrees(worker),
+    do:
+      Enum.count(
+        worker.worktree_allocations,
+        &Operations.worktree_consumes_execution_slot?/1
+      )
+
+  def retained_worktrees(worker),
+    do: Enum.count(worker.worktree_allocations, &(&1.state == "waiting"))
 
   def worktree_state_label(state), do: state |> String.replace("_", " ")
 
@@ -521,6 +528,7 @@ defmodule PtcManagerWeb.DashboardLive do
       repositories: Operations.list_repositories(),
       issues: Operations.dashboard_issues(),
       active_agent_runs: Operations.list_active_agent_runs(),
+      waiting_agent_runs: Operations.list_waiting_agent_runs(),
       recent_agent_runs: Operations.list_recent_agent_runs(),
       workers: Operations.list_workers_with_worktrees(),
       manager_enabled: Manager.enabled?(),

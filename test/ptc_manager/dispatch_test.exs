@@ -273,6 +273,30 @@ defmodule PtcManager.DispatchTest do
     assert {:ok, "w12", "w12:p1"} = PtcManager.Dispatch.HerdrAdapter.decode_worktree(output)
   end
 
+  test "terminal merged and closed PR worktrees use forced Herdr removal" do
+    for {job_state, pr_state} <- [{"done", "merged"}, {"cancelled", "closed"}] do
+      allocation = %{
+        herdr_workspace: "w-terminal",
+        job: %{state: job_state, pr_publication: %{pr_state: pr_state}}
+      }
+
+      assert PtcManager.Dispatch.HerdrAdapter.remove_worktree_args(allocation) == [
+               "worktree",
+               "remove",
+               "--workspace",
+               "w-terminal",
+               "--force"
+             ]
+    end
+
+    waiting = %{
+      herdr_workspace: "w-waiting",
+      job: %{state: "pr_open", pr_publication: %{pr_state: "open"}}
+    }
+
+    refute "--force" in PtcManager.Dispatch.HerdrAdapter.remove_worktree_args(waiting)
+  end
+
   test "agent startup may outlive the generic Herdr command timeout" do
     unique = System.unique_integer([:positive])
     test_root = Path.join(System.tmp_dir!(), "ptc-manager-slow-herdr-#{unique}")

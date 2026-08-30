@@ -10,7 +10,8 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     Job,
     MergeApproval,
     PrAnalysis,
-    PrPublication
+    PrPublication,
+    WorktreeAllocation
   }
 
   alias PtcManager.Repo
@@ -598,11 +599,30 @@ defmodule PtcManagerWeb.DashboardLiveTest do
         capabilities: %{"herdr" => true, "implementation_slots" => 3}
       })
 
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    job
+    |> Job.changeset(%{state: "working", lease_owner: worker.worker_key})
+    |> Repo.update!()
+
+    %WorktreeAllocation{}
+    |> WorktreeAllocation.changeset(%{
+      worker_id: worker.id,
+      job_id: job.id,
+      state: "attention",
+      path: "/tmp/uncertain-dashboard-slot",
+      last_used_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
+
     {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
 
     assert html =~ "Hetzner agent pool"
     assert html =~ "Implementation worktrees"
-    assert html =~ "0 / 3"
+    assert html =~ "1 / 3"
     assert Repo.get!(Operations.Worker, worker.id)
   end
 

@@ -4,6 +4,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.CodexAdapter
+  alias PtcManager.MaintainerActions.RetainedHerdrAdapter
   alias PtcManager.MaintainerActions.Sync
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
@@ -155,6 +156,18 @@ defmodule PtcManager.MaintainerActionsTest do
          "evidence" => ["The repaired commit was pushed without force"],
          "created_issue_numbers" => []
        }}
+    end
+  end
+
+  defmodule RetainedHerdrCommand do
+    def run(args, timeout) do
+      send(Process.get(:agent_action_test_pid), {:retained_herdr_prompt, args, timeout})
+      if callback = Process.get(:retained_herdr_callback), do: callback.()
+
+      Process.get(
+        :retained_herdr_result,
+        {:ok, ~s({"result":{"agent_status":"done"}})}
+      )
     end
   end
 
@@ -788,7 +801,186 @@ defmodule PtcManager.MaintainerActionsTest do
     repaired = Repo.get!(PrPublication, publication.id)
     assert repaired.remote_head_sha == repaired_head
     assert repaired.state == "published"
-    assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "waiting"
+  end
+
+  test "a PR repair resumes the original named Herdr implementation session" do
+    previous_command = Application.get_env(:ptc_manager, :herdr_command)
+    Application.put_env(:ptc_manager, :herdr_command, RetainedHerdrCommand)
+    on_exit(fn -> Application.put_env(:ptc_manager, :herdr_command, previous_command) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+
+    publication =
+      issue
+      |> open_publication_fixture()
+      |> PrPublication.changeset(%{checks_state: "failure", checks_failed: 1})
+      |> Repo.update!()
+
+    allocation =
+      publication
+      |> retain_real_repair_worktree(issue)
+      |> WorktreeAllocation.changeset(%{state: "active"})
+      |> Repo.update!()
+
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+    worker = Repo.get!(PtcManager.Operations.Worker, allocation.worker_id)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, retained_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "waiting",
+        status_text: "Waiting with open PR.",
+        agent_name: "impl_j#{job.id}_f#{job.fencing_token}",
+        herdr_workspace: "w-retained",
+        herdr_pane: "w-retained:p1",
+        herdr_session: "default",
+        external_key: "default:retained-#{job.id}",
+        started_at: DateTime.add(now, -300, :second),
+        last_heartbeat_at: now,
+        fencing_token: job.fencing_token
+      })
+
+    assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+    assert {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
+
+    assert {:ok, %{"outcome" => "repaired"}} = RetainedHerdrAdapter.run(action)
+
+    assert_receive {:retained_herdr_prompt, args, timeout}
+    assert Enum.take(args, 3) == ["agent", "prompt", retained_run.agent_name]
+    assert Enum.at(args, 3) =~ "reuse your prior context"
+    assert "--wait" in args
+    assert timeout > 0
+
+    retained_run = Repo.get!(AgentRun, retained_run.id)
+    assert retained_run.state == "waiting"
+    refute retained_run.ended_at
+
+    action_run = Repo.get_by!(AgentRun, agent_action_id: action.id)
+    assert action_run.agent_name == retained_run.agent_name
+    assert action_run.herdr_workspace == retained_run.herdr_workspace
+    assert action_run.herdr_pane == retained_run.herdr_pane
+  end
+
+  test "a failed retained Herdr prompt keeps the slot occupied and marks the run unknown" do
+    previous_command = Application.get_env(:ptc_manager, :herdr_command)
+    Application.put_env(:ptc_manager, :herdr_command, RetainedHerdrCommand)
+    Process.put(:retained_herdr_result, {:error, :herdr_timeout})
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :herdr_command, previous_command)
+      Process.delete(:retained_herdr_result)
+    end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+
+    publication =
+      issue
+      |> open_publication_fixture()
+      |> PrPublication.changeset(%{checks_state: "failure", checks_failed: 1})
+      |> Repo.update!()
+
+    allocation =
+      publication
+      |> retain_real_repair_worktree(issue)
+      |> WorktreeAllocation.changeset(%{state: "active"})
+      |> Repo.update!()
+
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+    worker = Repo.get!(PtcManager.Operations.Worker, allocation.worker_id)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, retained_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "waiting",
+        agent_name: "impl_j#{job.id}_f#{job.fencing_token}",
+        started_at: DateTime.add(now, -60, :second),
+        last_heartbeat_at: now,
+        fencing_token: job.fencing_token
+      })
+
+    assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+    assert {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
+    assert {:error, :herdr_timeout} = RetainedHerdrAdapter.run(action)
+
+    assert Repo.get!(AgentRun, retained_run.id).state == "unknown"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
+  end
+
+  test "terminal PR reconciliation wins a race with retained-agent settlement" do
+    previous_command = Application.get_env(:ptc_manager, :herdr_command)
+    Application.put_env(:ptc_manager, :herdr_command, RetainedHerdrCommand)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :herdr_command, previous_command)
+      Process.delete(:retained_herdr_callback)
+    end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+
+    publication =
+      issue
+      |> open_publication_fixture()
+      |> PrPublication.changeset(%{checks_state: "failure", checks_failed: 1})
+      |> Repo.update!()
+
+    allocation =
+      publication
+      |> retain_real_repair_worktree(issue)
+      |> WorktreeAllocation.changeset(%{state: "active"})
+      |> Repo.update!()
+
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+    worker = Repo.get!(PtcManager.Operations.Worker, allocation.worker_id)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, retained_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "waiting",
+        agent_name: "impl_j#{job.id}_f#{job.fencing_token}",
+        started_at: DateTime.add(now, -60, :second),
+        last_heartbeat_at: now,
+        fencing_token: job.fencing_token
+      })
+
+    Process.put(:retained_herdr_callback, fn ->
+      terminal_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      Repo.get!(PrPublication, publication.id)
+      |> PrPublication.changeset(%{pr_state: "merged", pr_checked_at: terminal_at})
+      |> Repo.update!()
+
+      Repo.get!(PtcManager.Operations.Job, job.id)
+      |> PtcManager.Operations.Job.changeset(%{state: "done", ended_at: terminal_at})
+      |> Repo.update!()
+
+      Repo.get!(WorktreeAllocation, allocation.id)
+      |> WorktreeAllocation.changeset(%{state: "terminal"})
+      |> Repo.update!()
+
+      Repo.get!(AgentRun, retained_run.id)
+      |> AgentRun.changeset(%{state: "done", ended_at: terminal_at})
+      |> Repo.update!()
+    end)
+
+    assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+    assert {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
+    assert {:ok, %{"outcome" => "repaired"}} = RetainedHerdrAdapter.run(action)
+
+    assert Repo.get!(AgentRun, retained_run.id).state == "done"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "terminal"
   end
 
   test "a repaired result with untracked files moves the worktree to attention" do
@@ -968,10 +1160,10 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:ok, _reserved} = Operations.reserve_worktree_for_repair(publication.job_id)
     File.write!(Path.join(allocation.path, "unfinished.txt"), "partial repair\n")
 
-    assert {:terminal_error, :worktree_changed} =
+    assert {:terminal_error, :repair_execution_uncertain} =
              Sync.sync_action(prepared, {:error, :adapter_failed})
 
-    assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
   end
 
   test "stops waiting when an advanced repair head never becomes visible on GitHub" do

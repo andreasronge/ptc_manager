@@ -443,7 +443,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   defp load_board(socket) do
     active_runs_by_job =
-      Operations.list_active_agent_runs()
+      Operations.list_current_agent_runs()
       |> Enum.reject(&is_nil(&1.job_id))
       |> Map.new(&{&1.job_id, &1})
 

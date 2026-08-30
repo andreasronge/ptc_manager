@@ -166,27 +166,26 @@ Jobs are durable database records, not in-memory tasks. If no compatible agent
 or worker is available, work remains queued across coordinator and server
 restarts. A scheduler records why a job is waiting, its priority, next attempt,
 and retry count. Expired leases are reconciled before a job can be reassigned.
-CI repair and conflict-resolution jobs prefer the original agent and worktree;
-after a bounded affinity window they may be handed to another compatible agent
-with the prior run, PR, review, and failure context. Only one fenced lease may
-modify a branch at a time.
+CI repair and conflict-resolution jobs resume the original named Herdr agent and
+retained worktree so its implementation context remains available. A later
+fallback may hand the work to another compatible agent with an explicit prior
+run, PR, review, and failure-context packet. Only one fenced lease may modify a
+branch at a time.
 
 Each worker also advertises its healthy, implementation-capable agent slots.
-That advertised capacity determines the worker's worktree limit; the product
-does not hard-code a fixed number of worktrees. A worker never creates more
-simultaneous implementation worktrees than it has usable implementation slots,
-and a transient loss of capacity never authorizes deletion of active work.
+That advertised capacity determines simultaneous CPU-active implementation
+work; the product does not hard-code a fixed number of slots or retained
+worktrees. A worker never runs more simultaneous implementation turns than it
+has usable implementation slots, and a transient loss of capacity never
+authorizes deletion of active or retained work.
 
-Worktrees have an explicit lifecycle: `active` while an agent owns them, `warm`
-after a verified PR exists, `reclaimable` when the clean local HEAD exactly
-matches the GitHub PR branch, and `terminal` after the PR is merged or closed.
-Terminal worktrees are removed promptly. When all current slots are occupied,
-the least-recently-used reclaimable worktree may be removed before a new one is
-created. Active worktrees are never removed, and a dirty worktree or one without
-a verified remote PR is retained and marked for attention. If no allocation is
-safe to reclaim, the next job remains durably queued. Repair work can recreate
-a worktree from the authoritative PR branch while retaining same-agent
-preference.
+Worktrees have an explicit lifecycle: `active` while an agent is executing,
+`waiting` while its open PR is waiting for CI or a maintainer action, and
+`terminal` after the PR is merged or closed. A waiting worktree does not consume
+an execution slot and is never reclaimed merely to start unrelated work.
+Terminal worktrees are removed promptly and idempotently; merged or closed PRs
+authorize forced removal even when the abandoned checkout is dirty. Any
+non-terminal cleanup remains fail-closed and requires a clean, verified head.
 
 ### Model adapters
 
@@ -331,8 +330,8 @@ GitHub mutation permission.
 - turn an approved job into a Herdr worktree and implementation agent;
 - derive bounded concurrency and worktree capacity from each worker's healthy,
   implementation-capable agent slots;
-- manage active, warm, reclaimable, and terminal worktrees, including safe
-  cleanup and reconstruction from a verified PR branch;
+- manage active, waiting, and terminal worktrees, retaining open-PR context and
+  cleaning up idempotently after merge or closure;
 - fencing tokens on worker state and external effects;
 - generate an implementation command that fixes the approved issue, runs tests,
   invokes the configured number of `codex-review` skill passes, fixes findings,

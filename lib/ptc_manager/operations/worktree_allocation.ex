@@ -2,7 +2,7 @@ defmodule PtcManager.Operations.WorktreeAllocation do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @states ~w(reserved active awaiting_pr warm reclaimable attention terminal cleaning removed)
+  @states ~w(reserved active awaiting_pr warm waiting reclaimable attention terminal cleaning removed)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   schema "worktree_allocations" do

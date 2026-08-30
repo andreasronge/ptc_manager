@@ -30,6 +30,7 @@ defmodule PtcManager.Operations do
 
   @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked)
   @capacity_job_states ~w(starting working idle blocked reconciling)
+  @capacity_run_states ~w(queued starting working idle unknown)
   @topic "operations"
 
   def subscribe, do: Phoenix.PubSub.subscribe(PtcManager.PubSub, @topic)
@@ -526,7 +527,7 @@ defmodule PtcManager.Operations do
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
              :ok <- issue_dependencies_resolved(Repo, job.issue),
              {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, now),
-             :ok <- dispatch_capacity_available(Repo, worker, capacity),
+             :ok <- dispatch_capacity_available(Repo, worker, capacity, now),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
              :ok <- remote_issue_matches_approval(remote_issue, job.approval) do
           fencing_token = job.fencing_token + 1
@@ -1033,6 +1034,22 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  def list_waiting_agent_runs do
+    AgentRun
+    |> where([run], run.state == "waiting")
+    |> order_by([run], asc: run.last_heartbeat_at, asc: run.id)
+    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
+  def list_current_agent_runs do
+    AgentRun
+    |> where([run], run.state in ~w(queued starting working idle blocked waiting unknown))
+    |> order_by([run], asc: run.started_at, asc: run.id)
+    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
   def list_recent_agent_runs(limit \\ 5) when is_integer(limit) and limit > 0 do
     AgentRun
     |> where([run], run.state in ~w(done failed lost))
@@ -1053,7 +1070,7 @@ defmodule PtcManager.Operations do
   def list_workers_with_worktrees do
     Worker
     |> order_by([worker], asc: worker.id)
-    |> preload(worktree_allocations: [job: [:issue, :repository]])
+    |> preload(worktree_allocations: [job: [:issue, :repository, :pr_publication, :agent_runs]])
     |> Repo.all()
   end
 
@@ -1065,9 +1082,27 @@ defmodule PtcManager.Operations do
       worker.worker_key == ^worker_key and allocation.state != "removed"
     )
     |> order_by([allocation], asc: allocation.last_used_at, asc: allocation.id)
-    |> preload([allocation, worker], worker: worker, job: [:issue, :repository])
+    |> preload([allocation, worker],
+      worker: worker,
+      job: [:issue, :repository, :pr_publication, :agent_runs]
+    )
     |> Repo.all()
   end
+
+  def worktree_consumes_execution_slot?(%WorktreeAllocation{
+        state: allocation_state,
+        job: %Job{state: job_state} = job
+      }) do
+    allocation_state in ["reserved", "active"] or job_state in @capacity_job_states or
+      execution_run_active?(job)
+  end
+
+  def worktree_consumes_execution_slot?(_allocation), do: false
+
+  defp execution_run_active?(%Job{agent_runs: runs}) when is_list(runs),
+    do: Enum.any?(runs, &(&1.role == "implementer" and &1.state in @capacity_run_states))
+
+  defp execution_run_active?(_job), do: false
 
   def dispatch_capacity(worker_key) when is_binary(worker_key) do
     case Repo.get_by(Worker, worker_key: worker_key) do
@@ -1088,24 +1123,54 @@ defmodule PtcManager.Operations do
   def mark_worktree_attention(allocation_id, reason, actor \\ "coordinator")
       when is_integer(allocation_id) do
     transition_worktree(allocation_id, "attention", actor, bounded_error(reason),
-      from: ~w(reserved active awaiting_pr warm reclaimable attention terminal)
+      from: ~w(reserved active awaiting_pr warm waiting reclaimable attention terminal)
     )
   end
 
   def reserve_worktree_for_repair(job_id, actor \\ "coordinator")
       when is_integer(job_id) and is_binary(actor) do
-    case {Repo.get(Job, job_id), Repo.get_by(WorktreeAllocation, job_id: job_id)} do
-      {%Job{state: "pr_open"}, nil} ->
-        {:error, :repair_worktree_not_available}
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-      {%Job{state: "pr_open"}, allocation} ->
-        transition_worktree(allocation.id, "active", actor, nil,
-          from: ~w(warm reclaimable attention)
-        )
+    outcome =
+      Repo.transaction(fn ->
+        job = Repo.get(Job, job_id)
 
-      _job_or_allocation ->
-        {:error, :repair_worktree_not_available}
-    end
+        allocation =
+          WorktreeAllocation
+          |> where([allocation], allocation.job_id == ^job_id)
+          |> preload(:worker)
+          |> Repo.one()
+
+        with %Job{state: "pr_open"} <- job,
+             %WorktreeAllocation{state: state, worker: worker} = allocation <- allocation,
+             true <- state in ~w(warm waiting reclaimable attention),
+             {:ok, capacity} <- worker_execution_capacity(worker),
+             :ok <- dispatch_capacity_available(Repo, worker, capacity, now) do
+          updated =
+            allocation
+            |> WorktreeAllocation.changeset(%{
+              state: "active",
+              last_used_at: now,
+              last_error: nil
+            })
+            |> Repo.update!()
+
+          insert_audit!(%{
+            actor: actor,
+            action: "worktree.active",
+            target_type: "worktree_allocation",
+            target_id: allocation.id,
+            details: %{"job_id" => job_id, "reason" => nil}
+          })
+
+          updated
+        else
+          {:error, reason} -> Repo.rollback(reason)
+          _invalid -> Repo.rollback(:repair_worktree_not_available)
+        end
+      end)
+
+    broadcast_change(outcome)
   end
 
   def release_repair_worktree(job_id, head_sha, actor \\ "coordinator")
@@ -1120,7 +1185,7 @@ defmodule PtcManager.Operations do
         outcome =
           allocation
           |> WorktreeAllocation.changeset(%{
-            state: "reclaimable",
+            state: "waiting",
             head_sha: head_sha,
             last_used_at: now,
             last_error: nil
@@ -1179,7 +1244,7 @@ defmodule PtcManager.Operations do
 
       claimed =
         WorktreeAllocation
-        |> preload(job: [:issue, :repository])
+        |> preload(job: [:issue, :repository, :pr_publication])
         |> Repo.get!(allocation_id)
 
       {:ok, claimed, token}
@@ -1295,35 +1360,68 @@ defmodule PtcManager.Operations do
       else: "broker"
   end
 
-  defp dispatch_capacity_available(_repo, _worker, capacity)
+  defp dispatch_capacity_available(_repo, _worker, capacity, _now)
        when not is_integer(capacity) or capacity < 1,
        do: {:error, :invalid_agent_capacity}
 
-  defp dispatch_capacity_available(repo, worker, capacity) do
-    allocation_count =
+  defp dispatch_capacity_available(repo, worker, capacity, now) do
+    # This harmless write obtains SQLite's writer lock before the count. Initial
+    # dispatch and retained-PR repair therefore share one serialized slot gate.
+    Worker
+    |> where([candidate], candidate.id == ^worker.id)
+    |> repo.update_all(set: [updated_at: now])
+
+    active_allocation_count =
       WorktreeAllocation
+      |> join(:inner, [allocation], job in Job,
+        as: :capacity_job,
+        on: job.id == allocation.job_id
+      )
       |> where(
-        [allocation],
-        allocation.worker_id == ^worker.id and allocation.state != "removed"
+        [allocation, job],
+        allocation.worker_id == ^worker.id and
+          (allocation.state in ["reserved", "active"] or
+             job.state in ^@capacity_job_states or
+             exists(
+               from run in AgentRun,
+                 where:
+                   run.job_id == parent_as(:capacity_job).id and run.role == "implementer" and
+                     run.state in ^@capacity_run_states
+             ))
       )
       |> repo.aggregate(:count)
 
-    legacy_count =
-      from(job in Job,
-        as: :job,
-        where:
-          job.lease_owner == ^worker.worker_key and job.state in ^@capacity_job_states and
-            not exists(
-              from allocation in WorktreeAllocation,
-                where: allocation.job_id == parent_as(:job).id
-            )
+    legacy_job_count =
+      Job
+      |> from(as: :legacy_job)
+      |> where(
+        [job],
+        job.lease_owner == ^worker.worker_key and job.state in ^@capacity_job_states and
+          not exists(
+            from allocation in WorktreeAllocation,
+              where: allocation.job_id == parent_as(:legacy_job).id
+          )
       )
       |> repo.aggregate(:count)
 
-    if allocation_count + legacy_count < capacity,
+    if active_allocation_count + legacy_job_count < capacity,
       do: :ok,
       else: {:error, :dispatch_capacity}
   end
+
+  defp worker_execution_capacity(%Worker{status: "online", capabilities: capabilities}) do
+    case capabilities["implementation_slots"] do
+      capacity when is_integer(capacity) and capacity > 0 ->
+        {:ok, capacity}
+
+      _capacity ->
+        if capabilities["herdr"],
+          do: {:ok, configured_agent_capacity()},
+          else: {:error, :worker_has_no_implementation_capacity}
+    end
+  end
+
+  defp worker_execution_capacity(%Worker{}), do: {:error, :worker_unavailable}
 
   defp ensure_capacity_worker(_repo, _worker_key, capacity, _now)
        when not is_integer(capacity) or capacity < 1,

@@ -171,9 +171,11 @@ catalog contains:
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
   verified diff still match. This increment records approval but does not merge.
 - **Fix CI or conflicts**, shown when an open PR has failing checks or merge
-  conflicts. It queues an agent to repair and push the existing branch without
-  force, performs two independent review-and-fix passes, and accepts the new PR
-  head only after the retained branch and GitHub report the same verified commit.
+  conflicts. It resumes the original named Herdr implementation agent in its
+  retained session and worktree, asks it to repair and push the existing branch
+  without force, performs two independent review-and-fix passes, and accepts the
+  new PR head only after the retained branch and GitHub report the same verified
+  commit.
 
 For issue dependencies, GitHub remains authoritative. Maintainer actions write
 the canonical `Blocked by #<number>` marker into the dependent issue and apply
@@ -366,9 +368,11 @@ The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
 The `ptc-manager-repo` group gives the coordinator, manager, and verifier
 read/execute access without filesystem write access. The worker-owned
 `PTC_WORKTREE_ROOT` contains only job worktrees. PtcManager removes a worktree
-through Herdr only after the PR branch matches its exact head and a
-credential-free Git check proves the checkout is clean. Dirty, missing, or
-unpushed work is retained for attention.
+through Herdr only after a credential-free Git check proves a non-terminal
+checkout is clean and its exact head is on the PR branch. Dirty, missing, or
+unpushed non-terminal work is retained for attention. A merged or closed PR is
+the explicit exception: its abandoned checkout is removed with Herdr's force
+option because GitHub has already made the work terminal.
 The separate `ptc-manager-publish` group lets only the coordinator and verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
 The coordinator and private manager share only the setgid
@@ -413,9 +417,15 @@ managed attempt never appeared can safely release that attempt.
 
 PR tracking and worktree allocations live in SQLite and survive process or
 server restarts. If no implementation-capable agent slot is available, the job
-stays queued. Terminal worktrees are removed promptly. When all advertised slots
-are occupied, the least-recently-used worktree whose clean head is already on
-GitHub may be reclaimed; otherwise new work remains queued.
+stays queued. Once a PR is open, its named Herdr session and worktree move to a
+passive `waiting` state: they remain available for CI repairs or review feedback
+without consuming a CPU-active implementation slot. The Operations and backlog
+screens show these retained agents separately from agents that are running now.
+When GitHub reports the PR merged or closed, the job becomes terminal and the
+cleanup worker removes the Herdr worktree and session idempotently. This final
+cleanup is authorized to discard a dirty checkout because GitHub has already
+made the PR terminal; non-terminal cleanup still requires a clean, verified
+head.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

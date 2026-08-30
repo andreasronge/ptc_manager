@@ -10,21 +10,16 @@ defmodule PtcManager.Worktrees do
       when not is_integer(capacity) or capacity < 1,
       do: {:error, :invalid_agent_capacity}
 
-  def ensure_slot(worker_key, capacity, adapter, probe) when is_binary(worker_key) do
+  def ensure_slot(worker_key, capacity, _adapter, _probe) when is_binary(worker_key) do
     allocations = Operations.list_occupying_worktrees(worker_key)
 
-    if length(allocations) < capacity do
+    active_count =
+      Enum.count(allocations, &Operations.worktree_consumes_execution_slot?/1)
+
+    if active_count < capacity do
       :ok
     else
-      case cleanup_candidate(allocations) do
-        nil ->
-          {:error, :worktree_capacity}
-
-        allocation ->
-          with :ok <- remove(allocation, adapter, probe) do
-            ensure_slot(worker_key, capacity, adapter, probe)
-          end
-      end
+      {:error, :worktree_capacity}
     end
   end
 
@@ -47,17 +42,6 @@ defmodule PtcManager.Worktrees do
     end
   end
 
-  defp cleanup_candidate(allocations) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
-    Enum.find(allocations, &(&1.state == "terminal")) ||
-      Enum.find(allocations, &(&1.state == "reclaimable")) ||
-      Enum.find(allocations, fn allocation ->
-        (allocation.state == "cleaning" and allocation.cleanup_expires_at) &&
-          DateTime.compare(allocation.cleanup_expires_at, now) != :gt
-      end)
-  end
-
   defp remove(allocation, adapter, probe) do
     with {:ok, claimed, token} <- Operations.claim_worktree_cleanup(allocation.id),
          :ok <- verify_clean_head(claimed, probe),
@@ -72,6 +56,13 @@ defmodule PtcManager.Worktrees do
         {:error, {:worktree_cleanup_failed, reason}}
     end
   end
+
+  defp verify_clean_head(
+         %{job: %{state: job_state, pr_publication: %{pr_state: pr_state}}},
+         _probe
+       )
+       when job_state in ["done", "cancelled"] and pr_state in ["merged", "closed"],
+       do: :ok
 
   defp verify_clean_head(%{path: path, job: job} = allocation, probe)
        when is_binary(path) and is_binary(allocation.head_sha) do

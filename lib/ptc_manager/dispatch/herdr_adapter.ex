@@ -18,14 +18,25 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   end
 
   @impl true
-  def remove_worktree(%{herdr_workspace: workspace}) when is_binary(workspace) do
-    case run(["worktree", "remove", "--workspace", workspace]) do
-      {:ok, _output} -> :ok
-      {:error, reason} -> {:error, reason}
+  def remove_worktree(%{herdr_workspace: workspace} = allocation) when is_binary(workspace) do
+    args = remove_worktree_args(allocation)
+
+    case run(args) do
+      {:ok, _output} ->
+        :ok
+
+      {:error, reason} ->
+        if worktree_missing?(allocation), do: :ok, else: {:error, reason}
     end
   end
 
   def remove_worktree(_allocation), do: {:error, :worktree_workspace_missing}
+
+  @doc false
+  def remove_worktree_args(%{herdr_workspace: workspace} = allocation) do
+    ["worktree", "remove", "--workspace", workspace] ++
+      if(terminal_pull_request?(allocation), do: ["--force"], else: [])
+  end
 
   defp dispatch_external(path, repository, job, issue) do
     with {:ok, created} <- create_worktree(path, repository, job),
@@ -208,6 +219,17 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   end
 
   defp agent_name(job), do: "impl_j#{job.id}_f#{job.fencing_token}"
+
+  defp terminal_pull_request?(%{
+         job: %{state: job_state, pr_publication: %{pr_state: pr_state}}
+       })
+       when job_state in ["done", "cancelled"] and pr_state in ["merged", "closed"],
+       do: true
+
+  defp terminal_pull_request?(_allocation), do: false
+
+  defp worktree_missing?(%{path: path}) when is_binary(path), do: not File.exists?(path)
+  defp worktree_missing?(_allocation), do: false
 
   defp run(args, timeout \\ nil), do: Command.run(args, timeout)
 end

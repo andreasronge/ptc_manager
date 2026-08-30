@@ -147,13 +147,19 @@ defmodule PtcManager.MaintainerActions.Sync do
          {:postflight, execution_result}
        ) do
     if head_sha == preflight_head(action) do
-      case release_unchanged_repair(publication, result) do
-        {:ok, _publication} ->
-          {:ok, %{pull_request: result}}
+      case execution_result do
+        {:error, _reason} ->
+          {:terminal_error, :repair_execution_uncertain}
 
-        {:error, reason} ->
-          mark_repair_attention(publication, reason)
-          {:terminal_error, reason}
+        _settled_result ->
+          case release_unchanged_repair(publication, result) do
+            {:ok, _publication} ->
+              {:ok, %{pull_request: result}}
+
+            {:error, reason} ->
+              mark_repair_attention(publication, reason)
+              {:terminal_error, reason}
+          end
       end
     else
       mark_repair_attention(publication, :unexpected_repair_head_change)
