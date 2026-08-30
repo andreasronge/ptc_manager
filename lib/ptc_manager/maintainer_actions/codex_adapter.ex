@@ -3,24 +3,31 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
-  alias PtcManager.MaintainerActions.RetainedHerdrAdapter
+  alias PtcManager.MaintainerActions.{ExternalPrRepairAdapter, RetainedHerdrAdapter}
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
 
   @impl true
   def run(%AgentAction{action_key: "repair_pr"} = action) do
-    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, RetainedHerdrAdapter)
+    publication = Repo.get!(PrPublication, action.target_id)
+
+    default_adapter =
+      if PrPublication.external?(publication),
+        do: ExternalPrRepairAdapter,
+        else: RetainedHerdrAdapter
+
+    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, default_adapter)
     adapter.run(action)
   end
 
   def run(%AgentAction{repository: repository} = action) do
     with {:ok, path} <- repository_path(action, repository) do
-      run_codex(action, path)
+      run_codex(action, path, [])
     end
   end
 
-  defp run_codex(action, repository_path) do
+  defp run_codex(action, repository_path, opts) do
     output_directory =
       Application.get_env(:ptc_manager, :agent_action_output_dir) ||
         Application.get_env(:ptc_manager, :manager_output_dir) || System.tmp_dir!()
@@ -39,19 +46,27 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
     binary = Application.get_env(:ptc_manager, :codex_binary, "codex")
     timeout = Application.get_env(:ptc_manager, :agent_action_timeout_ms, 1_800_000)
 
-    args = [
-      "exec",
-      "--ephemeral",
-      "--ignore-user-config",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--output-schema",
-      schema_path(),
-      "--output-last-message",
-      output_path,
-      "-C",
-      repository_path,
-      action.prompt
-    ]
+    isolation_args =
+      if Keyword.get(opts, :sandboxed, false),
+        do: ["--sandbox", "workspace-write", "--approve-for-me"],
+        else: ["--dangerously-bypass-approvals-and-sandbox"]
+
+    args =
+      [
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config"
+      ] ++
+        isolation_args ++
+        [
+          "--output-schema",
+          schema_path(),
+          "--output-last-message",
+          output_path,
+          "-C",
+          repository_path,
+          action.prompt
+        ]
 
     task =
       Task.async(fn ->
@@ -59,7 +74,11 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
           PrivateCodexAdapter.codex_command(
             binary,
             args,
-            Application.get_env(:ptc_manager, :agent_action_run_as_user)
+            Keyword.get(
+              opts,
+              :run_as_user,
+              Application.get_env(:ptc_manager, :agent_action_run_as_user)
+            )
           )
 
         System.cmd(command, command_args,
@@ -79,6 +98,18 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
     end
   rescue
     error -> {:error, {:codex_command_failed, error.__struct__}}
+  end
+
+  @doc false
+  def run_at(%AgentAction{} = action, repository_path) when is_binary(repository_path) do
+    run_at(action, repository_path, [])
+  end
+
+  @doc false
+  def run_at(%AgentAction{} = action, repository_path, opts) when is_binary(repository_path) do
+    if File.dir?(repository_path),
+      do: run_codex(action, Path.expand(repository_path), opts),
+      else: {:error, :repository_path_unavailable}
   end
 
   defp repository_path(

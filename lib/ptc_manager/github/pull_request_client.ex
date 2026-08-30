@@ -6,13 +6,33 @@ defmodule PtcManager.GitHub.PullRequestClient do
   alias PtcManager.GitHub.Client
   alias PtcManager.Operations.PrPublication
 
+  @per_page 100
+  @max_pages 20
+
   @impl true
-  def status(%PrPublication{pr_number: number, job: %{repository: repository}})
-      when is_integer(number) do
+  def list_open(repository) do
+    fetch_open_pages(repository, 1, [])
+  end
+
+  @impl true
+  def status(%PrPublication{pr_number: number} = publication) when is_integer(number) do
+    repository = publication_repository(publication)
+
+    if is_nil(repository) do
+      {:blocked, :pull_request_repository_missing}
+    else
+      fetch_status(repository, number)
+    end
+  end
+
+  defp fetch_status(repository, number) do
     case Client.get_json(repository_url(repository, "/pulls/#{number}")) do
       {:ok, pull} when is_map(pull) ->
-        case normalize(pull) do
-          {:ok, result} -> {:ok, Map.merge(result, health(repository, pull, result.head_sha))}
+        with {:ok, result} <- normalize(pull),
+             {:ok, health} <- health(repository, pull, result.head_sha) do
+          {:ok, Map.merge(result, health)}
+        else
+          {:retry, reason} -> {:retry, reason}
           {:error, reason} -> {:blocked, reason}
         end
 
@@ -35,8 +55,11 @@ defmodule PtcManager.GitHub.PullRequestClient do
 
     case Client.get_json(url) do
       {:ok, [pull]} when is_map(pull) ->
-        case normalize(pull) do
-          {:ok, result} -> {:ok, Map.merge(result, health(repository, pull, result.head_sha))}
+        with {:ok, result} <- normalize(pull),
+             {:ok, health} <- health(repository, pull, result.head_sha) do
+          {:ok, Map.merge(result, health)}
+        else
+          {:retry, reason} -> {:retry, reason}
           {:error, reason} -> {:blocked, reason}
         end
 
@@ -73,7 +96,8 @@ defmodule PtcManager.GitHub.PullRequestClient do
   def classify_error({:github_transport_error, _reason} = reason), do: {:retry, reason}
   def classify_error(reason), do: {:error, reason}
 
-  defp normalize(pull) do
+  @doc false
+  def normalize(pull) do
     state =
       cond do
         pull["merged_at"] -> "merged"
@@ -92,7 +116,9 @@ defmodule PtcManager.GitHub.PullRequestClient do
       head_repository: get_in(pull, ["head", "repo", "full_name"]),
       base_sha: get_in(pull, ["base", "sha"]),
       base_ref: get_in(pull, ["base", "ref"]),
-      base_repository: get_in(pull, ["base", "repo", "full_name"])
+      base_repository: get_in(pull, ["base", "repo", "full_name"]),
+      title: pull["title"],
+      author_login: get_in(pull, ["user", "login"])
     }
 
     if valid_normalized?(result), do: {:ok, result}, else: {:error, :invalid_pull_request}
@@ -103,8 +129,67 @@ defmodule PtcManager.GitHub.PullRequestClient do
       result.state in ["open", "merged", "closed"] and is_binary(result.head_sha) and
       is_binary(result.head_ref) and is_binary(result.head_repository) and
       is_binary(result.base_sha) and is_binary(result.base_ref) and
-      is_binary(result.base_repository)
+      is_binary(result.base_repository) and is_binary(result.title)
   end
+
+  defp fetch_open_pages(_repository, page, _pulls) when page > @max_pages,
+    do: {:blocked, :pull_request_pagination_limit_reached}
+
+  defp fetch_open_pages(repository, page, pulls) do
+    url =
+      repository_url(
+        repository,
+        "/pulls?state=open&sort=updated&direction=desc&per_page=#{@per_page}&page=#{page}"
+      )
+
+    case Client.get_json(url) do
+      {:ok, items} when is_list(items) ->
+        case normalize_open_page(items) do
+          {:ok, normalized} ->
+            next = pulls ++ normalized
+
+            if length(items) < @per_page,
+              do: {:ok, next},
+              else: fetch_open_pages(repository, page + 1, next)
+
+          {:error, reason} ->
+            {:blocked, reason}
+        end
+
+      {:ok, _unexpected} ->
+        {:blocked, :unexpected_github_response}
+
+      {:error, reason} ->
+        case classify_error(reason) do
+          {:retry, retry_reason} -> {:retry, retry_reason}
+          {:error, blocked_reason} -> {:blocked, blocked_reason}
+        end
+    end
+  end
+
+  defp normalize_open_page(pulls) do
+    Enum.reduce_while(pulls, {:ok, []}, fn pull, {:ok, normalized} ->
+      case normalize(pull) do
+        {:ok, result} ->
+          enriched = Map.merge(result, lightweight_health(pull))
+          {:cont, {:ok, [enriched | normalized]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      error -> error
+    end
+  end
+
+  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
+
+  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
+    do: repository
+
+  defp publication_repository(_publication), do: nil
 
   @doc false
   def health_from_responses(pull, combined_status, check_runs) do
@@ -137,19 +222,22 @@ defmodule PtcManager.GitHub.PullRequestClient do
   defp health(repository, pull, head_sha) do
     base = "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}"
 
-    combined_status =
-      case Client.get_json("#{base}/commits/#{head_sha}/status") do
-        {:ok, result} -> result
-        _failure -> nil
-      end
+    with {:ok, combined_status} <- health_response("#{base}/commits/#{head_sha}/status"),
+         {:ok, check_runs} <-
+           health_response("#{base}/commits/#{head_sha}/check-runs?per_page=100") do
+      {:ok, health_from_responses(pull, combined_status, check_runs)}
+    end
+  end
 
-    check_runs =
-      case Client.get_json("#{base}/commits/#{head_sha}/check-runs?per_page=100") do
-        {:ok, result} -> result
-        _failure -> nil
-      end
+  defp health_response(url) do
+    case Client.get_json(url) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> classify_error(reason)
+    end
+  end
 
-    health_from_responses(pull, combined_status, check_runs)
+  defp lightweight_health(pull) do
+    %{draft: pull["draft"] == true}
   end
 
   defp legacy_checks(%{"total_count" => 0}),

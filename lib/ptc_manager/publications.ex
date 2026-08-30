@@ -17,6 +17,85 @@ defmodule PtcManager.Publications do
   alias PtcManager.Repo
 
   @agent_reconciliation_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
+  @external_missing_marker "GitHub open-PR listing omitted this PR once; waiting for confirmation."
+
+  @doc "Imports GitHub's complete open-PR snapshot without inventing implementation jobs."
+  def sync_external_open_pull_requests(%Repository{} = repository, pulls) when is_list(pulls) do
+    now = now()
+
+    outcome =
+      if Enum.all?(pulls, &valid_external_status?/1) do
+        Repo.transaction(fn ->
+          managed_numbers = managed_pr_numbers(repository.id)
+          managed_heads = managed_pr_heads(repository)
+
+          external_pulls =
+            Enum.reject(pulls, fn pull ->
+              pull.pr_number in managed_numbers or
+                managed_head?(managed_heads, pull.head_repository, pull.head_ref)
+            end)
+
+          Enum.each(external_pulls, &upsert_external_pull!(repository, &1, now))
+
+          open_numbers = MapSet.new(external_pulls, & &1.pr_number)
+
+          stale_query =
+            PrPublication
+            |> where(
+              [publication],
+              publication.repository_id == ^repository.id and publication.source == "external" and
+                publication.pr_state == "open"
+            )
+
+          stale_query =
+            if MapSet.size(open_numbers) == 0,
+              do: stale_query,
+              else:
+                where(
+                  stale_query,
+                  [publication],
+                  publication.pr_number not in ^MapSet.to_list(open_numbers)
+                )
+
+          first_absence =
+            where(
+              stale_query,
+              [publication],
+              is_nil(publication.last_error) or
+                publication.last_error != ^@external_missing_marker
+            )
+
+          Repo.update_all(first_absence,
+            set: [last_error: @external_missing_marker, updated_at: now]
+          )
+
+          %{open_count: length(external_pulls), closed_count: 0}
+        end)
+      else
+        {:error, :invalid_external_pull_request_snapshot}
+      end
+
+    notify(outcome)
+  end
+
+  def external_missing_candidates(%Repository{id: repository_id}, pulls) when is_list(pulls) do
+    listed_numbers = Enum.map(pulls, & &1.pr_number)
+
+    query =
+      PrPublication
+      |> where(
+        [publication],
+        publication.repository_id == ^repository_id and publication.source == "external" and
+          publication.pr_state == "open" and publication.last_error == ^@external_missing_marker
+      )
+
+    query =
+      if listed_numbers == [],
+        do: query,
+        else: where(query, [publication], publication.pr_number not in ^listed_numbers)
+
+    Repo.all(query) |> Repo.preload(:repository)
+  end
 
   def agent_reconciliation_needed? do
     Repo.exists?(
@@ -46,17 +125,24 @@ defmodule PtcManager.Publications do
     |> Repo.one()
   end
 
-  def next_open_for_status do
-    PrPublication
-    |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
-    |> where(
-      [publication, job],
-      publication.state == "published" and job.state == "pr_open" and
-        (is_nil(publication.pr_state) or publication.pr_state == "open")
-    )
+  def next_open_for_status(include_external \\ true) do
+    query =
+      PrPublication
+      |> where(
+        [publication],
+        publication.state == "published" and
+          (is_nil(publication.pr_state) or publication.pr_state == "open")
+      )
+
+    query =
+      if include_external,
+        do: query,
+        else: where(query, [publication], publication.source != "external")
+
+    query
     |> order_by([publication], asc: publication.pr_checked_at, asc: publication.published_at)
     |> limit(1)
-    |> preload([_publication, job], job: {job, [:issue, :repository]})
+    |> preload([:repository, job: [:issue, :repository]])
     |> Repo.one()
   end
 
@@ -289,7 +375,7 @@ defmodule PtcManager.Publications do
         Repo.transaction(fn ->
           publication =
             PrPublication
-            |> preload(job: [:repository, :worktree_allocation])
+            |> preload(job: [:issue, :repository, :worktree_allocation])
             |> Repo.get!(publication_id)
 
           job = publication.job
@@ -356,6 +442,10 @@ defmodule PtcManager.Publications do
                     published_at: now,
                     pr_state: "open",
                     pr_checked_at: now,
+                    title: Map.get(result, :title) || job.issue.title,
+                    author_login: Map.get(result, :author_login),
+                    head_ref: result.head_ref,
+                    head_repository: result.head_repository,
                     last_error: nil
                   },
                   remote_health_attrs(result)
@@ -622,11 +712,14 @@ defmodule PtcManager.Publications do
       if valid_remote_status?(result) do
         Repo.transaction(fn ->
           publication = Repo.get!(PrPublication, publication_id)
-          job = Repo.get!(Job, publication.job_id)
-          repository = Repo.get!(Repository, job.repository_id)
+          job = publication.job_id && Repo.get!(Job, publication.job_id)
+          repository = publication_repository!(publication, job)
 
           cond do
-            publication.state != "published" or job.state != "pr_open" ->
+            PrPublication.external?(publication) ->
+              record_external_remote_status!(publication, repository, result, now)
+
+            publication.state != "published" or is_nil(job) or job.state != "pr_open" ->
               Repo.rollback(:publication_not_open)
 
             not intended_base?(result, repository) ->
@@ -894,8 +987,169 @@ defmodule PtcManager.Publications do
 
   defp load(id) do
     PrPublication
-    |> preload(job: [:issue, :repository, :worktree_allocation])
+    |> preload([:repository, job: [:issue, :repository, :worktree_allocation]])
     |> Repo.get!(id)
+  end
+
+  defp managed_pr_numbers(repository_id) do
+    PrPublication
+    |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
+    |> where(
+      [publication, job],
+      job.repository_id == ^repository_id and publication.source in ["broker", "agent"] and
+        not is_nil(publication.pr_number)
+    )
+    |> select([publication], publication.pr_number)
+    |> Repo.all()
+  end
+
+  defp managed_pr_heads(repository) do
+    PrPublication
+    |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
+    |> where(
+      [publication, job],
+      job.repository_id == ^repository.id and publication.source in ["broker", "agent"] and
+        (is_nil(publication.pr_state) or publication.pr_state == "open")
+    )
+    |> select([publication], publication.branch_name)
+    |> Repo.all()
+    |> Enum.reject(&is_nil/1)
+    |> MapSet.new(fn branch ->
+      {String.downcase("#{repository.github_owner}/#{repository.github_name}"), branch}
+    end)
+  end
+
+  defp managed_head?(heads, repository, branch)
+       when is_binary(repository) and is_binary(branch),
+       do: MapSet.member?(heads, {String.downcase(repository), branch})
+
+  defp managed_head?(_heads, _repository, _branch), do: false
+
+  defp upsert_external_pull!(repository, pull, now) do
+    attrs =
+      %{
+        repository_id: repository.id,
+        state: "published",
+        idempotency_key: external_key(repository.id, pull.pr_number),
+        fencing_token: 0,
+        branch_name: pull.head_ref,
+        base_sha: pull.base_sha,
+        head_sha: pull.head_sha,
+        diff_digest: external_version_digest(pull),
+        attempt_count: 0,
+        pr_number: pull.pr_number,
+        pr_url: pull.pr_url,
+        remote_head_sha: pull.head_sha,
+        remote_base_sha: pull.base_sha,
+        published_at: now,
+        pr_state: "open",
+        pr_checked_at: now,
+        source: "external",
+        title: pull.title,
+        author_login: pull.author_login,
+        head_ref: pull.head_ref,
+        head_repository: pull.head_repository,
+        last_error: nil
+      }
+      |> Map.merge(remote_health_attrs(pull))
+
+    case Repo.get_by(PrPublication,
+           repository_id: repository.id,
+           pr_number: pull.pr_number
+         ) do
+      nil ->
+        %PrPublication{}
+        |> PrPublication.changeset(attrs)
+        |> Repo.insert!()
+
+      %PrPublication{source: "external"} = publication ->
+        attrs =
+          attrs
+          |> Map.put(:published_at, publication.published_at || now)
+          |> preserve_or_reset_health(publication, pull)
+
+        publication |> PrPublication.changeset(attrs) |> Repo.update!()
+
+      %PrPublication{} = managed ->
+        managed
+    end
+  end
+
+  defp preserve_or_reset_health(attrs, publication, pull) do
+    cond do
+      publication.head_sha == pull.head_sha ->
+        attrs
+        |> Map.put(:pr_checked_at, publication.pr_checked_at)
+        |> Map.put(
+          :last_error,
+          if(publication.last_error == @external_missing_marker,
+            do: nil,
+            else: publication.last_error
+          )
+        )
+
+      Map.has_key?(pull, :mergeability) and Map.has_key?(pull, :checks_state) ->
+        attrs
+
+      true ->
+        Map.merge(attrs, %{
+          pr_checked_at: nil,
+          mergeability: "unknown",
+          mergeable_state: nil,
+          checks_state: "unknown",
+          checks_total: 0,
+          checks_failed: 0,
+          checks_pending: 0
+        })
+    end
+  end
+
+  defp record_external_remote_status!(publication, repository, result, now) do
+    if not intended_base?(result, repository) do
+      Repo.rollback(:unexpected_pull_request_base)
+    end
+
+    attrs =
+      %{
+        state: "published",
+        branch_name: result.head_ref,
+        base_sha: result.base_sha,
+        head_sha: result.head_sha,
+        diff_digest: external_version_digest(result),
+        pr_number: result.pr_number,
+        pr_url: result.pr_url,
+        remote_head_sha: result.head_sha,
+        remote_base_sha: result.base_sha,
+        pr_state: result.state,
+        pr_checked_at: now,
+        title: Map.get(result, :title) || publication.title,
+        author_login: Map.get(result, :author_login) || publication.author_login,
+        head_ref: result.head_ref,
+        head_repository: result.head_repository,
+        last_error: nil
+      }
+      |> Map.merge(remote_health_attrs(result))
+
+    publication |> PrPublication.changeset(attrs) |> Repo.update!()
+  end
+
+  defp publication_repository!(%PrPublication{repository_id: repository_id}, _job)
+       when is_integer(repository_id),
+       do: Repo.get!(Repository, repository_id)
+
+  defp publication_repository!(_publication, %Job{repository_id: repository_id}),
+    do: Repo.get!(Repository, repository_id)
+
+  defp external_key(repository_id, pr_number) do
+    "external:#{repository_id}:#{pr_number}"
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp external_version_digest(result) do
+    "#{result.base_sha}:#{result.head_sha}"
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   defp eligible(query, now) do
@@ -969,6 +1223,14 @@ defmodule PtcManager.Publications do
       is_binary(result[:base_sha]) and
       Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.base_sha) and
       is_binary(result[:base_ref]) and is_binary(result[:base_repository])
+  end
+
+  defp valid_external_status?(result) do
+    valid_remote_status?(result) and result.state == "open" and
+      is_integer(result[:pr_number]) and result.pr_number > 0 and
+      is_binary(result[:title]) and is_binary(result[:head_ref]) and
+      is_binary(result[:head_repository]) and
+      Regex.match?(~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/, result.head_repository)
   end
 
   defp remote_health_attrs(result) do

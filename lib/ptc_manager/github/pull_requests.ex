@@ -3,6 +3,7 @@ defmodule PtcManager.GitHub.PullRequests do
 
   @callback status(struct()) :: {:ok, map()} | {:retry, term()} | {:blocked, term()}
   @callback discover(struct()) :: {:ok, map()} | {:retry, term()} | {:blocked, term()}
+  @callback list_open(struct()) :: {:ok, [map()]} | {:retry, term()} | {:blocked, term()}
 
-  @optional_callbacks discover: 1
+  @optional_callbacks discover: 1, list_open: 1
 end

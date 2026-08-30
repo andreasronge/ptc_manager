@@ -152,27 +152,56 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def record_agent_action_target_snapshot(action_id, snapshot)
+  def record_agent_action_target_snapshot(action_id, snapshot, prompt \\ nil)
       when is_integer(action_id) and is_map(snapshot) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    updates =
+      [
+        target_snapshot: snapshot,
+        sync_attempt_count: 0,
+        next_sync_attempt_at: nil,
+        last_error: nil,
+        updated_at: now
+      ]
+      |> then(fn updates ->
+        if is_binary(prompt), do: [{:prompt, prompt} | updates], else: updates
+      end)
 
     {updated, _rows} =
       AgentAction
       |> where([action], action.id == ^action_id and action.state == "queued")
-      |> Repo.update_all(
-        set: [
-          target_snapshot: snapshot,
-          sync_attempt_count: 0,
-          next_sync_attempt_at: nil,
-          last_error: nil,
-          updated_at: now
-        ]
-      )
+      |> Repo.update_all(set: updates)
 
     if updated == 1 do
       {:ok, AgentAction |> preload(:repository) |> Repo.get!(action_id)}
     else
       {:error, :agent_action_no_longer_queued}
+    end
+  end
+
+  def record_agent_action_repair_intent(action_id, attempt_token, repaired_sha)
+      when is_integer(action_id) and is_binary(attempt_token) and is_binary(repaired_sha) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+
+        if action.state != "running" or action.attempt_token != attempt_token,
+          do: Repo.rollback(:agent_action_no_longer_running)
+
+        snapshot =
+          Map.put(action.target_snapshot || %{}, "repair_intended_head_sha", repaired_sha)
+
+        action
+        |> AgentAction.changeset(%{target_snapshot: snapshot, updated_at: now})
+        |> Repo.update!()
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, Repo.preload(action, :repository)})
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -343,43 +372,8 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def complete_agent_action_sync(action_id, {:ok, _summary}) when is_integer(action_id) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
-    outcome =
-      Repo.transaction(fn ->
-        action = Repo.get!(AgentAction, action_id)
-        if action.state != "sync_pending", do: Repo.rollback(:agent_action_not_sync_pending)
-
-        final_state = if is_binary(action.result_summary), do: "done", else: "failed"
-
-        completed =
-          action
-          |> AgentAction.changeset(%{
-            state: final_state,
-            ended_at: now,
-            next_sync_attempt_at: nil,
-            last_error:
-              if(final_state == "done", do: nil, else: execution_error_only(action.last_error))
-          })
-          |> Repo.update!()
-
-        insert_audit!(%{
-          actor: "coordinator",
-          action: "agent_action.sync_completed",
-          target_type: "agent_action",
-          target_id: action.id,
-          details: %{"final_state" => final_state}
-        })
-
-        completed
-      end)
-
-    case outcome do
-      {:ok, action} -> notify_and_return({:ok, action})
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  def complete_agent_action_sync(action_id, {:ok, _summary}) when is_integer(action_id),
+    do: complete_agent_action_sync_success(action_id, nil)
 
   def complete_agent_action_sync(action_id, {:terminal_error, reason})
       when is_integer(action_id) do
@@ -439,6 +433,50 @@ defmodule PtcManager.Operations do
       |> broadcast_change()
     else
       {:error, :agent_action_not_sync_pending}
+    end
+  end
+
+  def complete_agent_action_sync(action_id, {:ok, _summary}, {:ok, result})
+      when is_integer(action_id) and is_map(result),
+      do: complete_agent_action_sync_success(action_id, summarize_action_result(result))
+
+  defp complete_agent_action_sync_success(action_id, recovered_result_summary) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+        if action.state != "sync_pending", do: Repo.rollback(:agent_action_not_sync_pending)
+
+        result_summary = recovered_result_summary || action.result_summary
+        final_state = if is_binary(result_summary), do: "done", else: "failed"
+
+        completed =
+          action
+          |> AgentAction.changeset(%{
+            state: final_state,
+            ended_at: now,
+            next_sync_attempt_at: nil,
+            result_summary: result_summary,
+            last_error:
+              if(final_state == "done", do: nil, else: execution_error_only(action.last_error))
+          })
+          |> Repo.update!()
+
+        insert_audit!(%{
+          actor: "coordinator",
+          action: "agent_action.sync_completed",
+          target_type: "agent_action",
+          target_id: action.id,
+          details: %{"final_state" => final_state}
+        })
+
+        completed
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -810,7 +848,7 @@ defmodule PtcManager.Operations do
             )
 
           if updated == 1 do
-            job = Repo.get!(Job, job_id)
+            job = Job |> Repo.get!(job_id) |> Repo.preload([:issue, :repository])
 
             mark_allocation!(job.id, %{
               state: "awaiting_pr",
@@ -822,6 +860,7 @@ defmodule PtcManager.Operations do
             %PrPublication{}
             |> PrPublication.changeset(%{
               job_id: job.id,
+              repository_id: job.repository_id,
               state: "queued",
               idempotency_key: publication_key(job, result),
               fencing_token: fencing_token,
@@ -831,7 +870,10 @@ defmodule PtcManager.Operations do
               diff_digest: result.diff_digest,
               attempt_count: 0,
               next_attempt_at: nil,
-              source: job.publication_source || "broker"
+              source: job.publication_source || "broker",
+              title: job.issue.title,
+              head_ref: job.branch_name,
+              head_repository: "#{job.repository.github_owner}/#{job.repository.github_name}"
             })
             |> Repo.insert!()
 
@@ -1017,6 +1059,64 @@ defmodule PtcManager.Operations do
           end
       }
     end)
+  end
+
+  def delivery_board_items do
+    managed_items =
+      dashboard_issues()
+      |> Enum.reject(&is_nil(&1.active_job))
+      |> Enum.map(fn item ->
+        Map.merge(item, %{
+          managed?: true,
+          repository: item.issue.repository,
+          title: (item.publication && item.publication.title) || item.issue.title,
+          number: item.publication && item.publication.pr_number,
+          url: item.publication && item.publication.pr_url,
+          started_at: item.active_job.started_at || item.active_job.inserted_at
+        })
+      end)
+
+    external_publications =
+      PrPublication
+      |> where(
+        [publication],
+        publication.source == "external" and publication.state == "published" and
+          publication.pr_state == "open"
+      )
+      |> order_by([publication], desc: publication.pr_checked_at, desc: publication.id)
+      |> preload(:repository)
+      |> Repo.all()
+
+    publication_ids = Enum.map(external_publications, & &1.id)
+    analyses = latest_pr_analyses(publication_ids)
+    approvals = analyses |> Map.values() |> latest_merge_approvals()
+    actions = latest_agent_actions()
+
+    external_items =
+      Enum.map(external_publications, fn publication ->
+        %{
+          managed?: false,
+          repository: publication.repository,
+          title: publication.title,
+          number: publication.pr_number,
+          url: publication.pr_url,
+          started_at: publication.published_at || publication.inserted_at,
+          issue: nil,
+          dependencies: [],
+          proposal: nil,
+          active_job: nil,
+          latest_job: nil,
+          publication: publication,
+          pr_analysis: Map.get(analyses, publication.id),
+          merge_approval: Map.get(approvals, publication.id),
+          issue_agent_action: nil,
+          pr_agent_action: Map.get(actions, {"pull_request", publication.id}),
+          pr_retrospective_action: nil,
+          pr_retrospective_issue_actions: []
+        }
+      end)
+
+    managed_items ++ external_items
   end
 
   def list_agent_runs do

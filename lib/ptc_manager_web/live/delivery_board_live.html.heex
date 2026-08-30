@@ -54,23 +54,23 @@
       <div class="space-y-3 rounded-2xl border border-white/[0.07] bg-black/10 p-2.5 xl:min-h-[28rem]">
         <article
           :for={item <- lane_items(@lanes, lane.key)}
-          id={"board-job-#{item.active_job.id}"}
+          id={card_id(item)}
           class="rounded-xl border border-white/10 bg-slate-900 p-4 shadow-lg shadow-black/10"
         >
           <div class="flex items-start justify-between gap-2">
             <p class="text-[11px] font-medium text-slate-500">
-              {item.issue.repository.github_name} · #{item.issue.number}
+              {repository_label(item)} · {pull_request_label(item)}
             </p>
             <span class="shrink-0 text-[11px] text-slate-600">{card_age(@now, item)}</span>
           </div>
           <h3 class="mt-1.5 text-sm font-semibold leading-5 text-slate-100">
-            {item.issue.title}
+            {item.title}
           </h3>
 
           <div class="mt-3 flex flex-wrap gap-1.5">
             <.work_status
-              state={item.active_job.state}
-              label={status_label(item.active_job.state)}
+              state={delivery_state(item)}
+              label={delivery_label(item)}
               class="text-[10px]"
             />
             <.work_status
@@ -79,6 +79,12 @@
               label={work_label(item)}
               class="text-[10px]"
             />
+            <span
+              :if={!item.managed?}
+              class="rounded-full bg-sky-400/10 px-2 py-1 text-[10px] text-sky-300 ring-1 ring-sky-400/20"
+            >
+              Imported from GitHub
+            </span>
             <span
               :if={agent_label(item)}
               class="rounded-full bg-white/5 px-2 py-1 text-[10px] text-slate-400 ring-1 ring-white/10"
@@ -164,6 +170,7 @@
               Open PR #{item.publication.pr_number} ↗
             </a>
             <a
+              :if={item.issue}
               href={item.issue.html_url}
               target="_blank"
               rel="noreferrer"

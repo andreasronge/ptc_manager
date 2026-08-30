@@ -19,7 +19,7 @@ defmodule PtcManager.MergeDecisions do
     publication =
       PrPublication
       |> Repo.get!(action.target_id)
-      |> Repo.preload(job: :repository)
+      |> Repo.preload([:repository, job: :repository])
 
     with :ok <- valid_analysis_target(action, publication, status),
          attrs <- analysis_attrs(action, publication, result, status) do
@@ -73,7 +73,7 @@ defmodule PtcManager.MergeDecisions do
       |> Repo.get(publication_id)
       |> case do
         nil -> nil
-        record -> Repo.preload(record, job: :repository)
+        record -> Repo.preload(record, [:repository, job: :repository])
       end
 
     with %PrPublication{} <- publication,
@@ -105,7 +105,7 @@ defmodule PtcManager.MergeDecisions do
       action.action_key != "prepare_merge_decision" ->
         {:error, :wrong_agent_action}
 
-      publication.state != "published" or publication.job.state != "pr_open" ->
+      not publication_open?(publication) ->
         {:error, :pull_request_not_open}
 
       status.state != "open" or status.draft ->
@@ -117,7 +117,7 @@ defmodule PtcManager.MergeDecisions do
       status.head_sha != publication.remote_head_sha ->
         {:error, :pull_request_head_changed}
 
-      not intended_base?(status, publication.job.repository) ->
+      not intended_base?(status, publication_repository(publication)) ->
         {:error, :pull_request_base_changed}
 
       true ->
@@ -126,10 +126,12 @@ defmodule PtcManager.MergeDecisions do
   end
 
   defp valid_approval_target(publication, analysis, status) do
-    publication = Repo.get!(PrPublication, publication.id) |> Repo.preload(job: :repository)
+    publication =
+      Repo.get!(PrPublication, publication.id)
+      |> Repo.preload([:repository, job: :repository])
 
     cond do
-      publication.state != "published" or publication.job.state != "pr_open" ->
+      not publication_open?(publication) ->
         {:error, :pull_request_not_open}
 
       status.state != "open" ->
@@ -151,7 +153,7 @@ defmodule PtcManager.MergeDecisions do
       publication.diff_digest != analysis.diff_digest ->
         {:error, :merge_analysis_stale}
 
-      not intended_base?(status, publication.job.repository) ->
+      not intended_base?(status, publication_repository(publication)) ->
         {:error, :pull_request_base_changed}
 
       true ->
@@ -182,6 +184,17 @@ defmodule PtcManager.MergeDecisions do
 
   defp ensure_merge_ready(%PrAnalysis{outcome: "merge-ready"}), do: :ok
   defp ensure_merge_ready(%PrAnalysis{}), do: {:error, :merge_not_ready}
+
+  defp publication_open?(%PrPublication{state: "published", pr_state: "open"} = publication) do
+    PrPublication.external?(publication) or match?(%{state: "pr_open"}, publication.job)
+  end
+
+  defp publication_open?(_publication), do: false
+
+  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
+
+  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
+    do: repository
 
   defp normalize_status_result({:ok, status}), do: {:ok, status}
 

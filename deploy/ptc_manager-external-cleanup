@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+target=${1:-}
+root=/srv/ptc_manager-external
+
+case "$target" in
+  "$root"/external-pr-*-attempt-*) ;;
+  *) echo "invalid external repair cleanup target" >&2; exit 64 ;;
+esac
+
+if [ -e "$target" ]; then
+  resolved=$(/usr/bin/readlink -f -- "$target")
+  [ "$resolved" = "$target" ]
+  /usr/bin/rm -rf --one-file-system -- "$target"
+fi

@@ -27,6 +27,10 @@ defmodule PtcManager.Operations.PrPublication do
     field :pr_state, :string
     field :pr_checked_at, :utc_datetime_usec
     field :source, :string, default: "broker"
+    field :title, :string
+    field :author_login, :string
+    field :head_ref, :string
+    field :head_repository, :string
     field :draft, :boolean, default: false
     field :mergeability, :string, default: "unknown"
     field :mergeable_state, :string
@@ -36,6 +40,7 @@ defmodule PtcManager.Operations.PrPublication do
     field :checks_pending, :integer, default: 0
 
     belongs_to :job, PtcManager.Operations.Job
+    belongs_to :repository, PtcManager.Operations.Repository
     has_many :pr_analyses, PtcManager.Operations.PrAnalysis, foreign_key: :publication_id
     has_many :merge_approvals, PtcManager.Operations.MergeApproval, foreign_key: :publication_id
 
@@ -66,6 +71,11 @@ defmodule PtcManager.Operations.PrPublication do
       :pr_state,
       :pr_checked_at,
       :source,
+      :repository_id,
+      :title,
+      :author_login,
+      :head_ref,
+      :head_repository,
       :draft,
       :mergeability,
       :mergeable_state,
@@ -75,7 +85,6 @@ defmodule PtcManager.Operations.PrPublication do
       :checks_pending
     ])
     |> validate_required([
-      :job_id,
       :state,
       :idempotency_key,
       :fencing_token,
@@ -88,7 +97,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_inclusion(:state, @states)
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> validate_number(:attempt_count, greater_than_or_equal_to: 0)
-    |> validate_inclusion(:source, ["broker", "agent"])
+    |> validate_inclusion(:source, ["broker", "agent", "external"])
     |> validate_inclusion(:mergeability, ["unknown", "mergeable", "conflicting", "blocked"])
     |> validate_inclusion(:checks_state, ["unknown", "none", "pending", "success", "failure"])
     |> validate_number(:checks_total, greater_than_or_equal_to: 0)
@@ -101,6 +110,10 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_length(:last_error, max: 500)
     |> validate_length(:pr_url, max: 500)
     |> validate_length(:mergeable_state, max: 40)
+    |> validate_length(:title, max: 500)
+    |> validate_length(:author_login, max: 120)
+    |> validate_length(:head_ref, max: 240)
+    |> validate_length(:head_repository, max: 240)
     |> validate_inclusion(:pr_state, ["open", "merged", "closed"])
     |> validate_format(:idempotency_key, ~r/\A[0-9a-f]{64}\z/)
     |> validate_format(:base_sha, @sha)
@@ -110,5 +123,33 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_format(:diff_digest, ~r/\A[0-9a-f]{64}\z/)
     |> unique_constraint(:job_id)
     |> unique_constraint(:idempotency_key)
+    |> unique_constraint([:repository_id, :pr_number],
+      name: :pr_publications_repository_pr_number_index
+    )
+    |> validate_publication_identity()
+  end
+
+  def managed?(%__MODULE__{source: source, job_id: job_id}),
+    do: source in ["broker", "agent"] and is_integer(job_id)
+
+  def external?(%__MODULE__{source: "external", job_id: nil}), do: true
+  def external?(%__MODULE__{}), do: false
+
+  defp validate_publication_identity(changeset) do
+    if get_field(changeset, :source) == "external" do
+      validate_required(changeset, [
+        :repository_id,
+        :title,
+        :pr_number,
+        :pr_url,
+        :remote_head_sha,
+        :remote_base_sha,
+        :head_ref,
+        :head_repository,
+        :pr_state
+      ])
+    else
+      validate_required(changeset, [:job_id])
+    end
   end
 end

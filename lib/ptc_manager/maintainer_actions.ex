@@ -32,12 +32,13 @@ defmodule PtcManager.MaintainerActions do
     with %PrPublication{} = publication <-
            PrPublication
            |> Repo.get(publication_id)
-           |> Repo.preload(job: [:issue, :repository, :worktree_allocation]),
+           |> Repo.preload([:repository, job: [:issue, :repository, :worktree_allocation]]),
+         repository when not is_nil(repository) <- publication_repository(publication),
          {:ok, attrs} <-
            Catalog.build(action_key, %{
              publication: publication,
-             issue: publication.job.issue,
-             repository: publication.job.repository
+             issue: publication.job && publication.job.issue,
+             repository: repository
            }) do
       Operations.enqueue_agent_action(
         Map.merge(attrs, %{
@@ -119,14 +120,17 @@ defmodule PtcManager.MaintainerActions do
         with {:ok, prepared} <- prepare_for_execution(candidate, sync),
              {:ok, {action, token}} <- Operations.claim_agent_action(prepared.id) do
           result = adapter.run(action)
-          sync_result = sync_after_execution(sync, action, result)
+          current_action = AgentAction |> Repo.get!(action.id) |> Repo.preload(:repository)
+          sync_result = sync_after_execution(sync, current_action, result)
 
           case sync_result do
             {:ok, summary} ->
+              settled_result = settle_repair_result(current_action, result, summary)
+
               Operations.complete_agent_action(
                 action.id,
                 token,
-                store_private_analysis(action, result, summary)
+                store_private_analysis(current_action, settled_result, summary)
               )
 
             {:terminal_error, reason} ->
@@ -170,24 +174,33 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, sync) do
-    case sync.sync_action(action) do
-      {:ok, %{pull_request: status}} ->
-        Operations.record_agent_action_target_snapshot(action.id, MergeDecisions.snapshot(status))
+    publication = Repo.get!(PrPublication, action.target_id)
 
-      {:ok, _summary} ->
-        {:error, :pull_request_status_missing}
+    if PrPublication.external?(publication) do
+      fail_preflight(action.id, :external_pull_request_has_no_isolated_merge_reviewer)
+    else
+      case sync.sync_action(action) do
+        {:ok, %{pull_request: status}} ->
+          Operations.record_agent_action_target_snapshot(
+            action.id,
+            MergeDecisions.snapshot(status)
+          )
 
-      {:terminal_error, reason} ->
-        case Operations.fail_agent_action_preflight(action.id, reason) do
-          {:ok, failed} -> {:terminal, failed}
-          {:error, failure} -> {:error, failure}
-        end
+        {:ok, _summary} ->
+          {:error, :pull_request_status_missing}
 
-      {:error, reason} ->
-        case Operations.defer_agent_action_preflight(action.id, reason) do
-          {:ok, deferred} -> {:deferred, deferred}
-          {:error, defer_reason} -> {:error, defer_reason}
-        end
+        {:terminal_error, reason} ->
+          case Operations.fail_agent_action_preflight(action.id, reason) do
+            {:ok, failed} -> {:terminal, failed}
+            {:error, failure} -> {:error, failure}
+          end
+
+        {:error, reason} ->
+          case Operations.defer_agent_action_preflight(action.id, reason) do
+            {:ok, deferred} -> {:deferred, deferred}
+            {:error, defer_reason} -> {:error, defer_reason}
+          end
+      end
     end
   end
 
@@ -195,10 +208,12 @@ defmodule PtcManager.MaintainerActions do
     case sync.sync_action(action) do
       {:ok, %{pull_request: status}} ->
         if repair_needed?(status) do
-          with {:ok, prepared} <-
+          with {:ok, prompt} <- refreshed_repair_prompt(action, status),
+               {:ok, prepared} <-
                  Operations.record_agent_action_target_snapshot(
                    action.id,
-                   MergeDecisions.snapshot(status)
+                   MergeDecisions.snapshot(status),
+                   prompt
                  ) do
             case reserve_repair_worktree(action) do
               {:ok, _allocation} ->
@@ -238,10 +253,64 @@ defmodule PtcManager.MaintainerActions do
     status.checks_state == "failure" or status.mergeability == "conflicting"
   end
 
+  defp settle_repair_result(
+         %{action_key: "repair_pr", target_snapshot: snapshot},
+         {:error, _reason},
+         %{pull_request: %{head_sha: head_sha}}
+       )
+       when is_map(snapshot) do
+    if snapshot["repair_intended_head_sha"] == head_sha do
+      {:ok,
+       %{
+         "outcome" => "repaired",
+         "private_summary" =>
+           "GitHub confirmed the exact repair commit after the local push result was uncertain.",
+         "why_it_matters" => "The intended repair is on the existing pull-request branch.",
+         "scope" => "small",
+         "risk" => "medium",
+         "technical_evidence" => "Canonical GitHub head matches the persisted repair intent.",
+         "github_changes" => ["Advanced the existing pull-request branch to #{head_sha}."],
+         "evidence" => [head_sha],
+         "created_issue_numbers" => [],
+         "suggestions" => [],
+         "pushed_head_sha" => head_sha,
+         "recovered_after_uncertain_push" => true
+       }}
+    else
+      {:error, :repair_execution_uncertain}
+    end
+  end
+
+  defp settle_repair_result(_action, result, _summary), do: result
+
+  defp refreshed_repair_prompt(action, status) do
+    publication =
+      PrPublication
+      |> Repo.get!(action.target_id)
+      |> Repo.preload([:repository, job: [:issue, :repository]])
+
+    if PrPublication.external?(publication) do
+      repository = publication.repository
+      {:ok, Catalog.external_repair_prompt(repository, publication, status)}
+    else
+      {:ok, nil}
+    end
+  end
+
   defp reserve_repair_worktree(action) do
     publication = Repo.get!(PrPublication, action.target_id)
-    Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    if PrPublication.external?(publication),
+      do: {:ok, :external_workspace_created_by_adapter},
+      else: Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
   end
+
+  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
+
+  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
+    do: repository
+
+  defp publication_repository(_publication), do: nil
 
   defp fail_preflight(action_id, reason) do
     case Operations.fail_agent_action_preflight(action_id, reason) do
@@ -261,9 +330,11 @@ defmodule PtcManager.MaintainerActions do
 
     case sync_after_execution(sync, action, execution_result) do
       {:ok, summary} = synced ->
-        case store_private_analysis(action, execution_result, summary) do
-          {:ok, _result} ->
-            Operations.complete_agent_action_sync(action.id, synced)
+        settled_result = settle_repair_result(action, execution_result, summary)
+
+        case store_private_analysis(action, settled_result, summary) do
+          {:ok, result} ->
+            Operations.complete_agent_action_sync(action.id, synced, {:ok, result})
 
           {:error, reason} ->
             Operations.complete_agent_action_sync(action.id, {:terminal_error, reason})

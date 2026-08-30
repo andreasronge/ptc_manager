@@ -18,7 +18,7 @@ defmodule PtcManager.MaintainerActions.Sync do
     publication =
       PrPublication
       |> Repo.get!(publication_id)
-      |> Repo.preload(job: [:issue, :repository])
+      |> Repo.preload([:repository, job: [:issue, :repository]])
 
     client = Application.fetch_env!(:ptc_manager, :pull_request_client)
 
@@ -68,7 +68,7 @@ defmodule PtcManager.MaintainerActions.Sync do
     publication =
       PrPublication
       |> Repo.get!(publication_id)
-      |> Repo.preload(job: [:issue, :repository, :worktree_allocation])
+      |> Repo.preload([:repository, job: [:issue, :repository, :worktree_allocation]])
 
     client = Application.fetch_env!(:ptc_manager, :pull_request_client)
 
@@ -109,6 +109,45 @@ defmodule PtcManager.MaintainerActions.Sync do
     case Publications.record_remote_status(publication.id, result) do
       {:ok, _publication} -> {:terminal_error, :pull_request_not_open}
       {:error, reason} -> {:terminal_error, reason}
+    end
+  end
+
+  defp reconcile_repair_status(
+         action,
+         %PrPublication{source: "external", job_id: nil} = publication,
+         %{state: "open", head_sha: head_sha} = result,
+         {:postflight, execution_result}
+       ) do
+    intended_head = repair_intended_head(action)
+
+    cond do
+      is_binary(intended_head) and head_sha == intended_head ->
+        case Publications.record_remote_status(publication.id, result) do
+          {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
+          {:error, reason} -> {:terminal_error, reason}
+        end
+
+      is_binary(intended_head) and head_sha == preflight_head(action) and
+          action.sync_attempt_count < repair_visibility_sync_limit() ->
+        {:error, :repair_head_not_visible}
+
+      is_binary(intended_head) and head_sha == preflight_head(action) ->
+        {:terminal_error, :repair_head_visibility_timeout}
+
+      is_binary(intended_head) ->
+        {:terminal_error, :unexpected_repair_head_change}
+
+      head_sha != preflight_head(action) ->
+        {:terminal_error, :unexpected_repair_head_change}
+
+      match?({:error, _reason}, execution_result) ->
+        {:terminal_error, :repair_execution_uncertain}
+
+      true ->
+        case Publications.record_remote_status(publication.id, result) do
+          {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
+          {:error, reason} -> {:terminal_error, reason}
+        end
     end
   end
 
@@ -264,6 +303,15 @@ defmodule PtcManager.MaintainerActions.Sync do
       _head -> nil
     end
   end
+
+  defp repair_intended_head(%{target_snapshot: snapshot}) when is_map(snapshot) do
+    case snapshot["repair_intended_head_sha"] do
+      head when is_binary(head) -> head
+      _head -> nil
+    end
+  end
+
+  defp repair_intended_head(_action), do: nil
 
   defp repair_visibility_sync_limit do
     Application.get_env(:ptc_manager, :repair_visibility_sync_limit, 8)

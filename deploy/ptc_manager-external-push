@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+
+checkout=${1:-}
+repository=${2:-}
+branch=${3:-}
+expected=${4:-}
+repaired=${5:-}
+required_base=${6:-}
+max_bundle_bytes=${7:-}
+max_commits=${8:-}
+max_paths=${9:-}
+max_blob_bytes=${10:-}
+max_total_blob_bytes=${11:-}
+root=/srv/ptc_manager-external
+
+case "$checkout" in
+  "$root"/external-pr-*-attempt-*) ;;
+  *) echo "invalid external repair checkout" >&2; exit 64 ;;
+esac
+
+case "$repository" in
+  *[!A-Za-z0-9_./-]*|*/*/*|/*|*/|"") echo "invalid GitHub repository" >&2; exit 64 ;;
+esac
+
+case "$expected:$repaired" in
+  *[!0-9a-f:]*) echo "invalid repair SHA" >&2; exit 64 ;;
+esac
+
+if [ -n "$required_base" ]; then
+  case "$required_base" in
+    *[!0-9a-f]*) echo "invalid required base SHA" >&2; exit 64 ;;
+  esac
+  case "$required_base" in
+    ????????????????????????????????????????) ;;
+    *) echo "invalid required base SHA length" >&2; exit 64 ;;
+  esac
+fi
+
+for limit in "$max_bundle_bytes" "$max_commits" "$max_paths" "$max_blob_bytes" "$max_total_blob_bytes"; do
+  case "$limit" in
+    *[!0-9]*|"") echo "invalid external repair limit" >&2; exit 64 ;;
+  esac
+done
+
+case "$expected:$repaired" in
+  ????????????????????????????????????????:????????????????????????????????????????) ;;
+  *) echo "invalid repair SHA length" >&2; exit 64 ;;
+esac
+
+/usr/bin/git check-ref-format "refs/heads/$branch"
+resolved=$(/usr/bin/readlink -f -- "$checkout")
+[ "$resolved" = "$checkout" ]
+[ -d "$checkout/.git" ]
+bundle="$checkout/.ptc-manager-repair.bundle"
+[ -f "$bundle" ]
+[ ! -L "$bundle" ]
+
+staging=$(/usr/bin/mktemp -d /var/lib/ptc_manager-worker/ptc-external-push.XXXXXX)
+trap '/usr/bin/rm -rf -- "$staging"' EXIT HUP INT TERM
+trusted_bundle="$staging/repair.bundle"
+max_blocks=$((max_bundle_bytes / 1048576 + 1))
+/usr/bin/dd if="$bundle" of="$trusted_bundle" bs=1048576 count="$max_blocks" status=none
+bundle_bytes=$(/usr/bin/wc -c < "$trusted_bundle")
+[ "$bundle_bytes" -le "$max_bundle_bytes" ]
+/usr/bin/git -C "$staging" init --bare --template=/dev/null . >/dev/null
+/usr/bin/git -C "$staging" bundle unbundle "$trusted_bundle" >/dev/null
+/usr/bin/git -C "$staging" update-ref refs/heads/repaired "$repaired"
+/usr/bin/git -C "$staging" update-ref refs/heads/expected "$expected"
+
+/usr/bin/git -C "$staging" merge-base --is-ancestor "$expected" "$repaired"
+if [ -n "$required_base" ]; then
+  /usr/bin/git -C "$staging" update-ref refs/heads/required-base "$required_base"
+  /usr/bin/git -C "$staging" merge-base --is-ancestor "$required_base" "$repaired"
+fi
+
+if [ -n "$required_base" ]; then
+  excluded_revisions="^$expected ^$required_base"
+  diff_base="$required_base"
+else
+  excluded_revisions="^$expected"
+  diff_base="$expected"
+fi
+
+# shellcheck disable=SC2086
+commit_count=$(/usr/bin/git -C "$staging" rev-list --count "$repaired" $excluded_revisions)
+[ "$commit_count" -le "$max_commits" ]
+path_count=$(/usr/bin/git -C "$staging" diff --name-only "$diff_base" "$repaired" | /usr/bin/wc -l)
+[ "$path_count" -le "$max_paths" ]
+
+object_sizes="$staging/object-sizes"
+# shellcheck disable=SC2086
+/usr/bin/git -C "$staging" rev-list --objects "$repaired" $excluded_revisions |
+  /usr/bin/cut -d ' ' -f 1 |
+  /usr/bin/git -C "$staging" cat-file --batch-check='%(objecttype) %(objectsize)' > "$object_sizes"
+/usr/bin/awk -v max_blob="$max_blob_bytes" -v max_total="$max_total_blob_bytes" '
+  $1 == "blob" {
+    if ($2 > max_blob) exit 1
+    total += $2
+    if (total > max_total) exit 1
+  }
+' "$object_sizes"
+remote="https://github.com/$repository.git"
+
+remote_line=$(/usr/bin/git ls-remote --refs "$remote" "refs/heads/$branch")
+observed_sha=$(printf '%s\n' "$remote_line" | /usr/bin/cut -f1)
+observed_ref=$(printf '%s\n' "$remote_line" | /usr/bin/cut -f2)
+[ "$observed_sha" = "$expected" ]
+[ "$observed_ref" = "refs/heads/$branch" ]
+
+/usr/bin/git -C "$staging" -c core.hooksPath=/dev/null push --porcelain \
+  --force-with-lease="refs/heads/$branch:$expected" \
+  "$remote" "$repaired:refs/heads/$branch"

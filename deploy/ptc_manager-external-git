@@ -1,0 +1,8 @@
+#!/bin/sh
+
+# This wrapper runs Git as the credential-free external-repair identity. The
+# shared group lets the trusted coordinator inspect, commit, and remove the
+# disposable checkout afterward without granting the repair agent repository
+# or GitHub credentials.
+umask 0007
+exec /usr/bin/git "$@" </dev/null

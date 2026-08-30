@@ -4,6 +4,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   alias PtcManager.Operations
 
   alias PtcManager.Operations.{AgentAction, Job, PrAnalysis, PrPublication}
+  alias PtcManager.Publications
   alias PtcManager.Repo
 
   test "separates queued, working, and blocked deliveries", %{conn: conn} do
@@ -138,6 +139,39 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert has_element?(view, "#{create_button}[disabled]", "Issue queued")
   end
 
+  test "shows external GitHub pull requests with repair but without retrospective", %{conn: conn} do
+    repository = repository_fixture()
+
+    assert {:ok, _summary} =
+             Publications.sync_external_open_pull_requests(repository, [
+               external_status(repository, 901, "failure", "conflicting"),
+               external_status(repository, 902, "success", "mergeable")
+             ])
+
+    failing = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 901)
+    ready = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 902)
+    analysis_fixture(ready)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#lane-stuck #board-pr-#{failing.id}", "Imported from GitHub")
+    assert has_element?(view, "#repair-pr-#{failing.id}", "Fix CI or conflicts")
+
+    assert has_element?(
+             view,
+             "#lane-ready #board-pr-#{ready.id}",
+             "All observed gates are clean"
+           )
+
+    refute has_element?(view, "#retro-pr-#{ready.id}")
+    assert has_element?(view, "#approve-merge-board-#{ready.id}", "Approve merge")
+
+    view |> element("#repair-pr-#{failing.id}") |> render_click()
+
+    assert Repo.get_by!(AgentAction, action_key: "repair_pr", target_id: failing.id).state ==
+             "queued"
+  end
+
   defp approved_job(title) do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: title})
@@ -206,12 +240,16 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
   defp analysis_fixture(publication) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    publication = Repo.preload(publication, :job)
+    publication = Repo.preload(publication, [:repository, :job])
+    repository_id = publication.repository_id || publication.job.repository_id
+
+    repository =
+      publication.repository || Repo.get!(PtcManager.Operations.Repository, repository_id)
 
     action =
       %AgentAction{}
       |> AgentAction.changeset(%{
-        repository_id: publication.job.repository_id,
+        repository_id: repository_id,
         action_key: "prepare_merge_decision",
         target_type: "pull_request",
         target_id: publication.id,
@@ -239,16 +277,44 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
       scope: "small",
       risk: "low",
       technical_evidence: "Tests and CI pass.",
-      base_repository: "owner/repo",
-      base_ref: "main",
+      base_repository: "#{repository.github_owner}/#{repository.github_name}",
+      base_ref: repository.default_branch,
       reviewed_base_sha: publication.remote_base_sha,
-      head_repository: "owner/repo",
+      head_repository:
+        publication.head_repository || "#{repository.github_owner}/#{repository.github_name}",
       head_ref: publication.branch_name,
       head_sha: publication.remote_head_sha,
       diff_digest: publication.diff_digest,
       analyzed_at: now
     })
     |> Repo.insert!()
+  end
+
+  defp external_status(repository, number, checks_state, mergeability) do
+    head_sha = String.pad_leading(Integer.to_string(number, 16), 40, "b")
+
+    %{
+      pr_number: number,
+      pr_url:
+        "https://github.com/#{repository.github_owner}/#{repository.github_name}/pull/#{number}",
+      state: "open",
+      draft: false,
+      title: "External PR #{number}",
+      author_login: "external-author",
+      body: "",
+      head_sha: head_sha,
+      head_ref: "external/pr-#{number}",
+      head_repository: "#{repository.github_owner}/#{repository.github_name}",
+      base_sha: String.duplicate("a", 40),
+      base_ref: repository.default_branch,
+      base_repository: "#{repository.github_owner}/#{repository.github_name}",
+      mergeability: mergeability,
+      mergeable_state: if(mergeability == "conflicting", do: "dirty", else: "clean"),
+      checks_state: checks_state,
+      checks_total: 1,
+      checks_failed: if(checks_state == "failure", do: 1, else: 0),
+      checks_pending: 0
+    }
   end
 
   defp retrospective_action_fixture(publication) do

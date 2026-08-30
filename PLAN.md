@@ -65,6 +65,11 @@ fails closed when freshness cannot be established.
 
 ### Pull-request inbox
 
+The inbox imports every open PR reported by GitHub, not only PRs created from a
+PtcManager implementation job. Managed PRs keep their job, retained Herdr
+session, and verified branch lineage. Imported PRs are first-class GitHub
+snapshots with no synthetic issue or implementation job.
+
 Each pull request shows:
 
 - a plain-language description of what changed and why;
@@ -166,8 +171,16 @@ Jobs are durable database records, not in-memory tasks. If no compatible agent
 or worker is available, work remains queued across coordinator and server
 restarts. A scheduler records why a job is waiting, its priority, next attempt,
 and retry count. Expired leases are reconciled before a job can be reassigned.
-CI repair and conflict-resolution jobs resume the original named Herdr agent and
-retained worktree so its implementation context remains available. A later
+CI repair and conflict-resolution jobs for managed PRs resume the original named
+Herdr agent and retained worktree so its implementation context remains
+available. An imported PR instead uses a fresh disposable checkout owned by a
+separate Codex-only OS identity with no repository or GitHub credentials. The
+coordinator supplies the exact head and base, commits the verified result, and
+exports the verified commits to a Git bundle, and performs an ordinary
+fast-forward push from a trusted bare repository through a narrow worker
+wrapper.
+Imported PRs have no
+retrospective action because there is no retained implementation session. A later
 fallback may hand the work to another compatible agent with an explicit prior
 run, PR, review, and failure-context packet. Only one fenced lease may modify a
 branch at a time.

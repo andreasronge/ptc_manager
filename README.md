@@ -37,7 +37,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - durable worktree allocation, safe reclamation, and terminal cleanup;
 - canonical PR status and GitHub link in the dashboard;
 - read-only GitHub check-run, commit-status, draft, and merge-conflict signals
-  that place open PRs in Review & CI, Needs attention, or Ready to merge;
+  that import every open repository PR and place it in Review & CI, Needs
+  attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
   **Fix CI or conflicts**, **PR retrospective**, and **Prepare merge decision**
   buttons;
@@ -160,7 +161,8 @@ catalog contains:
 - **Review issue**, which uses up to three fresh independent `codex-review`
   consultations to challenge and improve the issue, stopping early after a
   clean pass and applying the same canonical label rules as **Prepare issue**;
-- **PR retrospective**, shown on merge-ready and finished PRs, which performs a
+- **PR retrospective**, shown only on merge-ready and finished PRs created by
+  PtcManager, which performs a
   read-only investigation and presents up to five concrete follow-up suggestions
   in simple language. It creates nothing until the maintainer approves an
   individual suggestion. The follow-up creation action searches for duplicates,
@@ -170,12 +172,13 @@ catalog contains:
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
   verified diff still match. This increment records approval but does not merge.
-- **Fix CI or conflicts**, shown when an open PR has failing checks or merge
-  conflicts. It resumes the original named Herdr implementation agent in its
-  retained session and worktree, asks it to repair and push the existing branch
-  without force, performs two independent review-and-fix passes, and accepts the
-  new PR head only after the retained branch and GitHub report the same verified
-  commit.
+- **Fix CI or conflicts**, shown when any open PR has failing checks or merge
+  conflicts. A PtcManager-created PR resumes its original named Herdr agent and
+  retained worktree. A PR imported from GitHub instead gets a fresh disposable
+  worktree and ephemeral repair agent. Both paths push only to the existing PR
+  branch without force and perform the configured review-and-fix passes. The
+  disposable worktree is removed after the attempt. Imported PRs deliberately
+  have no **Retro** button because they have no retained implementation session.
 
 For issue dependencies, GitHub remains authoritative. Maintainer actions write
 the canonical `Blocked by #<number>` marker into the dependent issue and apply
@@ -309,19 +312,23 @@ sudo groupadd --system ptc-manager
 sudo groupadd --system ptc-manager-codex
 sudo groupadd --system ptc-manager-output
 sudo groupadd --system ptc-manager-worker
+sudo groupadd --system ptc-manager-external
 sudo groupadd --system ptc-manager-repo
 sudo groupadd --system ptc-manager-publish
 sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output,ptc-manager-repo,ptc-manager-publish --shell /usr/sbin/nologin ptc-manager
 sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output,ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-codex
-sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo,ptc-manager-output --shell /usr/sbin/nologin ptc-manager-worker
+sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo,ptc-manager-output,ptc-manager-external --shell /usr/sbin/nologin ptc-manager-worker
+sudo useradd --system --home /var/lib/ptc_manager-external --gid ptc-manager-external --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager-external
 sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --groups ptc-manager-publish --shell /usr/sbin/nologin ptc-manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_manager-codex
 sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
+sudo install -d -o ptc-manager-external -g ptc-manager-external -m 0700 /var/lib/ptc_manager-external
 sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
 sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2770 /srv/ptc_manager-worktrees
+sudo install -d -o ptc-manager-external -g ptc-manager-external -m 2770 /srv/ptc_manager-external
 sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner
 sudo chmod -R g+rX,o-rwx /srv/ptc_runner
 sudo find /srv/ptc_runner -type d -exec chmod g+s {} +
@@ -333,6 +340,9 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager.env.example /etc/ptc_man
 sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_manager/github-app.pem
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
 sudo install -o root -g root -m 0755 deploy/ptc_manager-codex-exec /usr/local/bin/ptc-manager-codex-exec
+sudo install -o root -g root -m 0755 deploy/ptc_manager-external-git /usr/local/bin/ptc-manager-external-git
+sudo install -o root -g root -m 0755 deploy/ptc_manager-external-push /usr/local/bin/ptc-manager-external-push
+sudo install -o root -g root -m 0755 deploy/ptc_manager-external-cleanup /usr/local/bin/ptc-manager-external-cleanup
 sudo install -o root -g root -m 0440 deploy/ptc_manager-codex.sudoers /etc/sudoers.d/ptc_manager-codex
 sudo visudo -cf /etc/sudoers.d/ptc_manager-codex
 ```
@@ -346,8 +356,8 @@ sudo systemctl enable --now ptc_manager-herdr ptc_manager
 sudo systemctl status ptc_manager
 ```
 
-The coordinator, implementation worker, private manager, and Git verifier run
-as four different OS identities. Herdr, implementation agents, and the initial
+The coordinator, implementation worker, external-PR repairer, private manager,
+and Git verifier run as separate OS identities. Herdr, implementation agents, and the initial
 maintainer-action runner use `ptc-manager-worker`; that account has the
 authenticated `gh` session needed by explicitly queued maintainer actions and
 the optional agent-publication trial. Outside that explicit mode, the
@@ -356,12 +366,22 @@ credential broker can enforce that separation technically. Private read-only man
 `ptc-manager-codex`. Bounded branch verification runs as
 `ptc-manager-verifier` with an empty environment and no credentials. None of
 these accounts can read the root-only coordinator environment or inspect its
-process. Authenticate the two agent accounts:
+process. The `ptc-manager-external` account can write only its disposable
+checkout root, has no repository-group membership, and must never be logged in
+to `gh`. The coordinator fetches the exact PR head and base into a private,
+disposable bare repository—without modifying the worker-owned source checkout—and
+exports only those verified commits to a Git bundle,
+then performs an ordinary fast-forward push from a fresh bare repository through
+a narrow root-owned wrapper running as the authenticated worker; the repair
+agent never receives that credential and its repository configuration is never
+used by the credential-bearing push process.
+Authenticate the three Codex accounts:
 
 ```sh
 sudo -u ptc-manager-codex -H codex login
 sudo -u ptc-manager-worker -H codex login
 sudo -u ptc-manager-worker -H gh auth login
+sudo -u ptc-manager-external -H codex login
 ```
 
 The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
@@ -416,8 +436,16 @@ reconciliation so a duplicate cannot start. After
 managed attempt never appeared can safely release that attempt.
 
 PR tracking and worktree allocations live in SQLite and survive process or
-server restarts. If no implementation-capable agent slot is available, the job
-stays queued. Once a PR is open, its named Herdr session and worktree move to a
+server restarts. GitHub synchronization imports every open PR in each enabled
+repository; a branch already owned by a PtcManager job remains the managed
+record instead of being duplicated as an external PR. If no
+explicit `PTC_PR_RECONCILE_ENABLED` value is set, any positive
+`PTC_GITHUB_SYNC_INTERVAL_MS` also enables this PR import/reconciliation loop.
+The inexpensive list snapshot runs each cycle, while detailed CI and
+mergeability health rotates through one open PR per cycle to stay within GitHub
+API limits. If no
+implementation-capable agent slot is available, the job stays queued. Once a
+managed PR is open, its named Herdr session and worktree move to a
 passive `waiting` state: they remain available for CI repairs or review feedback
 without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
@@ -426,6 +454,15 @@ cleanup worker removes the Herdr worktree and session idempotently. This final
 cleanup is authorized to discard a dirty checkout because GitHub has already
 made the PR terminal; non-terminal cleanup still requires a clean, verified
 head.
+
+External PRs participate in the same CI and conflict lanes, but they do not
+create fake issues or jobs. Private merge review is intentionally omitted until
+it has the same credential-free isolation as repair. Their
+repair workspace is short-lived and therefore does not supply retrospective
+context later. External repair runs Codex in its workspace-write sandbox without
+GitHub credentials available to model-generated commands; the coordinator then
+commits and pushes the exact local repair SHA through its credential broker and
+requires GitHub to report that same SHA before recording success.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

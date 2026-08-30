@@ -166,7 +166,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def card_age(now, item) do
-    started_at = item.active_job.started_at || item.active_job.inserted_at
+    started_at = item.started_at || item.publication.pr_checked_at || item.publication.inserted_at
     seconds = DateTime.diff(now, started_at, :second) |> max(0)
 
     cond do
@@ -193,6 +193,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def retrospective_action(%{publication: nil}), do: nil
+
+  def retrospective_action(%{managed?: false}), do: nil
 
   def retrospective_action(%{publication: publication}) do
     Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "pr_retrospective"))
@@ -422,10 +424,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       item.pr_analysis && item.pr_analysis.outcome == "merge-needs-decision" ->
         "A maintainer decision is required."
 
-      item.active_job.state in ["failed", "lost"] ->
+      job_state(item) in ["failed", "lost"] ->
         "The agent stopped before completing the task."
 
-      item.active_job.state == "reconciling" ->
+      job_state(item) == "reconciling" ->
         "PtcManager cannot yet confirm the agent outcome."
 
       true ->
@@ -442,15 +444,30 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   defp load_board(socket) do
+    current_runs = Operations.list_current_agent_runs()
+
     active_runs_by_job =
-      Operations.list_current_agent_runs()
+      current_runs
       |> Enum.reject(&is_nil(&1.job_id))
       |> Map.new(&{&1.job_id, &1})
 
+    active_runs_by_action =
+      current_runs
+      |> Enum.reject(&is_nil(&1.agent_action_id))
+      |> Map.new(&{&1.agent_action_id, &1})
+
     items =
-      Operations.dashboard_issues()
-      |> Enum.reject(&is_nil(&1.active_job))
-      |> Enum.map(&Map.put(&1, :agent_run, Map.get(active_runs_by_job, &1.active_job.id)))
+      Operations.delivery_board_items()
+      |> Enum.map(fn item ->
+        run =
+          cond do
+            item.active_job -> Map.get(active_runs_by_job, item.active_job.id)
+            item.pr_agent_action -> Map.get(active_runs_by_action, item.pr_agent_action.id)
+            true -> nil
+          end
+
+        Map.put(item, :agent_run, run)
+      end)
 
     lanes =
       @lane_definitions
@@ -462,16 +479,16 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   defp lane_for(item) do
     cond do
-      item.active_job.state == "queued" -> :queued
+      job_state(item) == "queued" -> :queued
       stuck?(item) -> :stuck
       ready?(item) -> :ready
-      item.active_job.state == "pr_open" -> :review
+      open_pull_request?(item) -> :review
       true -> :working
     end
   end
 
   defp stuck?(item) do
-    item.active_job.state in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
+    job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
       match?(%{checks_state: "failure"}, item.publication) or
       match?(%{mergeability: "conflicting"}, item.publication) or
       match?(
@@ -486,12 +503,36 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   defp ready?(item) do
-    item.active_job.state == "pr_open" and
+    open_pull_request?(item) and
       match?(%{state: "published", pr_state: "open", draft: false}, item.publication) and
       item.publication.checks_state in ["success", "none"] and
       item.publication.mergeability == "mergeable" and
       match?(%{outcome: "merge-ready"}, item.pr_analysis) and analysis_fresh?(item)
   end
+
+  defp open_pull_request?(%{publication: %{state: "published", pr_state: "open"}}), do: true
+  defp open_pull_request?(_item), do: false
+
+  defp job_state(%{active_job: %{state: state}}), do: state
+  defp job_state(_item), do: nil
+
+  def card_id(%{active_job: %{id: id}}), do: "board-job-#{id}"
+  def card_id(%{publication: %{id: id}}), do: "board-pr-#{id}"
+
+  def delivery_state(%{active_job: %{state: state}}), do: state
+  def delivery_state(_item), do: "pr_open"
+
+  def delivery_label(%{managed?: false}), do: "External PR"
+  def delivery_label(%{active_job: %{state: state}}), do: status_label(state)
+
+  def repository_label(item), do: item.repository.github_name
+
+  def pull_request_label(%{publication: %{pr_number: number}, issue: nil}), do: "PR ##{number}"
+
+  def pull_request_label(%{publication: %{pr_number: number}, issue: issue}),
+    do: "PR ##{number} · issue ##{issue.number}"
+
+  def pull_request_label(%{publication: nil, issue: issue}), do: "issue ##{issue.number}"
 
   defp analysis_fresh?(%{publication: publication, pr_analysis: analysis})
        when not is_nil(publication) and not is_nil(analysis) do

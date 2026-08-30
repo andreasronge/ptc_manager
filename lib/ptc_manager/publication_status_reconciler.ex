@@ -7,7 +7,16 @@ defmodule PtcManager.PublicationStatusReconciler do
     client =
       Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :pull_request_client))
 
-    case reconcile_open(client) do
+    external_enabled =
+      Keyword.get(
+        opts,
+        :external,
+        Application.get_env(:ptc_manager, :external_pr_reconcile_enabled, false)
+      )
+
+    external_result = if external_enabled, do: reconcile_external(client), else: {:ok, :empty}
+
+    case reconcile_open(client, external_enabled) do
       {:retry_after, _delay_ms} = retry ->
         retry
 
@@ -18,8 +27,72 @@ defmodule PtcManager.PublicationStatusReconciler do
             publication -> discover_agent_publication(client, publication)
           end
 
-        combine_results(status_result, discovery_result)
+        status_result
+        |> combine_results(discovery_result)
+        |> combine_results(external_result)
     end
+  end
+
+  defp reconcile_external(client) do
+    if Code.ensure_loaded?(client) and function_exported?(client, :list_open, 1) do
+      PtcManager.Operations.list_repositories()
+      |> Enum.filter(& &1.enabled)
+      |> Enum.reduce_while({:ok, :empty}, fn repository, _acc ->
+        case client.list_open(repository) do
+          {:ok, pulls} ->
+            with {:ok, confirmed_pulls} <- confirm_missing_external(client, repository, pulls),
+                 {:ok, summary} <-
+                   Publications.sync_external_open_pull_requests(repository, confirmed_pulls) do
+              {:cont, {:ok, summary}}
+            else
+              {:retry_after, delay_ms} -> {:halt, {:retry_after, delay_ms}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+
+          {:retry, {:after, delay_ms, _reason}} when is_integer(delay_ms) ->
+            {:halt, {:retry_after, delay_ms}}
+
+          {:retry, reason} ->
+            {:halt, {:error, reason}}
+
+          {:blocked, reason} ->
+            {:halt, {:error, reason}}
+
+          other ->
+            {:halt, {:error, {:unexpected_pull_request_list_result, other}}}
+        end
+      end)
+    else
+      {:ok, :empty}
+    end
+  end
+
+  defp confirm_missing_external(client, repository, pulls) do
+    Publications.external_missing_candidates(repository, pulls)
+    |> Enum.reduce_while({:ok, pulls}, fn publication, {:ok, confirmed_pulls} ->
+      case client.status(publication) do
+        {:ok, %{state: "open"} = status} ->
+          {:cont, {:ok, [status | confirmed_pulls]}}
+
+        {:ok, %{state: state} = status} when state in ["merged", "closed"] ->
+          case Publications.record_remote_status(publication.id, status) do
+            {:ok, _publication} -> {:cont, {:ok, confirmed_pulls}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+
+        {:retry, {:after, delay_ms, _reason}} when is_integer(delay_ms) ->
+          {:halt, {:retry_after, delay_ms}}
+
+        {:retry, reason} ->
+          {:halt, {:error, reason}}
+
+        {:blocked, reason} ->
+          {:halt, {:error, reason}}
+
+        other ->
+          {:halt, {:error, {:unexpected_pull_request_status_result, other}}}
+      end
+    end)
   end
 
   defp discover_agent_publication(client, publication) do
@@ -66,8 +139,8 @@ defmodule PtcManager.PublicationStatusReconciler do
     end
   end
 
-  defp reconcile_open(client) do
-    case Publications.next_open_for_status() do
+  defp reconcile_open(client, include_external) do
+    case Publications.next_open_for_status(include_external) do
       nil ->
         {:ok, :empty}
 

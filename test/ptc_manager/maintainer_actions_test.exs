@@ -420,6 +420,8 @@ defmodule PtcManager.MaintainerActionsTest do
 
     publication = %PtcManager.Operations.PrPublication{
       id: 7,
+      job_id: 1,
+      source: "agent",
       pr_number: 81,
       pr_state: "merged"
     }
