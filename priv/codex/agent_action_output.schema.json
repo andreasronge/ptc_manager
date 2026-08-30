@@ -36,7 +36,6 @@
     "created_issue_numbers": {
       "type": "array",
       "maxItems": 50,
-      "uniqueItems": true,
       "items": {"type": "integer", "minimum": 1}
     }
   }
