@@ -12,9 +12,10 @@ The current Slice 4 increment adds the first PR decision-support path on top of
 the approved execution, publication, worktree, and maintainer-action workflows:
 
 - a responsive issue inbox with private plain-language summaries;
-- three focused maintainer views: **Planning** for backlog decisions,
-  **Delivery** for the approval-to-merge Kanban, and **Operations** for machine
-  capacity plus the agent/task timeline;
+- four focused maintainer views: **Planning** for backlog decisions,
+  **Delivery** for the approval-to-merge Kanban, **Operations** for machine
+  capacity plus the agent/task timeline, and **Configuration** for button-prompt
+  instructions;
 - an **Approve and start** workflow backed by SQLite transactions;
 - one active implementation job per issue, enforced by the database;
 - a live agent-activity panel with agent name, worker, role, task, start time,
@@ -42,6 +43,11 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
   **Fix**, **Fix and merge**, **PR retrospective**, and **Prepare merge decision**
   buttons, all visible alongside queued implementation jobs on **Operations**;
+- durable per-button prompt customizations, including private issue analysis,
+  Approve-and-start implementation, and every maintainer action. PtcManager appends the saved
+  maintainer instructions while continuing to inject and protect the exact
+  repository, target, branch, SHA, and authorization boundary. Queued and
+  running actions keep their frozen prompt when configuration changes;
 - a Delivery-board **Review for merge** action once CI and mergeability are
   clean, followed by a private **Retro** that proposes simple follow-up choices;
 - one shared clock/spinner status language for queued and actively running work
@@ -84,7 +90,9 @@ The authenticated routes are:
 - `/operations` — live CPU, memory, build-disk and slot signals, followed by
   the latest 40 agent runs and their tasks. Select an agent to open a bounded,
   read-only terminal panel; active panels refresh every five seconds and expose
-  no prompt or input controls.
+  no prompt or input controls;
+- `/configuration` — additional instructions for every button-triggered agent
+  prompt, with clear customized/default state and one-click reset.
 
 To choose a different local password:
 

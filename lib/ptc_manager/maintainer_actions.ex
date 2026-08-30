@@ -214,12 +214,11 @@ defmodule PtcManager.MaintainerActions do
     case sync.sync_action(action) do
       {:ok, %{pull_request: status}} ->
         if repair_needed?(status) do
-          with {:ok, prompt} <- refreshed_repair_prompt(action),
-               {:ok, prepared} <-
+          with {:ok, prepared} <-
                  Operations.record_agent_action_target_snapshot(
                    action.id,
                    MergeDecisions.snapshot(status),
-                   prompt
+                   action.prompt
                  ) do
             case reserve_repair_worktree(action) do
               {:ok, _allocation} ->
@@ -288,22 +287,6 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp settle_repair_result(_action, result, _summary), do: result
-
-  defp refreshed_repair_prompt(action) do
-    publication =
-      PrPublication
-      |> Repo.get!(action.target_id)
-      |> Repo.preload([:repository, job: [:issue, :repository]])
-
-    with {:ok, %{prompt: prompt}} <-
-           Catalog.build(action.action_key, %{
-             publication: publication,
-             issue: publication.job && publication.job.issue,
-             repository: publication_repository(publication)
-           }) do
-      {:ok, prompt}
-    end
-  end
 
   defp reserve_repair_worktree(action) do
     publication = Repo.get!(PrPublication, action.target_id)

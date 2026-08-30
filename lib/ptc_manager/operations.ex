@@ -33,6 +33,7 @@ defmodule PtcManager.Operations do
   @capacity_run_states ~w(queued starting working idle unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @merge_action_key "repair_and_merge_pr"
+  @superseded_herdr_status "Superseded duplicate of the action-owned Herdr run."
   @topic "operations"
 
   def subscribe, do: Phoenix.PubSub.subscribe(PtcManager.PubSub, @topic)
@@ -1226,6 +1227,7 @@ defmodule PtcManager.Operations do
 
   def list_active_agent_runs do
     AgentRun
+    |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(queued starting working blocked unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
     |> preload([:worker, :agent_action, job: [:issue, :repository]])
@@ -1234,6 +1236,7 @@ defmodule PtcManager.Operations do
 
   def list_waiting_agent_runs do
     AgentRun
+    |> without_orphaned_action_duplicates()
     |> where([run], run.state == "waiting")
     |> order_by([run], asc: run.last_heartbeat_at, asc: run.id)
     |> preload([:worker, :agent_action, job: [:issue, :repository]])
@@ -1242,6 +1245,7 @@ defmodule PtcManager.Operations do
 
   def list_current_agent_runs do
     AgentRun
+    |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(queued starting working idle blocked waiting unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
     |> preload([:worker, :agent_action, job: [:issue, :repository]])
@@ -1250,7 +1254,9 @@ defmodule PtcManager.Operations do
 
   def list_recent_agent_runs(limit \\ 5) when is_integer(limit) and limit > 0 do
     AgentRun
+    |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(done failed lost))
+    |> where([run], is_nil(run.status_text) or run.status_text != ^@superseded_herdr_status)
     |> order_by([run], desc: run.ended_at, desc: run.id)
     |> limit(^limit)
     |> preload([:worker, :agent_action, job: [:issue, :repository]])
@@ -1259,10 +1265,27 @@ defmodule PtcManager.Operations do
 
   def list_agent_timeline(limit \\ 40) when is_integer(limit) and limit > 0 do
     AgentRun
+    |> without_orphaned_action_duplicates()
+    |> where([run], is_nil(run.status_text) or run.status_text != ^@superseded_herdr_status)
     |> order_by([run], desc: run.started_at, desc: run.id)
     |> limit(^limit)
     |> preload([:worker, :agent_action, job: [:issue, :repository]])
     |> Repo.all()
+  end
+
+  defp without_orphaned_action_duplicates(query) do
+    action_agent_names =
+      from(linked in AgentRun,
+        where: not is_nil(linked.agent_action_id) and not is_nil(linked.agent_name),
+        select: linked.agent_name
+      )
+
+    where(
+      query,
+      [run],
+      not is_nil(run.agent_action_id) or is_nil(run.agent_name) or
+        run.agent_name not in subquery(action_agent_names)
+    )
   end
 
   def list_workers_with_worktrees do

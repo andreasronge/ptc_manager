@@ -369,8 +369,10 @@ the complete execution history.
   the single source of truth; PtcManager stores private explanations, queued
   action runs, their prompts/results, and synchronization metadata;
 - introduce a generic durable agent-action queue rendered initially as a small
-  hard-coded action catalog. Pressing a button authorizes and queues exactly one
-  prompt; later versions may make the catalog configurable;
+  action catalog. Pressing a button authorizes and queues exactly one frozen
+  prompt. The Configuration page persists optional per-action maintainer
+  instructions while PtcManager protects and injects the exact target identity,
+  version, and authorization boundary;
 - **Prepare issue** asks a maintainer agent to investigate and choose exactly
   one outcome: rewrite and mark ready, reject/close with a reason, wait because
   of a named dependency or external condition, or request a human decision;

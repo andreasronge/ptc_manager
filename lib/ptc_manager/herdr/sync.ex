@@ -15,6 +15,7 @@ defmodule PtcManager.Herdr.Sync do
 
   alias PtcManager.Repo
   @terminal_states ~w(done failed lost)
+  @superseded_status "Superseded duplicate of the action-owned Herdr run."
   @recoverable_attention_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation)
   @missing_retained_error "Herdr confirmed that the retained managed agent is no longer present."
 
@@ -76,6 +77,7 @@ defmodule PtcManager.Herdr.Sync do
             |> normalize_agent(session, now)
             |> Map.put(:snapshot_started_at, snapshot_started_at)
             |> maybe_attach_managed_attempt(worker.worker_key)
+            |> maybe_attach_agent_action_attempt(worker)
           end)
 
         existing_runs =
@@ -88,16 +90,17 @@ defmodule PtcManager.Herdr.Sync do
         observed_keys = MapSet.new(normalized, & &1.external_key)
 
         observed_run_ids =
-          Enum.map(normalized, fn attrs ->
+          Enum.flat_map(normalized, fn attrs ->
             existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
 
             if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
               run = upsert_agent_run(worker, existing_run, attrs)
+              superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, now)
               reconcile_worktree_identity(run, attrs, now)
               reconcile_job(run, attrs.state, now)
-              run.id
+              [run.id | superseded_ids]
             else
-              existing_run.id
+              [existing_run.id]
             end
           end)
           |> MapSet.new()
@@ -162,6 +165,23 @@ defmodule PtcManager.Herdr.Sync do
 
   defp upsert_agent_run(worker, nil, attrs) do
     insert_agent_run(worker, attrs)
+  end
+
+  defp upsert_agent_run(
+         _worker,
+         %AgentRun{agent_action_id: action_id, state: "starting"} = run,
+         attrs
+       )
+       when is_integer(action_id) do
+    attrs =
+      attrs
+      |> Map.put(:state, "starting")
+      |> Map.put(:started_at, run.started_at)
+      |> Map.put(:ended_at, nil)
+      |> Map.put(:status_text, run.status_text)
+      |> preserve_identity(run)
+
+    run |> AgentRun.changeset(attrs) |> Repo.update!()
   end
 
   defp upsert_agent_run(
@@ -526,6 +546,81 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp maybe_attach_managed_attempt(attrs, _worker_key), do: attrs
+
+  defp maybe_attach_agent_action_attempt(%{agent_name: name} = attrs, worker)
+       when is_binary(name) do
+    with [action_id, fencing_token] <-
+           Regex.run(
+             ~r/^(?:merge|repair)_pr\d+_a(\d+)_f(\d+)$/,
+             name,
+             capture: :all_but_first
+           ),
+         {action_id, ""} <- Integer.parse(action_id),
+         {fencing_token, ""} <- Integer.parse(fencing_token),
+         %AgentRun{} = action_run <-
+           AgentRun
+           |> where(
+             [run],
+             run.agent_action_id == ^action_id and run.fencing_token == ^fencing_token and
+               run.worker_id == ^worker.id and
+               run.state in ["starting", "working", "idle", "blocked", "waiting", "unknown"]
+           )
+           |> order_by([run], desc: run.id)
+           |> limit(1)
+           |> Repo.one() do
+      attrs
+      |> Map.put(:agent_action_id, action_id)
+      |> Map.put(:fencing_token, fencing_token)
+      |> Map.put(:managed_run, action_run)
+    else
+      _failure -> attrs
+    end
+  end
+
+  defp maybe_attach_agent_action_attempt(attrs, _worker), do: attrs
+
+  defp supersede_duplicate_action_runs(
+         worker,
+         %AgentRun{agent_action_id: action_id} = retained,
+         attrs,
+         now
+       )
+       when is_integer(action_id) do
+    workspace = attrs.herdr_workspace || retained.herdr_workspace
+    pane = attrs.herdr_pane || retained.herdr_pane
+    name = attrs.agent_name || retained.agent_name
+
+    duplicates =
+      AgentRun
+      |> where(
+        [run],
+        run.worker_id == ^worker.id and run.id != ^retained.id and is_nil(run.job_id) and
+          is_nil(run.agent_action_id) and run.agent_name == ^name and
+          ((not is_nil(^workspace) and run.herdr_workspace == ^workspace) or
+             (not is_nil(^pane) and run.herdr_pane == ^pane))
+      )
+      |> Repo.all()
+
+    Enum.each(duplicates, fn duplicate ->
+      attrs =
+        if duplicate.state in @terminal_states do
+          %{status_text: @superseded_status}
+        else
+          %{
+            state: "lost",
+            status_text: @superseded_status,
+            last_heartbeat_at: now,
+            ended_at: now
+          }
+        end
+
+      duplicate |> AgentRun.changeset(attrs) |> Repo.update!()
+    end)
+
+    Enum.map(duplicates, & &1.id)
+  end
+
+  defp supersede_duplicate_action_runs(_worker, _run, _attrs, _now), do: []
 
   defp mark_managed_run_uncertain(run, now) do
     run

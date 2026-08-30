@@ -1,11 +1,74 @@
 defmodule PtcManager.MaintainerActions.Catalog do
-  @moduledoc "Hard-coded first action catalog behind the generic durable action queue."
+  @moduledoc "Button action catalog and protected prompt builders for the durable action queue."
 
   alias PtcManager.Operations.{Issue, PrPublication}
+  alias PtcManager.PromptConfiguration
 
   @prompt_version 1
   @issue_review_limit 3
   @repair_review_limit 2
+
+  @configurable_actions [
+    %{
+      key: "private_issue_analysis",
+      label: "Private issue analysis",
+      button: "Investigate privately",
+      description: "Create the simple, private planning summary shown in the backlog."
+    },
+    %{
+      key: "implement_issue",
+      label: "Implement issue",
+      button: "Approve and start",
+      description: "Implement, test, review, commit, push, and create the issue pull request."
+    },
+    %{
+      key: "prepare_issue",
+      label: "Prepare issue",
+      button: "Prepare issue",
+      description: "Investigate an issue and make its GitHub state implementation-ready."
+    },
+    %{
+      key: "review_issue",
+      label: "Review issue",
+      button: "Review issue",
+      description: "Challenge issue readiness with independent Codex reviews."
+    },
+    %{
+      key: "prepare_merge_decision",
+      label: "Prepare merge decision",
+      button: "Prepare merge decision",
+      description: "Produce the private summary used for your merge decision."
+    },
+    %{
+      key: "repair_pr",
+      label: "Fix pull request",
+      button: "Fix",
+      description: "Repair CI failures or conflicts and push the existing PR branch."
+    },
+    %{
+      key: "repair_and_merge_pr",
+      label: "Fix and merge pull request",
+      button: "Fix and merge",
+      description: "Repair, verify, push, wait for CI, and merge the exact PR."
+    },
+    %{
+      key: "pr_retrospective",
+      label: "Pull request retrospective",
+      button: "Retro / Run retrospective",
+      description: "Find concrete follow-up work without creating issues automatically."
+    },
+    %{
+      key: "create_retrospective_issue",
+      label: "Create retrospective issue",
+      button: "Create issue",
+      description: "Create one approved follow-up issue from a retrospective suggestion."
+    }
+  ]
+
+  def configurable_actions, do: @configurable_actions
+
+  def configurable_action?(action_key) when is_binary(action_key),
+    do: Enum.any?(@configurable_actions, &(&1.key == action_key))
 
   def issue_actions(%Issue{state: "open"}) do
     [
@@ -97,7 +160,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_id: issue.id,
        target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
        prompt_version: @prompt_version,
-       prompt: prepare_issue_prompt(repository, issue)
+       prompt: configured("prepare_issue", prepare_issue_prompt(repository, issue))
      }}
   end
 
@@ -109,7 +172,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_id: issue.id,
        target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
        prompt_version: @prompt_version,
-       prompt: review_issue_prompt(repository, issue)
+       prompt: configured("review_issue", review_issue_prompt(repository, issue))
      }}
   end
 
@@ -164,7 +227,11 @@ defmodule PtcManager.MaintainerActions.Catalog do
          "source_action_id" => source_action_id,
          "suggestion_index" => suggestion_index
        },
-       prompt: create_retrospective_issue_prompt(repository, issue, publication, suggestion)
+       prompt:
+         configured(
+           "create_retrospective_issue",
+           create_retrospective_issue_prompt(repository, issue, publication, suggestion)
+         )
      }}
   end
 
@@ -188,7 +255,11 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_label:
          "#{repository.github_owner}/#{repository.github_name}##{publication.pr_number}",
        prompt_version: @prompt_version,
-       prompt: merge_decision_prompt(repository, issue, publication)
+       prompt:
+         configured(
+           "prepare_merge_decision",
+           merge_decision_prompt(repository, issue, publication)
+         )
      }}
   end
 
@@ -208,7 +279,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
          target_label:
            "#{repository.github_owner}/#{repository.github_name}##{publication.pr_number}",
          prompt_version: @prompt_version,
-         prompt: repair_prompt(repository, issue, publication)
+         prompt: configured("repair_pr", repair_prompt(repository, issue, publication))
        }}
     else
       {:error, :pull_request_does_not_need_repair}
@@ -231,7 +302,11 @@ defmodule PtcManager.MaintainerActions.Catalog do
          target_label:
            "#{repository.github_owner}/#{repository.github_name}##{publication.pr_number}",
          prompt_version: @prompt_version,
-         prompt: repair_and_merge_prompt(repository, issue, publication)
+         prompt:
+           configured(
+             "repair_and_merge_pr",
+             repair_and_merge_prompt(repository, issue, publication)
+           )
        }}
     else
       {:error, :pull_request_does_not_need_repair}
@@ -259,7 +334,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_label:
          "#{repository.github_owner}/#{repository.github_name}##{publication.pr_number}",
        prompt_version: @prompt_version,
-       prompt: retrospective_prompt(repository, issue, publication)
+       prompt:
+         configured("pr_retrospective", retrospective_prompt(repository, issue, publication))
      }}
   end
 
@@ -507,4 +583,6 @@ defmodule PtcManager.MaintainerActions.Catalog do
       "Confirm that the coordinator-created local repair branch starts at the exact pull-request head `#{publication.remote_head_sha}`. Push its final HEAD explicitly to the existing remote branch `#{publication.head_ref}`; the local branch name is intentionally different."
     end
   end
+
+  defp configured(action_key, prompt), do: PromptConfiguration.append(action_key, prompt)
 end

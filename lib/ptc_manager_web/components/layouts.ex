@@ -70,6 +70,13 @@ defmodule PtcManagerWeb.Layouts do
             >
               Operations
             </.nav_link>
+            <.nav_link
+              href={~p"/configuration"}
+              active={@current_path == "/configuration"}
+              icon="hero-cog-6-tooth-mini"
+            >
+              Configuration
+            </.nav_link>
           </nav>
           <.link href={~p"/logout"} method="delete" class="text-sm text-slate-400 hover:text-white">
             Sign out

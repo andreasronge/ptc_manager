@@ -1,0 +1,96 @@
+<Layouts.app flash={@flash} current_path="/configuration">
+  <div class="space-y-8">
+    <section class="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+      <div>
+        <p class="text-sm font-semibold uppercase tracking-[0.2em] text-teal-300">
+          Configuration
+        </p>
+        <h1 class="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">
+          Agent prompt instructions
+        </h1>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-400">
+          Add instructions to every prompt launched by a button. Saved changes affect prompts that start afterward; a prompt already running keeps the exact instructions it started with.
+        </p>
+      </div>
+    </section>
+
+    <aside class="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-5 text-sm leading-6 text-amber-100">
+      <p class="font-semibold">What stays protected</p>
+      <p class="mt-1 text-amber-100/80">
+        PtcManager still injects the exact repository, issue or PR number, branch, and verified SHA. Target limits and core authorization remain protected. In particular, conflict repair merges the latest main branch and uses a normal fast-forward push; it does not need force-push.
+      </p>
+    </aside>
+
+    <section id="prompt-configuration" class="grid gap-5 xl:grid-cols-2">
+      <article
+        :for={prompt <- @prompts}
+        id={"prompt-#{prompt.key}"}
+        class="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl shadow-black/10"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-lg font-semibold text-white">{prompt.label}</h2>
+            <p class="mt-1 text-xs font-medium uppercase tracking-wide text-teal-300">
+              Button: {prompt.button}
+            </p>
+          </div>
+          <span class={[
+            "rounded-full px-2.5 py-1 text-xs font-semibold",
+            if(prompt.customization,
+              do: "bg-teal-400/15 text-teal-200",
+              else: "bg-white/5 text-slate-400"
+            )
+          ]}>
+            {if(prompt.customization, do: "Customized", else: "Default")}
+          </span>
+        </div>
+
+        <p class="mt-3 text-sm leading-6 text-slate-400">{prompt.description}</p>
+
+        <.form
+          for={%{}}
+          as={:customization}
+          phx-submit="save-prompt"
+          class="mt-5 space-y-3"
+        >
+          <input type="hidden" name="action-key" value={prompt.key} />
+          <label
+            for={"instructions-#{prompt.key}"}
+            class="block text-sm font-medium text-slate-200"
+          >
+            Additional instructions
+          </label>
+          <textarea
+            id={"instructions-#{prompt.key}"}
+            name="customization[instructions]"
+            rows="7"
+            maxlength="20000"
+            placeholder="Example: Prefer the smallest documentation-only repair and mention any skipped environment-specific test in the final evidence."
+            class="block w-full rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 font-mono text-sm leading-6 text-slate-100 outline-none transition focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20"
+          >{prompt.customization && prompt.customization.instructions}</textarea>
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              class="rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-teal-300"
+            >
+              Save instructions
+            </button>
+            <button
+              :if={prompt.customization}
+              type="button"
+              phx-click="reset-prompt"
+              phx-value-action-key={prompt.key}
+              data-confirm="Reset this prompt to its built-in default instructions?"
+              class="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/20 hover:text-white"
+            >
+              Reset to default
+            </button>
+            <span :if={prompt.customization} class="text-xs text-slate-500">
+              Last saved by {prompt.customization.updated_by}
+            </span>
+          </div>
+        </.form>
+      </article>
+    </section>
+  </div>
+</Layouts.app>

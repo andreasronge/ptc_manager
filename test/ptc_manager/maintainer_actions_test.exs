@@ -8,6 +8,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.MaintainerActions.Sync
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
+  alias PtcManager.PromptConfiguration
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -578,12 +579,27 @@ defmodule PtcManager.MaintainerActionsTest do
       })
       |> Repo.update!()
 
+    assert {:ok, _} =
+             PromptConfiguration.save(
+               "repair_pr",
+               "Use the instructions captured when this repair was queued.",
+               "andreas"
+             )
+
     assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
     assert queued.state == "queued"
     assert queued.prompt =~ "Repair the existing"
     assert queued.prompt =~ "uncommitted changes from an earlier interrupted repair attempt"
     assert queued.prompt =~ "codex-review"
     assert queued.prompt =~ "Never use `--force`"
+    assert queued.prompt =~ "instructions captured when this repair was queued"
+
+    assert {:ok, _} =
+             PromptConfiguration.save(
+               "repair_pr",
+               "This later configuration must not rewrite queued repair work.",
+               "andreas"
+             )
 
     failing_status =
       publication
@@ -609,6 +625,9 @@ defmodule PtcManager.MaintainerActionsTest do
     assert completed.state == "done"
     assert completed.target_snapshot == MergeDecisions.snapshot(failing_status)
     assert Repo.get_by!(AgentRun, agent_action_id: completed.id).state == "done"
+    assert_receive {:ran_agent_action, executed}
+    assert executed.prompt =~ "instructions captured when this repair was queued"
+    refute executed.prompt =~ "later configuration must not rewrite"
     assert_receive {:repair_postflight, {:ok, %{"outcome" => "repaired"}}}
   end
 

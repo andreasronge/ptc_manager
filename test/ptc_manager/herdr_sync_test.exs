@@ -5,7 +5,7 @@ defmodule PtcManager.HerdrSyncTest do
 
   alias PtcManager.Herdr.{Client, Sync}
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentRun, Job, Worker, WorktreeAllocation}
+  alias PtcManager.Operations.{AgentAction, AgentRun, Job, Worker, WorktreeAllocation}
   alias PtcManager.Repo
 
   defmodule FakeClient do
@@ -67,6 +67,209 @@ defmodule PtcManager.HerdrSyncTest do
     lost_run = Repo.get!(AgentRun, run.id)
     assert lost_run.state == "lost"
     assert lost_run.ended_at
+  end
+
+  test "binds the final Herdr session identity to its action run and hides startup duplicates" do
+    repository = repository_fixture()
+    worker = worker_fixture(%{worker_key: "herdr:action-dedupe"})
+    now = now()
+
+    action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 1704,
+        target_label: "example/repo#1704",
+        prompt_version: 1,
+        prompt: "Fix and merge PR 1704",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "running",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now
+      })
+      |> Repo.insert!()
+
+    {:ok, action_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "working",
+        agent_name: "merge_pr1704_a#{action.id}_f1",
+        started_at: now,
+        last_heartbeat_at: now,
+        herdr_workspace: "w7",
+        herdr_pane: "w7:p1",
+        herdr_session: "action-dedupe",
+        external_key: "action-dedupe:w7:p1",
+        fencing_token: 1
+      })
+
+    {:ok, duplicate} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        role: "implementer",
+        state: "working",
+        agent_name: "merge_pr1704_a#{action.id}_f1",
+        started_at: now,
+        last_heartbeat_at: now,
+        herdr_workspace: "w7",
+        herdr_pane: "w7:p1",
+        herdr_session: "action-dedupe",
+        external_key: "action-dedupe:old-pane-identity"
+      })
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "codex",
+           "name" => "merge_pr1704_a#{action.id}_f1",
+           "agent_status" => "working",
+           "pane_id" => "w7:p1",
+           "workspace_id" => "w7",
+           "agent_session" => %{"value" => "final-session"}
+         }
+       ]}
+    )
+
+    assert {:ok, %{agent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "action-dedupe")
+
+    rebound = Repo.get!(AgentRun, action_run.id)
+    assert rebound.state == "working"
+    assert rebound.external_key == "action-dedupe:final-session"
+
+    superseded = Repo.get!(AgentRun, duplicate.id)
+    assert superseded.state == "lost"
+    assert superseded.status_text == "Superseded duplicate of the action-owned Herdr run."
+    assert Enum.map(Operations.list_active_agent_runs(), & &1.id) == [action_run.id]
+    assert Enum.map(Operations.list_agent_timeline(), & &1.id) == [action_run.id]
+  end
+
+  test "an early idle snapshot preserves an unattached action run in starting state" do
+    repository = repository_fixture()
+    worker = worker_fixture(%{worker_key: "herdr:early-action-snapshot"})
+    now = now()
+
+    action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_pr",
+        target_type: "pull_request",
+        target_id: 1705,
+        target_label: "example/repo#1705",
+        prompt_version: 1,
+        prompt: "Fix PR 1705",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "running",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now
+      })
+      |> Repo.insert!()
+
+    {:ok, action_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "starting",
+        status_text: "Waiting for Herdr to create the pull-request repair session.",
+        started_at: now,
+        last_heartbeat_at: now,
+        fencing_token: 1
+      })
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "codex",
+           "name" => "repair_pr1705_a#{action.id}_f1",
+           "agent_status" => "idle",
+           "pane_id" => "w8:p1",
+           "workspace_id" => "w8",
+           "agent_session" => %{"value" => "early-final-session"}
+         }
+       ]}
+    )
+
+    assert {:ok, %{agent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "early-action-snapshot")
+
+    assert {:ok, %{agent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "early-action-snapshot")
+
+    rebound = Repo.get!(AgentRun, action_run.id)
+    assert rebound.state == "starting"
+    assert rebound.external_key == "early-action-snapshot:early-final-session"
+    assert Repo.aggregate(AgentRun, :count) == 1
+  end
+
+  test "operations hides an orphan action duplicate even after Herdr has already stopped" do
+    repository = repository_fixture()
+    worker = worker_fixture(%{worker_key: "herdr:stopped-action-dedupe"})
+    now = now()
+
+    action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 1704,
+        target_label: "example/repo#1704",
+        prompt_version: 1,
+        prompt: "Fix and merge PR 1704",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "done",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now
+      })
+      |> Repo.insert!()
+
+    {:ok, retained} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "done",
+        agent_name: "merge_pr1704_a#{action.id}_f1",
+        started_at: now,
+        last_heartbeat_at: now,
+        ended_at: now,
+        fencing_token: 1
+      })
+
+    {:ok, _orphan} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        role: "implementer",
+        state: "lost",
+        agent_name: retained.agent_name,
+        started_at: now,
+        last_heartbeat_at: now,
+        ended_at: now,
+        external_key: "stopped-action-dedupe:old-session"
+      })
+
+    assert Enum.map(Operations.list_recent_agent_runs(), & &1.id) == [retained.id]
+    assert Enum.map(Operations.list_agent_timeline(), & &1.id) == [retained.id]
   end
 
   test "preserves terminal history and creates a new attempt when an agent restarts" do
