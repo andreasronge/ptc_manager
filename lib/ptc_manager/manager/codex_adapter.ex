@@ -80,7 +80,7 @@ defmodule PtcManager.Manager.CodexAdapter do
     try do
       case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
         {:ok, {_output, 0}} -> decode_output(output_path)
-        {:ok, {output, status}} -> {:error, {:codex_exit, status, bounded(output)}}
+        {:ok, {output, status}} -> {:error, codex_exit_error(status, output)}
         nil -> {:error, :codex_timeout}
       end
     after
@@ -124,7 +124,12 @@ defmodule PtcManager.Manager.CodexAdapter do
     end
   end
 
-  defp bounded(output), do: output |> String.trim() |> String.slice(-1_000, 1_000)
+  @doc false
+  def codex_exit_error(status, _output) when is_integer(status) do
+    # Codex's combined transcript may contain the untrusted prompt, including text
+    # that looks like an error marker. Keep only a stable classification here.
+    {:codex_exit, status, :codex_process_failed}
+  end
 
   @doc false
   def schema_path, do: Application.app_dir(:ptc_manager, "priv/codex/manager_output.schema.json")

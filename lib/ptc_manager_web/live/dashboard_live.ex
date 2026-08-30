@@ -402,7 +402,19 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
-  def agent_action_failure(%{state: "failed", last_error: error}) when is_binary(error), do: error
+  def agent_action_failure(%{state: "failed", last_error: error}) when is_binary(error) do
+    cond do
+      String.contains?(error, ["invalid_json_schema", "invalid_output_schema"]) ->
+        "Codex rejected the configured result format. Run the action again; if it repeats, the Codex configuration needs attention."
+
+      String.contains?(error, "codex_exit") ->
+        "Codex stopped before producing a usable result. Run the action again."
+
+      true ->
+        error
+    end
+  end
+
   def agent_action_failure(_action), do: nil
 
   def merge_approvable?(%{
@@ -563,7 +575,7 @@ defmodule PtcManagerWeb.DashboardLive do
   defp load_dashboard(socket) do
     assign(socket,
       repositories: Operations.list_repositories(),
-      issues: Operations.dashboard_issues(),
+      issues: Operations.dashboard_issues(state: "open"),
       active_agent_runs: Operations.list_active_agent_runs(),
       waiting_agent_runs: Operations.list_waiting_agent_runs(),
       recent_agent_runs: Operations.list_recent_agent_runs(),

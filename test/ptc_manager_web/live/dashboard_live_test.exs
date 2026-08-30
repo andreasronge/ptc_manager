@@ -83,6 +83,59 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
   end
 
+  test "shows only open issues in the Issue inbox", %{conn: conn} do
+    repository = repository_fixture()
+    open_issue = issue_fixture(repository, %{title: "Still needs planning"})
+    closed_issue = issue_fixture(repository, %{title: "Already completed", state: "closed"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#issue-#{open_issue.id}", "Still needs planning")
+    refute has_element?(view, "#issue-#{closed_issue.id}")
+  end
+
+  test "shows a concise Codex failure without echoing issue content", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Retry the review"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "review_issue",
+      target_type: "issue",
+      target_id: issue.id,
+      target_label: "issue ##{issue.number}",
+      prompt_version: 1,
+      prompt: "Review the issue",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "failed",
+      attempt_count: 1,
+      requested_at: now,
+      started_at: now,
+      ended_at: now,
+      last_error: "Execution failed: {:codex_exit, 1, \"secret issue body invalid_json_schema\"}"
+    })
+    |> Repo.insert!()
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert html =~ "Codex rejected the configured result format"
+    refute html =~ "secret issue body"
+  end
+
+  test "describes an empty synchronized inbox as having no open work", %{conn: conn} do
+    repository = repository_fixture()
+    issue_fixture(repository, %{state: "closed"})
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert html =~ "No open issues need planning."
+    refute html =~ "No issues have been synchronized yet."
+  end
+
   test "queues the hard-coded prepare issue action from the generic action button", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Decide the issue outcome"})

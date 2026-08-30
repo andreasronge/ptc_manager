@@ -1077,10 +1077,13 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def dashboard_issues do
+  def dashboard_issues(opts \\ []) do
+    state = Keyword.get(opts, :state)
+
     issues =
       Issue
       |> join(:inner, [issue], repository in assoc(issue, :repository))
+      |> maybe_filter_issue_state(state)
       |> order_by([issue], desc: issue.github_updated_at)
       |> preload([_issue, repository], repository: repository)
       |> Repo.all()
@@ -1160,6 +1163,9 @@ defmodule PtcManager.Operations do
       }
     end)
   end
+
+  defp maybe_filter_issue_state(query, nil), do: query
+  defp maybe_filter_issue_state(query, state), do: where(query, [issue], issue.state == ^state)
 
   def delivery_board_items do
     managed_items =

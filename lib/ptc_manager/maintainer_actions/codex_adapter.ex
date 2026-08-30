@@ -91,7 +91,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
     try do
       case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
         {:ok, {_output, 0}} -> decode_output(output_path, action.action_key)
-        {:ok, {output, status}} -> {:error, {:codex_exit, status, bounded(output)}}
+        {:ok, {output, status}} -> {:error, PrivateCodexAdapter.codex_exit_error(status, output)}
         nil -> {:error, :codex_timeout}
       end
     after
@@ -316,6 +316,4 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
   defp schema_path,
     do: Application.app_dir(:ptc_manager, "priv/codex/agent_action_output.schema.json")
-
-  defp bounded(output), do: output |> String.trim() |> String.slice(-1_000, 1_000)
 end

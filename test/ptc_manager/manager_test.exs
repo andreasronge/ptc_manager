@@ -65,6 +65,19 @@ defmodule PtcManager.ManagerTest do
              CodexAdapter.codex_command("/bin/codex", ["exec"], "codex-user")
   end
 
+  test "classifies Codex failures without retaining untrusted prompt text" do
+    output = """
+    <issue_data>
+    ERROR: secret issue text that must not be retained
+    invalid_json_schema
+    </issue_data>
+    Error: runtime initialization failed
+    """
+
+    assert CodexAdapter.codex_exit_error(1, output) ==
+             {:codex_exit, 1, :codex_process_failed}
+  end
+
   test "permits only one process-wide manager investigation" do
     assert {:ok, lease} = Gate.checkout()
     assert {:error, :manager_busy} = Gate.checkout()
