@@ -404,13 +404,12 @@ defmodule PtcManager.Publications do
             publication.state != "queued" or job.state != "ready_for_pr" ->
               Repo.rollback(:invalid_publication_state)
 
-            result.head_sha != publication.head_sha or
-                result.head_ref != publication.branch_name ->
+            result.head_ref != publication.branch_name ->
               block_agent_publication!(
                 publication,
                 job,
                 result,
-                "GitHub reports a different agent branch or head commit.",
+                "GitHub reports a different agent branch.",
                 now
               )
 
@@ -430,6 +429,15 @@ defmodule PtcManager.Publications do
                 job,
                 result,
                 "GitHub reports a different pull-request base.",
+                now
+              )
+
+            result.state == "open" and result.head_sha != publication.head_sha ->
+              block_agent_publication!(
+                publication,
+                job,
+                result,
+                "GitHub reports a different agent branch head commit.",
                 now
               )
 
@@ -774,7 +782,7 @@ defmodule PtcManager.Publications do
               insert_status_audit!(publication, "pr_publication.base_changed", result, now)
               load(publication.id)
 
-            result.head_sha != publication.remote_head_sha ->
+            result.state == "open" and result.head_sha != publication.remote_head_sha ->
               message = "GitHub reports a different pull-request head commit."
 
               publication
@@ -839,6 +847,7 @@ defmodule PtcManager.Publications do
                 Map.merge(
                   %{
                     pr_state: result.state,
+                    remote_head_sha: result.head_sha,
                     remote_base_sha: result.base_sha,
                     pr_checked_at: now,
                     pr_url: result.pr_url,

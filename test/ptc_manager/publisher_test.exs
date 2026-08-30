@@ -469,7 +469,7 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(PrPublication, external.id).source == "external"
   end
 
-  test "consolidates an imported repaired head before blocking the stale verified result" do
+  test "consolidates an imported repaired head after the PR has merged" do
     previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
     Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
 
@@ -485,12 +485,14 @@ defmodule PtcManager.PublisherTest do
 
     status = agent_status(job, publication, external, repaired_head, "merged")
 
-    assert {:ok, blocked} = Publications.record_agent_publication(publication.id, status)
-    assert blocked.id == publication.id
-    assert blocked.source == "agent"
-    assert blocked.state == "blocked"
-    assert blocked.last_error =~ "head commit"
-    assert Repo.get!(Job, job.id).state == "publish_blocked"
+    assert {:ok, merged} = Publications.record_agent_publication(publication.id, status)
+    assert merged.id == publication.id
+    assert merged.source == "agent"
+    assert merged.state == "published"
+    assert merged.pr_state == "merged"
+    assert merged.remote_head_sha == repaired_head
+    assert merged.last_error == nil
+    assert Repo.get!(Job, job.id).state == "done"
     refute Repo.get(PrPublication, external.id)
 
     assert Repo.aggregate(
@@ -793,6 +795,33 @@ defmodule PtcManager.PublisherTest do
     assert {:ok, closed} = PublicationStatusReconciler.run_once(client: FakeBroker)
     assert closed.pr_state == "closed"
     assert Repo.get!(Job, closed_job.id).state == "cancelled"
+  end
+
+  test "a merged PR with a later repaired head leaves the blocked lane" do
+    {job, publication, _result} = published_publication_fixture()
+    repaired_head = String.duplicate("e", 40)
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "merged",
+        pr_url: publication.pr_url,
+        head_sha: repaired_head,
+        base_sha: String.duplicate("a", 40),
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, merged} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert merged.state == "published"
+    assert merged.pr_state == "merged"
+    assert merged.remote_head_sha == repaired_head
+    assert merged.last_error == nil
+
+    terminal_job = Repo.get!(Job, job.id)
+    assert terminal_job.state == "done"
+    assert terminal_job.last_error == nil
   end
 
   test "terminal PR reconciliation cannot overwrite an active cleanup claim" do
