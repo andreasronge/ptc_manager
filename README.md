@@ -449,6 +449,8 @@ managed PR is open, its named Herdr session and worktree move to a
 passive `waiting` state: they remain available for CI repairs or review feedback
 without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
+Deployments may proceed while agents are only `waiting`; the deploy guard still
+stops for queued, starting, working, blocked, or unknown runs.
 When GitHub reports the PR merged or closed, the job becomes terminal and the
 cleanup worker removes the Herdr worktree and session idempotently. This final
 cleanup is authorized to discard a dirty checkout because GitHub has already

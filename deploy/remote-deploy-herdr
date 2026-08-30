@@ -119,7 +119,7 @@ read_environment_setting() {
 
 active_managed_runs() {
   sudo sqlite3 -readonly "$database_path" \
-    "select count(*) from agent_runs where state not in ('done','failed','lost');"
+    "select count(*) from agent_runs where state in ('queued','starting','working','blocked','unknown');"
 }
 
 ensure_no_managed_runs() {
