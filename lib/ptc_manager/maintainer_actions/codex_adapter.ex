@@ -8,6 +8,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
+  alias PtcManager.Repository.SourceSnapshot
 
   @impl true
   def run(%AgentAction{action_key: action_key} = action)
@@ -83,8 +84,19 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
             )
           )
 
+        environment =
+          PrivateCodexAdapter.command_environment()
+          |> Map.new()
+          |> Map.merge(%{
+            "GIT_CONFIG_COUNT" => "1",
+            "GIT_CONFIG_KEY_0" => "safe.directory",
+            "GIT_CONFIG_VALUE_0" => repository_path,
+            "GIT_OPTIONAL_LOCKS" => "0"
+          })
+          |> Map.to_list()
+
         System.cmd(command, command_args,
-          env: PrivateCodexAdapter.command_environment(),
+          env: environment,
           stderr_to_stdout: true
         )
       end)
@@ -131,6 +143,21 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
       _allocation ->
         {:error, :repair_worktree_unavailable}
+    end
+  end
+
+  defp repository_path(
+         %AgentAction{
+           action_key: action_key,
+           target_snapshot: %{"source_path" => path, "source_sha" => source_sha}
+         },
+         repository
+       )
+       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] and
+              is_binary(path) and is_binary(source_sha) do
+    case SourceSnapshot.verify(repository, path, source_sha) do
+      :ok -> {:ok, Path.expand(path)}
+      {:error, reason} -> {:error, reason}
     end
   end
 

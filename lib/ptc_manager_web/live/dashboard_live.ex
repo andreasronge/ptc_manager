@@ -455,6 +455,19 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  def agent_action_source_note(%{target_snapshot: snapshot}) when is_map(snapshot) do
+    case snapshot do
+      %{"source_sha" => source_sha, "source_ref" => source_ref}
+      when is_binary(source_sha) and is_binary(source_ref) ->
+        "Code evidence: #{source_ref} @ #{String.slice(source_sha, 0, 10)}"
+
+      _snapshot ->
+        nil
+    end
+  end
+
+  def agent_action_source_note(_action), do: nil
+
   def issue_decision(
         %{workflow_label: "ptc:needs-decision", content_digest: content_digest},
         %{state: "done", target_snapshot: snapshot} = action

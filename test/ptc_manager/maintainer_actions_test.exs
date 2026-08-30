@@ -23,6 +23,22 @@ defmodule PtcManager.MaintainerActionsTest do
   }
 
   alias PtcManager.Repo
+  alias PtcManager.Repository.SourceSnapshot
+
+  defmodule FakeSourceSnapshot do
+    def capture(repository) do
+      {:ok,
+       %{
+         sha: String.duplicate("7", 40),
+         ref: repository.default_branch
+       }}
+    end
+  end
+
+  defmodule UnavailableSourceSnapshot do
+    def prepare(_repository, _action_id, _snapshot),
+      do: {:error, :repository_snapshot_worktree_failed}
+  end
 
   defmodule FakeAdapter do
     @behaviour PtcManager.MaintainerActions.Adapter
@@ -364,7 +380,9 @@ defmodule PtcManager.MaintainerActionsTest do
   end
 
   defmodule FlakySync do
-    def sync_action(action) do
+    def sync_action(action), do: {:ok, %{repository: action.repository}}
+
+    def sync_action(action, _result) do
       send(Process.get(:agent_action_test_pid), {:sync_attempt, action.id})
 
       case Process.get(:agent_action_sync_result) do
@@ -388,6 +406,16 @@ defmodule PtcManager.MaintainerActionsTest do
   setup do
     Process.put(:agent_action_test_pid, self())
     Process.put(:retrospective_sync_call_count, 0)
+    previous_source_snapshot = Application.get_env(:ptc_manager, :planning_source_snapshot)
+    Application.put_env(:ptc_manager, :planning_source_snapshot, FakeSourceSnapshot)
+
+    on_exit(fn ->
+      if previous_source_snapshot,
+        do:
+          Application.put_env(:ptc_manager, :planning_source_snapshot, previous_source_snapshot),
+        else: Application.delete_env(:ptc_manager, :planning_source_snapshot)
+    end)
+
     :ok
   end
 
@@ -509,6 +537,9 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert {:ok, completed} =
              MaintainerActions.run_once(adapter: NeedsDecisionAdapter, sync: NeedsDecisionSync)
+
+    assert_receive {:ran_agent_action, executed_action}
+    assert executed_action.target_snapshot["issue_content_digest"] == String.duplicate("d", 64)
 
     assert completed.id == queued.id
     assert completed.state == "done"
@@ -658,8 +689,14 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:ok, completed} =
              MaintainerActions.run_once(adapter: FakeAdapter, sync: FakeSync)
 
-    assert_receive {:ran_agent_action, %{id: action_id}}
+    assert_receive {:ran_agent_action, executed_action}
+    action_id = executed_action.id
     assert action_id == queued.id
+    assert executed_action.target_snapshot["source_sha"] == String.duplicate("7", 40)
+    assert executed_action.target_snapshot["source_ref"] == repository.default_branch
+    assert executed_action.target_snapshot["issue_content_digest"] == issue.content_digest
+    assert executed_action.prompt =~ String.duplicate("7", 40)
+    assert executed_action.prompt =~ "Do not fetch, pull, checkout, reset"
     assert_receive {:synced_repository, repository_id}
     assert repository_id == repository.id
 
@@ -1993,6 +2030,219 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Operations.repository_merge_locked?(repository.id)
   end
 
+  test "planning actions remain runnable while fix-and-merge owns the writer lane" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, planning} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
+
+    merge =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 9_202,
+        target_label: "example/repo#9202",
+        prompt_version: 1,
+        prompt: "Fix and merge the exact pull request",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: DateTime.add(now, -60, :second)
+      })
+      |> Repo.insert!()
+
+    assert Operations.next_agent_action_candidate_for_lane(:writing).id == merge.id
+    assert Operations.next_agent_action_candidate_for_lane(:planning).id == planning.id
+    refute Operations.planning_agent_action?(%AgentAction{action_key: "prepare_merge_decision"})
+    refute Operations.planning_agent_action?(%AgentAction{action_key: "pr_retrospective"})
+
+    assert {:ok, {claimed, _token}} =
+             Operations.claim_next_agent_action_for_lane(:planning)
+
+    assert claimed.id == planning.id
+    assert Repo.get!(AgentAction, merge.id).state == "queued"
+  end
+
+  test "reports local planning snapshot failures separately from GitHub synchronization" do
+    Application.put_env(:ptc_manager, :planning_source_snapshot, UnavailableSourceSnapshot)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    {:ok, queued} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
+
+    assert {:ok, deferred} =
+             MaintainerActions.run_once(adapter: FakeAdapter, sync: NoopSync, lane: :planning)
+
+    assert deferred.id == queued.id
+    assert deferred.state == "queued"
+    assert deferred.last_error =~ "Planning source snapshot pending"
+    refute deferred.last_error =~ "GitHub synchronization"
+    refute_receive {:ran_agent_action, _action}
+  end
+
+  test "reaps a changed planning snapshot after an interrupted action becomes sync pending" do
+    previous_binary = Application.get_env(:ptc_manager, :planning_git_binary)
+    previous_root = Application.get_env(:ptc_manager, :planning_snapshot_root)
+
+    root =
+      Path.join(System.tmp_dir!(), "ptc-planning-reaper-#{System.unique_integer([:positive])}")
+
+    repository_path = Path.join(root, "repository")
+    worktree_root = Path.join(root, "planning-snapshots")
+    File.mkdir_p!(repository_path)
+
+    Application.put_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
+    Application.put_env(:ptc_manager, :planning_git_binary, "/usr/bin/git")
+    Application.put_env(:ptc_manager, :planning_snapshot_root, worktree_root)
+
+    on_exit(fn ->
+      restore_test_env(:planning_git_binary, previous_binary)
+      restore_test_env(:planning_snapshot_root, previous_root)
+      File.rm_rf(root)
+    end)
+
+    assert {_, 0} =
+             System.cmd("git", ["init", "-b", "main", repository_path], stderr_to_stdout: true)
+
+    File.write!(Path.join(repository_path, "README.md"), "planning snapshot\n")
+    assert {_, 0} = System.cmd("git", ["-C", repository_path, "add", "README.md"])
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               [
+                 "-C",
+                 repository_path,
+                 "-c",
+                 "user.name=PtcManager Test",
+                 "-c",
+                 "user.email=ptc@example.invalid",
+                 "commit",
+                 "-m",
+                 "initial"
+               ],
+               stderr_to_stdout: true
+             )
+
+    repository = repository_fixture(%{local_path: repository_path})
+    issue = issue_fixture(repository)
+
+    for index <- 1..21 do
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "review_issue",
+        target_type: "issue",
+        target_id: 20_000 + index,
+        target_label: "historical issue #{index}",
+        prompt_version: 1,
+        prompt: "Historical review",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{
+          "source_sha" => String.duplicate("6", 40),
+          "source_ref" => "main",
+          "source_path" => "/invalid/planning-snapshot-#{index}"
+        },
+        actor: "andreas",
+        state: "done",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now
+      })
+      |> Repo.insert!()
+    end
+
+    {:ok, queued} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
+    assert {:ok, snapshot} = SourceSnapshot.prepare(repository, queued.id, %{})
+
+    queued
+    |> AgentAction.changeset(%{
+      state: "sync_pending",
+      attempt_count: 1,
+      sync_attempt_count: 1,
+      target_snapshot: %{
+        "source_sha" => snapshot.sha,
+        "source_ref" => snapshot.ref,
+        "source_path" => snapshot.path
+      },
+      next_sync_attempt_at: DateTime.add(DateTime.utc_now(), 3_600, :second)
+    })
+    |> Repo.update!()
+
+    assert File.dir?(snapshot.path)
+
+    assert {_, 0} =
+             System.cmd("/bin/chmod", ["-R", "u+w", snapshot.path], stderr_to_stdout: true)
+
+    assert :ok =
+             File.chmod(
+               Path.join([snapshot.path, ".git", ".ptc-manager-planning-snapshot"]),
+               0o440
+             )
+
+    assert {_, 0} =
+             System.cmd("git", ["-C", snapshot.path, "checkout", "-b", "changed-after-crash"],
+               stderr_to_stdout: true
+             )
+
+    assert {:ok, :empty} = MaintainerActions.run_once(lane: :planning)
+    assert File.exists?(snapshot.path)
+
+    first_historical = Repo.get_by!(AgentAction, target_label: "historical issue 1")
+    assert first_historical.target_snapshot["source_cleanup_attempts"] == 1
+    assert first_historical.target_snapshot["source_cleanup_next_at"]
+
+    assert {:ok, :empty} = MaintainerActions.run_once(lane: :planning)
+    refute File.exists?(snapshot.path)
+
+    released = Repo.get!(AgentAction, queued.id)
+    refute released.target_snapshot["source_path"]
+    assert released.target_snapshot["source_released_at"]
+  end
+
+  test "writer synchronization does not block the planning lane" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, planning} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "repair_and_merge_pr",
+      target_type: "pull_request",
+      target_id: 9_203,
+      target_label: "example/repo#9203",
+      prompt_version: 1,
+      prompt: "Confirm the merge",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "andreas",
+      state: "sync_pending",
+      attempt_count: 1,
+      sync_attempt_count: 1,
+      requested_at: now,
+      started_at: now,
+      next_sync_attempt_at: now
+    })
+    |> Repo.insert!()
+
+    assert Operations.next_agent_action_candidate_for_lane(:planning).id == planning.id
+    assert Operations.next_agent_action_sync_pending_for_lane(:planning) == nil
+
+    assert Operations.next_agent_action_sync_pending_for_lane(:writing).action_key ==
+             "repair_and_merge_pr"
+  end
+
   test "a priority merge waiting for active repository work does not starve another repository" do
     busy_repository = repository_fixture()
     busy_issue = issue_fixture(busy_repository)
@@ -2045,6 +2295,9 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert Operations.next_agent_action_candidate().id == available.id
   end
+
+  defp restore_test_env(key, nil), do: Application.delete_env(:ptc_manager, key)
+  defp restore_test_env(key, value), do: Application.put_env(:ptc_manager, key, value)
 
   defp retrospective_publication_fixture(issue) do
     proposal_fixture(issue)

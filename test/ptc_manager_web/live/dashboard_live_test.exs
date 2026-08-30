@@ -114,7 +114,11 @@ defmodule PtcManagerWeb.DashboardLiveTest do
         prompt: "Prepare issue",
         actor: "maintainer",
         state: "done",
-        target_snapshot: %{"decision_issue_content_digest" => issue.content_digest},
+        target_snapshot: %{
+          "decision_issue_content_digest" => issue.content_digest,
+          "source_sha" => String.duplicate("7", 40),
+          "source_ref" => "main"
+        },
         attempt_count: 1,
         requested_at: now,
         started_at: now,
@@ -162,6 +166,12 @@ defmodule PtcManagerWeb.DashboardLiveTest do
              view,
              "#agent-action-details-#{completed.id}[phx-mounted]",
              "Action details"
+           )
+
+    assert has_element?(
+             view,
+             "#agent-action-source-#{completed.id}",
+             "Code evidence: main @ 7777777777"
            )
 
     send(view.pid, :tick)

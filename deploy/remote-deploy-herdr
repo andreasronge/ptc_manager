@@ -500,6 +500,9 @@ fi
 ensure_no_managed_runs
 ensure_no_busy_herdr_agents
 ensure_private_worktree_root "$worktree_root"
+sudo chmod 3770 /var/lib/ptc_manager-output
+sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
+  /var/lib/ptc_manager-output/planning-snapshots
 install_worker_node
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with

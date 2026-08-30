@@ -314,6 +314,13 @@
               label={agent_action_label(item.issue_agent_action)}
               class="rounded-xl px-3 py-2"
             />
+            <span
+              :if={source_note = agent_action_source_note(item.issue_agent_action)}
+              id={"agent-action-source-#{item.issue_agent_action.id}"}
+              class="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-xs font-medium text-slate-400"
+            >
+              {source_note}
+            </span>
             <form
               :if={!item.active_job}
               id={"approve-form-issue-#{item.issue.id}"}

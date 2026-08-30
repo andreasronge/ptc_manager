@@ -1,7 +1,8 @@
 defmodule PtcManager.MaintainerActions do
   @moduledoc "Queues and executes named maintainer prompts while GitHub remains canonical."
 
-  import Ecto.Query, only: [from: 2]
+  import Ecto.Query, only: [from: 2, limit: 2, order_by: 3, preload: 2, where: 3]
+  require Logger
 
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.Sync, as: ActionSync
@@ -10,8 +11,9 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, Issue, PrPublication}
+  alias PtcManager.Operations.{AgentAction, Issue, PrPublication, Repository}
   alias PtcManager.Repo
+  alias PtcManager.Repository.SourceSnapshot
   alias PtcManager.WorktreeSecurity
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
@@ -170,23 +172,31 @@ defmodule PtcManager.MaintainerActions do
       )
 
     sync = Keyword.get(opts, :sync, ActionSync)
+    lane = Keyword.get(opts, :lane, :any)
     Operations.expire_agent_action_attempts()
+    if lane in [:planning, :any], do: reap_planning_worktrees()
 
-    case Operations.next_agent_action_sync_pending() do
-      nil -> execute_next(adapter, sync)
+    case Operations.next_agent_action_sync_pending_for_lane(lane) do
+      nil -> execute_next(adapter, sync, lane)
       action -> reconcile_action(action, sync)
     end
   end
 
-  defp execute_next(adapter, sync) do
-    case Operations.next_agent_action_candidate() do
+  defp execute_next(adapter, sync, lane) do
+    case Operations.next_agent_action_candidate_for_lane(lane) do
       nil ->
         {:ok, :empty}
 
       candidate ->
         with {:ok, prepared} <- prepare_for_execution(candidate, sync),
              {:ok, {action, token}} <- Operations.claim_agent_action(prepared.id) do
-          result = adapter.run(action)
+          result =
+            try do
+              adapter.run(action)
+            after
+              release_issue_source_snapshot(action)
+            end
+
           current_action = AgentAction |> Repo.get!(action.id) |> Repo.preload(:repository)
           sync_result = sync_after_execution(sync, current_action, result)
 
@@ -248,8 +258,30 @@ defmodule PtcManager.MaintainerActions do
         with :ok <- ensure_open(issue),
              :ok <- ensure_decision_needed(issue),
              :ok <- ensure_resolution_snapshot_current(action, issue) do
-          {:ok, action}
+          prepare_issue_source_snapshot(action, issue)
         else
+          {:error, reason} -> fail_preflight(action.id, reason)
+        end
+
+      {:terminal_error, reason} ->
+        fail_preflight(action.id, reason)
+
+      {:error, reason} ->
+        case Operations.defer_agent_action_preflight(action.id, reason) do
+          {:ok, deferred} -> {:deferred, deferred}
+          {:error, defer_reason} -> {:error, defer_reason}
+        end
+    end
+  end
+
+  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+       when action_key in ["prepare_issue", "review_issue"] do
+    case sync.sync_action(action) do
+      {:ok, _summary} ->
+        issue = Repo.get!(Issue, action.target_id)
+
+        case ensure_open(issue) do
+          :ok -> prepare_issue_source_snapshot(action, issue)
           {:error, reason} -> fail_preflight(action.id, reason)
         end
 
@@ -338,6 +370,125 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(action, _sync), do: {:ok, action}
+
+  defp prepare_issue_source_snapshot(action, issue) do
+    repository = action.repository || Repo.get!(Repository, action.repository_id)
+
+    source_snapshot =
+      Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
+
+    snapshot_result =
+      if function_exported?(source_snapshot, :prepare, 3) do
+        source_snapshot.prepare(repository, action.id, action.target_snapshot || %{})
+      else
+        source_snapshot.capture(repository)
+      end
+
+    with {:ok, %{sha: source_sha, ref: source_ref} = source} <- snapshot_result do
+      captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      snapshot =
+        Map.merge(action.target_snapshot || %{}, %{
+          "source_sha" => source_sha,
+          "source_ref" => source_ref,
+          "source_default_branch" => repository.default_branch,
+          "source_captured_at" => DateTime.to_iso8601(captured_at),
+          "issue_content_digest" => issue.content_digest
+        })
+        |> maybe_put_source_path(source)
+
+      prompt =
+        action.prompt <>
+          """
+
+          Repository evidence snapshot for this action:
+          - Local checkout ref: #{source_ref}
+          - Exact commit: #{source_sha}
+          - Configured default branch: #{repository.default_branch}
+
+          The current working directory is a coordinator-owned, read-only Git clone pinned to that exact commit. Use it as the code evidence for this review. Do not fetch, pull, checkout, reset, commit, or otherwise try to modify or move the snapshot. Include the exact commit in the private technical evidence so the maintainer can see which source version informed the result. GitHub issue content was synchronized immediately before this snapshot and remains canonical.
+          """
+
+      Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt)
+    else
+      {:error, reason} ->
+        case Operations.defer_agent_action_source_preflight(
+               action.id,
+               reason,
+               action.sync_attempt_count
+             ) do
+          {:ok, deferred} -> {:deferred, deferred}
+          {:error, defer_reason} -> {:error, defer_reason}
+        end
+    end
+  end
+
+  defp maybe_put_source_path(snapshot, %{path: path}) when is_binary(path),
+    do: Map.put(snapshot, "source_path", path)
+
+  defp maybe_put_source_path(snapshot, _source), do: snapshot
+
+  defp release_issue_source_snapshot(
+         %AgentAction{action_key: action_key, repository: repository} = action
+       )
+       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+    source_snapshot =
+      Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
+
+    if is_atom(source_snapshot) and function_exported?(source_snapshot, :release, 3) do
+      case source_snapshot.release(repository, action.id, action.target_snapshot || %{}) do
+        :ok ->
+          case Operations.mark_agent_action_source_released(action.id) do
+            {:ok, _released} ->
+              :ok
+
+            {:error, reason} ->
+              Logger.warning("Planning worktree release record failed: #{inspect(reason)}")
+          end
+
+        {:error, reason} ->
+          case Operations.record_agent_action_source_cleanup_failure(action.id, reason) do
+            {:ok, _deferred} ->
+              :ok
+
+            {:error, failure} ->
+              Logger.warning("Planning snapshot cleanup retry failed: #{inspect(failure)}")
+          end
+
+          Logger.warning("Planning snapshot cleanup deferred: #{inspect(reason)}")
+      end
+    end
+  end
+
+  defp release_issue_source_snapshot(_action), do: :ok
+
+  defp reap_planning_worktrees do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_iso8601()
+
+    AgentAction
+    |> where(
+      [action],
+      action.action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] and
+        action.state in ["sync_pending", "done", "failed"]
+    )
+    |> where(
+      [action],
+      fragment("json_type(?, '$.source_path') = 'text'", action.target_snapshot)
+    )
+    |> where(
+      [action],
+      fragment(
+        "coalesce(json_extract(?, '$.source_cleanup_next_at'), '') <= ?",
+        action.target_snapshot,
+        ^now
+      )
+    )
+    |> order_by([action], asc: action.updated_at, asc: action.id)
+    |> limit(20)
+    |> preload(:repository)
+    |> Repo.all()
+    |> Enum.each(&release_issue_source_snapshot/1)
+  end
 
   defp repair_needed?(status) do
     status.checks_state == "failure" or status.mergeability == "conflicting"

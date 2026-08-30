@@ -88,7 +88,9 @@
         <div class="flex items-start justify-between gap-3">
           <div>
             <p class="text-sm font-semibold text-slate-100">{action.target_label}</p>
-            <p class="mt-1 text-xs text-slate-400">{queued_action_label(action)}</p>
+            <p class="mt-1 text-xs text-slate-400">
+              {queued_action_label(action)} · {queued_action_lane_label(action)}
+            </p>
           </div>
           <span class={[
             "rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",

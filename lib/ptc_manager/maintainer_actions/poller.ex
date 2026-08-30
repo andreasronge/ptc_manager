@@ -4,17 +4,44 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   alias PtcManager.MaintainerActions
 
-  def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
-  def wake, do: GenServer.cast(__MODULE__, :wake)
+  @planning_name PtcManager.MaintainerActions.PlanningPoller
+  @writing_name PtcManager.MaintainerActions.WritingPoller
+
+  def child_spec(opts) do
+    lane = Keyword.fetch!(opts, :lane)
+
+    %{
+      id: {__MODULE__, lane},
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :permanent,
+      shutdown: 5_000
+    }
+  end
+
+  def start_link(opts) do
+    lane = Keyword.fetch!(opts, :lane)
+    GenServer.start_link(__MODULE__, lane, name: name(lane))
+  end
+
+  def wake do
+    wake(@planning_name)
+    wake(@writing_name)
+    :ok
+  end
 
   @impl true
-  def init(:ok) do
-    {:ok, schedule(%{task_ref: nil, timer_ref: nil}, 0)}
+  def init(lane) when lane in [:planning, :writing] do
+    {:ok, schedule(%{lane: lane, task_ref: nil, timer_ref: nil}, 0)}
   end
 
   @impl true
   def handle_info(:run, %{task_ref: nil} = state) do
-    task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &MaintainerActions.run_once/0)
+    task =
+      Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
+        MaintainerActions.run_once(lane: state.lane)
+      end)
+
     {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
   end
 
@@ -48,6 +75,13 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(reference), do: Process.cancel_timer(reference, async: true, info: false)
+
+  defp name(:planning), do: @planning_name
+  defp name(:writing), do: @writing_name
+
+  defp wake(name) do
+    if Process.whereis(name), do: GenServer.cast(name, :wake)
+  end
 
   defp enabled?, do: MaintainerActions.enabled?()
   defp interval, do: Application.get_env(:ptc_manager, :agent_action_interval_ms, 5_000)

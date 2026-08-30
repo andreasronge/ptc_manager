@@ -78,6 +78,17 @@ config :ptc_manager,
   agent_action_sync_retry_max_ms:
     System.get_env("PTC_AGENT_ACTION_SYNC_RETRY_MAX_MS", "300000") |> String.to_integer(),
   agent_action_run_as_user: System.get_env("PTC_AGENT_ACTION_RUN_AS_USER"),
+  planning_snapshot_root:
+    System.get_env("PTC_PLANNING_SNAPSHOT_ROOT") ||
+      if(System.get_env("RELEASE_NAME"),
+        do: "/var/lib/ptc_manager-output/planning-snapshots"
+      ),
+  planning_git_binary: System.get_env("PTC_PLANNING_GIT_BINARY", "/usr/bin/git"),
+  planning_snapshot_permission_check:
+    System.get_env(
+      "PTC_PLANNING_SNAPSHOT_PERMISSION_CHECK",
+      if(System.get_env("RELEASE_NAME"), do: "true", else: "false")
+    ) == "true",
   external_pr_run_as_user: System.get_env("PTC_EXTERNAL_PR_RUN_AS_USER", "ptc-manager-external"),
   external_pr_group: System.get_env("PTC_EXTERNAL_PR_GROUP", "ptc-manager-external"),
   external_pr_worktree_root:

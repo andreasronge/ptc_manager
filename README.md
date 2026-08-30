@@ -202,6 +202,31 @@ catalog contains:
   be reviewed and repaired, but do not receive a generated implementation
   retrospective because PtcManager did not start their agent.
 
+Maintainer actions use two deliberately separate execution lanes. Repository
+writers—implementation, repair, and fix-and-merge—remain serialized whenever a
+merge action owns the repository, so two agents cannot race to rewrite or merge
+branches. Issue preparation, issue review, and issue-decision resolution use a
+separate planning worker and can continue while that writer lock is held. Merge
+decisions, retrospectives, and unknown future action types remain in the safer
+serialized writer lane until they receive equivalent snapshot isolation. The
+first version runs at most one planning action and one writing action at a time
+per PtcManager service; additional actions remain visible in the durable
+Operations queue.
+
+Before an issue-planning agent starts, PtcManager synchronizes the canonical
+GitHub issue, records its content digest, and captures the configured checkout's
+exact Git commit SHA and branch or ref. The action details show the source ref
+and SHA. The planning agent
+runs from a separate coordinator-owned Git clone whose complete tree is made
+read-only before the worker can see it; concurrent build agents therefore cannot
+alter the evidence. The temporary clone is removed when the agent exits, while
+its provenance remains in the action record. A durable reaper retries cleanup
+after an interrupted or expired run. This makes a review's issue and code
+evidence reproducible even if `main` advances while other agents are merging
+work. In production the snapshot directory is owned by the coordinator beneath
+the sticky shared-output parent, so the worker can traverse and read it but
+cannot rewrite, rename, or replace it.
+
 For issue dependencies, GitHub remains authoritative. Maintainer actions write
 the canonical `Blocked by #<number>` marker into the dependent issue and apply
 `ptc:blocked`. GitHub synchronization projects those markers into local
@@ -350,7 +375,8 @@ sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worke
 sudo useradd --system --home /var/lib/ptc_manager-external --gid ptc-manager-external --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager-external
 sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --groups ptc-manager-publish --shell /usr/sbin/nologin ptc-manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
-sudo install -d -o ptc-manager -g ptc-manager-output -m 2770 /var/lib/ptc_manager-output
+sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 /var/lib/ptc_manager-output
+sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 /var/lib/ptc_manager-output/planning-snapshots
 sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_manager-codex
 sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 0700 /var/lib/ptc_manager-external

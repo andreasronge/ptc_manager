@@ -235,6 +235,10 @@ defmodule PtcManagerWeb.OperationsLive do
   def queued_action_label(%{action_key: "repair_pr"}), do: "Fix PR"
   def queued_action_label(action), do: String.replace(action.action_key, "_", " ")
 
+  def queued_action_lane_label(action) do
+    if Operations.planning_agent_action?(action), do: "Planning lane", else: "Writer lane"
+  end
+
   def queue_age(now, requested_at), do: duration(now, requested_at, nil)
 
   def phase_timing(

@@ -102,6 +102,17 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
   end
 
+  test "remote deployment creates the coordinator-owned planning snapshot root" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "sudo chmod 3770 /var/lib/ptc_manager-output"
+
+    assert script =~
+             "/var/lib/ptc_manager-output/planning-snapshots"
+
+    assert script =~ "-m 2750"
+  end
+
   defp jq_count(payload) do
     fixture = write_json_fixture(payload)
     {output, 0} = System.cmd("jq", ["-r", "-f", @agent_filter, fixture])

@@ -35,6 +35,11 @@ defmodule PtcManager.Operations do
   @capacity_run_states ~w(queued starting working idle unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @merge_action_key "repair_and_merge_pr"
+  @planning_action_keys ~w(
+    prepare_issue
+    review_issue
+    resolve_issue_decision
+  )
   @superseded_herdr_status "Superseded duplicate of the action-owned Herdr run."
   @topic "operations"
 
@@ -103,10 +108,30 @@ defmodule PtcManager.Operations do
     end
   end
 
+  def claim_next_agent_action_for_lane(
+        lane,
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      )
+      when lane in [:planning, :writing] do
+    case next_agent_action_candidate_for_lane(lane, now) do
+      nil -> {:ok, nil}
+      candidate -> do_claim_agent_action(candidate, now)
+    end
+  end
+
   def next_agent_action_candidate(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+    next_agent_action_candidate_for_lane(:any, now)
+  end
+
+  def next_agent_action_candidate_for_lane(
+        lane,
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      )
+      when lane in [:any, :planning, :writing] do
     blocked_repository_ids =
       AgentAction
       |> where([action], action.state == "sync_pending")
+      |> agent_action_lane(lane)
       |> select([action], action.repository_id)
       |> distinct(true)
       |> Repo.all()
@@ -118,7 +143,28 @@ defmodule PtcManager.Operations do
         action.state == "queued" and action.repository_id not in ^blocked_repository_ids and
           (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
       )
+      |> agent_action_lane(lane)
 
+    if lane == :planning do
+      base
+      |> order_by([action], asc: action.requested_at, asc: action.id)
+      |> limit(1)
+      |> preload(:repository)
+      |> Repo.one()
+    else
+      next_writing_action(base)
+    end
+  end
+
+  def planning_agent_action?(%AgentAction{action_key: action_key}),
+    do: planning_agent_action?(action_key)
+
+  def planning_agent_action?(action_key) when is_binary(action_key),
+    do: action_key in @planning_action_keys
+
+  def planning_agent_action?(_action), do: false
+
+  defp next_writing_action(base) do
     merge_candidate =
       base
       |> where(
@@ -236,6 +282,65 @@ defmodule PtcManager.Operations do
     end
   end
 
+  def mark_agent_action_source_released(action_id)
+      when is_integer(action_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+
+        snapshot =
+          (action.target_snapshot || %{})
+          |> Map.delete("source_path")
+          |> Map.delete("source_cleanup_attempts")
+          |> Map.delete("source_cleanup_error")
+          |> Map.delete("source_cleanup_next_at")
+          |> Map.put("source_released_at", DateTime.to_iso8601(now))
+
+        action
+        |> AgentAction.changeset(%{target_snapshot: snapshot})
+        |> Repo.update!()
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def record_agent_action_source_cleanup_failure(action_id, reason)
+      when is_integer(action_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+        snapshot = action.target_snapshot || %{}
+        attempts = max(snapshot["source_cleanup_attempts"] || 0, 0) + 1
+
+        next_at =
+          now
+          |> DateTime.add(min(round(5 * :math.pow(2, min(attempts - 1, 10))), 3_600), :second)
+          |> DateTime.to_iso8601()
+
+        updated_snapshot =
+          snapshot
+          |> Map.put("source_cleanup_attempts", attempts)
+          |> Map.put("source_cleanup_error", bounded_error(reason))
+          |> Map.put("source_cleanup_next_at", next_at)
+
+        action
+        |> AgentAction.changeset(%{target_snapshot: updated_snapshot})
+        |> Repo.update!()
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, action})
+      {:error, failure} -> {:error, failure}
+    end
+  end
+
   def record_agent_action_repair_intent(action_id, attempt_token, repaired_sha)
       when is_integer(action_id) and is_binary(attempt_token) and is_binary(repaired_sha) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -332,6 +437,34 @@ defmodule PtcManager.Operations do
   def defer_agent_action_preflight(action_id, reason, previous_attempt_count \\ 0)
       when is_integer(action_id) and is_integer(previous_attempt_count) and
              previous_attempt_count >= 0 do
+    defer_agent_action_preflight(
+      action_id,
+      reason,
+      previous_attempt_count,
+      "Preflight GitHub synchronization pending",
+      "sync_error"
+    )
+  end
+
+  def defer_agent_action_source_preflight(action_id, reason, previous_attempt_count \\ 0)
+      when is_integer(action_id) and is_integer(previous_attempt_count) and
+             previous_attempt_count >= 0 do
+    defer_agent_action_preflight(
+      action_id,
+      reason,
+      previous_attempt_count,
+      "Planning source snapshot pending",
+      "source_error"
+    )
+  end
+
+  defp defer_agent_action_preflight(
+         action_id,
+         reason,
+         previous_attempt_count,
+         error_prefix,
+         audit_error_key
+       ) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     outcome =
@@ -346,7 +479,7 @@ defmodule PtcManager.Operations do
           |> AgentAction.changeset(%{
             sync_attempt_count: sync_attempt_count,
             next_sync_attempt_at: next_sync_attempt_at(now, sync_attempt_count),
-            last_error: "Preflight GitHub synchronization pending: #{bounded_error(reason)}"
+            last_error: "#{error_prefix}: #{bounded_error(reason)}"
           })
           |> Repo.update!()
 
@@ -358,7 +491,7 @@ defmodule PtcManager.Operations do
           details: %{
             "action_key" => action.action_key,
             "sync_attempt_count" => sync_attempt_count,
-            "sync_error" => bounded_error(reason)
+            audit_error_key => bounded_error(reason)
           }
         })
 
@@ -397,12 +530,21 @@ defmodule PtcManager.Operations do
   end
 
   def next_agent_action_sync_pending(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+    next_agent_action_sync_pending_for_lane(:any, now)
+  end
+
+  def next_agent_action_sync_pending_for_lane(
+        lane,
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      )
+      when lane in [:any, :planning, :writing] do
     AgentAction
     |> where(
       [action],
       action.state == "sync_pending" and
         (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
     )
+    |> agent_action_lane(lane)
     |> order_by([action], asc: action.next_sync_attempt_at, asc: action.id)
     |> limit(1)
     |> preload(:repository)
@@ -2384,6 +2526,14 @@ defmodule PtcManager.Operations do
     |> where([job], job.state in ^@capacity_job_states)
     |> select([job], job.repository_id)
   end
+
+  defp agent_action_lane(query, :planning),
+    do: where(query, [action], action.action_key in ^@planning_action_keys)
+
+  defp agent_action_lane(query, :writing),
+    do: where(query, [action], action.action_key not in ^@planning_action_keys)
+
+  defp agent_action_lane(query, :any), do: query
 
   defp repository_dispatch_unlocked(repository_id) do
     if repository_merge_locked?(repository_id), do: {:error, :merge_priority}, else: :ok
