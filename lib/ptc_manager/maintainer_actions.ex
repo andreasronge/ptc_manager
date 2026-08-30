@@ -5,12 +5,14 @@ defmodule PtcManager.MaintainerActions do
 
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.Sync, as: ActionSync
+  alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.IssueDecision
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, Issue, PrPublication}
   alias PtcManager.Repo
+  alias PtcManager.WorktreeSecurity
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
@@ -286,13 +288,12 @@ defmodule PtcManager.MaintainerActions do
                 {:ok, prepared}
 
               {:error, :dispatch_capacity} ->
-                case Operations.defer_agent_action_preflight(action.id, :dispatch_capacity) do
-                  {:ok, deferred} -> {:deferred, deferred}
-                  {:error, defer_reason} -> {:error, defer_reason}
-                end
+                defer_preflight(action.id, :dispatch_capacity, action.sync_attempt_count)
 
               {:error, reason} ->
-                fail_preflight(action.id, reason)
+                if WorktreeSecurity.infrastructure_error?(reason),
+                  do: defer_preflight(action.id, reason, action.sync_attempt_count),
+                  else: fail_preflight(action.id, reason)
             end
           end
         else
@@ -350,11 +351,17 @@ defmodule PtcManager.MaintainerActions do
   defp settle_repair_result(_action, result, _summary), do: result
 
   defp reserve_repair_worktree(action) do
-    publication = Repo.get!(PrPublication, action.target_id)
+    publication = PrPublication |> Repo.get!(action.target_id) |> Repo.preload(:repository)
 
     if PrPublication.external?(publication),
-      do: {:ok, :external_workspace_created_by_adapter},
+      do: preflight_external_repair_worktree(publication),
       else: Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+  end
+
+  defp preflight_external_repair_worktree(publication) do
+    with :ok <- HerdrAdapter.validate_pull_request_worktree_root(publication.repository) do
+      {:ok, :external_workspace_created_by_adapter}
+    end
   end
 
   defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
@@ -368,6 +375,13 @@ defmodule PtcManager.MaintainerActions do
     case Operations.fail_agent_action_preflight(action_id, reason) do
       {:ok, failed} -> {:terminal, failed}
       {:error, failure} -> {:error, failure}
+    end
+  end
+
+  defp defer_preflight(action_id, reason, previous_attempt_count) do
+    case Operations.defer_agent_action_preflight(action_id, reason, previous_attempt_count) do
+      {:ok, deferred} -> {:deferred, deferred}
+      {:error, defer_reason} -> {:error, defer_reason}
     end
   end
 

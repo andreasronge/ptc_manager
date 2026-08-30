@@ -39,6 +39,7 @@ sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 coordinator_environment_files=
 coordinator_session=
 worker_session=
+worktree_root=
 remote_script=$0
 swapped=false
 service_stopped=false
@@ -170,6 +171,69 @@ ensure_no_busy_herdr_agents() {
   fi
 }
 
+ensure_private_worktree_root() {
+  root=$1
+
+  case "$root" in
+    /*) ;;
+    *)
+      echo "configured worktree root is not absolute: $root" >&2
+      return 1
+      ;;
+  esac
+
+  if sudo test -L "$root" || ! sudo test -d "$root"; then
+    echo "configured worktree root must be an existing, non-symlink directory: $root" >&2
+    return 1
+  fi
+
+  owner_group=$(sudo stat -c '%U:%G' "$root")
+
+  if [ "$owner_group" != "ptc-manager-worker:ptc-manager-repo" ]; then
+    echo "configured worktree root has unexpected ownership: $owner_group" >&2
+    return 1
+  fi
+
+  # The worker owns this directory and creates every checkout through Herdr.
+  # The coordinator needs group read/traverse access, but never group write.
+  sudo chmod 2750 "$root"
+
+  current=$root
+  root_component=true
+
+  while :; do
+    if sudo test -L "$current"; then
+      echo "worktree ancestor must not be a symlink: $current" >&2
+      return 1
+    fi
+
+    symbolic_mode=$(sudo stat -c '%A' "$current")
+    owner=$(sudo stat -c '%U' "$current")
+    group_write=$(printf '%s' "$symbolic_mode" | cut -c 6)
+    other_write=$(printf '%s' "$symbolic_mode" | cut -c 9)
+
+    if [ "$group_write" = "w" ] || [ "$other_write" = "w" ]; then
+      echo "worktree ancestor is writable by another identity: $current" >&2
+      return 1
+    fi
+
+    if [ "$root_component" = true ]; then
+      expected_owner=ptc-manager-worker
+      root_component=false
+    else
+      expected_owner=root
+    fi
+
+    if [ "$owner" != "$expected_owner" ]; then
+      echo "worktree ancestor has an untrusted owner: $current" >&2
+      return 1
+    fi
+
+    [ "$current" = "/" ] && break
+    current=$(dirname "$current")
+  done
+}
+
 prune_successful_backups() {
   sudo find /opt -maxdepth 1 -type d -name 'ptc_manager-before-*' -printf '%T@ %p\n' |
     sort -nr |
@@ -296,17 +360,21 @@ configured_database_path=$(read_environment_setting DATABASE_PATH $coordinator_e
 configured_health_port=$(read_environment_setting PORT $coordinator_environment_files)
 # shellcheck disable=SC2086
 configured_coordinator_session=$(read_environment_setting PTC_HERDR_SESSION $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_worktree_root=$(read_environment_setting PTC_WORKTREE_ROOT $coordinator_environment_files)
 
 running_database_path=$(read_process_setting "$service_pid" DATABASE_PATH "")
 running_health_port=$(read_process_setting "$service_pid" PORT 4000)
 running_coordinator_session=$(read_process_setting "$service_pid" PTC_HERDR_SESSION default)
+running_worktree_root=$(read_process_setting "$service_pid" PTC_WORKTREE_ROOT "")
 
 configured_health_port=${configured_health_port:-4000}
 configured_coordinator_session=${configured_coordinator_session:-default}
 
 if [ "$running_database_path" != "$configured_database_path" ] ||
   [ "$running_health_port" != "$configured_health_port" ] ||
-  [ "$running_coordinator_session" != "$configured_coordinator_session" ]; then
+  [ "$running_coordinator_session" != "$configured_coordinator_session" ] ||
+  [ "$running_worktree_root" != "$configured_worktree_root" ]; then
   echo "systemd environment files differ from the running services; restart them before deploying" >&2
   exit 1
 fi
@@ -328,6 +396,7 @@ fi
 
 database_path=$configured_database_path
 health_port=$configured_health_port
+worktree_root=$configured_worktree_root
 
 case "$database_path" in
   /*) ;;
@@ -366,6 +435,7 @@ fi
 
 ensure_no_managed_runs
 ensure_no_busy_herdr_agents
+ensure_private_worktree_root "$worktree_root"
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.

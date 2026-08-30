@@ -11,6 +11,7 @@ defmodule PtcManager.Operations do
   alias Ecto.Multi
   alias PtcManager.Repo
   alias PtcManager.ReviewPolicy
+  alias PtcManager.WorktreeSecurity
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -328,7 +329,9 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def defer_agent_action_preflight(action_id, reason) when is_integer(action_id) do
+  def defer_agent_action_preflight(action_id, reason, previous_attempt_count \\ 0)
+      when is_integer(action_id) and is_integer(previous_attempt_count) and
+             previous_attempt_count >= 0 do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     outcome =
@@ -336,7 +339,7 @@ defmodule PtcManager.Operations do
         action = Repo.get!(AgentAction, action_id)
         if action.state != "queued", do: Repo.rollback(:agent_action_no_longer_queued)
 
-        sync_attempt_count = action.sync_attempt_count + 1
+        sync_attempt_count = max(action.sync_attempt_count, previous_attempt_count) + 1
 
         deferred =
           action
@@ -727,15 +730,16 @@ defmodule PtcManager.Operations do
           {:error, reason} when reason in [:worker_unavailable, :worker_capacity_changed] ->
             Repo.rollback(reason)
 
-          {:error, :worktree_root_unavailable} ->
-            Repo.rollback(:worktree_root_unavailable)
-
           {:error, :merge_priority} ->
             Repo.rollback(:merge_priority)
 
           {:error, reason} ->
-            rejected = reject_job!(job, reason, now)
-            {:rejected, reason, rejected}
+            if WorktreeSecurity.infrastructure_error?(reason) do
+              Repo.rollback(reason)
+            else
+              rejected = reject_job!(job, reason, now)
+              {:rejected, reason, rejected}
+            end
         end
       end)
 
@@ -1803,14 +1807,16 @@ defmodule PtcManager.Operations do
           do: Path.join(Path.dirname(Path.expand(repository_path)), ".ptc-manager-worktrees")
         )
 
-    if is_binary(root) and Path.type(root) == :absolute do
+    with true <- is_binary(root) and Path.type(root) == :absolute,
+         :ok <- WorktreeSecurity.validate_configured_root(root) do
       slug =
         "#{repository.github_owner}-#{repository.github_name}"
         |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
 
       {:ok, Path.join(Path.expand(root), "#{slug}-job-#{job_id}-f#{fencing_token}")}
     else
-      {:error, :worktree_root_unavailable}
+      false -> {:error, :worktree_root_unavailable}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -1831,6 +1837,8 @@ defmodule PtcManager.Operations do
   end
 
   defp reject_job!(job, reason, now) do
+    message = rejection_error(reason)
+
     {updated, _rows} =
       Job
       |> where(
@@ -1839,7 +1847,7 @@ defmodule PtcManager.Operations do
           candidate.fencing_token == ^job.fencing_token
       )
       |> Repo.update_all(
-        set: [state: "cancelled", ended_at: now, last_error: to_string(reason), updated_at: now]
+        set: [state: "cancelled", ended_at: now, last_error: message, updated_at: now]
       )
 
     if updated == 1 do
@@ -1848,7 +1856,7 @@ defmodule PtcManager.Operations do
         action: "job.dispatch_rejected",
         target_type: "job",
         target_id: job.id,
-        details: %{"reason" => to_string(reason)}
+        details: %{"reason" => message}
       })
 
       Repo.get!(Job, job.id)
@@ -2576,6 +2584,8 @@ defmodule PtcManager.Operations do
   end
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
+  defp rejection_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp rejection_error(reason), do: bounded_error(reason)
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)
 
   defp configured_agent_capacity,

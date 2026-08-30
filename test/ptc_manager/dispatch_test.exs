@@ -292,6 +292,32 @@ defmodule PtcManager.DispatchTest do
     assert {:error, :already_active} = Operations.approve_issue(job.issue_id, "andreas")
   end
 
+  test "an unsafe worktree root leaves implementation work queued" do
+    unique = System.unique_integer([:positive, :monotonic])
+    unsafe_root = Path.join(System.tmp_dir!(), "ptc-manager-unsafe-root-#{unique}")
+    File.mkdir_p!(unsafe_root)
+    File.chmod!(unsafe_root, 0o750)
+
+    keys = [:worktree_root, :worktree_permission_check, :worktree_owner_uid]
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn {key, value} -> restore_env(key, value) end)
+      File.rm_rf!(unsafe_root)
+    end)
+
+    Application.put_env(:ptc_manager, :worktree_root, unsafe_root)
+    Application.put_env(:ptc_manager, :worktree_permission_check, true)
+    Application.put_env(:ptc_manager, :worktree_owner_uid, File.stat!(unsafe_root).uid)
+
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    canonical = IssueSnapshot.normalize!(remote, job.repository_id)
+
+    assert {:error, reason} = Operations.lease_job(job.id, "herdr:default", canonical, 60_000)
+    assert PtcManager.WorktreeSecurity.infrastructure_error?(reason)
+    assert Repo.get!(Job, job.id).state == "queued"
+  end
+
   test "decodes the documented Herdr worktree response" do
     output =
       Jason.encode!(%{
@@ -383,7 +409,7 @@ defmodule PtcManager.DispatchTest do
           printf '%s' '{"result":{"workspace":{"workspace_id":"w-slow"},"root_pane":{"pane_id":"w-slow:p1"}}}'
           ;;
         *"agent start"*)
-          sleep 1
+          sleep 1.5
           printf '%s' '{"result":{"agent":{"agent_session":{"value":"impl-slow"}}}}'
           ;;
         *"agent prompt"*)
@@ -420,7 +446,7 @@ defmodule PtcManager.DispatchTest do
     Application.put_env(:ptc_manager, :herdr_binary, fake_herdr)
     Application.put_env(:ptc_manager, :dispatch_enabled, true)
     Application.delete_env(:ptc_manager, :herdr_run_as_user)
-    Application.put_env(:ptc_manager, :herdr_timeout_ms, 500)
+    Application.put_env(:ptc_manager, :herdr_timeout_ms, 1_000)
     Application.put_env(:ptc_manager, :implementation_agent_start_timeout_ms, 3_000)
 
     repository = repository_fixture(%{local_path: repository_path})

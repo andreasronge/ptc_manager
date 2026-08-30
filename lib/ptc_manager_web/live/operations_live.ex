@@ -237,6 +237,39 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def queue_age(now, requested_at), do: duration(now, requested_at, nil)
 
+  def phase_timing(
+        %{started_at: %DateTime{} = started_at, ended_at: %DateTime{} = ended_at} = run
+      ) do
+    session_seconds = elapsed_seconds(started_at, ended_at)
+
+    case requested_at(run) do
+      %DateTime{} = requested_at ->
+        queue_seconds = elapsed_seconds(requested_at, started_at)
+
+        label =
+          if queue_seconds > session_seconds do
+            "Time before the agent session was the longest recorded phase"
+          else
+            "The agent session took most recorded time"
+          end
+
+        %{
+          label: label,
+          detail:
+            "Before session #{format_duration(queue_seconds)} · session #{format_duration(session_seconds)}. " <>
+              "Session time includes coding, tests, reviews, and waits for CI."
+        }
+
+      _missing ->
+        %{
+          label: "Agent session lasted #{format_duration(session_seconds)}",
+          detail: "Session time includes coding, tests, reviews, and waits for CI."
+        }
+    end
+  end
+
+  def phase_timing(_run), do: nil
+
   defp load_operations(socket) do
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()
@@ -320,4 +353,20 @@ defmodule PtcManagerWeb.OperationsLive do
   defp high?(nil, _threshold), do: false
   defp high?(value, threshold), do: value >= threshold
   defp format_number(value), do: :erlang.float_to_binary(value / 1, decimals: 1)
+
+  defp requested_at(%{agent_action: %{requested_at: %DateTime{} = requested_at}}),
+    do: requested_at
+
+  defp requested_at(%{job: %{inserted_at: %DateTime{} = inserted_at}}), do: inserted_at
+  defp requested_at(_run), do: nil
+
+  defp elapsed_seconds(from, to), do: DateTime.diff(to, from, :second) |> max(0)
+
+  defp format_duration(seconds) when seconds < 60, do: "#{seconds}s"
+
+  defp format_duration(seconds) when seconds < 3_600,
+    do: "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
+
+  defp format_duration(seconds),
+    do: "#{div(seconds, 3_600)}h #{div(rem(seconds, 3_600), 60)}m"
 end

@@ -7,6 +7,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.PromptConfiguration
   alias PtcManager.ReviewPolicy
+  alias PtcManager.WorktreeSecurity
 
   @agent_start_command_grace_ms 5_000
   @agent_action_command_grace_ms 5_000
@@ -41,9 +42,20 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     with :ok <- enabled?(),
          {:ok, repository_path} <- repository_path(repository),
          :ok <- valid_external_pr_context(action, publication, repository),
-         {:ok, ref} <- fetch_pull_request_head(repository_path, action, publication, repository),
          {:ok, worktree_path} <- pull_request_worktree_path(repository, action, publication),
-         {:ok, created} <-
+         {:ok, ref} <- fetch_pull_request_head(repository_path, action, publication, repository) do
+      try do
+        create_pull_request_action(action, publication, repository_path, worktree_path, ref)
+      after
+        _ = delete_temporary_ref(repository_path, ref)
+      end
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp create_pull_request_action(action, publication, repository_path, worktree_path, ref) do
+    with {:ok, created} <-
            run([
              "worktree",
              "create",
@@ -60,7 +72,6 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
              "--no-focus"
            ]),
          {:ok, workspace_id, pane_id} <- decode_worktree(created) do
-      _ = delete_temporary_ref(repository_path, ref)
       agent_name = pull_request_agent_name(action, publication)
 
       case start_agent(agent_name, pane_id) do
@@ -82,8 +93,6 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           _ = remove_action_workspace(workspace_id)
           {:error, reason}
       end
-    else
-      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -120,6 +129,13 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     else
       false -> {:error, :invalid_pull_request_action_head}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Validates the private root before an imported-PR action is claimed."
+  def validate_pull_request_worktree_root(repository) do
+    with {:ok, root} <- pull_request_worktree_root(repository) do
+      WorktreeSecurity.validate_configured_root(root)
     end
   end
 
@@ -215,21 +231,31 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     remote =
       "https://github.com/#{repository.github_owner}/#{repository.github_name}.git"
 
-    with :ok <-
-           run_git([
-             "-C",
-             repository_path,
-             "fetch",
-             "--no-tags",
-             remote,
-             "+refs/pull/#{publication.pr_number}/head:#{ref}"
-           ]),
-         {:ok, fetched_head} <- capture_git(["-C", repository_path, "rev-parse", ref]),
-         true <- fetched_head == action.target_snapshot["head_sha"] do
-      {:ok, ref}
-    else
-      false -> {:error, :external_pull_request_version_changed}
-      {:error, reason} -> {:error, reason}
+    result =
+      with :ok <-
+             run_git([
+               "-C",
+               repository_path,
+               "fetch",
+               "--no-tags",
+               remote,
+               "+refs/pull/#{publication.pr_number}/head:#{ref}"
+             ]),
+           {:ok, fetched_head} <- capture_git(["-C", repository_path, "rev-parse", ref]),
+           true <- fetched_head == action.target_snapshot["head_sha"] do
+        {:ok, ref}
+      else
+        false -> {:error, :external_pull_request_version_changed}
+        {:error, reason} -> {:error, reason}
+      end
+
+    case result do
+      {:ok, ^ref} = fetched ->
+        fetched
+
+      {:error, _reason} = error ->
+        _ = delete_temporary_ref(repository_path, ref)
+        error
     end
   end
 
@@ -237,6 +263,17 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     do: run_git(["-C", repository_path, "update-ref", "-d", ref])
 
   defp pull_request_worktree_path(repository, action, publication) do
+    with {:ok, root} <- pull_request_worktree_root(repository),
+         :ok <- WorktreeSecurity.validate_configured_root(root) do
+      {:ok,
+       Path.join(
+         Path.expand(root),
+         "external-pr-#{publication.pr_number}-action-#{action.id}-f#{action.attempt_count}"
+       )}
+    end
+  end
+
+  defp pull_request_worktree_root(repository) do
     repository_path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
 
     root =
@@ -245,14 +282,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           do: Path.join(Path.dirname(repository_path), ".ptc-manager-worktrees")
         )
 
-    if is_binary(root) and Path.type(root) == :absolute do
-      {:ok,
-       Path.join(
-         Path.expand(root),
-         "external-pr-#{publication.pr_number}-action-#{action.id}-f#{action.attempt_count}"
-       )}
-    else
-      {:error, :worktree_root_unavailable}
+    case is_binary(root) and Path.type(root) == :absolute do
+      true -> {:ok, root}
+      false -> {:error, :worktree_root_unavailable}
     end
   end
 

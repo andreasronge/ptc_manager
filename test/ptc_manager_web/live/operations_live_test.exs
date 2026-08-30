@@ -17,6 +17,21 @@ defmodule PtcManagerWeb.OperationsLiveTest do
            }) == :unknown
   end
 
+  test "completed runs explain the coarsely recorded bottleneck without guessing" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    timing =
+      OperationsLive.phase_timing(%{
+        started_at: DateTime.add(now, -600, :second),
+        ended_at: now,
+        agent_action: %{requested_at: DateTime.add(now, -660, :second)}
+      })
+
+    assert timing.label == "The agent session took most recorded time"
+    assert timing.detail =~ "Before session 1m 0s · session 10m 0s"
+    assert timing.detail =~ "waits for CI"
+  end
+
   test "shows machine capacity, workers, and an agent task timeline", %{conn: conn} do
     previous_reader = Application.get_env(:ptc_manager, :herdr_transcript_reader)
     Application.put_env(:ptc_manager, :herdr_transcript_reader, FakeTranscript)

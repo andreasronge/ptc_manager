@@ -349,7 +349,7 @@ sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 0700 /var/lib/ptc_manager-external
 sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
 sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
-sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2770 /srv/ptc_manager-worktrees
+sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2750 /srv/ptc_manager-worktrees
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 2770 /srv/ptc_manager-external
 sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner
 sudo chmod -R g+rX,o-rwx /srv/ptc_runner
@@ -410,7 +410,11 @@ sudo -u ptc-manager-external -H codex login
 The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
 The `ptc-manager-repo` group gives the coordinator, manager, and verifier
 read/execute access without filesystem write access. The worker-owned
-`PTC_WORKTREE_ROOT` contains only job worktrees. PtcManager removes a worktree
+`PTC_WORKTREE_ROOT` contains only job worktrees. It and every ancestor must be
+non-writable by group and other identities; the deployment enforces mode
+`2750` on the worker-owned root and PtcManager refuses new work when that
+invariant is broken. This keeps private build artifacts safe while still
+allowing the coordinator read-only traversal. PtcManager removes a worktree
 through Herdr only after a credential-free Git check proves a non-terminal
 checkout is clean and its exact head is on the PR branch. Dirty, missing, or
 unpushed non-terminal work is retained for attention. A merged or closed PR is

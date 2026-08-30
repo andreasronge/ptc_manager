@@ -78,6 +78,17 @@ defmodule Mix.Tasks.PtcDeployTest do
            ]
   end
 
+  test "remote deployment removes shared write access from the worktree root" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "ensure_private_worktree_root \"$worktree_root\""
+    assert script =~ "sudo chmod 2750 \"$root\""
+    assert script =~ "ptc-manager-worker:ptc-manager-repo"
+    assert script =~ "worktree ancestor is writable by another identity"
+    assert script =~ "worktree ancestor has an untrusted owner"
+    assert script =~ "running_worktree_root"
+  end
+
   defp jq_count(payload) do
     fixture = write_json_fixture(payload)
     {output, 0} = System.cmd("jq", ["-r", "-f", @agent_filter, fixture])

@@ -328,6 +328,57 @@ defmodule PtcManager.ExternalPullRequestsTest do
     refute prompt =~ "Do not use network access"
   end
 
+  test "external repair stays queued when the private worktree root is unavailable" do
+    repository = repository_fixture(%{local_path: File.cwd!()})
+    status = external_status(repository, 98, String.duplicate("f", 40))
+    {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
+    publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 98)
+    {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "maintainer")
+
+    previous_check = Application.get_env(:ptc_manager, :worktree_permission_check)
+    previous_root = Application.get_env(:ptc_manager, :worktree_root)
+    previous_uid = Application.get_env(:ptc_manager, :worktree_owner_uid)
+
+    Application.put_env(:ptc_manager, :worktree_permission_check, true)
+    Application.put_env(:ptc_manager, :worktree_root, Path.join(File.cwd!(), "missing-root"))
+    Application.put_env(:ptc_manager, :worktree_owner_uid, File.stat!(File.cwd!()).uid)
+    Process.put(:external_repair_test_pid, self())
+    Process.put(:capture_repair_status, status)
+
+    on_exit(fn ->
+      restore_env(:worktree_permission_check, previous_check)
+      restore_env(:worktree_root, previous_root)
+      restore_env(:worktree_owner_uid, previous_uid)
+    end)
+
+    assert {:ok, deferred} =
+             MaintainerActions.run_once(
+               adapter: PromptCaptureRepairAdapter,
+               sync: PromptCaptureRepairSync
+             )
+
+    assert deferred.id == action.id
+    assert deferred.state == "queued"
+    assert deferred.sync_attempt_count == 1
+    assert deferred.last_error =~ "worktree_root_unavailable"
+    refute_receive {:executed_prompt, _prompt}
+
+    deferred
+    |> AgentAction.changeset(%{next_sync_attempt_at: nil})
+    |> Repo.update!()
+
+    assert {:ok, deferred_again} =
+             MaintainerActions.run_once(
+               adapter: PromptCaptureRepairAdapter,
+               sync: PromptCaptureRepairSync
+             )
+
+    assert deferred_again.state == "queued"
+    assert deferred_again.sync_attempt_count == 2
+    assert DateTime.after?(deferred_again.next_sync_attempt_at, deferred.next_sync_attempt_at)
+    refute_receive {:executed_prompt, _prompt}
+  end
+
   test "a persisted repair intent recovers after the push response is lost" do
     repository = repository_fixture()
     original_head = String.duplicate("b", 40)
