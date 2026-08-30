@@ -5,6 +5,7 @@ defmodule PtcManager.MaintainerActions do
 
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.Sync, as: ActionSync
+  alias PtcManager.IssueDecision
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
@@ -57,6 +58,43 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  def enqueue_issue_decision(issue_id, source_action_id, choice, custom_answer, actor)
+      when is_integer(issue_id) and is_integer(source_action_id) and is_binary(choice) and
+             is_binary(custom_answer) and is_binary(actor) do
+    with %Issue{} = issue <- Issue |> Repo.get(issue_id) |> Repo.preload(:repository),
+         :ok <- ensure_open(issue),
+         :ok <- ensure_decision_needed(issue),
+         %AgentAction{
+           id: ^source_action_id,
+           state: "done",
+           target_type: "issue",
+           target_id: ^issue_id
+         } = source <- Repo.get(AgentAction, source_action_id),
+         :ok <- ensure_latest_issue_action(source),
+         :ok <- ensure_decision_source_current(source, issue),
+         {:ok, source_result} <- decode_action_result(source),
+         {:ok, decision} <- IssueDecision.from_result(source_result),
+         {:ok, answer} <- IssueDecision.answer(decision, choice, custom_answer),
+         {:ok, attrs} <-
+           Catalog.build("resolve_issue_decision", %{
+             issue: issue,
+             repository: issue.repository,
+             decision_answer: answer.value,
+             source_action_id: source_action_id
+           }) do
+      Operations.enqueue_agent_action(
+        Map.merge(attrs, %{action_key: "resolve_issue_decision", actor: actor})
+      )
+    else
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+      _invalid -> {:error, :issue_decision_not_current}
+    end
+  end
+
+  def enqueue_issue_decision(_issue_id, _source_action_id, _choice, _custom_answer, _actor),
+    do: {:error, :decision_answer_missing}
 
   def enqueue_retrospective_issue(source_action_id, suggestion_index, actor)
       when is_integer(source_action_id) and is_integer(suggestion_index) and
@@ -168,6 +206,30 @@ defmodule PtcManager.MaintainerActions do
           )
 
         Operations.record_agent_action_baseline(action.id, issue_numbers)
+
+      {:error, reason} ->
+        case Operations.defer_agent_action_preflight(action.id, reason) do
+          {:ok, deferred} -> {:deferred, deferred}
+          {:error, defer_reason} -> {:error, defer_reason}
+        end
+    end
+  end
+
+  defp prepare_for_execution(%{action_key: "resolve_issue_decision"} = action, sync) do
+    case sync.sync_action(action) do
+      {:ok, _summary} ->
+        issue = Repo.get!(Issue, action.target_id)
+
+        with :ok <- ensure_open(issue),
+             :ok <- ensure_decision_needed(issue),
+             :ok <- ensure_resolution_snapshot_current(action, issue) do
+          {:ok, action}
+        else
+          {:error, reason} -> fail_preflight(action.id, reason)
+        end
+
+      {:terminal_error, reason} ->
+        fail_preflight(action.id, reason)
 
       {:error, reason} ->
         case Operations.defer_agent_action_preflight(action.id, reason) do
@@ -339,11 +401,11 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp store_private_analysis(
-         %{action_key: action_key, target_id: issue_id},
+         %{id: action_id, action_key: action_key, target_id: issue_id},
          {:ok, result},
          _summary
        )
-       when action_key in ["prepare_issue", "review_issue"] do
+       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
     issue = Repo.get!(Issue, issue_id)
 
     analysis = %{
@@ -356,7 +418,8 @@ defmodule PtcManager.MaintainerActions do
     }
 
     with :ok <- canonical_outcome_matches(issue, result["outcome"]),
-         {:ok, _proposal} <- Manager.store_analysis(issue, analysis) do
+         {:ok, _proposal} <- Manager.store_analysis(issue, analysis),
+         :ok <- record_decision_source(action_id, action_key, issue, result) do
       {:ok, result}
     else
       {:error, reason} -> {:error, {:private_analysis_failed, reason}}
@@ -437,6 +500,63 @@ defmodule PtcManager.MaintainerActions do
   defp readiness("blocked"), do: "needs_information"
   defp readiness("needs-decision"), do: "needs_information"
   defp readiness("reject"), do: "outdated"
+
+  defp ensure_decision_needed(%Issue{
+         workflow_label: "ptc:needs-decision",
+         workflow_label_conflict: false
+       }),
+       do: :ok
+
+  defp ensure_decision_needed(%Issue{}), do: {:error, :issue_decision_not_current}
+
+  defp ensure_decision_source_current(
+         %AgentAction{target_snapshot: snapshot},
+         %Issue{content_digest: content_digest}
+       )
+       when is_map(snapshot) and is_binary(content_digest) do
+    if snapshot["decision_issue_content_digest"] == content_digest,
+      do: :ok,
+      else: {:error, :issue_decision_not_current}
+  end
+
+  defp ensure_decision_source_current(_action, _issue),
+    do: {:error, :issue_decision_not_current}
+
+  defp ensure_resolution_snapshot_current(
+         %AgentAction{target_snapshot: snapshot},
+         %Issue{content_digest: content_digest}
+       )
+       when is_map(snapshot) and is_binary(content_digest) do
+    if snapshot["issue_content_digest"] == content_digest,
+      do: :ok,
+      else: {:error, :issue_decision_not_current}
+  end
+
+  defp ensure_resolution_snapshot_current(_action, _issue),
+    do: {:error, :issue_decision_not_current}
+
+  defp record_decision_source(action_id, action_key, issue, %{"outcome" => "needs-decision"})
+       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+    case Operations.record_agent_action_decision_digest(action_id, issue.content_digest) do
+      {:ok, _action} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp record_decision_source(_action_id, _action_key, _issue, _result), do: :ok
+
+  defp ensure_latest_issue_action(%AgentAction{id: action_id, target_id: issue_id}) do
+    latest_id =
+      Repo.one(
+        from action in AgentAction,
+          where: action.target_type == "issue" and action.target_id == ^issue_id,
+          order_by: [desc: action.inserted_at, desc: action.id],
+          limit: 1,
+          select: action.id
+      )
+
+    if latest_id == action_id, do: :ok, else: {:error, :issue_decision_not_current}
+  end
 
   defp canonical_outcome_matches(
          %Issue{state: "open", workflow_label_conflict: false, workflow_label: "ptc:ready"},

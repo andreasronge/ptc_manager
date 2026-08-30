@@ -260,6 +260,35 @@ defmodule PtcManager.Operations do
     end
   end
 
+  def record_agent_action_decision_digest(action_id, content_digest)
+      when is_integer(action_id) and is_binary(content_digest) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        action = Repo.get!(AgentAction, action_id)
+
+        if action.state not in ["running", "sync_pending"],
+          do: Repo.rollback(:agent_action_not_recording_result)
+
+        snapshot =
+          Map.put(
+            action.target_snapshot || %{},
+            "decision_issue_content_digest",
+            content_digest
+          )
+
+        action
+        |> AgentAction.changeset(%{target_snapshot: snapshot, updated_at: now})
+        |> Repo.update!()
+      end)
+
+    case outcome do
+      {:ok, action} -> notify_and_return({:ok, Repo.preload(action, :repository)})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   def fail_agent_action_preflight(action_id, reason) when is_integer(action_id) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     error = "Preflight stopped: #{bounded_error(reason)}"

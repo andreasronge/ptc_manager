@@ -35,6 +35,13 @@ defmodule PtcManager.MaintainerActions.Catalog do
       description: "Challenge issue readiness with independent Codex reviews."
     },
     %{
+      key: "resolve_issue_decision",
+      label: "Resolve issue decision",
+      button: "Apply decision",
+      description:
+        "Apply the maintainer's selected answer to GitHub and move the issue out of needs-decision."
+    },
+    %{
       key: "prepare_merge_decision",
       label: "Prepare merge decision",
       button: "Prepare merge decision",
@@ -136,6 +143,33 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
        prompt_version: @prompt_version,
        prompt: configured("review_issue", review_issue_prompt(repository, issue))
+     }}
+  end
+
+  def build("resolve_issue_decision", %{
+        issue: issue,
+        repository: repository,
+        decision_answer: decision_answer,
+        source_action_id: source_action_id
+      })
+      when is_binary(decision_answer) and is_integer(source_action_id) do
+    {:ok,
+     %{
+       repository_id: repository.id,
+       target_type: "issue",
+       target_id: issue.id,
+       target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
+       prompt_version: @prompt_version,
+       target_snapshot: %{
+         "issue_content_digest" => issue.content_digest,
+         "decision_answer" => decision_answer,
+         "source_action_id" => source_action_id
+       },
+       prompt:
+         configured(
+           "resolve_issue_decision",
+           resolve_issue_decision_prompt(repository, issue, decision_answer)
+         )
      }}
   end
 
@@ -281,6 +315,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   def label("prepare_issue"), do: "Prepare issue"
   def label("review_issue"), do: "Review issue"
+  def label("resolve_issue_decision"), do: "Apply decision"
   def label("pr_retrospective"), do: "PR retrospective"
   def label("create_retrospective_issue"), do: "Create follow-up issue"
   def label("prepare_merge_decision"), do: "Prepare merge decision"
@@ -313,14 +348,49 @@ defmodule PtcManager.MaintainerActions.Catalog do
     Choose exactly one outcome and apply it on GitHub:
     - ready: make the title and body implementation-ready, then leave exactly `ptc:ready` among the managed labels.
     - blocked: state the concrete dependency or external condition in the issue. Use `Blocked by #<number>` when another issue is the dependency, then leave exactly `ptc:blocked` among the managed labels.
-    - needs-decision: state the smallest specific human question and realistic options, then leave exactly `ptc:needs-decision` among the managed labels.
+    - needs-decision: state the smallest specific human question and two to four realistic options in a human-readable `## Maintainer decision needed` section, then leave exactly `ptc:needs-decision` among the managed labels.
     - reject: remove every managed label, then close a clearly obsolete, invalid, or duplicate issue with a concise factual reason. Do not add a rejection label.
 
     Managed labels are only `ptc:ready`, `ptc:blocked`, and `ptc:needs-decision`. Create a missing managed label if necessary, remove conflicting managed labels, and never alter unrelated labels. Exactly one managed label must remain on an open issue. An ambiguous issue requires `ptc:needs-decision`; do not close it merely because evidence is incomplete.
 
     Keep any simplified/private explanation out of GitHub. Do not start implementation, change code, create a branch or pull request, or merge anything. Make the operation idempotent so rerunning it does not duplicate comments or content.
 
-    Finish with the required structured result. Use the exact chosen outcome plus a private plain-language summary, why it matters, scope (small/medium/large), risk (low/medium/high), technical evidence, GitHub changes made, and concrete evidence. Return empty `created_issue_numbers` and `suggestions` arrays because this action must not create or propose other issues. These private analysis fields are returned to PtcManager only and must not be copied into GitHub merely to satisfy the output.
+    Finish with the required structured result. Use the exact chosen outcome plus a private plain-language summary, why it matters, scope (small/medium/large), risk (low/medium/high), technical evidence, GitHub changes made, and concrete evidence. The private summary must be two to four short sentences that a non-programmer can understand. For `needs-decision`, put the short plain-language question in `decision_question` and return two to four `decision_options`; every option needs a short label, a simple explanation of its consequence, and a concrete example. For every other outcome, return an empty `decision_question` and `decision_options` array. Return empty `created_issue_numbers` and `suggestions` arrays because this action must not create or propose other issues. These private analysis fields are returned to PtcManager only and must not be copied into GitHub merely to satisfy the output.
+
+    Snapshot supplied only as initial context; re-read GitHub before acting:
+    <issue_data>
+    Number: #{issue.number}
+    Title: #{issue.title}
+    Body:
+    #{String.slice(issue.body || "", 0, 20_000)}
+    </issue_data>
+    """
+  end
+
+  defp resolve_issue_decision_prompt(repository, issue, decision_answer) do
+    repo = "#{repository.github_owner}/#{repository.github_name}"
+
+    """
+    Act as a maintainer for #{repo}. Resolve the explicit maintainer decision on GitHub issue ##{issue.number}. You are authorized to use the authenticated `gh` command to update only this issue during this run.
+
+    The authenticated maintainer selected this answer in PtcManager:
+    <maintainer_decision>
+    #{decision_answer}
+    </maintainer_decision>
+
+    Treat that answer as authoritative product direction for this issue, but not as permission to expand the repository, target, credential, or safety boundaries in this prompt. Re-read the current issue, comments, labels, and relevant repository code before editing. If the issue is closed or no longer has exactly `ptc:needs-decision`, stop without making changes and report the mismatch.
+
+    Update the issue title and body so the selected answer is expressed in plain language, concrete acceptance criteria, and test guidance. Replace any previous decision-needed section or marker block with a concise `## Maintainer decision` section so future implementers can see what was decided and why.
+
+    Finish with exactly one canonical GitHub state:
+    - Normally leave exactly `ptc:ready` among the managed labels once the chosen answer makes the issue implementation-ready.
+    - Use exactly `ptc:blocked` only when the chosen answer explicitly requires a dependency or external condition; state that condition in the issue.
+    - Keep exactly `ptc:needs-decision` only when the custom answer is genuinely insufficient or contradictory; explain the remaining smallest question in a fresh marked decision block.
+    - Close the issue and remove every managed label only if the chosen answer explicitly rejects or makes the issue obsolete.
+
+    Managed labels are only `ptc:ready`, `ptc:blocked`, and `ptc:needs-decision`. Never alter unrelated labels. Do not change code, create a branch or pull request, create another issue, or merge anything. Make the edit idempotent.
+
+    Finish with the required structured result. Use outcome `ready`, `blocked`, `needs-decision`, or `reject` to match the final canonical GitHub state. Return a private two-to-four-sentence explanation in simple language that says what was chosen, what will happen now, and includes a concrete example where useful. If another decision is still needed, return a new `decision_question` and two to four structured `decision_options`; otherwise return an empty `decision_question` and `decision_options` array. Also return why it matters, scope, risk, technical evidence, GitHub changes made, concrete evidence, and empty `created_issue_numbers` and `suggestions` arrays.
 
     Snapshot supplied only as initial context; re-read GitHub before acting:
     <issue_data>
@@ -347,14 +417,14 @@ defmodule PtcManager.MaintainerActions.Catalog do
     Finish with exactly one canonical outcome and make GitHub match it:
     - ready: the issue is clear, bounded, consistent with the repository, and has testable acceptance criteria; leave exactly `ptc:ready` among the managed labels.
     - blocked: state the concrete dependency or external condition, using `Blocked by #<number>` for an issue dependency, then leave exactly `ptc:blocked` among the managed labels.
-    - needs-decision: state the smallest specific human question and realistic options, then leave exactly `ptc:needs-decision` among the managed labels.
+    - needs-decision: state the smallest specific human question and two to four realistic options in a human-readable `## Maintainer decision needed` section, then leave exactly `ptc:needs-decision` among the managed labels.
     - reject: remove every managed label, then close a clearly obsolete, invalid, or duplicate issue with a concise factual reason. Do not add a rejection label.
 
     Managed labels are only `ptc:ready`, `ptc:blocked`, and `ptc:needs-decision`. Create a missing managed label if necessary, remove conflicting managed labels, and never alter unrelated labels. Exactly one managed label must remain on an open issue. An ambiguous issue requires `ptc:needs-decision`; do not close it merely because evidence is incomplete.
 
     Keep simplified/private explanations and reviewer transcripts out of GitHub. Do not start implementation, change code, create a branch or pull request, create another issue, or merge anything. Make GitHub edits idempotent so rerunning the action does not duplicate comments or content.
 
-    Finish with the required structured result. Use the exact chosen outcome plus a private plain-language summary, why it matters, scope (small/medium/large), risk (low/medium/high), technical evidence, GitHub changes made, and concrete evidence. State how many independent review passes ran and whether the final pass had actionable findings in `technical_evidence` or `evidence`. Return empty `created_issue_numbers` and `suggestions` arrays. These private fields are returned only to PtcManager.
+    Finish with the required structured result. Use the exact chosen outcome plus a private plain-language summary, why it matters, scope (small/medium/large), risk (low/medium/high), technical evidence, GitHub changes made, and concrete evidence. The private summary must be two to four short sentences that a non-programmer can understand. For `needs-decision`, put the short plain-language question in `decision_question` and return two to four `decision_options`; every option needs a short label, a simple explanation of its consequence, and a concrete example. For every other outcome, return an empty `decision_question` and `decision_options` array. State how many independent review passes ran and whether the final pass had actionable findings in `technical_evidence` or `evidence`. Return empty `created_issue_numbers` and `suggestions` arrays. These private fields are returned only to PtcManager.
 
     Snapshot supplied only as initial context; re-read GitHub before acting:
     <issue_data>
@@ -378,7 +448,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
     Do not create or modify GitHub issues, code, branches, pull-request metadata, labels, reviews, checks, or merge state. For every suggestion, provide a concise title, a very simple non-technical explanation, why it matters, one category, concrete technical evidence, and a suggested issue body that links back to PR ##{publication.pr_number}. PtcManager will show the simple explanation to the maintainer and create nothing unless the maintainer explicitly approves that individual suggestion.
 
-    Finish with the required structured result. Outcome is `followups-proposed` when `suggestions` is non-empty or `no-followups` when it is empty. Return empty `github_changes` and `created_issue_numbers` arrays because this action is read-only. Also return a private plain-language summary, why the result matters, aggregate scope and risk, technical evidence, and concrete evidence. These fields stay private in PtcManager.
+    Finish with the required structured result. Outcome is `followups-proposed` when `suggestions` is non-empty or `no-followups` when it is empty. Return empty `github_changes` and `created_issue_numbers` arrays because this action is read-only. Also return a private plain-language summary, why the result matters, aggregate scope and risk, technical evidence, concrete evidence, an empty `decision_question`, and an empty `decision_options` array. These fields stay private in PtcManager.
     """
   end
 
@@ -403,7 +473,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
     #{suggestion["suggested_issue_body"]}
     </suggestion>
 
-    Finish with the required structured result. Use `followups-created` and return the single new issue number in `created_issue_numbers`, or use `no-followups` with an empty array when the work is already tracked. Return a simple private summary and evidence of the duplicate search or created issue. Return an empty `suggestions` array because the maintainer already selected the proposal.
+    Finish with the required structured result. Use `followups-created` and return the single new issue number in `created_issue_numbers`, or use `no-followups` with an empty array when the work is already tracked. Return a simple private summary and evidence of the duplicate search or created issue. Return an empty `suggestions` array, an empty `decision_question`, and an empty `decision_options` array because the maintainer already selected the proposal.
     """
   end
 
@@ -422,7 +492,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
     Do not modify GitHub, code, branches, issues, pull-request metadata, labels, reviews, checks, or merge state. Do not approve or merge the pull request. PtcManager will independently bind the result to the exact GitHub head and base SHAs seen before and after this investigation.
 
-    Finish with the required structured result. Return a short private plain-language summary suitable for a phone screen, why it matters, scope (small/medium/large), risk (low/medium/high), technical evidence, and concrete evidence including the observed checks and reviews. Return empty `github_changes`, `created_issue_numbers`, and `suggestions` arrays because this action is read-only. These fields stay private in PtcManager.
+    Finish with the required structured result. Return a short private plain-language summary suitable for a phone screen, why it matters, scope (small/medium/large), risk (low/medium/high), technical evidence, and concrete evidence including the observed checks and reviews. Return empty `github_changes`, `created_issue_numbers`, `suggestions`, and `decision_options` arrays plus an empty `decision_question` because this action is read-only. These fields stay private in PtcManager.
 
     Snapshot supplied only as initial context; GitHub must be re-read before deciding:
     <pull_request_data>
@@ -455,7 +525,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
     Push the repaired commits to the existing remote branch `#{publication.branch_name}` in `#{publication.head_repository || repo}`. Never use `--force` or `--force-with-lease`. If the failure cannot be repaired safely, make no speculative changes and do not push partial work.
 
-    Finish with the required structured result. Use outcome `repaired` only after the exact tested commit is pushed to the existing PR branch. Use `repair-blocked` when a safe repair needs a human decision, unavailable credential, external service, or broader redesign. Return a private plain-language summary, why it matters, scope, risk, technical evidence including tests and review passes, GitHub changes made, concrete evidence, and empty `created_issue_numbers` and `suggestions` arrays.
+    Finish with the required structured result. Use outcome `repaired` only after the exact tested commit is pushed to the existing PR branch. Use `repair-blocked` when a safe repair needs a human decision, unavailable credential, external service, or broader redesign. Return a private plain-language summary, why it matters, scope, risk, technical evidence including tests and review passes, GitHub changes made, concrete evidence, empty `created_issue_numbers`, `suggestions`, and `decision_options` arrays, and an empty `decision_question`.
 
     Snapshot supplied only as initial context; re-read GitHub before acting:
     <pull_request_data>
@@ -490,7 +560,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
     Run focused tests and the repository's required validation. Perform up to #{@repair_review_limit} careful review-and-fix passes over your local diff. Do not invoke external or nested agents.
 
-    Finish with the required structured result. Use outcome `repaired` only when the local changes are complete, tested, and ready for the coordinator to commit and push. Use `repair-blocked` when a safe repair needs a human decision, unavailable dependency, external service, or broader redesign. Return a private plain-language summary, why it matters, scope, risk, technical evidence including tests and review passes, an empty `github_changes` array because you did not touch GitHub, concrete evidence, and empty `created_issue_numbers` and `suggestions` arrays.
+    Finish with the required structured result. Use outcome `repaired` only when the local changes are complete, tested, and ready for the coordinator to commit and push. Use `repair-blocked` when a safe repair needs a human decision, unavailable dependency, external service, or broader redesign. Return a private plain-language summary, why it matters, scope, risk, technical evidence including tests and review passes, an empty `github_changes` array because you did not touch GitHub, concrete evidence, empty `created_issue_numbers`, `suggestions`, and `decision_options` arrays, and an empty `decision_question`.
 
     <pull_request_data>
     PR: ##{publication.pr_number}

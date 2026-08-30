@@ -11,6 +11,8 @@
     "technical_evidence",
     "github_changes",
     "evidence",
+    "decision_question",
+    "decision_options",
     "created_issue_numbers",
     "suggestions"
   ],
@@ -33,6 +35,21 @@
       "type": "array",
       "maxItems": 50,
       "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+    },
+    "decision_question": {"type": "string", "maxLength": 1000},
+    "decision_options": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "description", "example"],
+        "properties": {
+          "label": {"type": "string", "minLength": 1, "maxLength": 120},
+          "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "example": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
     },
     "created_issue_numbers": {
       "type": "array",

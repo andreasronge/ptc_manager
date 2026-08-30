@@ -83,6 +83,219 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
   end
 
+  test "keeps action details open and turns a marked issue decision into choices", %{conn: conn} do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        number: 1701,
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false,
+        body: "The GitHub issue contains the human-readable decision and its context."
+      })
+
+    proposal_fixture(issue, %{
+      readiness: "needs_information",
+      plain_summary: "Choose whether matching should be precise or only give a broad hint.",
+      why_it_matters: "A broad hint could make a typo look like a real command."
+    })
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    completed =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: issue.id,
+        target_label: "issue #1701",
+        prompt_version: 1,
+        prompt: "Prepare issue",
+        actor: "maintainer",
+        state: "done",
+        target_snapshot: %{"decision_issue_content_digest" => issue.content_digest},
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now,
+        result_summary:
+          Jason.encode!(%{
+            "outcome" => "needs-decision",
+            "private_summary" =>
+              "Choose whether matching should be precise or only give a broad hint.",
+            "why_it_matters" => "A broad hint could make a typo look real.",
+            "decision_question" =>
+              "Should misses identify exact exports or only a shipped namespace?",
+            "decision_options" => [
+              %{
+                "label" => "Exact export (preferred)",
+                "description" => "Redirect only names that are real shipped commands.",
+                "example" => "agent.core/run gets help; agent.core/typo stays an ordinary miss."
+              },
+              %{
+                "label" => "Namespace hint",
+                "description" => "Say only that the shipped library is not attached.",
+                "example" => "A real name and a typo both receive the same broad hint."
+              }
+            ],
+            "github_changes" => ["Added the marked decision section."],
+            "evidence" => ["agent.core/typo demonstrates the difference."]
+          })
+      })
+      |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-decision-#{issue.id}",
+             "Should misses identify exact exports"
+           )
+
+    assert has_element?(view, "#issue-decision-#{issue.id}", "A — Exact export")
+    assert has_element?(view, "#issue-decision-#{issue.id}", "agent.core/typo")
+    assert has_element?(view, "#issue-decision-#{issue.id}", "B — Namespace hint")
+    assert has_element?(view, "#custom-decision-answer-#{issue.id}")
+
+    assert has_element?(
+             view,
+             "#agent-action-details-#{completed.id}[phx-mounted]",
+             "Action details"
+           )
+
+    send(view.pid, :tick)
+
+    assert has_element?(view, "#agent-action-details-#{completed.id}[phx-mounted]")
+
+    view
+    |> form("#resolve-decision-form-#{issue.id}", %{
+      "issue-id" => Integer.to_string(issue.id),
+      "source-action-id" => Integer.to_string(completed.id),
+      "decision" => %{"choice" => "0", "custom_answer" => ""}
+    })
+    |> render_submit()
+
+    assert render(view) =~ "Your decision is queued for the agent to apply to GitHub"
+
+    queued = Repo.get_by!(AgentAction, action_key: "resolve_issue_decision")
+    assert queued.state == "queued"
+    assert queued.target_snapshot["decision_answer"] =~ "Exact export"
+    refute has_element?(view, "#issue-decision-refresh-#{issue.id}")
+  end
+
+  test "offers an explicit refresh for a legacy decision result without structured choices", %{
+    conn: conn
+  } do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false
+      })
+
+    proposal_fixture(issue, %{readiness: "needs_information"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "prepare_issue",
+      target_type: "issue",
+      target_id: issue.id,
+      target_label: "issue ##{issue.number}",
+      prompt_version: 1,
+      prompt: "Prepare issue",
+      actor: "maintainer",
+      state: "done",
+      attempt_count: 1,
+      requested_at: now,
+      started_at: now,
+      ended_at: now,
+      result_summary:
+        Jason.encode!(%{
+          "outcome" => "needs-decision",
+          "private_summary" => "A decision is needed.",
+          "github_changes" => [],
+          "evidence" => []
+        })
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-decision-refresh-#{issue.id}",
+             "Decision choices need a refresh"
+           )
+
+    assert has_element?(view, "#issue-decision-refresh-#{issue.id}", "2–4 alternatives")
+
+    view
+    |> element("#issue-decision-refresh-#{issue.id} button", "Refresh decision choices")
+    |> render_click()
+
+    assert render(view) =~ "Prepare issue queued for an agent"
+    assert Repo.get_by!(AgentAction, action_key: "prepare_issue", state: "queued")
+  end
+
+  test "explains that structured choices are stale after the GitHub issue changes", %{conn: conn} do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false
+      })
+
+    proposal_fixture(issue, %{readiness: "needs_information"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "prepare_issue",
+      target_type: "issue",
+      target_id: issue.id,
+      target_label: "issue ##{issue.number}",
+      prompt_version: 1,
+      prompt: "Prepare issue",
+      actor: "maintainer",
+      state: "done",
+      target_snapshot: %{"decision_issue_content_digest" => issue.content_digest},
+      attempt_count: 1,
+      requested_at: now,
+      started_at: now,
+      ended_at: now,
+      result_summary:
+        Jason.encode!(%{
+          "outcome" => "needs-decision",
+          "decision_question" => "Which behavior should users get?",
+          "decision_options" => [
+            %{"label" => "A", "description" => "First", "example" => "One"},
+            %{"label" => "B", "description" => "Second", "example" => "Two"}
+          ]
+        })
+    })
+    |> Repo.insert!()
+
+    issue
+    |> Issue.changeset(%{content_digest: String.duplicate("c", 64)})
+    |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-decision-refresh-#{issue.id}",
+             "Issue changed since this decision was prepared"
+           )
+
+    assert has_element?(view, "#issue-decision-refresh-#{issue.id}", "newer issue content")
+  end
+
   test "shows only open issues in the Issue inbox", %{conn: conn} do
     repository = repository_fixture()
     open_issue = issue_fixture(repository, %{title: "Still needs planning"})

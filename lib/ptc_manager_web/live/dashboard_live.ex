@@ -3,6 +3,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
   alias PtcManager.GitHub.Sync, as: GitHubSync
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
+  alias PtcManager.IssueDecision
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.MaintainerActions
@@ -96,6 +97,58 @@ defmodule PtcManagerWeb.DashboardLive do
 
       _error ->
         {:noreply, put_flash(socket, :error, "The agent action could not be queued.")}
+    end
+  end
+
+  def handle_event(
+        "resolve-issue-decision",
+        %{
+          "issue-id" => issue_id,
+          "source-action-id" => source_action_id,
+          "decision" => decision
+        },
+        socket
+      ) do
+    choice = Map.get(decision, "choice", "")
+    custom_answer = Map.get(decision, "custom_answer", "")
+
+    with {issue_id, ""} <- Integer.parse(issue_id),
+         {source_action_id, ""} <- Integer.parse(source_action_id),
+         {:ok, _action} <-
+           MaintainerActions.enqueue_issue_decision(
+             issue_id,
+             source_action_id,
+             choice,
+             custom_answer,
+             socket.assigns.actor
+           ) do
+      MaintainerActionPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "Your decision is queued for the agent to apply to GitHub.")
+       |> load_dashboard()}
+    else
+      {:error, :decision_answer_missing} ->
+        {:noreply, put_flash(socket, :error, "Choose an option or write your own answer.")}
+
+      {:error, :decision_answer_too_long} ->
+        {:noreply, put_flash(socket, :error, "Keep the custom answer under 2,000 characters.")}
+
+      {:error, :agent_action_already_active} ->
+        {:noreply, put_flash(socket, :error, "An agent action is already queued or running.")}
+
+      {:error, :issue_decision_not_current} ->
+        {:noreply,
+         put_flash(socket, :error, "GitHub no longer reports this decision as unresolved.")}
+
+      _error ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The decision could not be queued. Synchronize GitHub and try again."
+         )}
     end
   end
 
@@ -401,6 +454,39 @@ defmodule PtcManagerWeb.DashboardLive do
       _items -> []
     end
   end
+
+  def issue_decision(
+        %{workflow_label: "ptc:needs-decision", content_digest: content_digest},
+        %{state: "done", target_snapshot: snapshot} = action
+      ) do
+    if is_map(snapshot) and snapshot["decision_issue_content_digest"] == content_digest do
+      case action |> decode_agent_action_result() |> IssueDecision.from_result() do
+        {:ok, decision} -> decision
+        {:error, _reason} -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  def issue_decision(_issue, _action), do: nil
+
+  def decision_refresh_reason(
+        %{workflow_label: "ptc:needs-decision", content_digest: content_digest},
+        %{state: "done", target_snapshot: snapshot} = action
+      ) do
+    case action |> decode_agent_action_result() |> IssueDecision.from_result() do
+      {:error, _reason} ->
+        :choices_unavailable
+
+      {:ok, _decision} ->
+        if is_map(snapshot) and snapshot["decision_issue_content_digest"] == content_digest,
+          do: nil,
+          else: :issue_changed
+    end
+  end
+
+  def decision_refresh_reason(_issue, _action), do: nil
 
   def agent_action_failure(%{state: "failed", last_error: error}) when is_binary(error) do
     cond do

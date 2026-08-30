@@ -177,6 +177,11 @@ catalog contains:
 - **Review issue**, which uses up to three fresh independent `codex-review`
   consultations to challenge and improve the issue, stopping early after a
   clean pass and applying the same canonical label rules as **Prepare issue**;
+- **Apply decision**, shown after an issue action returns a schema-validated
+  question with two to four plain-language choices. A maintainer can choose an
+  option or enter a custom answer; a queued agent then records that decision on
+  GitHub and normally moves the issue to `ptc:ready`. Choices are tied to the
+  exact synchronized issue version, so an edit requires a fresh analysis;
 - **Prepare merge decision**, shown for an open PR, which returns a private
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and

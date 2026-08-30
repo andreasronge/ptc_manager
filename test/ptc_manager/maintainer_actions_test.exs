@@ -14,6 +14,7 @@ defmodule PtcManager.MaintainerActionsTest do
     AgentAction,
     AgentRun,
     AuditEvent,
+    Issue,
     MergeApproval,
     PrAnalysis,
     PrPublication,
@@ -40,6 +41,33 @@ defmodule PtcManager.MaintainerActionsTest do
          "github_changes" => ["Applied ptc:ready"],
          "evidence" => ["Inspected lib/example.ex"],
          "created_issue_numbers" => []
+       }}
+    end
+  end
+
+  defmodule NeedsDecisionAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(action) do
+      send(Process.get(:agent_action_test_pid), {:ran_agent_action, action})
+
+      {:ok,
+       %{
+         "outcome" => "needs-decision",
+         "private_summary" => "The maintainer needs to choose one of two behaviors.",
+         "why_it_matters" => "The choice changes what users see after a typo.",
+         "scope" => "small",
+         "risk" => "medium",
+         "technical_evidence" => "Both behaviors fit the current implementation.",
+         "github_changes" => ["Added the maintainer decision section."],
+         "evidence" => ["Compared exact and broad matching."],
+         "created_issue_numbers" => [],
+         "suggestions" => [],
+         "decision_question" => "Should matching be exact or broad?",
+         "decision_options" => [
+           %{"label" => "Exact", "description" => "Match commands.", "example" => "Typos miss."},
+           %{"label" => "Broad", "description" => "Match namespaces.", "example" => "Typos hint."}
+         ]
        }}
     end
   end
@@ -279,6 +307,54 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule DecisionSync do
+    def sync_action(action), do: {:ok, %{repository: action.repository}}
+
+    def sync_action(action, _result) do
+      send(Process.get(:agent_action_test_pid), {:synced_repository, action.repository_id})
+
+      PtcManager.Operations.Issue
+      |> PtcManager.Repo.get!(action.target_id)
+      |> PtcManager.Operations.Issue.changeset(%{
+        workflow_label: "ptc:ready",
+        workflow_label_conflict: false
+      })
+      |> PtcManager.Repo.update!()
+
+      {:ok, %{repository: action.repository}}
+    end
+  end
+
+  defmodule NeedsDecisionSync do
+    def sync_action(action) do
+      digest = String.duplicate("d", 64)
+
+      PtcManager.Operations.Issue
+      |> PtcManager.Repo.get!(action.target_id)
+      |> PtcManager.Operations.Issue.changeset(%{
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false,
+        content_digest: digest
+      })
+      |> PtcManager.Repo.update!()
+
+      {:ok, %{repository: action.repository}}
+    end
+  end
+
+  defmodule ChangedDecisionSync do
+    def sync_action(action) do
+      PtcManager.Operations.Issue
+      |> PtcManager.Repo.get!(action.target_id)
+      |> PtcManager.Operations.Issue.changeset(%{
+        content_digest: String.duplicate("f", 64)
+      })
+      |> PtcManager.Repo.update!()
+
+      {:ok, %{repository: action.repository}}
+    end
+  end
+
   defmodule NoopSync do
     def sync_action(action), do: {:ok, %{repository: action.repository}}
   end
@@ -327,6 +403,9 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.target_label =~ "#42"
     assert action.prompt =~ "Choose exactly one outcome"
     assert action.prompt =~ "ptc:needs-decision"
+    assert action.prompt =~ "decision_question"
+    assert action.prompt =~ "decision_options"
+    assert action.prompt =~ "concrete example"
     assert action.prompt =~ "Follow relevant links"
     assert action.prompt =~ "Do not sign in to third-party sites"
 
@@ -350,6 +429,194 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.prompt =~ "Do not invoke nested reviewers"
     assert action.prompt =~ "leave exactly `ptc:ready`"
     assert action.prompt =~ "Return empty `created_issue_numbers` and `suggestions` arrays"
+  end
+
+  test "queues an authenticated issue decision as a narrowly scoped GitHub action" do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        number: 44,
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false,
+        body: "The issue contains a human-readable maintainer question."
+      })
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    source =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: issue.id,
+        target_label: "issue #44",
+        prompt_version: 1,
+        prompt: "Prepare issue",
+        actor: "andreas",
+        state: "done",
+        target_snapshot: %{"decision_issue_content_digest" => issue.content_digest},
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now,
+        result_summary:
+          Jason.encode!(%{
+            "outcome" => "needs-decision",
+            "decision_question" => "Should matching use exact exports or only namespaces?",
+            "decision_options" => [
+              %{
+                "label" => "Exact export",
+                "description" => "Redirect only real commands.",
+                "example" => "Redirect agent.core/run, but not agent.core/typo."
+              },
+              %{
+                "label" => "Namespace hint",
+                "description" => "Mention only that the library is not attached.",
+                "example" => "Both real names and typos get the same broad hint."
+              }
+            ]
+          })
+      })
+      |> Repo.insert!()
+
+    assert {:ok, action} =
+             MaintainerActions.enqueue_issue_decision(issue.id, source.id, "0", "", "andreas")
+
+    assert action.action_key == "resolve_issue_decision"
+    assert action.target_snapshot["decision_answer"] =~ "Exact export"
+    assert action.target_snapshot["source_action_id"] == source.id
+    assert action.prompt =~ "authenticated maintainer selected this answer"
+    assert action.prompt =~ "Replace any previous decision-needed section or marker block"
+    assert action.prompt =~ "leave exactly `ptc:ready`"
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(adapter: FakeAdapter, sync: DecisionSync)
+
+    assert completed.state == "done"
+    assert Repo.get!(Issue, issue.id).workflow_label == "ptc:ready"
+    assert Repo.get_by!(Proposal, issue_id: issue.id).plain_summary =~ "clear enough"
+
+    assert {:error, :issue_decision_not_current} =
+             MaintainerActions.enqueue_issue_decision(issue.id, source.id, "0", "", "andreas")
+  end
+
+  test "binds generated decision choices to the synchronized GitHub issue version" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    {:ok, queued} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(adapter: NeedsDecisionAdapter, sync: NeedsDecisionSync)
+
+    assert completed.id == queued.id
+    assert completed.state == "done"
+
+    synchronized_issue = Repo.get!(Issue, issue.id)
+
+    assert completed.target_snapshot["decision_issue_content_digest"] ==
+             synchronized_issue.content_digest
+  end
+
+  test "rejects a completed decision after the GitHub issue content changes" do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false
+      })
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    source =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: issue.id,
+        target_label: "issue ##{issue.number}",
+        prompt_version: 1,
+        prompt: "Prepare issue",
+        actor: "andreas",
+        state: "done",
+        target_snapshot: %{"decision_issue_content_digest" => issue.content_digest},
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now,
+        result_summary:
+          Jason.encode!(%{
+            "outcome" => "needs-decision",
+            "decision_question" => "Which behavior?",
+            "decision_options" => [
+              %{"label" => "A", "description" => "First", "example" => "One"},
+              %{"label" => "B", "description" => "Second", "example" => "Two"}
+            ]
+          })
+      })
+      |> Repo.insert!()
+
+    issue
+    |> Issue.changeset(%{content_digest: String.duplicate("e", 64)})
+    |> Repo.update!()
+
+    assert {:error, :issue_decision_not_current} =
+             MaintainerActions.enqueue_issue_decision(issue.id, source.id, "0", "", "andreas")
+  end
+
+  test "stops a queued decision when synchronization finds a newer issue version" do
+    repository = repository_fixture()
+
+    issue =
+      issue_fixture(repository, %{
+        workflow_label: "ptc:needs-decision",
+        workflow_label_conflict: false
+      })
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    source =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: issue.id,
+        target_label: "issue ##{issue.number}",
+        prompt_version: 1,
+        prompt: "Prepare issue",
+        actor: "andreas",
+        state: "done",
+        target_snapshot: %{"decision_issue_content_digest" => issue.content_digest},
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now,
+        result_summary:
+          Jason.encode!(%{
+            "outcome" => "needs-decision",
+            "decision_question" => "Which behavior?",
+            "decision_options" => [
+              %{"label" => "A", "description" => "First", "example" => "One"},
+              %{"label" => "B", "description" => "Second", "example" => "Two"}
+            ]
+          })
+      })
+      |> Repo.insert!()
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue_issue_decision(issue.id, source.id, "0", "", "andreas")
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(adapter: FakeAdapter, sync: ChangedDecisionSync)
+
+    assert failed.id == queued.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "issue_decision_not_current"
+    refute_receive {:ran_agent_action, _action}
   end
 
   test "serializes different maintainer actions for the same issue" do
@@ -456,6 +723,31 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert :ok = CodexAdapter.validate_result(result, "prepare_issue")
     assert :ok = CodexAdapter.validate_result(result, "review_issue")
+    assert :ok = CodexAdapter.validate_result(result, "resolve_issue_decision")
+
+    decision_result =
+      result
+      |> Map.put("outcome", "needs-decision")
+      |> Map.put("decision_question", "Which behavior should users get?")
+      |> Map.put("decision_options", [
+        %{
+          "label" => "Precise",
+          "description" => "Only recognize exact commands.",
+          "example" => "A typo remains not found."
+        },
+        %{
+          "label" => "Broad",
+          "description" => "Recognize the whole namespace.",
+          "example" => "A typo still gets a library hint."
+        }
+      ])
+
+    assert :ok = CodexAdapter.validate_result(decision_result, "prepare_issue")
+
+    assert {:error, :invalid_issue_decision} =
+             result
+             |> Map.put("outcome", "needs-decision")
+             |> CodexAdapter.validate_result("prepare_issue")
 
     assert {:error, :invalid_agent_action_outcome} =
              CodexAdapter.validate_result(result, "pr_retrospective")

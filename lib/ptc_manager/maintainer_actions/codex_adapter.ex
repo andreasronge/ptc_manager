@@ -4,6 +4,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   @behaviour PtcManager.MaintainerActions.Adapter
 
   alias PtcManager.MaintainerActions.{ExternalPrRepairAdapter, RetainedHerdrAdapter}
+  alias PtcManager.IssueDecision
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
@@ -155,59 +156,73 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   end
 
   @doc false
-  def validate_result(result, action_key)
-      when is_map(result) and not is_map_key(result, "suggestions") do
-    validate_result(Map.put(result, "suggestions", []), action_key)
+  def validate_result(result, action_key) when is_map(result) do
+    result
+    |> Map.put_new("suggestions", [])
+    |> Map.put_new("decision_question", "")
+    |> Map.put_new("decision_options", [])
+    |> validate_normalized_result(action_key)
   end
 
-  def validate_result(
-        %{
-          "outcome" => outcome,
-          "private_summary" => summary,
-          "why_it_matters" => why_it_matters,
-          "scope" => scope,
-          "risk" => risk,
-          "technical_evidence" => technical_evidence,
-          "github_changes" => changes,
-          "evidence" => evidence,
-          "created_issue_numbers" => created_issue_numbers,
-          "suggestions" => suggestions
-        },
-        action_key
-      )
-      when outcome in [
-             "ready",
-             "blocked",
-             "needs-decision",
-             "reject",
-             "followups-proposed",
-             "followups-created",
-             "no-followups",
-             "merge-ready",
-             "merge-blocked",
-             "merge-needs-decision",
-             "repaired",
-             "repair-blocked"
-           ] and is_binary(summary) and is_binary(why_it_matters) and
-             scope in ["small", "medium", "large"] and risk in ["low", "medium", "high"] and
-             is_binary(technical_evidence) and is_list(changes) and is_list(evidence) and
-             is_list(suggestions),
-      do:
-        validate_action_result(
-          action_key,
-          outcome,
-          created_issue_numbers,
-          changes,
-          suggestions
-        )
-
   def validate_result(_result, _action_key), do: {:error, :invalid_agent_action_output}
+
+  defp validate_normalized_result(
+         %{
+           "outcome" => outcome,
+           "private_summary" => summary,
+           "why_it_matters" => why_it_matters,
+           "scope" => scope,
+           "risk" => risk,
+           "technical_evidence" => technical_evidence,
+           "github_changes" => changes,
+           "evidence" => evidence,
+           "decision_question" => decision_question,
+           "decision_options" => decision_options,
+           "created_issue_numbers" => created_issue_numbers,
+           "suggestions" => suggestions
+         },
+         action_key
+       )
+       when outcome in [
+              "ready",
+              "blocked",
+              "needs-decision",
+              "reject",
+              "followups-proposed",
+              "followups-created",
+              "no-followups",
+              "merge-ready",
+              "merge-blocked",
+              "merge-needs-decision",
+              "repaired",
+              "repair-blocked"
+            ] and is_binary(summary) and is_binary(why_it_matters) and
+              scope in ["small", "medium", "large"] and risk in ["low", "medium", "high"] and
+              is_binary(technical_evidence) and is_list(changes) and is_list(evidence) and
+              is_binary(decision_question) and is_list(decision_options) and is_list(suggestions),
+       do:
+         validate_action_result(
+           action_key,
+           outcome,
+           created_issue_numbers,
+           changes,
+           suggestions,
+           decision_question,
+           decision_options
+         )
+
+  defp validate_normalized_result(_result, _action_key),
+    do: {:error, :invalid_agent_action_output}
 
   defp validate_outcome("prepare_issue", outcome)
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
 
   defp validate_outcome("review_issue", outcome)
+       when outcome in ["ready", "blocked", "needs-decision", "reject"],
+       do: :ok
+
+  defp validate_outcome("resolve_issue_decision", outcome)
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
 
@@ -235,15 +250,35 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
          outcome,
          created_issue_numbers,
          changes,
-         suggestions
+         suggestions,
+         decision_question,
+         decision_options
        ) do
     with :ok <- validate_outcome(action_key, outcome),
          :ok <- validate_created_issue_numbers(action_key, outcome, created_issue_numbers),
          :ok <- validate_github_changes(action_key, changes),
-         :ok <- validate_suggestions(action_key, outcome, suggestions) do
+         :ok <- validate_suggestions(action_key, outcome, suggestions),
+         :ok <- validate_decision(action_key, outcome, decision_question, decision_options) do
       :ok
     end
   end
+
+  defp validate_decision(action_key, "needs-decision", question, options)
+       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+    case IssueDecision.from_result(%{
+           "outcome" => "needs-decision",
+           "decision_question" => question,
+           "decision_options" => options
+         }) do
+      {:ok, _decision} -> :ok
+      {:error, _reason} -> {:error, :invalid_issue_decision}
+    end
+  end
+
+  defp validate_decision(_action_key, _outcome, "", []), do: :ok
+
+  defp validate_decision(_action_key, _outcome, _question, _options),
+    do: {:error, :unexpected_issue_decision}
 
   defp validate_github_changes("prepare_merge_decision", []), do: :ok
 
@@ -259,6 +294,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("resolve_issue_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("repair_pr", _outcome, []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "followups-proposed", []), do: :ok
