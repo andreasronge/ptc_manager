@@ -41,6 +41,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
   **Fix CI or conflicts**, **PR retrospective**, and **Prepare merge decision**
   buttons;
+- a Delivery-board **Review for merge** action once CI and mergeability are
+  clean, followed by a private **Retro** that proposes simple follow-up choices;
 - one shared clock/spinner status language for queued and actively running work
   across Planning, Delivery, and Operations;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
@@ -158,9 +160,12 @@ catalog contains:
 - **Review issue**, which uses up to three fresh independent `codex-review`
   consultations to challenge and improve the issue, stopping early after a
   clean pass and applying the same canonical label rules as **Prepare issue**;
-- **PR retrospective**, shown after a PR finishes, which may create concrete,
-  non-duplicate follow-up issues. New follow-ups intentionally start without a
-  managed `ptc:*` label;
+- **PR retrospective**, shown on merge-ready and finished PRs, which performs a
+  read-only investigation and presents up to five concrete follow-up suggestions
+  in simple language. It creates nothing until the maintainer approves an
+  individual suggestion. The follow-up creation action searches for duplicates,
+  creates at most one issue, and leaves it without a managed `ptc:*` label so it
+  enters the normal planning inbox;
 - **Prepare merge decision**, shown for an open PR, which returns a private
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and

@@ -54,7 +54,8 @@ defmodule PtcManager.MaintainerActions.Sync do
 
   def sync_action(%{action_key: "repair_pr"} = action), do: sync_repair(action, :preflight)
 
-  def sync_action(%{action_key: "pr_retrospective", repository: repository}) do
+  def sync_action(%{action_key: action_key, repository: repository})
+      when action_key in ["pr_retrospective", "create_retrospective_issue"] do
     GitHubSync.sync_repository(repository)
   end
 

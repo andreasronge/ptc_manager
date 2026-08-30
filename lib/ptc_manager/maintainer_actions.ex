@@ -8,7 +8,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Issue, PrPublication}
+  alias PtcManager.Operations.{AgentAction, Issue, PrPublication}
   alias PtcManager.Repo
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
@@ -52,6 +52,46 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  def enqueue_retrospective_issue(source_action_id, suggestion_index, actor)
+      when is_integer(source_action_id) and is_integer(suggestion_index) and
+             suggestion_index >= 0 and is_binary(actor) do
+    with %AgentAction{action_key: "pr_retrospective", state: "done"} = source <-
+           AgentAction |> Repo.get(source_action_id) |> Repo.preload(:repository),
+         {:ok, result} <- decode_action_result(source),
+         suggestions when is_list(suggestions) <- result["suggestions"],
+         %{} = suggestion <- Enum.at(suggestions, suggestion_index),
+         nil <- existing_suggestion_action(source, suggestion_index),
+         %PrPublication{} = publication <-
+           PrPublication
+           |> Repo.get(source.target_id)
+           |> Repo.preload(job: [:issue, :repository, :worktree_allocation]),
+         {:ok, attrs} <-
+           Catalog.build("create_retrospective_issue", %{
+             publication: publication,
+             issue: publication.job.issue,
+             repository: publication.job.repository,
+             suggestion: suggestion,
+             source_action_id: source.id,
+             suggestion_index: suggestion_index
+           }) do
+      Operations.enqueue_agent_action(
+        Map.merge(attrs, %{
+          action_key: "create_retrospective_issue",
+          actor: actor
+        })
+      )
+    else
+      nil -> {:error, :not_found}
+      false -> {:error, :invalid_suggestion}
+      %AgentAction{} -> {:error, :suggestion_already_handled}
+      {:error, reason} -> {:error, reason}
+      _invalid -> {:error, :invalid_suggestion}
+    end
+  end
+
+  def enqueue_retrospective_issue(_source_action_id, _suggestion_index, _actor),
+    do: {:error, :invalid_suggestion}
 
   def run_once(opts \\ []) do
     adapter =
@@ -107,7 +147,8 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "pr_retrospective"} = action, sync) do
+  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+       when action_key in ["pr_retrospective", "create_retrospective_issue"] do
     case sync.sync_action(action) do
       {:ok, _summary} ->
         issue_numbers =
@@ -267,6 +308,30 @@ defmodule PtcManager.MaintainerActions do
        ) do
     publication = Repo.get!(PrPublication, publication_id)
 
+    case canonical_retrospective_proposal_matches(
+           publication,
+           repository_id,
+           result["outcome"],
+           result["suggestions"],
+           baseline_numbers(baseline_issue_numbers)
+         ) do
+      :ok -> {:ok, result}
+      {:error, reason} -> {:error, {:retrospective_validation_failed, reason}}
+    end
+  end
+
+  defp store_private_analysis(
+         %{
+           action_key: "create_retrospective_issue",
+           target_id: publication_id,
+           repository_id: repository_id,
+           baseline_issue_numbers: baseline_issue_numbers
+         },
+         {:ok, result},
+         _summary
+       ) do
+    publication = Repo.get!(PrPublication, publication_id)
+
     case canonical_retrospective_matches(
            publication,
            repository_id,
@@ -275,7 +340,7 @@ defmodule PtcManager.MaintainerActions do
            baseline_numbers(baseline_issue_numbers)
          ) do
       :ok -> {:ok, result}
-      {:error, reason} -> {:error, {:retrospective_validation_failed, reason}}
+      {:error, reason} -> {:error, {:retrospective_issue_validation_failed, reason}}
     end
   end
 
@@ -403,6 +468,42 @@ defmodule PtcManager.MaintainerActions do
        ),
        do: {:error, :canonical_followup_issues_mismatch}
 
+  defp canonical_retrospective_proposal_matches(
+         _publication,
+         repository_id,
+         outcome,
+         suggestions,
+         baseline_issue_numbers
+       )
+       when outcome in ["followups-proposed", "no-followups"] and is_list(suggestions) and
+              is_list(baseline_issue_numbers) do
+    current_issue_numbers =
+      Repo.all(
+        from issue in Issue,
+          where: issue.repository_id == ^repository_id,
+          select: issue.number
+      )
+
+    no_issues_created? = MapSet.new(current_issue_numbers) == MapSet.new(baseline_issue_numbers)
+
+    outcome_matches? =
+      (outcome == "no-followups" and suggestions == []) or
+        (outcome == "followups-proposed" and suggestions != [])
+
+    if no_issues_created? and outcome_matches?,
+      do: :ok,
+      else: {:error, :canonical_retrospective_proposal_mismatch}
+  end
+
+  defp canonical_retrospective_proposal_matches(
+         _publication,
+         _repository_id,
+         _outcome,
+         _suggestions,
+         _baseline_issue_numbers
+       ),
+       do: {:error, :canonical_retrospective_proposal_mismatch}
+
   defp links_to_pull_request?(body, pr_number) when is_binary(body) do
     pattern =
       Regex.compile!(
@@ -417,6 +518,32 @@ defmodule PtcManager.MaintainerActions do
 
   defp baseline_numbers(%{"numbers" => numbers}) when is_list(numbers), do: numbers
   defp baseline_numbers(_baseline), do: []
+
+  defp decode_action_result(%AgentAction{result_summary: body}) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, result} when is_map(result) -> {:ok, result}
+      _result -> {:error, :invalid_retrospective_result}
+    end
+  end
+
+  defp decode_action_result(_action), do: {:error, :invalid_retrospective_result}
+
+  defp existing_suggestion_action(source, suggestion_index) do
+    target_type = source.target_type
+    target_id = source.target_id
+
+    Repo.all(
+      from action in AgentAction,
+        where:
+          action.action_key == "create_retrospective_issue" and
+            action.target_type == ^target_type and action.target_id == ^target_id and
+            action.state in ["queued", "running", "sync_pending", "done"]
+    )
+    |> Enum.find(fn action ->
+      action.target_snapshot["source_action_id"] == source.id and
+        action.target_snapshot["suggestion_index"] == suggestion_index
+    end)
+  end
 
   defp ensure_open(%Issue{state: "open"}), do: :ok
   defp ensure_open(%Issue{}), do: {:error, :issue_closed}

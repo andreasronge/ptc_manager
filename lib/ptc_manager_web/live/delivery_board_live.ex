@@ -4,6 +4,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
+  alias PtcManager.MergeDecisions
   alias PtcManager.Operations
 
   @lane_definitions [
@@ -84,8 +85,65 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       {:error, :pull_request_does_not_need_repair} ->
         {:noreply, put_flash(socket, :info, "GitHub no longer reports a repairable problem.")}
 
+      {:error, :pull_request_not_ready_for_retrospective} ->
+        {:noreply, put_flash(socket, :info, "The PR is no longer ready for a retrospective.")}
+
       _error ->
-        {:noreply, put_flash(socket, :error, "The repair action could not be queued.")}
+        {:noreply, put_flash(socket, :error, "The PR action could not be queued.")}
+    end
+  end
+
+  def handle_event(
+        "create-retrospective-issue",
+        %{"source-action-id" => source_action_id, "suggestion-index" => suggestion_index},
+        socket
+      ) do
+    with {source_action_id, ""} <- Integer.parse(source_action_id),
+         {suggestion_index, ""} <- Integer.parse(suggestion_index),
+         {:ok, _action} <-
+           MaintainerActions.enqueue_retrospective_issue(
+             source_action_id,
+             suggestion_index,
+             socket.assigns.actor
+           ) do
+      MaintainerActionPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "Approved follow-up queued for GitHub issue creation.")
+       |> load_board()}
+    else
+      {:error, :suggestion_already_handled} ->
+        {:noreply, put_flash(socket, :info, "That follow-up is already queued or handled.")}
+
+      {:error, :agent_action_already_active} ->
+        {:noreply, put_flash(socket, :error, "Another PR action is already queued or running.")}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "The follow-up issue could not be queued.")}
+    end
+  end
+
+  def handle_event("approve-merge", %{"publication-id" => publication_id}, socket) do
+    with {publication_id, ""} <- Integer.parse(publication_id),
+         {:ok, _approval} <- MergeDecisions.approve(publication_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Approved for merge at this exact PR version.")
+       |> load_board()}
+    else
+      {:error, :merge_analysis_missing} ->
+        {:noreply, put_flash(socket, :error, "Review the PR for merge first.")}
+
+      {:error, :merge_not_ready} ->
+        {:noreply, put_flash(socket, :error, "The current review does not recommend merging.")}
+
+      {:error, :merge_analysis_stale} ->
+        {:noreply, put_flash(socket, :error, "The PR changed. Review it again first.")}
+
+      _error ->
+        {:noreply,
+         put_flash(socket, :error, "The exact PR version could not be approved safely.")}
     end
   end
 
@@ -134,12 +192,34 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "repair_pr"))
   end
 
+  def retrospective_action(%{publication: nil}), do: nil
+
+  def retrospective_action(%{publication: publication}) do
+    Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "pr_retrospective"))
+  end
+
+  def merge_decision_action(%{publication: nil}), do: nil
+
+  def merge_decision_action(%{publication: publication}) do
+    Enum.find(
+      ActionCatalog.pull_request_actions(publication),
+      &(&1.key == "prepare_merge_decision")
+    )
+  end
+
+  def merge_decision_needed?(item) do
+    (item.publication && not item.publication.draft) and
+      item.publication.checks_state in ["success", "none"] and
+      item.publication.mergeability == "mergeable" and
+      (is_nil(item.pr_analysis) or not analysis_fresh?(item))
+  end
+
   def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
     do: true
 
   def active_agent_action?(_action), do: false
 
-  def work_state(%{pr_agent_action: %{action_key: "repair_pr"} = action}) do
+  def work_state(%{pr_agent_action: action}) when not is_nil(action) do
     if active_agent_action?(action), do: action.state, else: nil
   end
 
@@ -154,7 +234,112 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def work_label(%{pr_agent_action: %{action_key: "repair_pr", state: "sync_pending"}}),
     do: "Checking repaired PR"
 
+  def work_label(%{
+        pr_agent_action: %{action_key: "prepare_merge_decision", state: "queued"}
+      }),
+      do: "Merge review queued"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "prepare_merge_decision", state: "running"}
+      }),
+      do: "Agent reviewing"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "prepare_merge_decision", state: "sync_pending"}
+      }),
+      do: "Checking reviewed PR"
+
+  def work_label(%{pr_agent_action: %{action_key: "pr_retrospective", state: "queued"}}),
+    do: "Retro queued"
+
+  def work_label(%{pr_agent_action: %{action_key: "pr_retrospective", state: "running"}}),
+    do: "Agent running retro"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "create_retrospective_issue", state: "queued"}
+      }),
+      do: "Follow-up queued"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "create_retrospective_issue", state: "running"}
+      }),
+      do: "Creating follow-up"
+
   def work_label(_item), do: nil
+
+  def retrospective_suggestions(%{state: "done", result_summary: body})
+      when is_binary(body) do
+    with {:ok, result} <- Jason.decode(body),
+         suggestions when is_list(suggestions) <- result["suggestions"] do
+      Enum.with_index(suggestions)
+    else
+      _result -> []
+    end
+  end
+
+  def retrospective_suggestions(_action), do: []
+
+  def retrospective_summary(%{state: "done", result_summary: body}) when is_binary(body) do
+    with {:ok, result} <- Jason.decode(body),
+         summary when is_binary(summary) <- result["private_summary"] do
+      summary
+    else
+      _result -> nil
+    end
+  end
+
+  def retrospective_summary(_action), do: nil
+
+  def suggestion_action(item, source_action_id, suggestion_index) do
+    Enum.find(item.pr_retrospective_issue_actions, fn action ->
+      action.target_snapshot["source_action_id"] == source_action_id and
+        action.target_snapshot["suggestion_index"] == suggestion_index
+    end)
+  end
+
+  def suggestion_action_active?(%{state: state})
+      when state in ["queued", "running", "sync_pending"],
+      do: true
+
+  def suggestion_action_active?(_action), do: false
+
+  def suggestion_action_label(%{state: "queued"}), do: "Issue queued"
+  def suggestion_action_label(%{state: "running"}), do: "Creating issue"
+  def suggestion_action_label(%{state: "sync_pending"}), do: "Checking GitHub"
+  def suggestion_action_label(%{state: "failed"}), do: "Try again"
+  def suggestion_action_label(_action), do: "Add as GitHub issue"
+
+  def created_issue_number(%{state: "done", result_summary: body}) when is_binary(body) do
+    with {:ok, result} <- Jason.decode(body),
+         [number] <- result["created_issue_numbers"],
+         true <- is_integer(number) do
+      number
+    else
+      _result -> nil
+    end
+  end
+
+  def created_issue_number(_action), do: nil
+
+  def suggestion_not_created?(%{state: "done", result_summary: body}) when is_binary(body) do
+    with {:ok, result} <- Jason.decode(body) do
+      result["outcome"] == "no-followups"
+    else
+      _result -> false
+    end
+  end
+
+  def suggestion_not_created?(_action), do: false
+
+  def issue_url(item, issue_number) do
+    "https://github.com/#{item.issue.repository.github_owner}/#{item.issue.repository.github_name}/issues/#{issue_number}"
+  end
+
+  def category_label(category) when is_binary(category) do
+    category |> String.replace("-", " ") |> String.capitalize()
+  end
+
+  def category_label(_category), do: "Follow-up"
 
   def health_badges(item) do
     publication = item.publication

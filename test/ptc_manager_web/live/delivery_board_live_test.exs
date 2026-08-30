@@ -33,6 +33,9 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     stuck_job = approved_job("Resolve conflicts") |> set_job_state("pr_open")
     _stuck_publication = publication_fixture(stuck_job, "success", "conflicting")
 
+    needs_review_job = approved_job("Review the clean pull request") |> set_job_state("pr_open")
+    needs_review_publication = publication_fixture(needs_review_job, "success", "mergeable")
+
     ready_job = approved_job("Merge the finished change") |> set_job_state("pr_open")
     ready_publication = publication_fixture(ready_job, "success", "mergeable")
     analysis_fixture(ready_publication)
@@ -48,6 +51,23 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
            )
 
     assert has_element?(view, "#lane-stuck #board-job-#{stuck_job.id}", "Merge conflicts")
+
+    assert has_element?(view, "#lane-review #board-job-#{needs_review_job.id}")
+
+    assert has_element?(
+             view,
+             "#review-for-merge-#{needs_review_publication.id}",
+             "Review for merge"
+           )
+
+    view
+    |> element("#review-for-merge-#{needs_review_publication.id}")
+    |> render_click()
+
+    assert Repo.get_by!(AgentAction,
+             action_key: "prepare_merge_decision",
+             target_id: needs_review_publication.id
+           ).state == "queued"
 
     assert has_element?(
              view,
@@ -79,6 +99,43 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
            )
 
     assert has_element?(view, "#repair-pr-#{publication.id}[disabled]")
+  end
+
+  test "shows a private retro on merge-ready work and creates only an approved suggestion", %{
+    conn: conn
+  } do
+    job = approved_job("Merge and learn from this change") |> set_job_state("pr_open")
+    publication = publication_fixture(job, "success", "mergeable")
+    analysis_fixture(publication)
+    retrospective = retrospective_action_fixture(publication)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#lane-ready #board-job-#{job.id}")
+    assert has_element?(view, "#retro-pr-#{publication.id}", "Retro")
+    assert has_element?(view, "#approve-merge-board-#{publication.id}", "Approve merge")
+
+    assert has_element?(
+             view,
+             "#retro-suggestion-#{retrospective.id}-0",
+             "A rare retry can still surprise users."
+           )
+
+    create_button = "#create-retro-issue-#{retrospective.id}-0"
+    assert has_element?(view, create_button, "Add as GitHub issue")
+
+    view |> element(create_button) |> render_click()
+
+    creation =
+      Repo.get_by!(AgentAction,
+        action_key: "create_retrospective_issue",
+        target_id: publication.id
+      )
+
+    assert creation.state == "queued"
+    assert creation.target_snapshot["source_action_id"] == retrospective.id
+    assert creation.target_snapshot["suggestion_index"] == 0
+    assert has_element?(view, "#{create_button}[disabled]", "Issue queued")
   end
 
   defp approved_job(title) do
@@ -190,6 +247,54 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
       head_sha: publication.remote_head_sha,
       diff_digest: publication.diff_digest,
       analyzed_at: now
+    })
+    |> Repo.insert!()
+  end
+
+  defp retrospective_action_fixture(publication) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    publication = Repo.preload(publication, job: :repository)
+
+    result = %{
+      "outcome" => "followups-proposed",
+      "private_summary" => "One useful follow-up is worth considering.",
+      "why_it_matters" => "It may prevent a future regression.",
+      "scope" => "small",
+      "risk" => "low",
+      "technical_evidence" => "The retry edge case is not covered.",
+      "github_changes" => [],
+      "evidence" => ["Reviewed the pull request diff"],
+      "created_issue_numbers" => [],
+      "suggestions" => [
+        %{
+          "title" => "Investigate the unusual retry",
+          "simple_summary" => "A rare retry can still surprise users.",
+          "why_it_matters" => "It might repeat the bug in another path.",
+          "category" => "potential-bug",
+          "technical_evidence" => "No focused test covers the unusual retry.",
+          "suggested_issue_body" => "Investigate the retry found while reviewing this PR."
+        }
+      ]
+    }
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: publication.job.repository_id,
+      action_key: "pr_retrospective",
+      target_type: "pull_request",
+      target_id: publication.id,
+      target_label: "PR ##{publication.pr_number}",
+      prompt_version: 1,
+      prompt: "Review the pull request without changing GitHub",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "done",
+      attempt_count: 1,
+      requested_at: now,
+      started_at: now,
+      ended_at: now,
+      result_summary: Jason.encode!(result)
     })
     |> Repo.insert!()
   end

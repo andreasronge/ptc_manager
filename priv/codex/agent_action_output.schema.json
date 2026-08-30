@@ -11,12 +11,13 @@
     "technical_evidence",
     "github_changes",
     "evidence",
-    "created_issue_numbers"
+    "created_issue_numbers",
+    "suggestions"
   ],
   "properties": {
     "outcome": {
       "type": "string",
-      "enum": ["ready", "blocked", "needs-decision", "reject", "followups-created", "no-followups", "merge-ready", "merge-blocked", "merge-needs-decision", "repaired", "repair-blocked"]
+      "enum": ["ready", "blocked", "needs-decision", "reject", "followups-proposed", "followups-created", "no-followups", "merge-ready", "merge-blocked", "merge-needs-decision", "repaired", "repair-blocked"]
     },
     "private_summary": {"type": "string", "minLength": 1, "maxLength": 4000},
     "why_it_matters": {"type": "string", "minLength": 1, "maxLength": 4000},
@@ -37,6 +38,33 @@
       "type": "array",
       "maxItems": 50,
       "items": {"type": "integer", "minimum": 1}
+    },
+    "suggestions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "simple_summary",
+          "why_it_matters",
+          "category",
+          "technical_evidence",
+          "suggested_issue_body"
+        ],
+        "properties": {
+          "title": {"type": "string", "minLength": 1, "maxLength": 160},
+          "simple_summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "why_it_matters": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "category": {
+            "type": "string",
+            "enum": ["potential-bug", "refactoring", "flaky-test", "missing-test", "surprise", "other"]
+          },
+          "technical_evidence": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "suggested_issue_body": {"type": "string", "minLength": 1, "maxLength": 10000}
+        }
+      }
     }
   }
 }

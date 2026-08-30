@@ -952,6 +952,8 @@ defmodule PtcManager.Operations do
     pr_analyses = latest_pr_analyses(publication_ids)
     merge_approvals = latest_merge_approvals(Map.values(pr_analyses))
     agent_actions = latest_agent_actions()
+    retrospective_actions = latest_agent_actions("pr_retrospective")
+    retrospective_issue_actions = retrospective_issue_actions()
 
     Enum.map(issues, fn issue ->
       %{
@@ -993,6 +995,24 @@ defmodule PtcManager.Operations do
                ) do
             nil -> nil
             publication -> Map.get(agent_actions, {"pull_request", publication.id})
+          end,
+        pr_retrospective_action:
+          case publication_for_issue(
+                 publications,
+                 Map.get(jobs, issue.id),
+                 Map.get(latest_jobs, issue.id)
+               ) do
+            nil -> nil
+            publication -> Map.get(retrospective_actions, {"pull_request", publication.id})
+          end,
+        pr_retrospective_issue_actions:
+          case publication_for_issue(
+                 publications,
+                 Map.get(jobs, issue.id),
+                 Map.get(latest_jobs, issue.id)
+               ) do
+            nil -> []
+            publication -> Map.get(retrospective_issue_actions, publication.id, [])
           end
       }
     end)
@@ -1508,6 +1528,24 @@ defmodule PtcManager.Operations do
     |> Enum.reduce(%{}, fn action, actions ->
       Map.put_new(actions, {action.target_type, action.target_id}, action)
     end)
+  end
+
+  defp latest_agent_actions(action_key) do
+    AgentAction
+    |> where([action], action.action_key == ^action_key)
+    |> order_by([action], desc: action.inserted_at, desc: action.id)
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn action, actions ->
+      Map.put_new(actions, {action.target_type, action.target_id}, action)
+    end)
+  end
+
+  defp retrospective_issue_actions do
+    AgentAction
+    |> where([action], action.action_key == "create_retrospective_issue")
+    |> order_by([action], desc: action.inserted_at, desc: action.id)
+    |> Repo.all()
+    |> Enum.group_by(& &1.target_id)
   end
 
   defp latest_pr_analyses([]), do: %{}

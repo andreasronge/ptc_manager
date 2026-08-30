@@ -117,6 +117,11 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   end
 
   @doc false
+  def validate_result(result, action_key)
+      when is_map(result) and not is_map_key(result, "suggestions") do
+    validate_result(Map.put(result, "suggestions", []), action_key)
+  end
+
   def validate_result(
         %{
           "outcome" => outcome,
@@ -127,7 +132,8 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
           "technical_evidence" => technical_evidence,
           "github_changes" => changes,
           "evidence" => evidence,
-          "created_issue_numbers" => created_issue_numbers
+          "created_issue_numbers" => created_issue_numbers,
+          "suggestions" => suggestions
         },
         action_key
       )
@@ -136,6 +142,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
              "blocked",
              "needs-decision",
              "reject",
+             "followups-proposed",
              "followups-created",
              "no-followups",
              "merge-ready",
@@ -145,8 +152,16 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
              "repair-blocked"
            ] and is_binary(summary) and is_binary(why_it_matters) and
              scope in ["small", "medium", "large"] and risk in ["low", "medium", "high"] and
-             is_binary(technical_evidence) and is_list(changes) and is_list(evidence),
-      do: validate_action_result(action_key, outcome, created_issue_numbers, changes)
+             is_binary(technical_evidence) and is_list(changes) and is_list(evidence) and
+             is_list(suggestions),
+      do:
+        validate_action_result(
+          action_key,
+          outcome,
+          created_issue_numbers,
+          changes,
+          suggestions
+        )
 
   def validate_result(_result, _action_key), do: {:error, :invalid_agent_action_output}
 
@@ -159,6 +174,10 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
        do: :ok
 
   defp validate_outcome("pr_retrospective", outcome)
+       when outcome in ["followups-proposed", "no-followups"],
+       do: :ok
+
+  defp validate_outcome("create_retrospective_issue", outcome)
        when outcome in ["followups-created", "no-followups"],
        do: :ok
 
@@ -172,10 +191,17 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
   defp validate_outcome(_action_key, _outcome), do: {:error, :invalid_agent_action_outcome}
 
-  defp validate_action_result(action_key, outcome, created_issue_numbers, changes) do
+  defp validate_action_result(
+         action_key,
+         outcome,
+         created_issue_numbers,
+         changes,
+         suggestions
+       ) do
     with :ok <- validate_outcome(action_key, outcome),
          :ok <- validate_created_issue_numbers(action_key, outcome, created_issue_numbers),
-         :ok <- validate_github_changes(action_key, changes) do
+         :ok <- validate_github_changes(action_key, changes),
+         :ok <- validate_suggestions(action_key, outcome, suggestions) do
       :ok
     end
   end
@@ -185,16 +211,23 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   defp validate_github_changes("prepare_merge_decision", _changes),
     do: {:error, :unexpected_github_changes}
 
+  defp validate_github_changes("pr_retrospective", []), do: :ok
+
+  defp validate_github_changes("pr_retrospective", _changes),
+    do: {:error, :unexpected_github_changes}
+
   defp validate_github_changes(_action_key, _changes), do: :ok
 
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("repair_pr", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("pr_retrospective", "followups-proposed", []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "no-followups", []), do: :ok
+  defp validate_created_issue_numbers("create_retrospective_issue", "no-followups", []), do: :ok
 
   defp validate_created_issue_numbers(
-         "pr_retrospective",
+         "create_retrospective_issue",
          "followups-created",
          issue_numbers
        )
@@ -207,6 +240,40 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
   defp validate_created_issue_numbers(_action_key, _outcome, _issue_numbers),
     do: {:error, :invalid_created_issue_numbers}
+
+  defp validate_suggestions("pr_retrospective", "followups-proposed", suggestions)
+       when suggestions != [] do
+    if Enum.all?(suggestions, &valid_suggestion?/1),
+      do: :ok,
+      else: {:error, :invalid_retrospective_suggestions}
+  end
+
+  defp validate_suggestions("pr_retrospective", "no-followups", []), do: :ok
+  defp validate_suggestions(_action_key, _outcome, []), do: :ok
+
+  defp validate_suggestions(_action_key, _outcome, _suggestions),
+    do: {:error, :unexpected_retrospective_suggestions}
+
+  defp valid_suggestion?(%{
+         "title" => title,
+         "simple_summary" => summary,
+         "why_it_matters" => why,
+         "category" => category,
+         "technical_evidence" => evidence,
+         "suggested_issue_body" => body
+       }) do
+    Enum.all?([title, summary, why, evidence, body], &(is_binary(&1) and String.trim(&1) != "")) and
+      category in [
+        "potential-bug",
+        "refactoring",
+        "flaky-test",
+        "missing-test",
+        "surprise",
+        "other"
+      ]
+  end
+
+  defp valid_suggestion?(_suggestion), do: false
 
   defp schema_path,
     do: Application.app_dir(:ptc_manager, "priv/codex/agent_action_output.schema.json")

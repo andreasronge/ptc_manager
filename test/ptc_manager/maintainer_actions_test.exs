@@ -50,15 +50,47 @@ defmodule PtcManager.MaintainerActionsTest do
 
       {:ok,
        %{
-         "outcome" => "followups-created",
+         "outcome" => "followups-proposed",
          "private_summary" => "The retrospective found one concrete follow-up.",
          "why_it_matters" => "The follow-up prevents the same regression.",
          "scope" => "small",
          "risk" => "low",
          "technical_evidence" => "The pull request left one edge case uncovered.",
-         "github_changes" => ["Created issue #900"],
+         "github_changes" => [],
          "evidence" => ["Reviewed the merged diff"],
-         "created_issue_numbers" => [900]
+         "created_issue_numbers" => [],
+         "suggestions" => [
+           %{
+             "title" => "Cover the retry edge case",
+             "simple_summary" => "One unusual retry can still behave unexpectedly.",
+             "why_it_matters" => "It could repeat the regression.",
+             "category" => "potential-bug",
+             "technical_evidence" => "The merged diff does not cover the retry edge case.",
+             "suggested_issue_body" => "Investigate the retry edge case found in PR #81."
+           }
+         ]
+       }}
+    end
+  end
+
+  defmodule RetrospectiveIssueAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(action) do
+      send(Process.get(:agent_action_test_pid), {:ran_agent_action, action})
+
+      {:ok,
+       %{
+         "outcome" => "followups-created",
+         "private_summary" => "The approved follow-up was created.",
+         "why_it_matters" => "The work is now visible in the planning inbox.",
+         "scope" => "small",
+         "risk" => "low",
+         "technical_evidence" => "The new issue links to the source pull request.",
+         "github_changes" => ["Created issue #900"],
+         "evidence" => ["Created one unlabelled issue"],
+         "created_issue_numbers" => [900],
+         "suggestions" => []
        }}
     end
   end
@@ -303,7 +335,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.prompt =~ "you, the primary maintainer, must sanity-check their findings"
     assert action.prompt =~ "Do not invoke nested reviewers"
     assert action.prompt =~ "leave exactly `ptc:ready`"
-    assert action.prompt =~ "Return an empty `created_issue_numbers` array"
+    assert action.prompt =~ "Return empty `created_issue_numbers` and `suggestions` arrays"
   end
 
   test "serializes different maintainer actions for the same issue" do
@@ -386,8 +418,8 @@ defmodule PtcManager.MaintainerActionsTest do
                publication: publication
              })
 
-    assert prompt =~ "Creating zero issues is a valid"
-    assert prompt =~ "without a managed `ptc:*` workflow label"
+    assert prompt =~ "Returning zero suggestions is valid"
+    assert prompt =~ "Do not create or modify GitHub issues"
     assert prompt =~ "Search existing open and closed issues"
     assert prompt =~ "Follow relevant links"
   end
@@ -402,7 +434,8 @@ defmodule PtcManager.MaintainerActionsTest do
       "technical_evidence" => "Evidence",
       "github_changes" => [],
       "evidence" => [],
-      "created_issue_numbers" => []
+      "created_issue_numbers" => [],
+      "suggestions" => []
     }
 
     assert :ok = CodexAdapter.validate_result(result, "prepare_issue")
@@ -420,12 +453,28 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:error, :invalid_agent_action_outcome} =
              CodexAdapter.validate_result(retrospective, "review_issue")
 
+    proposed =
+      retrospective
+      |> Map.put("outcome", "followups-proposed")
+      |> Map.put("suggestions", [
+        %{
+          "title" => "Investigate retry behavior",
+          "simple_summary" => "A rare retry may still fail.",
+          "why_it_matters" => "Users could lose work.",
+          "category" => "potential-bug",
+          "technical_evidence" => "The edge case has no test.",
+          "suggested_issue_body" => "Investigate the retry behavior found in PR #23."
+        }
+      ])
+
+    assert :ok = CodexAdapter.validate_result(proposed, "pr_retrospective")
+
     created =
       retrospective
       |> Map.put("outcome", "followups-created")
       |> Map.put("created_issue_numbers", [23])
 
-    assert :ok = CodexAdapter.validate_result(created, "pr_retrospective")
+    assert :ok = CodexAdapter.validate_result(created, "create_retrospective_issue")
 
     merge_result =
       result
@@ -1114,7 +1163,7 @@ defmodule PtcManager.MaintainerActionsTest do
     refute_receive {:ran_agent_action, _action}
   end
 
-  test "verifies retrospective follow-up issue numbers against synchronized GitHub state" do
+  test "keeps retrospective read-only and creates only an explicitly approved suggestion" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
     publication = retrospective_publication_fixture(issue)
@@ -1126,24 +1175,54 @@ defmodule PtcManager.MaintainerActionsTest do
     issue_fixture(repository, %{number: 901, body: "Created while this action was queued."})
 
     assert {:ok, completed} =
-             MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: RetrospectiveSync)
+             MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: NoopSync)
 
     assert completed.id == queued.id
     assert completed.state == "done"
     assert 901 in completed.baseline_issue_numbers["numbers"]
+
+    assert {:ok, creation} =
+             MaintainerActions.enqueue_retrospective_issue(completed.id, 0, "andreas")
+
+    assert creation.action_key == "create_retrospective_issue"
+    assert creation.target_snapshot["source_action_id"] == completed.id
+    assert creation.target_snapshot["suggestion_index"] == 0
+
+    assert {:error, :suggestion_already_handled} =
+             MaintainerActions.enqueue_retrospective_issue(completed.id, 0, "andreas")
+
+    assert {:ok, created} =
+             MaintainerActions.run_once(
+               adapter: RetrospectiveIssueAdapter,
+               sync: RetrospectiveSync
+             )
+
+    assert created.id == creation.id
+    assert created.state == "done"
 
     second_repository = repository_fixture()
     second_issue = issue_fixture(second_repository)
     issue_fixture(second_repository, %{number: 900, body: "Already tracked from PR #81."})
     second_publication = retrospective_publication_fixture(second_issue)
 
-    assert {:ok, queued_without_issue} =
+    assert {:ok, _queued_without_issue} =
              MaintainerActions.enqueue("pr_retrospective", second_publication.id, "andreas")
 
-    assert {:ok, failed} =
+    assert {:ok, proposal} =
              MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: NoopSync)
 
-    assert failed.id == queued_without_issue.id
+    assert proposal.state == "done"
+
+    assert {:ok, duplicate_creation} =
+             MaintainerActions.enqueue_retrospective_issue(proposal.id, 0, "andreas")
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: RetrospectiveIssueAdapter,
+               sync: NoopSync
+             )
+
+    assert failed.id == duplicate_creation.id
     assert failed.state == "failed"
     assert failed.last_error =~ "canonical_followup_issues_mismatch"
 
@@ -1155,11 +1234,11 @@ defmodule PtcManager.MaintainerActionsTest do
              MaintainerActions.enqueue("pr_retrospective", third_publication.id, "andreas")
 
     assert {:ok, unexpected_creation} =
-             MaintainerActions.run_once(adapter: NoFollowupsAdapter, sync: RetrospectiveSync)
+             MaintainerActions.run_once(adapter: RetrospectiveAdapter, sync: RetrospectiveSync)
 
     assert unexpected_creation.id == no_followups.id
     assert unexpected_creation.state == "failed"
-    assert unexpected_creation.last_error =~ "canonical_followup_issues_mismatch"
+    assert unexpected_creation.last_error =~ "canonical_retrospective_proposal_mismatch"
   end
 
   test "defers a retrospective when its immediate pre-action GitHub sync fails" do
