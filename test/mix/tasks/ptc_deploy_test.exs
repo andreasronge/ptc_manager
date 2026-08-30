@@ -89,6 +89,19 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "running_worktree_root"
   end
 
+  test "remote deployment exposes the pinned Node runtime to managed agents" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "node_version=22.23.2"
+    assert script =~ "install_worker_node"
+    assert script =~ "/opt/ptc-manager-node-${node_version}"
+    assert script =~ "lib/node_modules/npm/bin/npm-cli.js"
+    assert script =~ "lib/node_modules/npm/bin/npx-cli.js"
+    assert script =~ "lib/node_modules/corepack/dist/corepack.js"
+    assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/node --version"
+    assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
+  end
+
   defp jq_count(payload) do
     fixture = write_json_fixture(payload)
     {output, 0} = System.cmd("jq", ["-r", "-f", @agent_filter, fixture])

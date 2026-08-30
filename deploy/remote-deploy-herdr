@@ -30,6 +30,9 @@ database_backup=
 failed_database=
 health_url=
 mise_binary=/home/agent/.local/bin/mise
+node_version=22.23.2
+worker_node_dir="/opt/ptc-manager-node-${node_version}"
+worker_node_staging=
 manual_herdr=/home/agent/.local/bin/herdr
 worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
@@ -50,6 +53,10 @@ cleanup_remote() {
 
   case "$build_dir" in
     /home/agent/src/ptc_manager-build-*) rm -rf -- "$build_dir" ;;
+  esac
+
+  case "$worker_node_staging" in
+    /opt/ptc-manager-node-*) sudo rm -rf -- "$worker_node_staging" ;;
   esac
 }
 
@@ -232,6 +239,63 @@ ensure_private_worktree_root() {
     [ "$current" = "/" ] && break
     current=$(dirname "$current")
   done
+}
+
+install_worker_node() {
+  node_source=$("$mise_binary" where "node@${node_version}")
+
+  case "$node_source" in
+    /home/agent/.local/share/mise/installs/node/*) ;;
+    *)
+      echo "mise returned an unexpected Node installation path: $node_source" >&2
+      return 1
+      ;;
+  esac
+
+  if [ ! -x "$node_source/bin/node" ]; then
+    echo "mise-managed Node executable is missing: $node_source/bin/node" >&2
+    return 1
+  fi
+
+  if ! sudo test -e "$worker_node_dir"; then
+    worker_node_staging=$(sudo mktemp -d "/opt/ptc-manager-node-${node_version}.XXXXXX")
+    sudo cp -a "$node_source/." "$worker_node_staging/"
+    sudo chown -R root:root "$worker_node_staging"
+
+    if [ "$(sudo "$worker_node_staging/bin/node" --version)" != "v${node_version}" ]; then
+      echo "staged worker Node runtime has an unexpected version" >&2
+      return 1
+    fi
+
+    sudo mv "$worker_node_staging" "$worker_node_dir"
+    worker_node_staging=
+  fi
+
+  if [ "$(sudo "$worker_node_dir/bin/node" --version)" != "v${node_version}" ]; then
+    echo "installed worker Node runtime has an unexpected version" >&2
+    return 1
+  fi
+
+  npm_cli="$worker_node_dir/lib/node_modules/npm/bin/npm-cli.js"
+  npx_cli="$worker_node_dir/lib/node_modules/npm/bin/npx-cli.js"
+  corepack_cli="$worker_node_dir/lib/node_modules/corepack/dist/corepack.js"
+
+  for executable in "$worker_node_dir/bin/node" "$npm_cli" "$npx_cli" "$corepack_cli"; do
+    if ! sudo test -x "$executable"; then
+      echo "worker Node command is missing or not executable: $executable" >&2
+      return 1
+    fi
+  done
+
+  sudo ln -sfn "$worker_node_dir/bin/node" /usr/local/bin/node
+  sudo ln -sfn "$npm_cli" /usr/local/bin/npm
+  sudo ln -sfn "$npx_cli" /usr/local/bin/npx
+  sudo ln -sfn "$corepack_cli" /usr/local/bin/corepack
+
+  sudo -u ptc-manager-worker -H /usr/local/bin/node --version >/dev/null
+  sudo -u ptc-manager-worker -H /usr/local/bin/npm --version >/dev/null
+  sudo -u ptc-manager-worker -H /usr/local/bin/npx --version >/dev/null
+  sudo -u ptc-manager-worker -H /usr/local/bin/corepack --version >/dev/null
 }
 
 prune_successful_backups() {
@@ -436,6 +500,7 @@ fi
 ensure_no_managed_runs
 ensure_no_busy_herdr_agents
 ensure_private_worktree_root "$worktree_root"
+install_worker_node
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.
@@ -449,13 +514,13 @@ tar -xf "$source_archive" -C "$build_dir"
 cd "$build_dir"
 
 echo "Building production release..."
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix deps.get
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix compile
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix assets.deploy
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 node@22.23.2 -- \
+"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix release
 
 [ -x "$new_release/bin/ptc_manager" ]

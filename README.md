@@ -315,6 +315,13 @@ checks the configured manual Herdr session. If the optional
 `ptc_manager-herdr` worker service is running, its live session is checked too;
 observation-only installations do not require that worker service.
 
+Deployments also install the pinned Node.js runtime used for release builds
+under `/opt/ptc-manager-node-<version>` and expose `node`, `npm`, `npx`, and
+`corepack` through `/usr/local/bin`. Managed Codex and Claude agents therefore
+receive the same Node version even though the worker service cannot read the
+interactive `agent` account's mise installation. The deployment verifies Node
+as the `ptc-manager-worker` user before replacing the application release.
+
 The task reads the actual `DATABASE_PATH` and `PORT` from the running systemd
 service, creates a consistent SQLite backup, and replaces `/opt/ptc_manager`.
 Starting the new release applies all pending Ecto migrations before the web
