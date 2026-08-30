@@ -64,14 +64,16 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#metric-agents", "1 / 2")
 
     view
-    |> element("#timeline-run-#{run.id} button")
+    |> element("#timeline-run-#{run.id} a")
     |> render_click()
 
+    assert_patch(view, ~p"/operations?agent=#{run.id}")
     assert has_element?(view, "#agent-detail-panel", "Read-only terminal")
     assert has_element?(view, "#agent-terminal-output", "Result: 169 passed")
     refute render(view) =~ "textarea"
 
     view |> element("#close-agent-detail") |> render_click()
+    assert_patch(view, ~p"/operations")
     refute has_element?(view, "#agent-detail-panel")
 
     send(view.pid, :metrics_tick)

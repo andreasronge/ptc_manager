@@ -25,6 +25,20 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   @impl true
+  def handle_params(%{"agent" => id}, _uri, socket) do
+    {:noreply, open_agent(socket, id)}
+  end
+
+  def handle_params(_params, _uri, socket) do
+    {:noreply,
+     socket
+     |> cancel_agent_output_timer()
+     |> assign(:selected_run, nil)
+     |> assign(:agent_output, nil)
+     |> assign(:agent_output_error, nil)}
+  end
+
+  @impl true
   def handle_info(:metrics_tick, socket) do
     Process.send_after(self(), :metrics_tick, 5_000)
 
@@ -50,27 +64,26 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   @impl true
-  def handle_event("show_agent", %{"id" => id}, socket) do
+  def handle_event("close_agent", _params, socket),
+    do: {:noreply, push_patch(socket, to: ~p"/operations")}
+
+  defp open_agent(socket, id) do
     with {run_id, ""} <- Integer.parse(id),
          %{} = run <- Enum.find(socket.assigns.timeline, &(&1.id == run_id)) do
-      {:noreply,
-       socket
-       |> cancel_agent_output_timer()
-       |> assign(:selected_run, run)
-       |> load_agent_output()
-       |> schedule_agent_output()}
+      socket
+      |> cancel_agent_output_timer()
+      |> assign(:selected_run, run)
+      |> load_agent_output()
+      |> schedule_agent_output()
     else
-      _failure -> {:noreply, put_flash(socket, :error, "That agent run is no longer available.")}
+      _failure ->
+        socket
+        |> cancel_agent_output_timer()
+        |> assign(:selected_run, nil)
+        |> assign(:agent_output, nil)
+        |> assign(:agent_output_error, nil)
+        |> put_flash(:error, "That agent run is no longer available.")
     end
-  end
-
-  def handle_event("close_agent", _params, socket) do
-    {:noreply,
-     socket
-     |> cancel_agent_output_timer()
-     |> assign(:selected_run, nil)
-     |> assign(:agent_output, nil)
-     |> assign(:agent_output_error, nil)}
   end
 
   def percent(nil), do: "—"
@@ -260,7 +273,11 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   defp schedule_agent_output(%{assigns: %{selected_run: %{ended_at: nil}}} = socket) do
-    assign(socket, :agent_output_timer, Process.send_after(self(), :agent_output_tick, 5_000))
+    if connected?(socket) do
+      assign(socket, :agent_output_timer, Process.send_after(self(), :agent_output_tick, 5_000))
+    else
+      socket
+    end
   end
 
   defp schedule_agent_output(socket), do: socket
