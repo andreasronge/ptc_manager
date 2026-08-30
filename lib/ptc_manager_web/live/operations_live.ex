@@ -2,6 +2,7 @@ defmodule PtcManagerWeb.OperationsLive do
   use PtcManagerWeb, :live_view
 
   alias PtcManager.HostMetrics
+  alias PtcManager.Herdr.Transcript
   alias PtcManager.Operations
 
   @impl true
@@ -16,6 +17,10 @@ defmodule PtcManagerWeb.OperationsLive do
      |> assign(:page_title, "Operations")
      |> assign(:now, DateTime.utc_now())
      |> assign(:metrics, HostMetrics.snapshot())
+     |> assign(:selected_run, nil)
+     |> assign(:agent_output, nil)
+     |> assign(:agent_output_error, nil)
+     |> assign(:agent_output_timer, nil)
      |> load_operations()}
   end
 
@@ -32,6 +37,41 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def handle_info({:operations_changed, _source}, socket),
     do: {:noreply, load_operations(socket)}
+
+  def handle_info(:agent_output_tick, %{assigns: %{selected_run: nil}} = socket),
+    do: {:noreply, assign(socket, :agent_output_timer, nil)}
+
+  def handle_info(:agent_output_tick, socket) do
+    {:noreply,
+     socket
+     |> assign(:agent_output_timer, nil)
+     |> load_agent_output()
+     |> schedule_agent_output()}
+  end
+
+  @impl true
+  def handle_event("show_agent", %{"id" => id}, socket) do
+    with {run_id, ""} <- Integer.parse(id),
+         %{} = run <- Enum.find(socket.assigns.timeline, &(&1.id == run_id)) do
+      {:noreply,
+       socket
+       |> cancel_agent_output_timer()
+       |> assign(:selected_run, run)
+       |> load_agent_output()
+       |> schedule_agent_output()}
+    else
+      _failure -> {:noreply, put_flash(socket, :error, "That agent run is no longer available.")}
+    end
+  end
+
+  def handle_event("close_agent", _params, socket) do
+    {:noreply,
+     socket
+     |> cancel_agent_output_timer()
+     |> assign(:selected_run, nil)
+     |> assign(:agent_output, nil)
+     |> assign(:agent_output_error, nil)}
+  end
 
   def percent(nil), do: "—"
   def percent(value), do: :erlang.float_to_binary(value / 1, decimals: 1) <> "%"
@@ -162,9 +202,19 @@ defmodule PtcManagerWeb.OperationsLive do
   def slot_markers(total) when is_integer(total) and total > 0, do: 1..total
   def slot_markers(_total), do: []
 
+  def terminal_refresh_label(%{ended_at: nil}), do: "Auto-refreshes every 5 seconds"
+  def terminal_refresh_label(_run), do: "Final retained terminal snapshot"
+
   defp load_operations(socket) do
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()
+    timeline = Operations.list_agent_timeline(40)
+
+    selected_run =
+      case socket.assigns.selected_run do
+        nil -> nil
+        selected -> Enum.find(timeline, &(&1.id == selected.id)) || selected
+      end
 
     active_slot_count =
       Enum.count(active_runs, &(&1.role == "implementer" and not is_nil(&1.job_id)))
@@ -175,7 +225,8 @@ defmodule PtcManagerWeb.OperationsLive do
       workers: workers,
       active_runs: active_runs,
       active_slot_count: active_slot_count,
-      timeline: Operations.list_agent_timeline(40),
+      timeline: timeline,
+      selected_run: selected_run,
       total_slots: total_slots,
       available_slots: max(total_slots - active_slot_count, 0)
     )
@@ -189,6 +240,37 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   defp worker_capacity(_worker), do: 0
+
+  defp load_agent_output(%{assigns: %{selected_run: run}} = socket) do
+    reader = Application.get_env(:ptc_manager, :herdr_transcript_reader, Transcript)
+
+    case reader.read(run) do
+      {:ok, ""} ->
+        assign(socket,
+          agent_output: "The agent terminal is currently empty.",
+          agent_output_error: nil
+        )
+
+      {:ok, output} ->
+        assign(socket, agent_output: output, agent_output_error: nil)
+
+      {:error, message} ->
+        assign(socket, agent_output: nil, agent_output_error: message)
+    end
+  end
+
+  defp schedule_agent_output(%{assigns: %{selected_run: %{ended_at: nil}}} = socket) do
+    assign(socket, :agent_output_timer, Process.send_after(self(), :agent_output_tick, 5_000))
+  end
+
+  defp schedule_agent_output(socket), do: socket
+
+  defp cancel_agent_output_timer(%{assigns: %{agent_output_timer: nil}} = socket), do: socket
+
+  defp cancel_agent_output_timer(socket) do
+    Process.cancel_timer(socket.assigns.agent_output_timer, async: true, info: false)
+    assign(socket, :agent_output_timer, nil)
+  end
 
   defp high?(nil, _threshold), do: false
   defp high?(value, threshold), do: value >= threshold

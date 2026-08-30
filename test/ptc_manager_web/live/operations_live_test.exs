@@ -4,6 +4,10 @@ defmodule PtcManagerWeb.OperationsLiveTest do
   alias PtcManager.Operations
   alias PtcManagerWeb.OperationsLive
 
+  defmodule FakeTranscript do
+    def read(_run), do: {:ok, "Running mix test\nResult: 169 passed"}
+  end
+
   test "does not recommend another agent until every machine signal is available" do
     assert OperationsLive.capacity_tone(%{
              metrics: %{cpu_percent: nil, memory_percent: 20.0, disk_percent: 10.0},
@@ -12,6 +16,13 @@ defmodule PtcManagerWeb.OperationsLiveTest do
   end
 
   test "shows machine capacity, workers, and an agent task timeline", %{conn: conn} do
+    previous_reader = Application.get_env(:ptc_manager, :herdr_transcript_reader)
+    Application.put_env(:ptc_manager, :herdr_transcript_reader, FakeTranscript)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :herdr_transcript_reader, previous_reader)
+    end)
+
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Add bounded result contracts"})
     proposal_fixture(issue)
@@ -51,6 +62,17 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#timeline-run-#{run.id}", "Add bounded result contracts")
     assert html =~ "Herdr build one"
     assert has_element?(view, "#metric-agents", "1 / 2")
+
+    view
+    |> element("#timeline-run-#{run.id} button")
+    |> render_click()
+
+    assert has_element?(view, "#agent-detail-panel", "Read-only terminal")
+    assert has_element?(view, "#agent-terminal-output", "Result: 169 passed")
+    refute render(view) =~ "textarea"
+
+    view |> element("#close-agent-detail") |> render_click()
+    refute has_element?(view, "#agent-detail-panel")
 
     send(view.pid, :metrics_tick)
     assert render(view) =~ "configured slot(s) currently available"

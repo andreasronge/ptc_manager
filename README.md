@@ -76,7 +76,9 @@ The authenticated routes are:
 - `/` — Planning backlog and maintainer actions;
 - `/board` — active delivery Kanban;
 - `/operations` — live CPU, memory, build-disk and slot signals, followed by
-  the latest 40 agent runs and their tasks.
+  the latest 40 agent runs and their tasks. Select an agent to open a bounded,
+  read-only terminal panel; active panels refresh every five seconds and expose
+  no prompt or input controls.
 
 To choose a different local password:
 
