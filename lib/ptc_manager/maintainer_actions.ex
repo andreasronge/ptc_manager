@@ -36,30 +36,53 @@ defmodule PtcManager.MaintainerActions do
              "repair_and_merge_pr"
            ] and
              is_integer(publication_id) and is_binary(actor) do
-    with %PrPublication{} = publication <-
-           PrPublication
-           |> Repo.get(publication_id)
-           |> Repo.preload([:repository, job: [:issue, :repository, :worktree_allocation]]),
-         repository when not is_nil(repository) <- publication_repository(publication),
-         {:ok, attrs} <-
-           Catalog.build(action_key, %{
-             publication: publication,
-             issue: publication.job && publication.job.issue,
-             repository: repository
-           }) do
-      Operations.enqueue_agent_action(
-        Map.merge(attrs, %{
-          action_key: action_key,
-          actor: actor
-        })
-      )
-    else
-      nil -> {:error, :not_found}
-      {:error, reason} -> {:error, reason}
-    end
+    immediate_transaction(fn ->
+      result =
+        with %PrPublication{} = publication <-
+               PrPublication
+               |> Repo.get(publication_id)
+               |> Repo.preload([
+                 :repository,
+                 job: [:issue, :repository, :worktree_allocation]
+               ]),
+             repository when not is_nil(repository) <- publication_repository(publication),
+             {:ok, attrs} <-
+               Catalog.build(action_key, %{
+                 publication: publication,
+                 issue: publication.job && publication.job.issue,
+                 repository: repository
+               }) do
+          Operations.enqueue_agent_action(
+            Map.merge(attrs, %{
+              action_key: action_key,
+              actor: actor
+            })
+          )
+        else
+          nil -> {:error, :not_found}
+          {:error, reason} -> {:error, reason}
+        end
+
+      case result do
+        {:ok, action} -> action
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  defp immediate_transaction(fun) do
+    Repo.transaction(fun, mode: :immediate)
+  rescue
+    error in Exqlite.Error ->
+      if error.message == "database is locked" and
+           String.starts_with?(error.statement || "", "BEGIN IMMEDIATE") do
+        {:error, :database_busy}
+      else
+        reraise(error, __STACKTRACE__)
+      end
+  end
 
   def enqueue_issue_decision(issue_id, source_action_id, choice, custom_answer, actor)
       when is_integer(issue_id) and is_integer(source_action_id) and is_binary(choice) and

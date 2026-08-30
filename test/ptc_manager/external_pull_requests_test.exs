@@ -5,7 +5,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
   alias PtcManager.MaintainerActions.ExternalPrRepairAdapter
   alias PtcManager.MaintainerActions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, PrPublication}
+  alias PtcManager.Operations.{AgentAction, Job, PrPublication}
   alias PtcManager.Publications
   alias PtcManager.Repo
 
@@ -168,6 +168,34 @@ defmodule PtcManager.ExternalPullRequestsTest do
              )
 
     assert Repo.get!(PrPublication, publication.id).pr_state == "closed"
+  end
+
+  test "does not import an agent PR before its managed publication row exists" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    branch = "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+
+    job
+    |> Job.changeset(%{
+      state: "working",
+      branch_name: branch,
+      publication_source: "agent",
+      fencing_token: 1
+    })
+    |> Repo.update!()
+
+    pull =
+      repository
+      |> external_status(99, String.duplicate("b", 40))
+      |> Map.put(:head_ref, branch)
+
+    assert {:ok, %{open_count: 0}} =
+             Publications.sync_external_open_pull_requests(repository, [pull])
+
+    refute Repo.get_by(PrPublication, repository_id: repository.id, pr_number: 99)
   end
 
   test "external pull requests have isolated repair but no retained-context actions" do

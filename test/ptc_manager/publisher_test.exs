@@ -6,14 +6,18 @@ defmodule PtcManager.PublisherTest do
   alias PtcManager.Operations
 
   alias PtcManager.Operations.{
+    AgentAction,
     AuditEvent,
     Job,
+    MergeApproval,
+    PrAnalysis,
     PrPublication,
     Repository,
     WorktreeAllocation
   }
 
   alias PtcManager.{
+    MaintainerActions,
     PublicationStatusPoller,
     PublicationStatusReconciler,
     Publications,
@@ -148,6 +152,382 @@ defmodule PtcManager.PublisherTest do
 
     refute_receive :probe_called
     assert {:ok, :empty} = Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+  end
+
+  test "adopts an already imported PR into its agent publication" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+
+    external =
+      %PrPublication{}
+      |> PrPublication.changeset(%{
+        repository_id: job.repository_id,
+        state: "published",
+        idempotency_key: String.duplicate("e", 64),
+        fencing_token: 0,
+        branch_name: publication.branch_name,
+        base_sha: String.duplicate("d", 40),
+        head_sha: result.head_sha,
+        diff_digest: String.duplicate("f", 64),
+        attempt_count: 0,
+        pr_number: 91,
+        pr_url: "https://github.com/owner/repo/pull/91",
+        remote_head_sha: result.head_sha,
+        remote_base_sha: String.duplicate("d", 40),
+        published_at: DateTime.utc_now(),
+        pr_state: "open",
+        pr_checked_at: DateTime.utc_now(),
+        source: "external",
+        title: "Imported before result verification",
+        author_login: "agent",
+        head_ref: publication.branch_name,
+        head_repository: base_repository(job)
+      })
+      |> Repo.insert!()
+
+    status = %{
+      pr_number: 91,
+      pr_url: external.pr_url,
+      state: "open",
+      draft: false,
+      head_sha: result.head_sha,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: String.duplicate("d", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
+
+    assert {:ok, adopted} = Publications.record_agent_publication(publication.id, status)
+    assert adopted.id == publication.id
+    assert adopted.source == "agent"
+    assert adopted.job_id == job.id
+    assert adopted.pr_number == 91
+    assert adopted.state == "published"
+    assert Repo.get!(Job, job.id).state == "pr_open"
+    refute Repo.get(PrPublication, external.id)
+
+    assert {:ok, replayed} = Publications.record_agent_publication(publication.id, status)
+    assert replayed.id == publication.id
+
+    assert Repo.aggregate(
+             from(candidate in PrPublication,
+               where: candidate.repository_id == ^job.repository_id and candidate.pr_number == 91
+             ),
+             :count
+           ) == 1
+
+    assert Repo.exists?(
+             from audit in AuditEvent,
+               where:
+                 audit.target_id == ^publication.id and
+                   audit.action == "pr_publication.external_adopted"
+           )
+  end
+
+  test "moves external PR history to the stable agent publication id" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+    external = external_publication_fixture(job, publication.branch_name, result.head_sha, 95)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, queued_action} =
+      Operations.enqueue_agent_action(%{
+        repository_id: job.repository_id,
+        action_key: "prepare_merge_decision",
+        target_type: "pull_request",
+        target_id: external.id,
+        target_label: "owner/repo#95",
+        prompt_version: 1,
+        prompt: "Historical external review",
+        actor: "maintainer"
+      })
+
+    action =
+      queued_action
+      |> AgentAction.changeset(%{state: "done", ended_at: now})
+      |> Repo.update!()
+
+    analysis =
+      %PrAnalysis{}
+      |> PrAnalysis.changeset(%{
+        publication_id: external.id,
+        agent_action_id: action.id,
+        outcome: "merge-ready",
+        plain_summary: "Ready.",
+        why_it_matters: "Preserve review history.",
+        scope: "small",
+        risk: "low",
+        technical_evidence: "Reviewed before adoption.",
+        base_repository: base_repository(job),
+        base_ref: "main",
+        reviewed_base_sha: String.duplicate("d", 40),
+        head_repository: base_repository(job),
+        head_ref: publication.branch_name,
+        head_sha: result.head_sha,
+        diff_digest: publication.diff_digest,
+        analyzed_at: now
+      })
+      |> Repo.insert!()
+
+    approval =
+      %MergeApproval{}
+      |> MergeApproval.changeset(%{
+        publication_id: external.id,
+        pr_analysis_id: analysis.id,
+        decision: "approve",
+        actor: "maintainer",
+        base_repository: base_repository(job),
+        base_ref: "main",
+        reviewed_base_sha: String.duplicate("d", 40),
+        head_sha: result.head_sha,
+        diff_digest: publication.diff_digest,
+        approved_at: now
+      })
+      |> Repo.insert!()
+
+    audit =
+      %AuditEvent{}
+      |> AuditEvent.changeset(%{
+        actor: "github-sync",
+        action: "pr_publication.external_imported",
+        target_type: "pr_publication",
+        target_id: external.id,
+        details: %{}
+      })
+      |> Repo.insert!()
+
+    status = agent_status(job, publication, external, result.head_sha, "open")
+    assert {:ok, adopted} = Publications.record_agent_publication(publication.id, status)
+    assert adopted.id == publication.id
+    assert Repo.get!(AgentAction, action.id).target_id == publication.id
+    assert Repo.get!(PrAnalysis, analysis.id).publication_id == publication.id
+    assert Repo.get!(MergeApproval, approval.id).publication_id == publication.id
+    assert Repo.get!(AuditEvent, audit.id).target_id == publication.id
+    refute Repo.get(PrPublication, external.id)
+  end
+
+  test "defers adoption while an external PR action is active and retries after it finishes" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+    external = external_publication_fixture(job, publication.branch_name, result.head_sha, 96)
+
+    {:ok, action} =
+      Operations.enqueue_agent_action(%{
+        repository_id: job.repository_id,
+        action_key: "repair_pr",
+        target_type: "pull_request",
+        target_id: external.id,
+        target_label: "owner/repo#96",
+        prompt_version: 1,
+        prompt: "Repair using the external checkout.",
+        actor: "maintainer"
+      })
+
+    status = agent_status(job, publication, external, result.head_sha, "open")
+    assert {:ok, deferred} = Publications.record_agent_publication(publication.id, status)
+    assert deferred.id == publication.id
+    assert deferred.state == "queued"
+    assert deferred.last_error =~ "active external action"
+    assert Repo.get!(Job, job.id).state == "ready_for_pr"
+    assert Repo.get!(PrPublication, external.id).source == "external"
+    assert Repo.get!(AgentAction, action.id).target_id == external.id
+
+    action
+    |> AgentAction.changeset(%{state: "done", ended_at: DateTime.utc_now()})
+    |> Repo.update!()
+
+    assert {:ok, adopted} = Publications.record_agent_publication(publication.id, status)
+    assert adopted.id == publication.id
+    assert adopted.state == "published"
+    assert adopted.last_error == nil
+    refute Repo.get(PrPublication, external.id)
+  end
+
+  @tag sandbox: false
+  test "serializes external action enqueue with agent PR adoption on separate connections" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-manager-adoption-race-#{System.unique_integer([:positive])}.db"
+      )
+
+    File.cp!(Repo.config()[:database], database)
+
+    {:ok, race_repo} =
+      Repo.start_link(
+        name: nil,
+        database: database,
+        pool_size: 3,
+        pool: DBConnection.ConnectionPool
+      )
+
+    Process.unlink(race_repo)
+    Repo.put_dynamic_repo(race_repo)
+
+    on_exit(fn ->
+      if Process.alive?(race_repo), do: Supervisor.stop(race_repo)
+      File.rm(database)
+      File.rm(database <> "-shm")
+      File.rm(database <> "-wal")
+    end)
+
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+
+    external =
+      job
+      |> external_publication_fixture(publication.branch_name, result.head_sha, 97)
+      |> PrPublication.changeset(%{checks_state: "failure"})
+      |> Repo.update!()
+
+    status = agent_status(job, publication, external, result.head_sha, "open")
+    test_pid = self()
+    handler_id = "publication-adoption-enqueue-#{System.unique_integer([:positive])}"
+    pause_once = :atomics.new(1, signed: false)
+
+    enqueue_task =
+      Task.async(fn ->
+        Repo.put_dynamic_repo(race_repo)
+
+        receive do
+          :start -> MaintainerActions.enqueue("repair_pr", external.id, "maintainer")
+        end
+      end)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:ptc_manager, :repo, :query],
+        fn _event, _measurements, metadata, {target_pid, owner_pid, pause_once} ->
+          query = Map.get(metadata, :query, "")
+
+          if self() == target_pid and String.contains?(query, "pr_publications") and
+               String.contains?(query, "SELECT") and
+               :atomics.compare_exchange(pause_once, 1, 0, 1) == :ok do
+            send(owner_pid, {:external_publication_loaded, self()})
+
+            receive do
+              :continue_enqueue -> :ok
+            end
+          end
+        end,
+        {enqueue_task.pid, test_pid, pause_once}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    send(enqueue_task.pid, :start)
+    assert_receive {:external_publication_loaded, enqueue_pid}, 1_000
+
+    {:ok, _adoption_pid} =
+      Task.start(fn ->
+        Repo.put_dynamic_repo(race_repo)
+        send(test_pid, :adoption_transaction_starting)
+
+        send(
+          test_pid,
+          {:adoption_result, Publications.record_agent_publication(publication.id, status)}
+        )
+      end)
+
+    assert_receive :adoption_transaction_starting, 1_000
+
+    assert_receive {:adoption_result, {:error, :database_busy}}, 5_000
+
+    send(enqueue_pid, :continue_enqueue)
+
+    assert {:ok, action} = Task.await(enqueue_task, 10_000)
+    assert action.target_id == external.id
+
+    assert {:ok, deferred} = Publications.record_agent_publication(publication.id, status)
+    assert deferred.id == publication.id
+    assert deferred.state == "queued"
+    assert Repo.get!(PrPublication, external.id).source == "external"
+  end
+
+  test "consolidates an imported repaired head before blocking the stale verified result" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, _result} = verified_publication_fixture()
+    repaired_head = String.duplicate("9", 40)
+
+    external =
+      external_publication_fixture(job, publication.branch_name, repaired_head, 93)
+
+    status = agent_status(job, publication, external, repaired_head, "merged")
+
+    assert {:ok, blocked} = Publications.record_agent_publication(publication.id, status)
+    assert blocked.id == publication.id
+    assert blocked.source == "agent"
+    assert blocked.state == "blocked"
+    assert blocked.last_error =~ "head commit"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+    refute Repo.get(PrPublication, external.id)
+
+    assert Repo.aggregate(
+             from(candidate in PrPublication,
+               where: candidate.repository_id == ^job.repository_id and candidate.pr_number == 93
+             ),
+             :count
+           ) == 1
+  end
+
+  test "records an agent PR that was merged before its first discovery" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+
+    status = %{
+      pr_number: 94,
+      pr_url: "https://github.com/owner/repo/pull/94",
+      state: "merged",
+      draft: false,
+      head_sha: result.head_sha,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: String.duplicate("d", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
+
+    assert {:ok, merged} = Publications.record_agent_publication(publication.id, status)
+    assert merged.state == "published"
+    assert merged.pr_state == "merged"
+    assert Repo.get!(Job, job.id).state == "done"
   end
 
   test "blocks an agent-created PR whose head does not match the verified commit" do
@@ -794,6 +1174,51 @@ defmodule PtcManager.PublisherTest do
       |> Repo.update!()
 
     {verified, publication, result}
+  end
+
+  defp external_publication_fixture(job, branch, head_sha, pr_number) do
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      repository_id: job.repository_id,
+      state: "published",
+      idempotency_key:
+        :crypto.hash(:sha256, "external-publication-#{job.id}-#{pr_number}")
+        |> Base.encode16(case: :lower),
+      fencing_token: 0,
+      branch_name: branch,
+      base_sha: String.duplicate("d", 40),
+      head_sha: head_sha,
+      diff_digest: String.duplicate("f", 64),
+      attempt_count: 0,
+      pr_number: pr_number,
+      pr_url: "https://github.com/owner/repo/pull/#{pr_number}",
+      remote_head_sha: head_sha,
+      remote_base_sha: String.duplicate("d", 40),
+      published_at: DateTime.utc_now(),
+      pr_state: "open",
+      pr_checked_at: DateTime.utc_now(),
+      source: "external",
+      title: "Imported before result verification",
+      author_login: "agent",
+      head_ref: branch,
+      head_repository: base_repository(job)
+    })
+    |> Repo.insert!()
+  end
+
+  defp agent_status(job, publication, external, head_sha, state) do
+    %{
+      pr_number: external.pr_number,
+      pr_url: external.pr_url,
+      state: state,
+      draft: false,
+      head_sha: head_sha,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: String.duplicate("d", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
   end
 
   defp published_publication_fixture do

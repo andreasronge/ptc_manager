@@ -7,9 +7,12 @@ defmodule PtcManager.Publications do
   alias PtcManager.GitHub.{LinkedIssues, PullRequestClient}
 
   alias PtcManager.Operations.{
+    AgentAction,
     AgentRun,
     AuditEvent,
     Job,
+    MergeApproval,
+    PrAnalysis,
     PrPublication,
     Repository,
     WorktreeAllocation
@@ -19,6 +22,7 @@ defmodule PtcManager.Publications do
 
   @agent_reconciliation_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
   @external_missing_marker "GitHub open-PR listing omitted this PR once; waiting for confirmation."
+  @external_adoption_deferred "The matching pull request has an active external action. Adoption will retry after that action finishes."
 
   @doc "Imports GitHub's complete open-PR snapshot without inventing implementation jobs."
   def sync_external_open_pull_requests(%Repository{} = repository, pulls) when is_list(pulls) do
@@ -373,7 +377,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_agent_result?(result) do
-        Repo.transaction(fn ->
+        immediate_transaction(fn ->
           publication =
             PrPublication
             |> preload(job: [:issue, :repository, :worktree_allocation])
@@ -382,9 +386,16 @@ defmodule PtcManager.Publications do
           job = publication.job
           repository = job.repository
 
+          publication =
+            adopt_matching_external_publication!(publication, job, repository, result, now)
+
           cond do
             publication.source != "agent" ->
               Repo.rollback(:wrong_publication_source)
+
+            publication.state == "queued" and
+                publication.last_error == @external_adoption_deferred ->
+              load(publication.id)
 
             publication.state == "published" and
                 published_matches?(publication, publication.fencing_token, result) ->
@@ -393,7 +404,8 @@ defmodule PtcManager.Publications do
             publication.state != "queued" or job.state != "ready_for_pr" ->
               Repo.rollback(:invalid_publication_state)
 
-            result.head_sha != publication.head_sha or result.head_ref != publication.branch_name ->
+            result.head_sha != publication.head_sha or
+                result.head_ref != publication.branch_name ->
               block_agent_publication!(
                 publication,
                 job,
@@ -421,15 +433,6 @@ defmodule PtcManager.Publications do
                 now
               )
 
-            result.state != "open" ->
-              block_agent_publication!(
-                publication,
-                job,
-                result,
-                "The discovered agent pull request is not open.",
-                now
-              )
-
             true ->
               publication
               |> PrPublication.changeset(
@@ -441,12 +444,13 @@ defmodule PtcManager.Publications do
                     remote_head_sha: result.head_sha,
                     remote_base_sha: result.base_sha,
                     published_at: now,
-                    pr_state: "open",
+                    pr_state: result.state,
                     pr_checked_at: now,
                     title: Map.get(result, :title) || job.issue.title,
                     author_login: Map.get(result, :author_login),
                     head_ref: result.head_ref,
                     head_repository: result.head_repository,
+                    next_attempt_at: nil,
                     last_error: nil
                   },
                   remote_health_attrs(result)
@@ -454,8 +458,21 @@ defmodule PtcManager.Publications do
               )
               |> Repo.update!()
 
+              terminal? = result.state in ["merged", "closed"]
+
+              job_state =
+                case result.state do
+                  "open" -> "pr_open"
+                  "merged" -> "done"
+                  "closed" -> "cancelled"
+                end
+
               job
-              |> Job.changeset(%{state: "pr_open", last_error: nil})
+              |> Job.changeset(%{
+                state: job_state,
+                ended_at: if(terminal?, do: now),
+                last_error: nil
+              })
               |> Repo.update!()
 
               WorktreeAllocation
@@ -466,7 +483,7 @@ defmodule PtcManager.Publications do
               )
               |> Repo.update_all(
                 set: [
-                  state: "waiting",
+                  state: if(terminal?, do: "terminal", else: "waiting"),
                   head_sha: result.head_sha,
                   pr_number: result.pr_number,
                   pr_url: result.pr_url,
@@ -476,7 +493,9 @@ defmodule PtcManager.Publications do
                 ]
               )
 
-              mark_implementation_agent_waiting(job.id, now)
+              if terminal?,
+                do: finish_retained_implementation_agent(job.id, result.state, now),
+                else: mark_implementation_agent_waiting(job.id, now)
 
               insert_audit!(%{
                 actor: "github-reconciler",
@@ -487,9 +506,19 @@ defmodule PtcManager.Publications do
                   "fencing_token" => publication.fencing_token,
                   "head_sha" => result.head_sha,
                   "pr_number" => result.pr_number,
-                  "pr_url" => result.pr_url
+                  "pr_url" => result.pr_url,
+                  "pr_state" => result.state
                 }
               })
+
+              if terminal? do
+                insert_status_audit!(
+                  publication,
+                  "pr_publication.#{result.state}",
+                  result,
+                  now
+                )
+              end
 
               load(publication.id)
           end
@@ -1005,15 +1034,28 @@ defmodule PtcManager.Publications do
   end
 
   defp managed_pr_heads(repository) do
-    PrPublication
-    |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
-    |> where(
-      [publication, job],
-      job.repository_id == ^repository.id and publication.source in ["broker", "agent"] and
-        (is_nil(publication.pr_state) or publication.pr_state == "open")
-    )
-    |> select([publication], publication.branch_name)
-    |> Repo.all()
+    publication_heads =
+      PrPublication
+      |> join(:inner, [publication], job in Job, on: job.id == publication.job_id)
+      |> where(
+        [publication, job],
+        job.repository_id == ^repository.id and publication.source in ["broker", "agent"] and
+          (is_nil(publication.pr_state) or publication.pr_state == "open")
+      )
+      |> select([publication], publication.branch_name)
+      |> Repo.all()
+
+    active_agent_job_heads =
+      Job
+      |> where(
+        [job],
+        job.repository_id == ^repository.id and job.publication_source == "agent" and
+          job.state in ^@agent_reconciliation_job_states
+      )
+      |> select([job], job.branch_name)
+      |> Repo.all()
+
+    (publication_heads ++ active_agent_job_heads)
     |> Enum.reject(&is_nil/1)
     |> MapSet.new(fn branch ->
       {String.downcase("#{repository.github_owner}/#{repository.github_name}"), branch}
@@ -1306,6 +1348,132 @@ defmodule PtcManager.Publications do
     publication.state == "published" and publication.fencing_token == fencing_token and
       publication.pr_number == result.pr_number and publication.pr_url == result.pr_url and
       publication.remote_head_sha == result.head_sha
+  end
+
+  defp adopt_matching_external_publication!(publication, job, repository, result, now) do
+    duplicate =
+      Repo.get_by(PrPublication,
+        repository_id: repository.id,
+        pr_number: result.pr_number
+      )
+
+    cond do
+      is_nil(duplicate) or duplicate.id == publication.id ->
+        publication
+
+      matching_external_identity?(duplicate, result) and active_external_action?(duplicate.id) ->
+        defer_agent_adoption!(publication, duplicate, now)
+
+      matching_external_identity?(duplicate, result) ->
+        external_id = duplicate.id
+        transfer_external_history!(external_id, publication.id)
+        Repo.delete!(duplicate)
+
+        insert_audit!(%{
+          actor: "github-reconciler",
+          action: "pr_publication.external_adopted",
+          target_type: "pr_publication",
+          target_id: publication.id,
+          details: %{
+            "job_id" => job.id,
+            "pr_number" => result.pr_number,
+            "replaced_external_publication_id" => external_id,
+            "observed_at" => DateTime.to_iso8601(now)
+          }
+        })
+
+        publication
+        |> PrPublication.changeset(%{next_attempt_at: nil, last_error: nil})
+        |> Repo.update!()
+
+      true ->
+        Repo.rollback(:pull_request_identity_conflict)
+    end
+  end
+
+  defp matching_external_identity?(publication, result) do
+    PrPublication.external?(publication) and publication.head_ref == result.head_ref and
+      String.downcase(publication.head_repository || "") ==
+        String.downcase(result.head_repository)
+  end
+
+  defp active_external_action?(publication_id) do
+    AgentAction
+    |> where(
+      [action],
+      action.target_type == "pull_request" and action.target_id == ^publication_id and
+        action.state in ["queued", "running", "sync_pending"]
+    )
+    |> Repo.exists?()
+  end
+
+  defp transfer_external_history!(external_id, managed_id) do
+    PrAnalysis
+    |> where([analysis], analysis.publication_id == ^external_id)
+    |> Repo.update_all(set: [publication_id: managed_id])
+
+    MergeApproval
+    |> where([approval], approval.publication_id == ^external_id)
+    |> Repo.update_all(set: [publication_id: managed_id])
+
+    AgentAction
+    |> where(
+      [action],
+      action.target_type == "pull_request" and action.target_id == ^external_id
+    )
+    |> Repo.update_all(set: [target_id: managed_id])
+
+    AuditEvent
+    |> where(
+      [audit],
+      audit.target_type == "pr_publication" and audit.target_id == ^external_id
+    )
+    |> Repo.update_all(set: [target_id: managed_id])
+  end
+
+  defp defer_agent_adoption!(publication, duplicate, now) do
+    retry_at =
+      DateTime.add(
+        now,
+        Application.get_env(:ptc_manager, :publication_status_interval_ms, 60_000),
+        :millisecond
+      )
+
+    deferred =
+      publication
+      |> PrPublication.changeset(%{
+        next_attempt_at: retry_at,
+        last_error: @external_adoption_deferred
+      })
+      |> Repo.update!()
+
+    insert_audit!(%{
+      actor: "github-reconciler",
+      action: "pr_publication.adoption_deferred",
+      target_type: "pr_publication",
+      target_id: publication.id,
+      details: %{
+        "external_publication_id" => duplicate.id,
+        "pr_number" => duplicate.pr_number,
+        "reason" => @external_adoption_deferred,
+        "retry_at" => DateTime.to_iso8601(retry_at),
+        "observed_at" => DateTime.to_iso8601(now)
+      }
+    })
+
+    deferred
+  end
+
+  defp immediate_transaction(fun) do
+    Repo.transaction(fun, mode: :immediate)
+  rescue
+    error in Exqlite.Error ->
+      if error.message == "database is locked" and
+           String.starts_with?(error.statement || "", "BEGIN IMMEDIATE") do
+        {:error, :database_busy}
+      else
+        reraise(error, __STACKTRACE__)
+      end
   end
 
   defp block_agent_publication!(publication, job, result, message, now) do

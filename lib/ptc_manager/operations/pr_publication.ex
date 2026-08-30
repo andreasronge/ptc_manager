@@ -131,6 +131,9 @@ defmodule PtcManager.Operations.PrPublication do
     |> unique_constraint([:repository_id, :pr_number],
       name: :pr_publications_repository_pr_number_index
     )
+    |> unique_constraint([:repository_id, :pr_number],
+      name: :pr_publications_repository_id_pr_number_index
+    )
     |> validate_publication_identity()
   end
 
