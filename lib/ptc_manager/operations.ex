@@ -31,6 +31,8 @@ defmodule PtcManager.Operations do
   @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked)
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @capacity_run_states ~w(queued starting working idle unknown)
+  @repair_action_keys ~w(repair_pr repair_and_merge_pr)
+  @merge_action_key "repair_and_merge_pr"
   @topic "operations"
 
   def subscribe, do: Phoenix.PubSub.subscribe(PtcManager.PubSub, @topic)
@@ -106,16 +108,67 @@ defmodule PtcManager.Operations do
       |> distinct(true)
       |> Repo.all()
 
+    base =
+      AgentAction
+      |> where(
+        [action],
+        action.state == "queued" and action.repository_id not in ^blocked_repository_ids and
+          (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
+      )
+
+    merge_candidate =
+      base
+      |> where(
+        [action],
+        action.action_key == @merge_action_key and
+          action.repository_id not in subquery(active_writing_repository_ids())
+      )
+      |> order_by([action], asc: action.requested_at, asc: action.id)
+      |> limit(1)
+      |> preload(:repository)
+      |> Repo.one()
+
+    merge_candidate ||
+      base
+      |> where(
+        [action],
+        action.repository_id not in subquery(active_merge_repository_ids())
+      )
+      |> order_by([action], asc: action.requested_at, asc: action.id)
+      |> limit(1)
+      |> preload(:repository)
+      |> Repo.one()
+  end
+
+  def list_queued_agent_actions do
+    AgentAction
+    |> where([action], action.state == "queued")
+    |> order_by(
+      [action],
+      asc: fragment("CASE WHEN ? = 'repair_and_merge_pr' THEN 0 ELSE 1 END", action.action_key),
+      asc: action.requested_at,
+      asc: action.id
+    )
+    |> preload(:repository)
+    |> Repo.all()
+  end
+
+  def list_queued_jobs do
+    Job
+    |> where([job], job.state == "queued")
+    |> order_by([job], asc: job.inserted_at, asc: job.id)
+    |> preload([:issue, :repository])
+    |> Repo.all()
+  end
+
+  def repository_merge_locked?(repository_id) when is_integer(repository_id) do
     AgentAction
     |> where(
       [action],
-      action.state == "queued" and action.repository_id not in ^blocked_repository_ids and
-        (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
+      action.repository_id == ^repository_id and action.action_key == @merge_action_key and
+        action.state in ["queued", "running", "sync_pending"]
     )
-    |> order_by([action], asc: action.requested_at, asc: action.id)
-    |> limit(1)
-    |> preload(:repository)
-    |> Repo.one()
+    |> Repo.exists?()
   end
 
   def claim_agent_action(action_id, now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond))
@@ -562,6 +615,7 @@ defmodule PtcManager.Operations do
         job = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
              :ok <- issue_dependencies_resolved(Repo, job.issue),
              {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, now),
@@ -645,6 +699,9 @@ defmodule PtcManager.Operations do
           {:error, :worktree_root_unavailable} ->
             Repo.rollback(:worktree_root_unavailable)
 
+          {:error, :merge_priority} ->
+            Repo.rollback(:merge_priority)
+
           {:error, reason} ->
             rejected = reject_job!(job, reason, now)
             {:rejected, reason, rejected}
@@ -724,6 +781,47 @@ defmodule PtcManager.Operations do
 
     case result do
       {:ok, value} -> notify_and_return({:ok, value})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def attach_agent_action_herdr_run(action_id, attempt_count, dispatch)
+      when is_integer(action_id) and is_integer(attempt_count) and is_map(dispatch) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        worker = get_or_create_dispatch_worker!(dispatch.worker_key, dispatch, now)
+
+        run =
+          AgentRun
+          |> where(
+            [run],
+            run.agent_action_id == ^action_id and run.fencing_token == ^attempt_count and
+              run.state in ["starting", "working"]
+          )
+          |> order_by([run], desc: run.id)
+          |> limit(1)
+          |> Repo.one!()
+
+        run
+        |> AgentRun.changeset(%{
+          worker_id: worker.id,
+          role: "implementer",
+          state: "working",
+          status_text: "Repairing the existing pull request in Herdr.",
+          last_heartbeat_at: now,
+          agent_name: dispatch.agent_name,
+          herdr_workspace: dispatch.workspace_id,
+          herdr_pane: dispatch.pane_id,
+          herdr_session: dispatch.session,
+          external_key: dispatch.external_key
+        })
+        |> Repo.update!()
+      end)
+
+    case outcome do
+      {:ok, run} -> notify_and_return({:ok, run})
       {:error, reason} -> {:error, reason}
     end
   end
@@ -1504,7 +1602,21 @@ defmodule PtcManager.Operations do
       )
       |> repo.aggregate(:count)
 
-    if active_allocation_count + legacy_job_count < capacity,
+    active_action_run_count =
+      AgentRun
+      |> join(:inner, [run], action in AgentAction, on: action.id == run.agent_action_id)
+      |> join(:left, [run, action], publication in PrPublication,
+        on: action.target_type == "pull_request" and publication.id == action.target_id
+      )
+      |> where(
+        [run, action, publication],
+        run.worker_id == ^worker.id and not is_nil(run.agent_action_id) and
+          run.state in ^@capacity_run_states and
+          (action.action_key not in ^@repair_action_keys or is_nil(publication.job_id))
+      )
+      |> repo.aggregate(:count)
+
+    if active_allocation_count + legacy_job_count + active_action_run_count < capacity,
       do: :ok,
       else: {:error, :dispatch_capacity}
   end
@@ -1780,6 +1892,8 @@ defmodule PtcManager.Operations do
 
     outcome =
       Repo.transaction(fn ->
+        worker = agent_action_worker!(candidate, now)
+
         {updated, _rows} =
           AgentAction
           |> where(
@@ -1819,15 +1933,18 @@ defmodule PtcManager.Operations do
           ]
         )
 
-        worker = get_or_create_agent_action_worker!(now)
-
         %AgentRun{}
         |> AgentRun.changeset(%{
           worker_id: worker.id,
           agent_action_id: candidate.id,
-          role: "manager",
-          state: "working",
-          status_text: "Running #{candidate.action_key |> String.replace("_", " ")}.",
+          role:
+            if(candidate.action_key in @repair_action_keys, do: "implementer", else: "manager"),
+          state: if(candidate.action_key in @repair_action_keys, do: "starting", else: "working"),
+          status_text:
+            if(candidate.action_key in @repair_action_keys,
+              do: "Waiting for Herdr to create the pull-request repair session.",
+              else: "Running #{candidate.action_key |> String.replace("_", " ")}."
+            ),
           started_at: now,
           last_heartbeat_at: now,
           fencing_token: attempt_count
@@ -1948,16 +2065,14 @@ defmodule PtcManager.Operations do
           |> limit(1)
           |> Repo.one!()
 
+        {run_state, status_text, ended_at} = retained_action_run_state(action, run, state, now)
+
         run
         |> AgentRun.changeset(%{
-          state: state,
-          status_text:
-            if(state == "done",
-              do: "Completed #{action.action_key |> String.replace("_", " ")}.",
-              else: "The action failed; details are retained in PtcManager."
-            ),
+          state: run_state,
+          status_text: status_text,
           last_heartbeat_at: now,
-          ended_at: now
+          ended_at: ended_at
         })
         |> Repo.update!()
 
@@ -1993,16 +2108,14 @@ defmodule PtcManager.Operations do
       |> limit(1)
       |> Repo.one!()
 
+    {run_state, status_text, ended_at} = retained_action_run_state(action, run, state, now)
+
     run
     |> AgentRun.changeset(%{
-      state: state,
-      status_text:
-        if(state == "done",
-          do: "Completed #{action.action_key |> String.replace("_", " ")}.",
-          else: "The action failed; GitHub reconciliation is still required."
-        ),
+      state: run_state,
+      status_text: status_text,
       last_heartbeat_at: now,
-      ended_at: now
+      ended_at: ended_at
     })
     |> Repo.update!()
   end
@@ -2048,6 +2161,136 @@ defmodule PtcManager.Operations do
     case Repo.get_by(Worker, worker_key: attrs.worker_key) do
       nil -> %Worker{} |> Worker.changeset(attrs) |> Repo.insert!()
       worker -> worker |> Worker.changeset(attrs) |> Repo.update!()
+    end
+  end
+
+  defp agent_action_worker!(%AgentAction{action_key: action_key} = action, now)
+       when action_key in @repair_action_keys do
+    if not Application.get_env(:ptc_manager, :dispatch_enabled, false) do
+      get_or_create_agent_action_worker!(now)
+    else
+      herdr_agent_action_worker!(action, now)
+    end
+  end
+
+  defp agent_action_worker!(%AgentAction{}, now), do: get_or_create_agent_action_worker!(now)
+
+  defp herdr_agent_action_worker!(%AgentAction{action_key: action_key} = action, now) do
+    session = Application.get_env(:ptc_manager, :herdr_session, "default")
+    worker_key = "herdr:#{session}"
+
+    worker =
+      case Repo.get_by(Worker, worker_key: worker_key) do
+        %Worker{status: "online"} = worker -> worker
+        _worker -> Repo.rollback(:worker_unavailable)
+      end
+
+    if action_key == "repair_pr" and
+         repository_merge_locked_except?(action.repository_id, action.id),
+       do: Repo.rollback(:merge_priority)
+
+    if action_key == @merge_action_key and repository_merge_precedes?(action),
+      do: Repo.rollback(:merge_priority)
+
+    if action_key == @merge_action_key and repository_writing_job_active?(action.repository_id),
+      do: Repo.rollback(:merge_waiting_for_active_work)
+
+    capacity =
+      case worker.capabilities["implementation_slots"] do
+        value when is_integer(value) and value > 0 -> value
+        _value -> Repo.rollback(:worker_has_no_implementation_capacity)
+      end
+
+    if managed_repair_action?(action) do
+      worker
+    else
+      case dispatch_capacity_available(Repo, worker, capacity, now) do
+        :ok -> worker
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end
+  end
+
+  defp retained_action_run_state(action, run, state, now) do
+    publication =
+      if action.action_key in @repair_action_keys and action.target_type == "pull_request",
+        do: Repo.get(PrPublication, action.target_id)
+
+    cond do
+      action.action_key in @repair_action_keys and is_binary(run.herdr_workspace) and
+        match?(%PrPublication{pr_state: "open"}, publication) and state == "done" ->
+        {"waiting", "Repair turn finished; retained while the PR remains open.", nil}
+
+      action.action_key in @repair_action_keys and is_binary(run.herdr_workspace) and
+          match?(%PrPublication{pr_state: "open"}, publication) ->
+        {"blocked", "The retained PR agent needs maintainer attention.", nil}
+
+      state == "done" ->
+        {"done", "Completed #{String.replace(action.action_key, "_", " ")}.", now}
+
+      true ->
+        {"failed", "The action failed; details are retained in PtcManager.", now}
+    end
+  end
+
+  defp active_merge_repository_ids do
+    AgentAction
+    |> where(
+      [action],
+      action.action_key == @merge_action_key and
+        action.state in ["queued", "running", "sync_pending"]
+    )
+    |> select([action], action.repository_id)
+  end
+
+  defp active_writing_repository_ids do
+    Job
+    |> where([job], job.state in ^@capacity_job_states)
+    |> select([job], job.repository_id)
+  end
+
+  defp repository_dispatch_unlocked(repository_id) do
+    if repository_merge_locked?(repository_id), do: {:error, :merge_priority}, else: :ok
+  end
+
+  defp repository_merge_locked_except?(repository_id, action_id) do
+    AgentAction
+    |> where(
+      [action],
+      action.repository_id == ^repository_id and action.id != ^action_id and
+        action.action_key == @merge_action_key and
+        action.state in ["queued", "running", "sync_pending"]
+    )
+    |> Repo.exists?()
+  end
+
+  defp repository_merge_precedes?(action) do
+    AgentAction
+    |> where(
+      [candidate],
+      candidate.repository_id == ^action.repository_id and candidate.id != ^action.id and
+        candidate.action_key == @merge_action_key and
+        (candidate.state in ["running", "sync_pending"] or
+           (candidate.state == "queued" and
+              (candidate.requested_at < ^action.requested_at or
+                 (candidate.requested_at == ^action.requested_at and candidate.id < ^action.id))))
+    )
+    |> Repo.exists?()
+  end
+
+  defp repository_writing_job_active?(repository_id) do
+    Job
+    |> where(
+      [job],
+      job.repository_id == ^repository_id and job.state in ^@capacity_job_states
+    )
+    |> Repo.exists?()
+  end
+
+  defp managed_repair_action?(%AgentAction{target_type: "pull_request", target_id: target_id}) do
+    case Repo.get(PrPublication, target_id) do
+      %PrPublication{job_id: job_id} when is_integer(job_id) -> true
+      _publication -> false
     end
   end
 

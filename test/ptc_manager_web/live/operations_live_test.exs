@@ -2,7 +2,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Job, WorktreeAllocation}
+  alias PtcManager.Operations.{AgentAction, Job, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManagerWeb.OperationsLive
 
@@ -46,6 +46,10 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     |> Job.changeset(%{state: "working", lease_owner: worker.worker_key})
     |> Repo.update!()
 
+    queued_issue = issue_fixture(repository, %{title: "Queue the next bounded change"})
+    proposal_fixture(queued_issue)
+    {:ok, queued_job} = Operations.approve_issue(queued_issue.id, "maintainer")
+
     %WorktreeAllocation{}
     |> WorktreeAllocation.changeset(%{
       worker_id: worker.id,
@@ -69,6 +73,25 @@ defmodule PtcManagerWeb.OperationsLiveTest do
         last_heartbeat_at: now
       })
 
+    priority_action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 9_004,
+        target_label: "example/repo#9004",
+        prompt_version: 1,
+        prompt: "Fix and merge the exact pull request",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: now
+      })
+      |> Repo.insert!()
+
     {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/operations")
 
     assert html =~ "Capacity and agent history"
@@ -78,6 +101,9 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#timeline-run-#{run.id}", "Add bounded result contracts")
     assert html =~ "Herdr build one"
     assert has_element?(view, "#metric-agents", "1 / 2")
+    assert has_element?(view, "#work-queue")
+    assert has_element?(view, "#queued-action-#{priority_action.id}", "Merge priority")
+    assert has_element?(view, "#queued-job-#{queued_job.id}", "Implementation")
 
     view
     |> element("#timeline-run-#{run.id} a")

@@ -4,8 +4,10 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   @behaviour PtcManager.Dispatch.Adapter
 
   alias PtcManager.Herdr.Command
+  alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
 
   @agent_start_command_grace_ms 5_000
+  @agent_action_command_grace_ms 5_000
 
   @impl true
   def dispatch(%{job: job, issue: issue, repository: repository}) do
@@ -31,6 +33,101 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   end
 
   def remove_worktree(_allocation), do: {:error, :worktree_workspace_missing}
+
+  @doc "Starts a named Herdr agent in a fresh worktree rooted at an imported PR head."
+  def start_pull_request_action(action, publication, repository) do
+    with :ok <- enabled?(),
+         {:ok, repository_path} <- repository_path(repository),
+         :ok <- valid_external_pr_context(action, publication, repository),
+         {:ok, ref} <- fetch_pull_request_head(repository_path, action, publication, repository),
+         {:ok, worktree_path} <- pull_request_worktree_path(repository, action, publication),
+         {:ok, created} <-
+           run([
+             "worktree",
+             "create",
+             "--cwd",
+             repository_path,
+             "--branch",
+             pull_request_branch(action, publication),
+             "--base",
+             ref,
+             "--path",
+             worktree_path,
+             "--label",
+             "pr-#{publication.pr_number}",
+             "--no-focus"
+           ]),
+         {:ok, workspace_id, pane_id} <- decode_worktree(created) do
+      _ = delete_temporary_ref(repository_path, ref)
+      agent_name = pull_request_agent_name(action, publication)
+
+      case start_agent(agent_name, pane_id) do
+        {:ok, agent_key} ->
+          session = Application.get_env(:ptc_manager, :herdr_session, "default")
+
+          {:ok,
+           %{
+             workspace_id: workspace_id,
+             pane_id: pane_id,
+             session: session,
+             external_key: "#{session}:#{agent_key}",
+             agent_name: agent_name,
+             worktree_path: worktree_path,
+             worker_key: "herdr:#{session}"
+           }}
+
+        {:error, reason} ->
+          _ = remove_action_workspace(workspace_id)
+          {:error, reason}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Waits for a PR action turn to settle while keeping its Herdr session alive."
+  def prompt_pull_request_action(agent_name, prompt)
+      when is_binary(agent_name) and is_binary(prompt) do
+    timeout = Application.get_env(:ptc_manager, :agent_action_timeout_ms, 7_200_000)
+
+    run(
+      [
+        "agent",
+        "prompt",
+        agent_name,
+        prompt,
+        "--wait",
+        "--until",
+        "idle",
+        "--until",
+        "done",
+        "--until",
+        "blocked",
+        "--timeout",
+        Integer.to_string(timeout)
+      ],
+      timeout + @agent_action_command_grace_ms
+    )
+  end
+
+  @doc "Returns the exact local commit produced by a PR-action agent."
+  def pull_request_action_head(worktree_path) when is_binary(worktree_path) do
+    with {:ok, head} <- capture_git(["-C", worktree_path, "rev-parse", "HEAD"]),
+         true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, head) do
+      {:ok, head}
+    else
+      false -> {:error, :invalid_pull_request_action_head}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Removes a retained PR-action workspace after its PR is terminal."
+  def remove_action_workspace(workspace) when is_binary(workspace) and workspace != "" do
+    case run(["worktree", "remove", "--workspace", workspace, "--force"]) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc false
   def remove_worktree_args(%{herdr_workspace: workspace} = allocation) do
@@ -107,6 +204,113 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       "issue-#{job.issue.number}",
       "--no-focus"
     ])
+  end
+
+  defp fetch_pull_request_head(repository_path, action, publication, repository) do
+    ref =
+      "refs/ptc-manager/pull-request-actions/#{publication.id}/#{action.id}/#{action.attempt_count}"
+
+    remote =
+      "https://github.com/#{repository.github_owner}/#{repository.github_name}.git"
+
+    with :ok <-
+           run_git([
+             "-C",
+             repository_path,
+             "fetch",
+             "--no-tags",
+             remote,
+             "+refs/pull/#{publication.pr_number}/head:#{ref}"
+           ]),
+         {:ok, fetched_head} <- capture_git(["-C", repository_path, "rev-parse", ref]),
+         true <- fetched_head == action.target_snapshot["head_sha"] do
+      {:ok, ref}
+    else
+      false -> {:error, :external_pull_request_version_changed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp delete_temporary_ref(repository_path, ref),
+    do: run_git(["-C", repository_path, "update-ref", "-d", ref])
+
+  defp pull_request_worktree_path(repository, action, publication) do
+    repository_path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
+
+    root =
+      Application.get_env(:ptc_manager, :worktree_root) ||
+        if(is_binary(repository_path),
+          do: Path.join(Path.dirname(repository_path), ".ptc-manager-worktrees")
+        )
+
+    if is_binary(root) and Path.type(root) == :absolute do
+      {:ok,
+       Path.join(
+         Path.expand(root),
+         "external-pr-#{publication.pr_number}-action-#{action.id}-f#{action.attempt_count}"
+       )}
+    else
+      {:error, :worktree_root_unavailable}
+    end
+  end
+
+  defp valid_external_pr_context(action, publication, repository) do
+    sha = action.target_snapshot["head_sha"]
+    repo = "#{repository.github_owner}/#{repository.github_name}"
+
+    cond do
+      publication.pr_state != "open" ->
+        {:error, :pull_request_not_open}
+
+      publication.head_repository != repo ->
+        {:error, :fork_pull_request_repair_not_supported}
+
+      not (is_binary(sha) and Regex.match?(~r/\A[0-9a-f]{40}\z/, sha)) ->
+        {:error, :external_pull_request_version_unavailable}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp pull_request_branch(action, publication),
+    do: "ptc-manager/repair-pr-#{publication.pr_number}-action-#{action.id}"
+
+  defp pull_request_agent_name(action, publication) do
+    prefix = if action.action_key == "repair_and_merge_pr", do: "merge", else: "repair"
+    "#{prefix}_pr#{publication.pr_number}_a#{action.id}_f#{action.attempt_count}"
+  end
+
+  defp run_git(args) do
+    case git_command(args) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, {:git_command_failed, status, bounded(output)}}
+    end
+  end
+
+  defp capture_git(args) do
+    case git_command(args) do
+      {output, 0} -> {:ok, String.trim(output)}
+      {output, status} -> {:error, {:git_command_failed, status, bounded(output)}}
+    end
+  end
+
+  defp git_command(args) do
+    binary = Application.get_env(:ptc_manager, :git_binary, "git")
+
+    {command, command_args} =
+      PrivateCodexAdapter.codex_command(
+        binary,
+        args,
+        Application.get_env(:ptc_manager, :herdr_run_as_user)
+      )
+
+    System.cmd(command, command_args,
+      env: PrivateCodexAdapter.command_environment(),
+      stderr_to_stdout: true
+    )
+  rescue
+    error -> {inspect(error.__struct__), 127}
   end
 
   defp start_agent(name, pane_id) do
@@ -232,4 +436,5 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp worktree_missing?(_allocation), do: false
 
   defp run(args, timeout \\ nil), do: Command.run(args, timeout)
+  defp bounded(output), do: output |> String.trim() |> String.slice(-1_000, 1_000)
 end

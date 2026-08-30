@@ -27,7 +27,12 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(action_key, publication_id, actor)
-      when action_key in ["pr_retrospective", "prepare_merge_decision", "repair_pr"] and
+      when action_key in [
+             "pr_retrospective",
+             "prepare_merge_decision",
+             "repair_pr",
+             "repair_and_merge_pr"
+           ] and
              is_integer(publication_id) and is_binary(actor) do
     with %PrPublication{} = publication <-
            PrPublication
@@ -204,11 +209,12 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "repair_pr"} = action, sync) do
+  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+       when action_key in ["repair_pr", "repair_and_merge_pr"] do
     case sync.sync_action(action) do
       {:ok, %{pull_request: status}} ->
         if repair_needed?(status) do
-          with {:ok, prompt} <- refreshed_repair_prompt(action, status),
+          with {:ok, prompt} <- refreshed_repair_prompt(action),
                {:ok, prepared} <-
                  Operations.record_agent_action_target_snapshot(
                    action.id,
@@ -254,11 +260,11 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp settle_repair_result(
-         %{action_key: "repair_pr", target_snapshot: snapshot},
+         %{action_key: action_key, target_snapshot: snapshot},
          {:error, _reason},
          %{pull_request: %{head_sha: head_sha}}
        )
-       when is_map(snapshot) do
+       when action_key in ["repair_pr", "repair_and_merge_pr"] and is_map(snapshot) do
     if snapshot["repair_intended_head_sha"] == head_sha do
       {:ok,
        %{
@@ -283,17 +289,19 @@ defmodule PtcManager.MaintainerActions do
 
   defp settle_repair_result(_action, result, _summary), do: result
 
-  defp refreshed_repair_prompt(action, status) do
+  defp refreshed_repair_prompt(action) do
     publication =
       PrPublication
       |> Repo.get!(action.target_id)
       |> Repo.preload([:repository, job: [:issue, :repository]])
 
-    if PrPublication.external?(publication) do
-      repository = publication.repository
-      {:ok, Catalog.external_repair_prompt(repository, publication, status)}
-    else
-      {:ok, nil}
+    with {:ok, %{prompt: prompt}} <-
+           Catalog.build(action.action_key, %{
+             publication: publication,
+             issue: publication.job && publication.job.issue,
+             repository: publication_repository(publication)
+           }) do
+      {:ok, prompt}
     end
   end
 

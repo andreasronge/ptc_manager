@@ -4,7 +4,7 @@ defmodule PtcManager.DispatchTest do
   alias PtcManager.Dispatch
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentRun, AuditEvent, IssueDependency, Job}
+  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent, IssueDependency, Job}
   alias PtcManager.Repo
 
   defmodule FakeGitHub do
@@ -58,6 +58,37 @@ defmodule PtcManager.DispatchTest do
     worker |> Operations.Worker.changeset(%{status: "degraded"}) |> Repo.update!()
 
     assert {:error, :worker_unavailable} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    assert Repo.get!(Job, job.id).state == "queued"
+    refute_receive {:dispatch_context, _context}
+  end
+
+  test "a queued fix-and-merge action prevents new implementation work in its repository" do
+    {repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "repair_and_merge_pr",
+      target_type: "pull_request",
+      target_id: 9_003,
+      target_label: "example/repo#9003",
+      prompt_version: 1,
+      prompt: "Fix and merge the exact pull request",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "andreas",
+      state: "queued",
+      attempt_count: 0,
+      requested_at: now
+    })
+    |> Repo.insert!()
+
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, :merge_priority} =
              Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
 
     assert Repo.get!(Job, job.id).state == "queued"

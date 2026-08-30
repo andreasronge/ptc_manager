@@ -84,7 +84,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#lane-stuck #board-job-#{job.id}")
-    assert has_element?(view, "#repair-pr-#{publication.id}", "Fix CI or conflicts")
+    assert has_element?(view, "#repair-pr-#{publication.id}", "Fix")
+    assert has_element?(view, "#repair-and-merge-pr-#{publication.id}", "Fix and merge")
 
     view
     |> element("#repair-pr-#{publication.id}")
@@ -100,6 +101,34 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
            )
 
     assert has_element?(view, "#repair-pr-#{publication.id}[disabled]")
+    assert has_element?(view, "#repair-and-merge-pr-#{publication.id}[disabled]")
+  end
+
+  test "queues fix-and-merge as a distinct merge-priority action", %{conn: conn} do
+    job = approved_job("Repair and merge the failing pull request") |> set_job_state("pr_open")
+    publication = publication_fixture(job, "failure", "mergeable")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    view
+    |> element("#repair-and-merge-pr-#{publication.id}")
+    |> render_click()
+
+    action =
+      Repo.get_by!(AgentAction,
+        action_key: "repair_and_merge_pr",
+        target_id: publication.id
+      )
+
+    assert action.state == "queued"
+    assert action.prompt =~ "same Herdr session"
+    assert action.prompt =~ "Merge with the authenticated `gh` CLI"
+
+    assert has_element?(
+             view,
+             "#board-job-#{job.id} [data-work-state=queued]",
+             "Priority merge queued"
+           )
   end
 
   test "shows a private retro on merge-ready work and creates only an approved suggestion", %{
@@ -154,7 +183,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#lane-stuck #board-pr-#{failing.id}", "Imported from GitHub")
-    assert has_element?(view, "#repair-pr-#{failing.id}", "Fix CI or conflicts")
+    assert has_element?(view, "#repair-pr-#{failing.id}", "Fix")
+    assert has_element?(view, "#repair-and-merge-pr-#{failing.id}", "Fix and merge")
 
     assert has_element?(
              view,

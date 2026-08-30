@@ -181,6 +181,23 @@ defmodule PtcManager.Herdr.Sync do
 
   defp upsert_agent_run(
          _worker,
+         %AgentRun{agent_action_id: action_id, state: "waiting"} = run,
+         %{state: observed_state} = attrs
+       )
+       when is_integer(action_id) and observed_state in ["idle", "done", "waiting"] do
+    attrs =
+      attrs
+      |> Map.put(:state, "waiting")
+      |> Map.put(:started_at, run.started_at)
+      |> Map.put(:ended_at, nil)
+      |> Map.put(:status_text, "Retained with its pull request; waiting for merge or closure.")
+      |> preserve_identity(run)
+
+    run |> AgentRun.changeset(attrs) |> Repo.update!()
+  end
+
+  defp upsert_agent_run(
+         _worker,
          %AgentRun{state: "lost"} = run,
          %{recover_retained: true, state: state} = attrs
        )

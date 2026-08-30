@@ -9,7 +9,8 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   alias PtcManager.Repo
 
   @impl true
-  def run(%AgentAction{action_key: "repair_pr"} = action) do
+  def run(%AgentAction{action_key: action_key} = action)
+      when action_key in ["repair_pr", "repair_and_merge_pr"] do
     publication = Repo.get!(PrPublication, action.target_id)
 
     default_adapter =
@@ -222,8 +223,9 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
        when outcome in ["merge-ready", "merge-blocked", "merge-needs-decision"],
        do: :ok
 
-  defp validate_outcome("repair_pr", outcome)
-       when outcome in ["repaired", "repair-blocked"],
+  defp validate_outcome(action_key, outcome)
+       when action_key in ["repair_pr", "repair_and_merge_pr"] and
+              outcome in ["repaired", "repair-blocked"],
        do: :ok
 
   defp validate_outcome(_action_key, _outcome), do: {:error, :invalid_agent_action_outcome}

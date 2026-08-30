@@ -224,10 +224,18 @@ defmodule PtcManagerWeb.OperationsLive do
   def terminal_refresh_label(%{ended_at: nil}), do: "Auto-refreshes every 5 seconds"
   def terminal_refresh_label(_run), do: "Final retained terminal snapshot"
 
+  def queued_action_label(%{action_key: "repair_and_merge_pr"}), do: "Fix and merge"
+  def queued_action_label(%{action_key: "repair_pr"}), do: "Fix PR"
+  def queued_action_label(action), do: String.replace(action.action_key, "_", " ")
+
+  def queue_age(now, requested_at), do: duration(now, requested_at, nil)
+
   defp load_operations(socket) do
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()
     waiting_runs = Operations.list_waiting_agent_runs()
+    queued_jobs = Operations.list_queued_jobs()
+    queued_actions = Operations.list_queued_agent_actions()
     timeline = Operations.list_agent_timeline(40)
 
     selected_run =
@@ -248,6 +256,8 @@ defmodule PtcManagerWeb.OperationsLive do
       workers: workers,
       active_runs: active_runs,
       waiting_runs: waiting_runs,
+      queued_jobs: queued_jobs,
+      queued_actions: queued_actions,
       active_slot_count: active_slot_count,
       timeline: timeline,
       selected_run: selected_run,

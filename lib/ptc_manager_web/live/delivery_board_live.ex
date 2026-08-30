@@ -192,6 +192,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "repair_pr"))
   end
 
+  def repair_and_merge_action(%{publication: nil}), do: nil
+
+  def repair_and_merge_action(%{publication: publication}) do
+    Enum.find(
+      ActionCatalog.pull_request_actions(publication),
+      &(&1.key == "repair_and_merge_pr")
+    )
+  end
+
   def retrospective_action(%{publication: nil}), do: nil
 
   def retrospective_action(%{managed?: false}), do: nil
@@ -235,6 +244,21 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   def work_label(%{pr_agent_action: %{action_key: "repair_pr", state: "sync_pending"}}),
     do: "Checking repaired PR"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "repair_and_merge_pr", state: "queued"}
+      }),
+      do: "Priority merge queued"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "repair_and_merge_pr", state: "running"}
+      }),
+      do: "Agent fixing and merging"
+
+  def work_label(%{
+        pr_agent_action: %{action_key: "repair_and_merge_pr", state: "sync_pending"}
+      }),
+      do: "Waiting for confirmed merge"
 
   def work_label(%{
         pr_agent_action: %{action_key: "prepare_merge_decision", state: "queued"}
@@ -407,10 +431,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def next_step(item, :stuck) do
     cond do
       work_state(item) == "queued" ->
-        "The repair is safely queued and will start when the maintainer agent is free."
+        if item.pr_agent_action.action_key == "repair_and_merge_pr",
+          do: "This priority merge is queued; no new repository work will start ahead of it.",
+          else: "The repair is safely queued and will start when a Herdr slot is free."
 
       work_state(item) == "running" ->
-        "An agent is repairing the existing pull request now."
+        if item.pr_agent_action.action_key == "repair_and_merge_pr",
+          do:
+            "The repository is locked while this Herdr agent fixes, verifies, and merges the PR.",
+          else: "A Herdr agent is repairing the existing pull request now."
 
       work_state(item) == "sync_pending" ->
         "The repair finished; PtcManager is verifying the new PR head against GitHub."

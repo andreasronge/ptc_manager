@@ -286,11 +286,15 @@ the worker protocol or UI concepts.
   reviewed base SHA, or diff digest changes.
 - Agent status never proves that work succeeded; GitHub branch, PR, review, and
   check state are authoritative.
-- An implementation agent receives no merge authority. GitHub writes are
+- A normal implementation agent receives no merge authority. GitHub writes are
   forbidden unless agent-publication mode explicitly limits it to pushing the
-  fenced job branch and creating or reading its one PR. The first deployment
-  does not technically isolate its `gh` credentials from maintainer actions;
-  that boundary is explicitly deferred.
+  fenced job branch and creating or reading its one PR. A distinct maintainer-
+  approved **Fix and merge** action grants one named Herdr agent authority to
+  repair, push, watch CI, and merge only its exact PR. While that action is
+  queued, running, or awaiting GitHub confirmation, it holds repository-level
+  queue priority so another writing agent cannot introduce a competing merge.
+  The first deployment does not technically isolate its `gh` credentials from
+  maintainer actions; that boundary is explicitly deferred.
 - All external effects are idempotent and carry an audit identity.
 - Labels and GitHub checks may reflect an approval, but the merge gate reads the
   SHA-bound approval record rather than trusting a mutable label.

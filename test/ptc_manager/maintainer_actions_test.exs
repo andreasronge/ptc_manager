@@ -1101,6 +1101,81 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
   end
 
+  test "managed fix-and-merge uses one slot and records a same-turn repaired merge" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :pull_request_client, previous_client)
+      Application.put_env(:ptc_manager, :dispatch_enabled, previous_dispatch)
+    end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        branch_name: job.branch_name,
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    old_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{
+        head_ref: job.branch_name,
+        base_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+
+    assert {:ok, action} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(old_status)
+             )
+
+    assert {:ok, _reserved} = Operations.reserve_worktree_for_repair(publication.job_id)
+
+    allocation_worker = Repo.get!(PtcManager.Operations.Worker, allocation.worker_id)
+
+    allocation_worker
+    |> PtcManager.Operations.Worker.changeset(%{
+      worker_key: "herdr:default",
+      status: "online",
+      capabilities: %{"herdr" => true, "implementation_slots" => 1}
+    })
+    |> Repo.update!()
+
+    assert {:ok, {claimed, _token}} = Operations.claim_agent_action(prepared.id)
+
+    File.write!(Path.join(allocation.path, "README.md"), "published\nrepaired and merged\n")
+    git!(allocation.path, ["commit", "-am", "repair before merge"])
+    repaired_head = git!(allocation.path, ["rev-parse", "HEAD"]) |> String.trim()
+    open_status = %{old_status | head_sha: repaired_head, checks_state: "success"}
+    Process.put(:repair_status, %{open_status | state: "merged"})
+
+    assert {:ok, %{publication: merged}} =
+             Sync.sync_action(claimed, {:ok, %{"outcome" => "repaired"}})
+
+    assert merged.pr_state == "merged"
+    assert merged.remote_head_sha == repaired_head
+    assert Repo.get!(PtcManager.Operations.Job, publication.job_id).state == "done"
+  end
+
   test "a blocked postflight status moves the reserved worktree to attention" do
     previous_client = Application.get_env(:ptc_manager, :pull_request_client)
     Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
@@ -1552,6 +1627,106 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:ok, {claimed, _token}} = Operations.claim_next_agent_action()
     assert claimed.id == second.id
     assert claimed.repository_id == second_repository.id
+  end
+
+  test "fix-and-merge is selected before older ordinary agent actions" do
+    repository = repository_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    ordinary =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: 9_001,
+        target_label: "example/repo#9001",
+        prompt_version: 1,
+        prompt: "Prepare issue",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: DateTime.add(now, -60, :second)
+      })
+      |> Repo.insert!()
+
+    priority =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 9_002,
+        target_label: "example/repo#9002",
+        prompt_version: 1,
+        prompt: "Fix and merge the exact pull request",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: now
+      })
+      |> Repo.insert!()
+
+    assert Operations.next_agent_action_candidate().id == priority.id
+    assert Enum.map(Operations.list_queued_agent_actions(), & &1.id) == [priority.id, ordinary.id]
+    assert Operations.repository_merge_locked?(repository.id)
+  end
+
+  test "a priority merge waiting for active repository work does not starve another repository" do
+    busy_repository = repository_fixture()
+    busy_issue = issue_fixture(busy_repository)
+    proposal_fixture(busy_issue)
+    {:ok, busy_job} = Operations.approve_issue(busy_issue.id, "andreas")
+
+    busy_job
+    |> PtcManager.Operations.Job.changeset(%{state: "working"})
+    |> Repo.update!()
+
+    other_repository = repository_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: busy_repository.id,
+      action_key: "repair_and_merge_pr",
+      target_type: "pull_request",
+      target_id: 9_101,
+      target_label: "busy/repo#9101",
+      prompt_version: 1,
+      prompt: "Fix and merge",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "andreas",
+      state: "queued",
+      attempt_count: 0,
+      requested_at: DateTime.add(now, -60, :second)
+    })
+    |> Repo.insert!()
+
+    available =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: other_repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: 9_102,
+        target_label: "other/repo#9102",
+        prompt_version: 1,
+        prompt: "Prepare issue",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: now
+      })
+      |> Repo.insert!()
+
+    assert Operations.next_agent_action_candidate().id == available.id
   end
 
   defp retrospective_publication_fixture(issue) do

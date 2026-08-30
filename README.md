@@ -40,8 +40,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
   that import every open repository PR and place it in Review & CI, Needs
   attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
-  **Fix CI or conflicts**, **PR retrospective**, and **Prepare merge decision**
-  buttons;
+  **Fix**, **Fix and merge**, **PR retrospective**, and **Prepare merge decision**
+  buttons, all visible alongside queued implementation jobs on **Operations**;
 - a Delivery-board **Review for merge** action once CI and mergeability are
   clean, followed by a private **Retro** that proposes simple follow-up choices;
 - one shared clock/spinner status language for queued and actively running work
@@ -172,13 +172,20 @@ catalog contains:
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
   verified diff still match. This increment records approval but does not merge.
-- **Fix CI or conflicts**, shown when any open PR has failing checks or merge
-  conflicts. A PtcManager-created PR resumes its original named Herdr agent and
-  retained worktree. A PR imported from GitHub instead gets a fresh disposable
-  worktree and ephemeral repair agent. Both paths push only to the existing PR
-  branch without force and perform the configured review-and-fix passes. The
-  disposable worktree is removed after the attempt. Imported PRs deliberately
-  have no **Retro** button because they have no retained implementation session.
+- **Fix**, shown when any open PR has failing checks or merge conflicts. A
+  PtcManager-created PR resumes its original named Herdr agent and retained
+  worktree. A PR imported from GitHub gets a fresh isolated Herdr worktree and
+  named repair agent. The agent repairs, reviews, commits, and pushes only to the
+  existing PR branch without force. Its session remains available while the PR
+  is open and is removed after GitHub reports the PR merged or closed.
+- **Fix and merge**, which gives the same repository the highest queue priority.
+  PtcManager prevents new writing agents from starting in that repository while
+  the action is queued, running, or awaiting GitHub confirmation. The Herdr
+  agent—not PtcManager—repairs and pushes the branch, watches required CI,
+  resolves any newly introduced conflict, and merges that exact PR with the
+  authenticated `gh` CLI. PtcManager verifies the resulting GitHub state and
+  retains the session until the PR is merged or closed. Imported PRs deliberately
+  have no **Retro** button because they lack the original implementation context.
 
 For issue dependencies, GitHub remains authoritative. Maintainer actions write
 the canonical `Blocked by #<number>` marker into the dependent issue and apply
@@ -458,13 +465,14 @@ made the PR terminal; non-terminal cleanup still requires a clean, verified
 head.
 
 External PRs participate in the same CI and conflict lanes, but they do not
-create fake issues or jobs. Private merge review is intentionally omitted until
-it has the same credential-free isolation as repair. Their
-repair workspace is short-lived and therefore does not supply retrospective
-context later. External repair runs Codex in its workspace-write sandbox without
-GitHub credentials available to model-generated commands; the coordinator then
-commits and pushes the exact local repair SHA through its credential broker and
-requires GitHub to report that same SHA before recording success.
+create fake issues or jobs. Private merge review is omitted because there is no
+original retained implementation context. Repair actions create a named Herdr
+agent in a fresh isolated worktree rooted at the exact observed PR head. **Fix**
+authorizes that agent to repair and push the existing branch. **Fix and merge**
+also authorizes that same agent to watch and repair CI until green and merge only
+that exact PR. PtcManager keeps the action durable, reserves repository priority,
+records the Herdr identity for read-only output, and independently confirms the
+GitHub result before releasing the repository and cleaning the worktree.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

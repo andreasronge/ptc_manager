@@ -118,6 +118,19 @@
               {repair_action(item).label}
             </button>
             <button
+              :if={lane.key == :stuck && repair_and_merge_action(item)}
+              id={"repair-and-merge-pr-#{item.publication.id}"}
+              phx-click="run-agent-action"
+              phx-value-action-key="repair_and_merge_pr"
+              phx-value-target-id={item.publication.id}
+              disabled={active_agent_action?(item.pr_agent_action)}
+              title={repair_and_merge_action(item).description}
+              class="inline-flex items-center gap-1.5 rounded-lg bg-teal-400 px-3 py-2 font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            >
+              <.icon name="hero-forward-mini" class="size-3.5" />
+              {repair_and_merge_action(item).label}
+            </button>
+            <button
               :if={lane.key == :ready && retrospective_action(item)}
               id={"retro-pr-#{item.publication.id}"}
               phx-click="run-agent-action"

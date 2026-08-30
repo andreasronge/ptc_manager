@@ -13,7 +13,8 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
   @command_grace_ms 5_000
 
   @impl true
-  def run(%AgentAction{action_key: "repair_pr", target_id: publication_id} = action) do
+  def run(%AgentAction{action_key: action_key, target_id: publication_id} = action)
+      when action_key in ["repair_pr", "repair_and_merge_pr"] do
     with %PrPublication{} = publication <-
            PrPublication
            |> Repo.get(publication_id)
@@ -110,7 +111,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
           |> where(
             [run],
             run.agent_action_id == ^action.id and run.fencing_token == ^action.attempt_count and
-              run.state == "working"
+              run.state in ["starting", "working"]
           )
           |> Repo.update_all(
             set: [

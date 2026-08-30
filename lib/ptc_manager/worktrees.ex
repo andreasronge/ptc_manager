@@ -2,6 +2,7 @@ defmodule PtcManager.Worktrees do
   @moduledoc "Enforces worker-advertised worktree capacity and safe reclamation."
 
   alias PtcManager.Operations
+  alias PtcManager.ExternalPrSessions
   alias PtcManager.Repository.GitProbe
 
   def ensure_slot(worker_key, capacity, adapter, probe \\ GitProbe)
@@ -24,6 +25,13 @@ defmodule PtcManager.Worktrees do
   end
 
   def cleanup_terminal_once(adapter \\ configured_adapter(), probe \\ GitProbe) do
+    case ExternalPrSessions.cleanup_terminal_once() do
+      {:ok, :empty} -> cleanup_managed_terminal_once(adapter, probe)
+      other -> other
+    end
+  end
+
+  defp cleanup_managed_terminal_once(adapter, probe) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     candidate =

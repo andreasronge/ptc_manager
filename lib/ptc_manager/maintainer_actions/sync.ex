@@ -52,15 +52,18 @@ defmodule PtcManager.MaintainerActions.Sync do
     end
   end
 
-  def sync_action(%{action_key: "repair_pr"} = action), do: sync_repair(action, :preflight)
+  def sync_action(%{action_key: action_key} = action)
+      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      do: sync_repair(action, :preflight)
 
   def sync_action(%{action_key: action_key, repository: repository})
       when action_key in ["pr_retrospective", "create_retrospective_issue"] do
     GitHubSync.sync_repository(repository)
   end
 
-  def sync_action(%{action_key: "repair_pr"} = action, result),
-    do: sync_repair(action, {:postflight, result})
+  def sync_action(%{action_key: action_key} = action, result)
+      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      do: sync_repair(action, {:postflight, result})
 
   def sync_action(action, _result), do: sync_action(action)
 
@@ -104,6 +107,26 @@ defmodule PtcManager.MaintainerActions.Sync do
     end
   end
 
+  defp reconcile_repair_status(
+         %{action_key: "repair_and_merge_pr"} = action,
+         publication,
+         %{state: "merged"} = result,
+         {:postflight, {:ok, %{"outcome" => "repaired"}}}
+       ) do
+    if merged_repair_matches?(action, publication, result) do
+      with {:ok, prepared} <- prepare_merged_repair(action, publication, result),
+           {:ok, %{state: "published", pr_state: "merged"} = updated} <-
+             Publications.record_remote_status(prepared.id, result) do
+        {:ok, %{pull_request: result, publication: updated}}
+      else
+        {:ok, _unexpected} -> {:terminal_error, :merged_repair_not_recorded}
+        {:error, reason} -> {:terminal_error, reason}
+      end
+    else
+      {:terminal_error, :unexpected_repair_head_change}
+    end
+  end
+
   defp reconcile_repair_status(_action, publication, %{state: state} = result, {:postflight, _})
        when state in ["merged", "closed"] do
     case Publications.record_remote_status(publication.id, result) do
@@ -123,8 +146,13 @@ defmodule PtcManager.MaintainerActions.Sync do
     cond do
       is_binary(intended_head) and head_sha == intended_head ->
         case Publications.record_remote_status(publication.id, result) do
-          {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
-          {:error, reason} -> {:terminal_error, reason}
+          {:ok, updated} ->
+            if action.action_key == "repair_and_merge_pr",
+              do: {:error, :authorized_merge_not_finished},
+              else: {:ok, %{pull_request: result, publication: updated}}
+
+          {:error, reason} ->
+            {:terminal_error, reason}
         end
 
       is_binary(intended_head) and head_sha == preflight_head(action) and
@@ -137,11 +165,20 @@ defmodule PtcManager.MaintainerActions.Sync do
       is_binary(intended_head) ->
         {:terminal_error, :unexpected_repair_head_change}
 
-      head_sha != preflight_head(action) ->
-        {:terminal_error, :unexpected_repair_head_change}
-
       match?({:error, _reason}, execution_result) ->
-        {:terminal_error, :repair_execution_uncertain}
+        {:terminal_error, {:repair_execution_failed, elem(execution_result, 1)}}
+
+      match?({:ok, %{"outcome" => "repair-blocked"}}, execution_result) ->
+        case Publications.record_remote_status(publication.id, result) do
+          {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
+          {:error, reason} -> {:terminal_error, reason}
+        end
+
+      action.action_key == "repair_and_merge_pr" ->
+        case Publications.record_remote_status(publication.id, result) do
+          {:ok, _updated} -> {:error, :authorized_merge_not_finished}
+          {:error, reason} -> {:terminal_error, reason}
+        end
 
       true ->
         case Publications.record_remote_status(publication.id, result) do
@@ -162,7 +199,9 @@ defmodule PtcManager.MaintainerActions.Sync do
     else
       case record_verified_repair(action, publication, result) do
         {:ok, _publication} ->
-          {:ok, %{pull_request: result}}
+          if action.action_key == "repair_and_merge_pr",
+            do: {:error, :authorized_merge_not_finished},
+            else: {:ok, %{pull_request: result}}
 
         {:error, :repair_base_missing} ->
           if action.sync_attempt_count >= repair_visibility_sync_limit() do
@@ -312,6 +351,22 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   defp repair_intended_head(_action), do: nil
+
+  defp merged_repair_matches?(action, %PrPublication{source: "external"}, result),
+    do: repair_intended_head(action) == result.head_sha
+
+  defp merged_repair_matches?(_action, _publication, _result), do: true
+
+  defp prepare_merged_repair(_action, %PrPublication{source: "external"} = publication, _result),
+    do: {:ok, publication}
+
+  defp prepare_merged_repair(action, publication, result) do
+    if result.head_sha == publication.remote_head_sha do
+      {:ok, publication}
+    else
+      record_verified_repair(action, publication, Map.put(result, :state, "open"))
+    end
+  end
 
   defp repair_visibility_sync_limit do
     Application.get_env(:ptc_manager, :repair_visibility_sync_limit, 8)
