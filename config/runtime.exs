@@ -72,7 +72,7 @@ config :ptc_manager,
   agent_action_interval_ms:
     System.get_env("PTC_AGENT_ACTION_INTERVAL_MS", "5000") |> String.to_integer(),
   agent_action_timeout_ms:
-    System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "1800000") |> String.to_integer(),
+    System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "7200000") |> String.to_integer(),
   agent_action_sync_retry_base_ms:
     System.get_env("PTC_AGENT_ACTION_SYNC_RETRY_BASE_MS", "5000") |> String.to_integer(),
   agent_action_sync_retry_max_ms:

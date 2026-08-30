@@ -517,6 +517,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
     assert queued.state == "queued"
     assert queued.prompt =~ "Repair the existing"
+    assert queued.prompt =~ "uncommitted changes from an earlier interrupted repair attempt"
     assert queued.prompt =~ "codex-review"
     assert queued.prompt =~ "Never use `--force`"
 
