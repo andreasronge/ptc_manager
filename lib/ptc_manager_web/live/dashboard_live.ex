@@ -339,6 +339,12 @@ defmodule PtcManagerWeb.DashboardLive do
     do: true
 
   def active_agent_action?(_action), do: false
+  def agent_action_label(%{action_key: "repair_pr", state: "queued"}), do: "Repair queued"
+  def agent_action_label(%{action_key: "repair_pr", state: "running"}), do: "Agent repairing"
+
+  def agent_action_label(%{action_key: "repair_pr", state: "sync_pending"}),
+    do: "Checking repaired PR"
+
   def agent_action_label(%{state: "queued"}), do: "Agent action queued"
   def agent_action_label(%{state: "running"}), do: "Agent action running"
   def agent_action_label(%{state: "sync_pending"}), do: "Waiting for GitHub sync"

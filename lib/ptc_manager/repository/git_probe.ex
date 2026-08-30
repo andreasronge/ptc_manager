@@ -21,8 +21,61 @@ defmodule PtcManager.Repository.GitProbe do
          :ok <- valid_branch(job),
          {:ok, head_sha} <- revision(path, "refs/heads/#{job.branch_name}^{commit}"),
          {:ok, base_ref} <- base_ref(path, repository.default_branch),
-         {:ok, base_sha} <- merge_base(path, base_ref, head_sha),
-         {:ok, commit_count} <- commit_count(path, base_sha, head_sha),
+         {:ok, base_sha} <- merge_base(path, base_ref, head_sha) do
+      verify_range(path, base_sha, head_sha)
+    else
+      false -> {:error, :repository_path_unavailable}
+      error -> error
+    end
+  end
+
+  @doc "Verifies a repair against the immutable base commit reported by GitHub."
+  def verify_repair_at(%Repository{}, %Job{} = job, path, github_base_sha)
+      when is_binary(path) and is_binary(github_base_sha) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         true <- Regex.match?(@sha, github_base_sha),
+         :ok <- valid_branch(job),
+         {:ok, head_sha} <- revision(path, "refs/heads/#{job.branch_name}^{commit}"),
+         :ok <- exact_base_available(path, github_base_sha),
+         {:ok, base_sha} <- merge_base(path, github_base_sha, head_sha) do
+      verify_range(path, base_sha, head_sha)
+    else
+      false -> {:error, :invalid_repair_base}
+      error -> error
+    end
+  end
+
+  def verify_repair_at(_repository, _job, _path, _github_base_sha),
+    do: {:error, :invalid_repair_base}
+
+  @doc "Reads HEAD only when the retained worktree is still on the job branch."
+  def current_job_head(path, %Job{branch_name: branch} = job)
+      when is_binary(path) and is_binary(branch) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         :ok <- valid_branch(job),
+         {:ok, ^branch} <- git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+         {:ok, head_sha} <- revision(path, "HEAD^{commit}") do
+      {:ok, head_sha}
+    else
+      false -> {:error, :worktree_path_unavailable}
+      {:ok, _other_branch} -> {:error, :unexpected_branch}
+      error -> error
+    end
+  end
+
+  def current_job_head(_path, _job), do: {:error, :unexpected_branch}
+
+  defp exact_base_available(path, expected_sha) do
+    case revision(path, "#{expected_sha}^{commit}") do
+      {:ok, ^expected_sha} -> :ok
+      {:ok, _other_sha} -> {:error, :invalid_repair_base}
+      {:error, :branch_missing} -> {:error, :repair_base_missing}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp verify_range(path, base_sha, head_sha) do
+    with {:ok, commit_count} <- commit_count(path, base_sha, head_sha),
          :ok <- has_commits(commit_count),
          {:ok, changed_paths} <- changed_paths(path, base_sha, head_sha),
          :ok <- within_path_limit(changed_paths),
@@ -35,9 +88,6 @@ defmodule PtcManager.Repository.GitProbe do
          diff_digest: diff_digest,
          commit_count: commit_count
        }}
-    else
-      false -> {:error, :repository_path_unavailable}
-      error -> error
     end
   end
 
@@ -57,6 +107,27 @@ defmodule PtcManager.Repository.GitProbe do
   end
 
   def reclaimable(_path, _branch, _expected_head), do: {:error, :invalid_worktree_identity}
+
+  @doc "Proves that a repaired head preserves the already-published PR history."
+  def descendant?(path, ancestor, head)
+      when is_binary(path) and is_binary(ancestor) and is_binary(head) do
+    cond do
+      Path.type(path) != :absolute or not File.dir?(path) ->
+        {:error, :worktree_path_unavailable}
+
+      not Regex.match?(@sha, ancestor) or not Regex.match?(@sha, head) ->
+        {:error, :invalid_sha}
+
+      true ->
+        case run_git(path, ["merge-base", "--is-ancestor", ancestor, head], {:collect, 1_024}) do
+          {:ok, _output} -> :ok
+          {:error, {:git_failed, "merge-base", 1}} -> {:error, :repair_not_fast_forward}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  def descendant?(_path, _ancestor, _head), do: {:error, :invalid_sha}
 
   defp repository_path(repository) do
     path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path

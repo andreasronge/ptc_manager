@@ -27,12 +27,12 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(action_key, publication_id, actor)
-      when action_key in ["pr_retrospective", "prepare_merge_decision"] and
+      when action_key in ["pr_retrospective", "prepare_merge_decision", "repair_pr"] and
              is_integer(publication_id) and is_binary(actor) do
     with %PrPublication{} = publication <-
            PrPublication
            |> Repo.get(publication_id)
-           |> Repo.preload(job: [:issue, :repository]),
+           |> Repo.preload(job: [:issue, :repository, :worktree_allocation]),
          {:ok, attrs} <-
            Catalog.build(action_key, %{
              publication: publication,
@@ -79,7 +79,7 @@ defmodule PtcManager.MaintainerActions do
         with {:ok, prepared} <- prepare_for_execution(candidate, sync),
              {:ok, {action, token}} <- Operations.claim_agent_action(prepared.id) do
           result = adapter.run(action)
-          sync_result = sync.sync_action(action)
+          sync_result = sync_after_execution(sync, action, result)
 
           case sync_result do
             {:ok, summary} ->
@@ -150,12 +150,71 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  defp prepare_for_execution(%{action_key: "repair_pr"} = action, sync) do
+    case sync.sync_action(action) do
+      {:ok, %{pull_request: status}} ->
+        if repair_needed?(status) do
+          with {:ok, prepared} <-
+                 Operations.record_agent_action_target_snapshot(
+                   action.id,
+                   MergeDecisions.snapshot(status)
+                 ) do
+            case reserve_repair_worktree(action) do
+              {:ok, _allocation} ->
+                {:ok, prepared}
+
+              {:error, reason} ->
+                fail_preflight(action.id, reason)
+            end
+          end
+        else
+          fail_preflight(action.id, :pull_request_no_longer_needs_repair)
+        end
+
+      {:ok, _summary} ->
+        {:error, :pull_request_status_missing}
+
+      {:terminal_error, reason} ->
+        fail_preflight(action.id, reason)
+
+      {:error, reason} ->
+        case Operations.defer_agent_action_preflight(action.id, reason) do
+          {:ok, deferred} -> {:deferred, deferred}
+          {:error, defer_reason} -> {:error, defer_reason}
+        end
+    end
+  end
+
   defp prepare_for_execution(action, _sync), do: {:ok, action}
 
+  defp repair_needed?(status) do
+    status.checks_state == "failure" or status.mergeability == "conflicting"
+  end
+
+  defp reserve_repair_worktree(action) do
+    publication = Repo.get!(PrPublication, action.target_id)
+    Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+  end
+
+  defp fail_preflight(action_id, reason) do
+    case Operations.fail_agent_action_preflight(action_id, reason) do
+      {:ok, failed} -> {:terminal, failed}
+      {:error, failure} -> {:error, failure}
+    end
+  end
+
+  defp sync_after_execution(sync, action, result) do
+    if is_atom(sync) and Code.ensure_loaded?(sync) and function_exported?(sync, :sync_action, 2),
+      do: sync.sync_action(action, result),
+      else: sync.sync_action(action)
+  end
+
   defp reconcile_action(action, sync) do
-    case sync.sync_action(action) do
+    execution_result = stored_execution_result(action)
+
+    case sync_after_execution(sync, action, execution_result) do
       {:ok, summary} = synced ->
-        case store_private_analysis(action, stored_execution_result(action), summary) do
+        case store_private_analysis(action, execution_result, summary) do
           {:ok, _result} ->
             Operations.complete_agent_action_sync(action.id, synced)
 

@@ -44,7 +44,14 @@
           disabled={@github_syncing || @repositories == []}
           class="rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
         >
-          {if @github_syncing, do: "Syncing…", else: "Sync now"}
+          <%= if @github_syncing do %>
+            <span class="inline-flex items-center gap-1.5">
+              <.icon name="hero-arrow-path-mini" class="size-3.5 motion-safe:animate-spin" />
+              Syncing…
+            </span>
+          <% else %>
+            Sync now
+          <% end %>
         </button>
       </div>
       <div :for={repository <- @repositories} class="mt-4 border-t border-white/10 pt-3 text-xs">
@@ -277,7 +284,10 @@
             >
               <%= cond do %>
                 <% investigating?(@investigating, item.issue.id) -> %>
-                  Investigating…
+                  <span class="inline-flex items-center gap-1.5">
+                    <.icon name="hero-arrow-path-mini" class="size-4 motion-safe:animate-spin" />
+                    Investigating…
+                  </span>
                 <% item.proposal && !fresh?(item) -> %>
                   Investigate again
                 <% item.proposal -> %>
@@ -298,15 +308,12 @@
             >
               {action.label}
             </button>
-            <span
+            <.work_status
               :if={item.issue_agent_action}
-              class={[
-                "rounded-xl px-3 py-2 text-xs",
-                state_classes(item.issue_agent_action.state)
-              ]}
-            >
-              {agent_action_label(item.issue_agent_action)}
-            </span>
+              state={item.issue_agent_action.state}
+              label={agent_action_label(item.issue_agent_action)}
+              class="rounded-xl px-3 py-2"
+            />
             <button
               :if={!item.active_job}
               id={"approve-issue-#{item.issue.id}"}
@@ -317,12 +324,12 @@
             >
               Approve and start
             </button>
-            <span
+            <.work_status
               :if={item.active_job}
-              class="rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm text-sky-300"
-            >
-              Job {job_label(item.active_job.state)}
-            </span>
+              state={item.active_job.state}
+              label={"Job #{job_label(item.active_job.state)}"}
+              class="rounded-xl px-4 py-2.5 text-sm"
+            />
             <button
               :if={
                 item.active_job &&
@@ -334,23 +341,23 @@
               disabled={reconciling_result?(@reconciling_results, item.active_job.id)}
               class="rounded-xl bg-white/10 px-4 py-2.5 text-sm font-semibold text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
             >
-              {if reconciling_result?(@reconciling_results, item.active_job.id),
-                do: "Checking branch…",
-                else:
-                  if(item.active_job.state == "verifying_result",
-                    do: "Check verification status",
-                    else: "Check committed branch"
-                  )}
+              <%= if reconciling_result?(@reconciling_results, item.active_job.id) do %>
+                <span class="inline-flex items-center gap-1.5">
+                  <.icon name="hero-arrow-path-mini" class="size-4 motion-safe:animate-spin" />
+                  Checking branch…
+                </span>
+              <% else %>
+                {if item.active_job.state == "verifying_result",
+                  do: "Check verification status",
+                  else: "Check committed branch"}
+              <% end %>
             </button>
-            <span
+            <.work_status
               :if={!item.active_job && item.latest_job}
-              class={[
-                "rounded-xl px-4 py-2.5 text-sm",
-                state_classes(item.latest_job.state)
-              ]}
-            >
-              Last job {item.latest_job.state}
-            </span>
+              state={item.latest_job.state}
+              label={"Last job #{item.latest_job.state}"}
+              class="rounded-xl px-4 py-2.5 text-sm"
+            />
             <a
               href={item.issue.html_url}
               target="_blank"
@@ -452,15 +459,12 @@
                   >
                     {action.label}
                   </button>
-                  <span
+                  <.work_status
                     :if={item.pr_agent_action}
-                    class={[
-                      "rounded-lg px-3 py-2 text-xs",
-                      state_classes(item.pr_agent_action.state)
-                    ]}
-                  >
-                    {agent_action_label(item.pr_agent_action)}
-                  </span>
+                    state={item.pr_agent_action.state}
+                    label={agent_action_label(item.pr_agent_action)}
+                    class="rounded-lg px-3 py-2"
+                  />
                 </div>
               <% item.publication && item.publication.state == "blocked" -> %>
                 <p class="mt-2 text-xs text-amber-300">
@@ -587,15 +591,12 @@
               >
                 {action.label}
               </button>
-              <span
+              <.work_status
                 :if={item.pr_agent_action}
-                class={[
-                  "rounded-lg px-3 py-2 text-xs",
-                  state_classes(item.pr_agent_action.state)
-                ]}
-              >
-                {agent_action_label(item.pr_agent_action)}
-              </span>
+                state={item.pr_agent_action.state}
+                label={agent_action_label(item.pr_agent_action)}
+                class="rounded-lg px-3 py-2"
+              />
             </div>
             <div
               :if={agent_action_private_summary(item.pr_agent_action)}
@@ -701,9 +702,7 @@
                 {run.worker.name} · <span class="capitalize">{run.role} agent</span>
               </p>
             </div>
-            <span class={["rounded-full px-2.5 py-1 text-xs ring-1", state_classes(run.state)]}>
-              {run.state}
-            </span>
+            <.work_status state={run.state} label={run.state} />
           </div>
 
           <div :if={run.job} class="mt-4">
@@ -795,12 +794,11 @@
                     )} · ended {short_time(run.ended_at)}
                   </p>
                 </div>
-                <span class={[
-                  "shrink-0 rounded-full px-2 py-0.5 text-[11px] ring-1",
-                  state_classes(run.state)
-                ]}>
-                  {run.state}
-                </span>
+                <.work_status
+                  state={run.state}
+                  label={run.state}
+                  class="shrink-0 px-2 py-0.5 text-[11px]"
+                />
               </div>
             </article>
 

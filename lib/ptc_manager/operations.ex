@@ -1072,6 +1072,62 @@ defmodule PtcManager.Operations do
     )
   end
 
+  def reserve_worktree_for_repair(job_id, actor \\ "coordinator")
+      when is_integer(job_id) and is_binary(actor) do
+    case {Repo.get(Job, job_id), Repo.get_by(WorktreeAllocation, job_id: job_id)} do
+      {%Job{state: "pr_open"}, nil} ->
+        {:error, :repair_worktree_not_available}
+
+      {%Job{state: "pr_open"}, allocation} ->
+        transition_worktree(allocation.id, "active", actor, nil,
+          from: ~w(warm reclaimable attention)
+        )
+
+      _job_or_allocation ->
+        {:error, :repair_worktree_not_available}
+    end
+  end
+
+  def release_repair_worktree(job_id, head_sha, actor \\ "coordinator")
+      when is_integer(job_id) and is_binary(head_sha) and is_binary(actor) do
+    case Repo.get_by(WorktreeAllocation, job_id: job_id) do
+      nil ->
+        {:ok, nil}
+
+      %{state: "active"} = allocation ->
+        now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+        outcome =
+          allocation
+          |> WorktreeAllocation.changeset(%{
+            state: "reclaimable",
+            head_sha: head_sha,
+            last_used_at: now,
+            last_error: nil
+          })
+          |> Repo.update()
+
+        case outcome do
+          {:ok, updated} ->
+            insert_audit!(%{
+              actor: actor,
+              action: "worktree.repair_released",
+              target_type: "worktree_allocation",
+              target_id: allocation.id,
+              details: %{"job_id" => job_id, "head_sha" => head_sha}
+            })
+
+            notify_and_return({:ok, updated})
+
+          error ->
+            error
+        end
+
+      _allocation ->
+        {:error, :repair_worktree_not_reserved}
+    end
+  end
+
   def claim_worktree_cleanup(
         allocation_id,
         now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)

@@ -156,6 +156,65 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert GitProbe.timeout_duration() == "15.0s"
   end
 
+  test "accepts only repair heads that preserve the published history" do
+    path = repository_with_base()
+    base_sha = git!(path, ["rev-parse", "HEAD"]) |> String.trim()
+
+    File.write!(Path.join(path, "README.md"), "base\nrepair\n")
+    git!(path, ["commit", "-am", "repair pull request"])
+    repaired_sha = git!(path, ["rev-parse", "HEAD"]) |> String.trim()
+
+    assert :ok = GitProbe.descendant?(path, base_sha, repaired_sha)
+    assert {:error, :repair_not_fast_forward} = GitProbe.descendant?(path, repaired_sha, base_sha)
+  end
+
+  test "repair verification stays pinned to GitHub's exact base commit" do
+    path = repository_with_base()
+    github_base_sha = git!(path, ["rev-parse", "HEAD"]) |> String.trim()
+    branch = "ptc-manager/issue-42-job-13"
+    git!(path, ["switch", "-c", branch])
+    File.write!(Path.join(path, "README.md"), "base\nrepair\n")
+    git!(path, ["commit", "-am", "repair pull request"])
+    repaired_sha = git!(path, ["rev-parse", "HEAD"]) |> String.trim()
+
+    # Simulate an agent moving the mutable local default-branch ref.
+    git!(path, ["branch", "-f", "main", repaired_sha])
+
+    assert {:ok, verified} =
+             GitProbe.verify_repair_at(
+               %Repository{local_path: path, default_branch: "main"},
+               %Job{id: 13, issue_id: 42, branch_name: branch},
+               path,
+               github_base_sha
+             )
+
+    assert verified.base_sha == github_base_sha
+    assert verified.head_sha == repaired_sha
+    assert verified.commit_count == 1
+
+    assert {:error, :repair_base_missing} =
+             GitProbe.verify_repair_at(
+               %Repository{local_path: path, default_branch: "main"},
+               %Job{id: 13, issue_id: 42, branch_name: branch},
+               path,
+               String.duplicate("f", 40)
+             )
+  end
+
+  test "reclaimable worktrees must be clean and checked out on the expected branch" do
+    path = repository_with_base()
+    expected_head = git!(path, ["rev-parse", "HEAD"]) |> String.trim()
+
+    assert :ok = GitProbe.reclaimable(path, "main", expected_head)
+
+    File.write!(Path.join(path, "leftover.txt"), "dirty\n")
+    assert {:error, :worktree_changed} = GitProbe.reclaimable(path, "main", expected_head)
+    File.rm!(Path.join(path, "leftover.txt"))
+
+    git!(path, ["switch", "-c", "other"])
+    assert {:error, :worktree_changed} = GitProbe.reclaimable(path, "main", expected_head)
+  end
+
   defp repository_with_base do
     path =
       Path.join(System.tmp_dir!(), "ptc-manager-git-probe-#{System.unique_integer([:positive])}")

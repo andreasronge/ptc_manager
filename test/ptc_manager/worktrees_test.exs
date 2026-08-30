@@ -124,6 +124,32 @@ defmodule PtcManager.WorktreesTest do
     assert preserved.last_error =~ "workspace_busy"
   end
 
+  test "a PR repair reserves its retained worktree until verification finishes" do
+    {_repository, job, remote} = approved_job_fixture()
+    {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+    head_sha = String.duplicate("a", 40)
+    allocation = Repo.get_by!(WorktreeAllocation, job_id: leased.id)
+
+    allocation
+    |> WorktreeAllocation.changeset(%{state: "reclaimable", head_sha: head_sha})
+    |> Repo.update!()
+
+    leased |> Job.changeset(%{state: "pr_open"}) |> Repo.update!()
+
+    assert {:ok, reserved} = Operations.reserve_worktree_for_repair(leased.id, "repair-agent")
+    assert reserved.state == "active"
+
+    assert {:error, :worktree_capacity} =
+             Worktrees.ensure_slot("herdr:pool", 1, FakeAdapter, FakeProbe)
+
+    refute_receive {:remove_worktree, _allocation_id}
+
+    assert {:ok, released} =
+             Operations.release_repair_worktree(leased.id, head_sha, "repair-agent")
+
+    assert released.state == "reclaimable"
+  end
+
   test "a terminal worktree is never removed when the final clean-head check fails" do
     {_repository, job, remote} = approved_job_fixture()
     {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)

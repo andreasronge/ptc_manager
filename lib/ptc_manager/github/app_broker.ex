@@ -100,6 +100,25 @@ defmodule PtcManager.GitHub.AppBroker do
 
   def status(_publication), do: {:blocked, :invalid_publication_context}
 
+  @doc "Fetches and pins the current default-branch commit for trusted repair verification."
+  def fetch_base_for_verification(path, repository, expected_sha)
+      when is_binary(path) and is_binary(expected_sha) do
+    with :ok <- configured?(),
+         :ok <- valid_verification_context(path, repository, expected_sha),
+         {:ok, token} <- installation_token(),
+         :ok <- fetch_authoritative_base(path, token, repository),
+         :ok <- authoritative_base_matches(path, repository, expected_sha) do
+      :ok
+    else
+      {:blocked, reason} -> {:blocked, reason}
+      {:error, {:github_http_error, _status, _message, _delay_ms} = reason} -> {:retry, reason}
+      {:error, reason} -> {:retry, reason}
+    end
+  end
+
+  def fetch_base_for_verification(_path, _repository, _expected_sha),
+    do: {:blocked, :invalid_repair_verification_context}
+
   @doc false
   def inspect_staged_repository(source_path, publication, function)
       when is_function(function, 1) do
@@ -151,6 +170,28 @@ defmodule PtcManager.GitHub.AppBroker do
         publication.base_sha != publication.job.result_base_sha or
           publication.diff_digest != publication.job.result_diff_digest ->
         {:blocked, :stale_publication_context}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_verification_context(path, repository, expected_sha) do
+    cond do
+      Path.type(path) != :absolute or not File.dir?(path) ->
+        {:blocked, :invalid_repository_path}
+
+      not safe_repository_component?(repository.github_owner) ->
+        {:blocked, :invalid_repository_owner}
+
+      not safe_repository_component?(repository.github_name) ->
+        {:blocked, :invalid_repository_name}
+
+      not safe_ref?(repository.default_branch) ->
+        {:blocked, :invalid_default_branch}
+
+      not Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, expected_sha) ->
+        {:blocked, :invalid_repair_base}
 
       true ->
         :ok

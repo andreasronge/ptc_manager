@@ -419,6 +419,60 @@ defmodule PtcManagerWeb.CoreComponents do
     """
   end
 
+  @doc "Renders the shared queued/running/completed work indicator used across the console."
+  attr :state, :string, required: true
+  attr :label, :string, required: true
+  attr :class, :any, default: nil
+
+  def work_status(assigns) do
+    assigns =
+      assign(assigns,
+        icon: work_status_icon(assigns.state),
+        spinning: work_status_running?(assigns.state),
+        tone: work_status_tone(assigns.state)
+      )
+
+    ~H"""
+    <span
+      class={[
+        "inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ring-1",
+        @tone,
+        @class
+      ]}
+      data-work-state={@state}
+    >
+      <.icon
+        name={@icon}
+        class={if @spinning, do: "size-3.5 motion-safe:animate-spin", else: "size-3.5"}
+      />
+      {@label}
+    </span>
+    """
+  end
+
+  defp work_status_running?(state),
+    do:
+      state in ~w(starting working running reconciling awaiting_reconciliation verifying_result publishing_pr sync_pending)
+
+  defp work_status_icon("queued"), do: "hero-clock-mini"
+  defp work_status_icon(state) when state in ~w(done ready_for_pr pr_open), do: "hero-check-mini"
+
+  defp work_status_icon(state) when state in ~w(failed lost blocked publish_blocked),
+    do: "hero-exclamation-triangle-mini"
+
+  defp work_status_icon(_state), do: "hero-arrow-path-mini"
+
+  defp work_status_tone("queued"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+
+  defp work_status_tone(state)
+       when state in ~w(starting working running reconciling awaiting_reconciliation verifying_result publishing_pr sync_pending),
+       do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
+
+  defp work_status_tone(state) when state in ~w(failed lost blocked publish_blocked),
+    do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+
+  defp work_status_tone(_state), do: "bg-white/5 text-slate-300 ring-white/10"
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do

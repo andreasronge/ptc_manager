@@ -1,6 +1,9 @@
 defmodule PtcManagerWeb.DeliveryBoardLive do
   use PtcManagerWeb, :live_view
 
+  alias PtcManager.MaintainerActions
+  alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
+  alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
 
   @lane_definitions [
@@ -37,7 +40,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   ]
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
     if connected?(socket) do
       Operations.subscribe()
       Process.send_after(self(), :board_tick, 60_000)
@@ -46,6 +49,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     {:ok,
      socket
      |> assign(:page_title, "Delivery board")
+     |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:now, DateTime.utc_now())
      |> assign(:lane_definitions, @lane_definitions)
      |> load_board()}
@@ -57,6 +61,32 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def handle_info(:board_tick, socket) do
     Process.send_after(self(), :board_tick, 60_000)
     {:noreply, assign(socket, :now, DateTime.utc_now())}
+  end
+
+  @impl true
+  def handle_event(
+        "run-agent-action",
+        %{"action-key" => action_key, "target-id" => target_id},
+        socket
+      ) do
+    with {target_id, ""} <- Integer.parse(target_id),
+         {:ok, _action} <- MaintainerActions.enqueue(action_key, target_id, socket.assigns.actor) do
+      MaintainerActionPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "#{ActionCatalog.label(action_key)} queued for an agent.")
+       |> load_board()}
+    else
+      {:error, :agent_action_already_active} ->
+        {:noreply, put_flash(socket, :error, "A PR action is already queued or running.")}
+
+      {:error, :pull_request_does_not_need_repair} ->
+        {:noreply, put_flash(socket, :info, "GitHub no longer reports a repairable problem.")}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "The repair action could not be queued.")}
+    end
   end
 
   def lane_items(lanes, key), do: Map.get(lanes, key, [])
@@ -97,6 +127,34 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       _value -> "#{run.role} agent"
     end
   end
+
+  def repair_action(%{publication: nil}), do: nil
+
+  def repair_action(%{publication: publication}) do
+    Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "repair_pr"))
+  end
+
+  def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
+    do: true
+
+  def active_agent_action?(_action), do: false
+
+  def work_state(%{pr_agent_action: %{action_key: "repair_pr"} = action}) do
+    if active_agent_action?(action), do: action.state, else: nil
+  end
+
+  def work_state(_item), do: nil
+
+  def work_label(%{pr_agent_action: %{action_key: "repair_pr", state: "queued"}}),
+    do: "Repair queued"
+
+  def work_label(%{pr_agent_action: %{action_key: "repair_pr", state: "running"}}),
+    do: "Agent repairing"
+
+  def work_label(%{pr_agent_action: %{action_key: "repair_pr", state: "sync_pending"}}),
+    do: "Checking repaired PR"
+
+  def work_label(_item), do: nil
 
   def health_badges(item) do
     publication = item.publication
@@ -158,6 +216,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   def next_step(item, :stuck) do
     cond do
+      work_state(item) == "queued" ->
+        "The repair is safely queued and will start when the maintainer agent is free."
+
+      work_state(item) == "running" ->
+        "An agent is repairing the existing pull request now."
+
+      work_state(item) == "sync_pending" ->
+        "The repair finished; PtcManager is verifying the new PR head against GitHub."
+
       match?(%{publication: %{mergeability: "conflicting"}}, item) ->
         "Merge conflicts must be resolved by the implementation agent."
 

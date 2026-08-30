@@ -755,6 +755,112 @@ defmodule PtcManager.Publications do
     notify(outcome)
   end
 
+  @doc "Records a newly pushed PR head only after its retained branch passes local verification."
+  def record_repaired_status(publication_id, result, verified)
+      when is_integer(publication_id) and is_map(result) and is_map(verified) do
+    now = now()
+
+    outcome =
+      if valid_agent_result?(result) and valid_verified_result?(verified) do
+        Repo.transaction(fn ->
+          publication = Repo.get!(PrPublication, publication_id)
+          job = Repo.get!(Job, publication.job_id)
+          repository = Repo.get!(Repository, job.repository_id)
+
+          cond do
+            not repair_lineage_open?(publication, job) ->
+              Repo.rollback(:publication_not_open)
+
+            result.state != "open" ->
+              Repo.rollback(:pull_request_not_open)
+
+            not intended_base?(result, repository) ->
+              Repo.rollback(:unexpected_pull_request_base)
+
+            result.head_ref != publication.branch_name ->
+              Repo.rollback(:unexpected_pull_request_branch)
+
+            String.downcase(result.head_repository) !=
+                String.downcase("#{repository.github_owner}/#{repository.github_name}") ->
+              Repo.rollback(:unexpected_pull_request_repository)
+
+            result.head_sha != verified.head_sha ->
+              Repo.rollback(:repair_head_not_verified)
+
+            true ->
+              publication
+              |> PrPublication.changeset(
+                Map.merge(
+                  %{
+                    state: "published",
+                    base_sha: verified.base_sha,
+                    head_sha: verified.head_sha,
+                    diff_digest: verified.diff_digest,
+                    remote_head_sha: result.head_sha,
+                    remote_base_sha: result.base_sha,
+                    pr_state: "open",
+                    pr_checked_at: now,
+                    pr_url: result.pr_url,
+                    last_error: nil
+                  },
+                  remote_health_attrs(result)
+                )
+              )
+              |> Repo.update!()
+
+              job
+              |> Job.changeset(%{
+                state: "pr_open",
+                result_base_sha: verified.base_sha,
+                result_head_sha: verified.head_sha,
+                result_diff_digest: verified.diff_digest,
+                result_commit_count: verified.commit_count,
+                result_verified_at: now,
+                last_error: nil
+              })
+              |> Repo.update!()
+
+              WorktreeAllocation
+              |> where(
+                [allocation],
+                allocation.job_id == ^job.id and allocation.state not in ["cleaning", "removed"]
+              )
+              |> Repo.update_all(
+                set: [
+                  state: "reclaimable",
+                  head_sha: verified.head_sha,
+                  pr_number: result.pr_number,
+                  pr_url: result.pr_url,
+                  last_used_at: now,
+                  last_error: nil,
+                  updated_at: now
+                ]
+              )
+
+              insert_audit!(%{
+                actor: "repair-agent",
+                action: "pr_publication.repair_verified",
+                target_type: "pr_publication",
+                target_id: publication.id,
+                details: %{
+                  "previous_head_sha" => publication.remote_head_sha,
+                  "head_sha" => verified.head_sha,
+                  "base_sha" => verified.base_sha,
+                  "diff_digest" => verified.diff_digest,
+                  "observed_at" => DateTime.to_iso8601(now)
+                }
+              })
+
+              load(publication.id)
+          end
+        end)
+      else
+        {:error, :invalid_repair_result}
+      end
+
+    notify(outcome)
+  end
+
   def record_status_error(publication_id, reason) when is_integer(publication_id) do
     now = now()
     message = bounded_error(reason)
@@ -869,6 +975,26 @@ defmodule PtcManager.Publications do
     valid_remote_status?(result) and is_integer(result[:pr_number]) and result.pr_number > 0 and
       is_binary(result[:head_ref]) and is_binary(result[:head_repository])
   end
+
+  defp valid_verified_result?(result) do
+    is_binary(result[:base_sha]) and
+      Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.base_sha) and
+      is_binary(result[:head_sha]) and
+      Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.head_sha) and
+      is_binary(result[:diff_digest]) and
+      Regex.match?(~r/\A[0-9a-f]{64}\z/, result.diff_digest) and
+      is_integer(result[:commit_count]) and result.commit_count > 0
+  end
+
+  defp repair_lineage_open?(%{state: "published"}, %{state: "pr_open"}), do: true
+
+  defp repair_lineage_open?(
+         %{state: "blocked", last_error: "GitHub reports a different pull-request head commit."},
+         %{state: "publish_blocked"}
+       ),
+       do: true
+
+  defp repair_lineage_open?(_publication, _job), do: false
 
   defp intended_base?(result, repository) do
     result.base_ref == repository.default_branch and

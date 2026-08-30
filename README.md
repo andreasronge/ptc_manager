@@ -39,7 +39,10 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - read-only GitHub check-run, commit-status, draft, and merge-conflict signals
   that place open PRs in Review & CI, Needs attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
-  **PR retrospective**, and **Prepare merge decision** buttons;
+  **Fix CI or conflicts**, **PR retrospective**, and **Prepare merge decision**
+  buttons;
+- one shared clock/spinner status language for queued and actively running work
+  across Planning, Delivery, and Operations;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
   `ptc:needs-decision` GitHub labels;
 - structured projection of canonical `Blocked by #<number>` issue dependencies,
@@ -162,6 +165,10 @@ catalog contains:
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
   verified diff still match. This increment records approval but does not merge.
+- **Fix CI or conflicts**, shown when an open PR has failing checks or merge
+  conflicts. It queues an agent to repair and push the existing branch without
+  force, performs two independent review-and-fix passes, and accepts the new PR
+  head only after the retained branch and GitHub report the same verified commit.
 
 For issue dependencies, GitHub remains authoritative. Maintainer actions write
 the canonical `Blocked by #<number>` marker into the dependent issue and apply

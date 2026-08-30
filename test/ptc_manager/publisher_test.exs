@@ -503,6 +503,57 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(Job, job.id).state == "publish_blocked"
   end
 
+  test "an explicitly verified repair advances the trusted PR head" do
+    {job, publication, _result} = published_publication_fixture()
+    repaired_head = String.duplicate("e", 40)
+
+    remote = %{
+      state: "open",
+      pr_number: publication.pr_number,
+      pr_url: publication.pr_url,
+      head_sha: repaired_head,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: String.duplicate("d", 40),
+      base_ref: "main",
+      base_repository: base_repository(job),
+      draft: false,
+      checks_state: "pending",
+      checks_total: 2,
+      checks_failed: 0,
+      checks_pending: 2,
+      mergeability: "unknown",
+      mergeable_state: "unknown"
+    }
+
+    verified = %{
+      base_sha: String.duplicate("a", 40),
+      head_sha: repaired_head,
+      diff_digest: String.duplicate("f", 64),
+      commit_count: 3
+    }
+
+    assert {:ok, prematurely_blocked} =
+             Publications.record_remote_status(publication.id, remote)
+
+    assert prematurely_blocked.state == "blocked"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+
+    assert {:ok, repaired} =
+             Publications.record_repaired_status(publication.id, remote, verified)
+
+    assert repaired.state == "published"
+    assert repaired.remote_head_sha == repaired_head
+    assert repaired.head_sha == repaired_head
+    assert repaired.diff_digest == verified.diff_digest
+    assert repaired.checks_state == "pending"
+
+    repaired_job = Repo.get!(Job, job.id)
+    assert repaired_job.state == "pr_open"
+    assert repaired_job.result_head_sha == repaired_head
+    assert repaired_job.result_diff_digest == verified.diff_digest
+  end
+
   test "a changed GitHub PR base blocks the publication lineage" do
     {job, publication, result} = published_publication_fixture()
 

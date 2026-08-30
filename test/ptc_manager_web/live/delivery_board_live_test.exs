@@ -43,6 +43,31 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
            )
   end
 
+  test "queues a repair from Needs attention and shows queued work consistently", %{conn: conn} do
+    job = approved_job("Repair the failing pull request") |> set_job_state("pr_open")
+    publication = publication_fixture(job, "failure", "mergeable")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#lane-stuck #board-job-#{job.id}")
+    assert has_element?(view, "#repair-pr-#{publication.id}", "Fix CI or conflicts")
+
+    view
+    |> element("#repair-pr-#{publication.id}")
+    |> render_click()
+
+    action = Repo.get_by!(AgentAction, action_key: "repair_pr", target_id: publication.id)
+    assert action.state == "queued"
+
+    assert has_element?(
+             view,
+             "#board-job-#{job.id} [data-work-state=queued]",
+             "Repair queued"
+           )
+
+    assert has_element?(view, "#repair-pr-#{publication.id}[disabled]")
+  end
+
   defp approved_job(title) do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: title})

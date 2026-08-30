@@ -4,6 +4,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.CodexAdapter
+  alias PtcManager.MaintainerActions.Sync
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
 
@@ -14,7 +15,8 @@ defmodule PtcManager.MaintainerActionsTest do
     MergeApproval,
     PrAnalysis,
     PrPublication,
-    Proposal
+    Proposal,
+    WorktreeAllocation
   }
 
   alias PtcManager.Repo
@@ -103,6 +105,27 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule RepairAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(action) do
+      send(Process.get(:agent_action_test_pid), {:ran_agent_action, action})
+
+      {:ok,
+       %{
+         "outcome" => "repaired",
+         "private_summary" => "The failing check was fixed on the existing PR branch.",
+         "why_it_matters" => "The pull request can return to CI review.",
+         "scope" => "small",
+         "risk" => "low",
+         "technical_evidence" => "Focused tests and two review passes completed.",
+         "github_changes" => ["Pushed a repair commit to the existing branch"],
+         "evidence" => ["The repaired commit was pushed without force"],
+         "created_issue_numbers" => []
+       }}
+    end
+  end
+
   defmodule MergeDecisionSync do
     def sync_action(_action) do
       [status | remaining] = Process.get(:merge_decision_statuses)
@@ -114,6 +137,55 @@ defmodule PtcManager.MaintainerActionsTest do
   defmodule MergeDecisionClient do
     @behaviour PtcManager.GitHub.PullRequests
     def status(_publication), do: Process.get(:merge_approval_status)
+  end
+
+  defmodule RepairClient do
+    @behaviour PtcManager.GitHub.PullRequests
+
+    def status(_publication) do
+      case Process.get(:repair_status) do
+        {kind, _reason} = result when kind in [:retry, :blocked] -> result
+        status -> {:ok, status}
+      end
+    end
+  end
+
+  defmodule RepairBaseFetcher do
+    def fetch_base_for_verification(path, repository, expected_sha) do
+      send(
+        Process.get(:agent_action_test_pid),
+        {:repair_base_fetch, path, repository.id, expected_sha}
+      )
+
+      Process.get(:repair_base_fetch_result, {:retry, :offline})
+    end
+  end
+
+  defmodule RepairSync do
+    def sync_action(_action) do
+      [status | remaining] = Process.get(:merge_decision_statuses)
+      Process.put(:merge_decision_statuses, remaining)
+      {:ok, %{pull_request: status}}
+    end
+
+    def sync_action(action, result) do
+      send(Process.get(:agent_action_test_pid), {:repair_postflight, result})
+      sync_action(action)
+    end
+  end
+
+  defmodule DeferredRepairSync do
+    def sync_action(_action), do: {:ok, %{pull_request: Process.get(:repair_preflight_status)}}
+
+    def sync_action(_action, result) do
+      send(Process.get(:agent_action_test_pid), {:deferred_repair_postflight, result})
+      attempts = Process.get(:deferred_repair_sync_attempts, 0) + 1
+      Process.put(:deferred_repair_sync_attempts, attempts)
+
+      if attempts == 1,
+        do: {:error, :repair_head_not_visible},
+        else: {:ok, %{pull_request: Process.get(:repair_postflight_status)}}
+    end
   end
 
   defmodule RetrospectiveSync do
@@ -361,6 +433,9 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert :ok = CodexAdapter.validate_result(merge_result, "prepare_merge_decision")
 
+    repair_result = Map.put(result, "outcome", "repaired")
+    assert :ok = CodexAdapter.validate_result(repair_result, "repair_pr")
+
     assert {:error, :unexpected_github_changes} =
              merge_result
              |> Map.put("github_changes", ["Approved the PR"])
@@ -420,6 +495,522 @@ defmodule PtcManager.MaintainerActionsTest do
     assert failed.state == "failed"
     assert failed.last_error =~ "pull_request_changed_during_analysis"
     refute Repo.get_by(PrAnalysis, agent_action_id: second_action.id)
+  end
+
+  test "queues and executes a repair for a failing open pull request" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        checks_state: "failure",
+        checks_total: 2,
+        checks_failed: 1,
+        checks_pending: 0,
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+    assert queued.state == "queued"
+    assert queued.prompt =~ "Repair the existing"
+    assert queued.prompt =~ "codex-review"
+    assert queued.prompt =~ "Never use `--force`"
+
+    failing_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+
+    repaired_status =
+      Map.merge(failing_status, %{
+        head_sha: String.duplicate("e", 40),
+        checks_state: "pending",
+        mergeability: "unknown"
+      })
+
+    Process.put(:merge_decision_statuses, [failing_status, repaired_status])
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+
+    assert completed.id == queued.id
+    assert completed.state == "done"
+    assert completed.target_snapshot == MergeDecisions.snapshot(failing_status)
+    assert Repo.get_by!(AgentRun, agent_action_id: completed.id).state == "done"
+    assert_receive {:repair_postflight, {:ok, %{"outcome" => "repaired"}}}
+  end
+
+  test "fails a repair safely when its retained worktree is unavailable" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+
+    publication
+    |> PrPublication.changeset(%{checks_state: "failure", mergeability: "mergeable"})
+    |> Repo.update!()
+
+    assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "failure", mergeability: "mergeable"})
+
+    Process.put(:merge_decision_statuses, [status])
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+
+    assert failed.id == queued.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "repair_worktree_not_available"
+    refute_receive {:ran_agent_action, _action}
+  end
+
+  test "fails a claimed repair when the retained branch did not advance" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha
+      })
+      |> Repo.update!()
+
+    publication
+    |> PrPublication.changeset(%{checks_state: "failure", mergeability: "mergeable"})
+    |> Repo.update!()
+
+    status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "failure", mergeability: "mergeable"})
+
+    Process.put(:repair_status, status)
+
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(status)
+             )
+
+    assert {:ok, _reserved} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    assert {:terminal_error, :repair_agent_did_not_advance_head} =
+             Sync.sync_action(prepared, {:ok, %{"outcome" => "repaired"}})
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+  end
+
+  test "a deferred repair reconciliation reuses the stored agent result" do
+    previous_base = Application.get_env(:ptc_manager, :agent_action_sync_retry_base_ms)
+    previous_max = Application.get_env(:ptc_manager, :agent_action_sync_retry_max_ms)
+    Application.put_env(:ptc_manager, :agent_action_sync_retry_base_ms, 1)
+    Application.put_env(:ptc_manager, :agent_action_sync_retry_max_ms, 1)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :agent_action_sync_retry_base_ms, previous_base)
+      Application.put_env(:ptc_manager, :agent_action_sync_retry_max_ms, previous_max)
+    end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{checks_state: "failure", mergeability: "mergeable"})
+      |> Repo.update!()
+
+    failing_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "failure", mergeability: "mergeable"})
+
+    Process.put(:repair_preflight_status, failing_status)
+
+    Process.put(:repair_postflight_status, %{failing_status | head_sha: String.duplicate("e", 40)})
+
+    Process.put(:deferred_repair_sync_attempts, 0)
+
+    assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, pending} =
+             MaintainerActions.run_once(adapter: RepairAdapter, sync: DeferredRepairSync)
+
+    assert pending.id == queued.id
+    assert pending.state == "sync_pending"
+    assert_receive {:ran_agent_action, %{id: action_id}}
+    assert action_id == queued.id
+    assert_receive {:deferred_repair_postflight, {:ok, %{"outcome" => "repaired"}}}
+
+    Process.sleep(2)
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(adapter: RepairAdapter, sync: DeferredRepairSync)
+
+    assert completed.state == "done"
+    assert_receive {:deferred_repair_postflight, {:ok, %{"outcome" => "repaired"}}}
+    refute_receive {:ran_agent_action, _action}
+  end
+
+  test "accepts a clean fast-forward repair verified from the retained worktree" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        branch_name: job.branch_name,
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    old_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{
+        head_ref: job.branch_name,
+        base_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(old_status)
+             )
+
+    assert {:ok, _reserved} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    File.write!(Path.join(allocation.path, "README.md"), "published\nrepaired\n")
+    git!(allocation.path, ["commit", "-am", "repair failing CI"])
+    repaired_head = git!(allocation.path, ["rev-parse", "HEAD"]) |> String.trim()
+
+    repaired_status =
+      old_status
+      |> Map.merge(%{
+        head_sha: repaired_head,
+        checks_state: "pending",
+        checks_failed: 0,
+        checks_pending: 1,
+        mergeability: "unknown"
+      })
+
+    Process.put(:repair_status, repaired_status)
+
+    assert {:ok, %{pull_request: ^repaired_status}} =
+             Sync.sync_action(prepared, {:ok, %{"outcome" => "repaired"}})
+
+    repaired = Repo.get!(PrPublication, publication.id)
+    assert repaired.remote_head_sha == repaired_head
+    assert repaired.state == "published"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
+  end
+
+  test "a repaired result with untracked files moves the worktree to attention" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        branch_name: job.branch_name,
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    old_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{
+        head_ref: job.branch_name,
+        base_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(old_status)
+             )
+
+    assert {:ok, _reserved} = Operations.reserve_worktree_for_repair(publication.job_id)
+    File.write!(Path.join(allocation.path, "README.md"), "published\nrepaired\n")
+    git!(allocation.path, ["commit", "-am", "repair failing CI"])
+    repaired_head = git!(allocation.path, ["rev-parse", "HEAD"]) |> String.trim()
+    File.write!(Path.join(allocation.path, "leftover.txt"), "untracked\n")
+    repaired_status = %{old_status | head_sha: repaired_head}
+    Process.put(:repair_status, repaired_status)
+
+    assert {:terminal_error, :worktree_changed} =
+             Sync.sync_action(prepared, {:ok, %{"outcome" => "repaired"}})
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+  end
+
+  test "a missing postflight base uses the trusted fetcher before retrying" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    previous_fetcher = Application.get_env(:ptc_manager, :repair_base_fetcher)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    Application.put_env(:ptc_manager, :repair_base_fetcher, RepairBaseFetcher)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :pull_request_client, previous_client)
+      Application.put_env(:ptc_manager, :repair_base_fetcher, previous_fetcher)
+    end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        branch_name: job.branch_name,
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    old_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{
+        head_ref: job.branch_name,
+        base_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(old_status)
+             )
+
+    assert {:ok, _reserved} = Operations.reserve_worktree_for_repair(publication.job_id)
+    File.write!(Path.join(allocation.path, "README.md"), "published\nrepaired\n")
+    git!(allocation.path, ["commit", "-am", "repair failing CI"])
+    repaired_head = git!(allocation.path, ["rev-parse", "HEAD"]) |> String.trim()
+    missing_base = String.duplicate("f", 40)
+    Process.put(:repair_status, %{old_status | head_sha: repaired_head, base_sha: missing_base})
+
+    assert {:error, :repair_base_missing} =
+             Sync.sync_action(prepared, {:ok, %{"outcome" => "repaired"}})
+
+    assert_receive {:repair_base_fetch, path, repository_id, ^missing_base}
+    assert path == allocation.path
+    assert repository_id == repository.id
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
+  end
+
+  test "a blocked postflight status moves the reserved worktree to attention" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+
+    publication
+    |> PrPublication.changeset(%{checks_state: "failure", mergeability: "mergeable"})
+    |> Repo.update!()
+
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+    assert {:ok, _reserved} = Operations.reserve_worktree_for_repair(publication.job_id)
+    Process.put(:repair_status, {:blocked, :github_auth_failed})
+
+    assert {:terminal_error, :github_auth_failed} =
+             Sync.sync_action(action, {:error, :adapter_failed})
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+  end
+
+  test "a failed repair never releases a dirty worktree as reusable" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "failure", mergeability: "mergeable"})
+
+    Process.put(:repair_status, status)
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(status)
+             )
+
+    assert {:ok, _reserved} = Operations.reserve_worktree_for_repair(publication.job_id)
+    File.write!(Path.join(allocation.path, "unfinished.txt"), "partial repair\n")
+
+    assert {:terminal_error, :worktree_changed} =
+             Sync.sync_action(prepared, {:error, :adapter_failed})
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+  end
+
+  test "stops waiting when an advanced repair head never becomes visible on GitHub" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    previous_limit = Application.get_env(:ptc_manager, :repair_visibility_sync_limit)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    Application.put_env(:ptc_manager, :repair_visibility_sync_limit, 1)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :pull_request_client, previous_client)
+      Application.put_env(:ptc_manager, :repair_visibility_sync_limit, previous_limit)
+    end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_real_repair_worktree(publication, issue)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        head_sha: allocation.head_sha,
+        remote_head_sha: allocation.head_sha,
+        checks_state: "failure",
+        mergeability: "mergeable"
+      })
+      |> Repo.update!()
+
+    old_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "failure", mergeability: "mergeable"})
+
+    Process.put(:repair_status, old_status)
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(old_status)
+             )
+
+    prepared =
+      prepared
+      |> AgentAction.changeset(%{sync_attempt_count: 1})
+      |> Repo.update!()
+
+    assert {:ok, _reserved} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    File.write!(Path.join(allocation.path, "README.md"), "published\nlocal repair\n")
+    git!(allocation.path, ["commit", "-am", "repair not visible remotely"])
+
+    assert {:terminal_error, :repair_head_visibility_timeout} =
+             Sync.sync_action(prepared, {:ok, %{"outcome" => "repaired"}})
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+  end
+
+  test "repair reconciliation records a pull request closed during the attempt" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{checks_state: "failure", mergeability: "mergeable"})
+      |> Repo.update!()
+
+    status = publication |> merge_status(repository) |> Map.put(:state, "closed")
+    Process.put(:repair_status, status)
+
+    assert {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
+
+    assert {:ok, prepared} =
+             Operations.record_agent_action_target_snapshot(
+               action.id,
+               MergeDecisions.snapshot(status)
+             )
+
+    assert {:terminal_error, :pull_request_not_open} =
+             Sync.sync_action(prepared, {:ok, %{"outcome" => "repair-blocked"}})
+
+    assert Repo.get!(PrPublication, publication.id).pr_state == "closed"
+    assert Repo.get!(PtcManager.Operations.Job, publication.job_id).state == "cancelled"
   end
 
   test "human merge approval is bound to the analyzed head, base, and diff" do
@@ -772,5 +1363,57 @@ defmodule PtcManager.MaintainerActionsTest do
       base_ref: repository.default_branch,
       base_repository: "#{repository.github_owner}/#{repository.github_name}"
     }
+  end
+
+  defp retain_repair_worktree(publication) do
+    worker = worker_fixture(%{worker_key: "repair-worker-#{publication.id}"})
+
+    %WorktreeAllocation{}
+    |> WorktreeAllocation.changeset(%{
+      worker_id: worker.id,
+      job_id: publication.job_id,
+      state: "reclaimable",
+      path: System.tmp_dir!(),
+      head_sha: publication.remote_head_sha,
+      last_used_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.insert!()
+  end
+
+  defp retain_real_repair_worktree(publication, issue) do
+    path =
+      Path.join(System.tmp_dir!(), "ptc-manager-repair-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+    git!(path, ["init", "-b", "main"])
+    git!(path, ["config", "user.email", "test@example.com"])
+    git!(path, ["config", "user.name", "PtcManager Test"])
+    File.write!(Path.join(path, "README.md"), "published\n")
+    git!(path, ["add", "README.md"])
+    git!(path, ["commit", "-m", "published head"])
+    branch = "ptc-manager/issue-#{issue.number}-job-#{publication.job_id}"
+    git!(path, ["switch", "-c", branch])
+
+    job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
+    job |> PtcManager.Operations.Job.changeset(%{branch_name: branch}) |> Repo.update!()
+
+    worker = worker_fixture(%{worker_key: "real-repair-worker-#{publication.id}"})
+
+    %WorktreeAllocation{}
+    |> WorktreeAllocation.changeset(%{
+      worker_id: worker.id,
+      job_id: publication.job_id,
+      state: "reclaimable",
+      path: path,
+      head_sha: git!(path, ["rev-parse", "HEAD"]) |> String.trim(),
+      last_used_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.insert!()
+  end
+
+  defp git!(path, args) do
+    {output, 0} = System.cmd("git", args, cd: path, stderr_to_stdout: true)
+    output
   end
 end

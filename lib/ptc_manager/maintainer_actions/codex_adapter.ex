@@ -4,11 +4,12 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   @behaviour PtcManager.MaintainerActions.Adapter
 
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
-  alias PtcManager.Operations.AgentAction
+  alias PtcManager.Operations.{AgentAction, PrPublication}
+  alias PtcManager.Repo
 
   @impl true
   def run(%AgentAction{repository: repository} = action) do
-    with {:ok, path} <- repository_path(repository) do
+    with {:ok, path} <- repository_path(action, repository) do
       run_codex(action, path)
     end
   end
@@ -74,6 +75,28 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
     error -> {:error, {:codex_command_failed, error.__struct__}}
   end
 
+  defp repository_path(
+         %AgentAction{action_key: "repair_pr", target_id: publication_id},
+         _repository
+       ) do
+    publication =
+      PrPublication
+      |> Repo.get(publication_id)
+      |> Repo.preload(job: :worktree_allocation)
+
+    case publication && publication.job.worktree_allocation do
+      %{path: path} when is_binary(path) ->
+        if File.dir?(path),
+          do: {:ok, Path.expand(path)},
+          else: {:error, :repair_worktree_unavailable}
+
+      _allocation ->
+        {:error, :repair_worktree_unavailable}
+    end
+  end
+
+  defp repository_path(_action, repository), do: repository_path(repository)
+
   defp repository_path(repository) do
     path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
 
@@ -117,7 +140,9 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
              "no-followups",
              "merge-ready",
              "merge-blocked",
-             "merge-needs-decision"
+             "merge-needs-decision",
+             "repaired",
+             "repair-blocked"
            ] and is_binary(summary) and is_binary(why_it_matters) and
              scope in ["small", "medium", "large"] and risk in ["low", "medium", "high"] and
              is_binary(technical_evidence) and is_list(changes) and is_list(evidence),
@@ -141,6 +166,10 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
        when outcome in ["merge-ready", "merge-blocked", "merge-needs-decision"],
        do: :ok
 
+  defp validate_outcome("repair_pr", outcome)
+       when outcome in ["repaired", "repair-blocked"],
+       do: :ok
+
   defp validate_outcome(_action_key, _outcome), do: {:error, :invalid_agent_action_outcome}
 
   defp validate_action_result(action_key, outcome, created_issue_numbers, changes) do
@@ -161,6 +190,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("repair_pr", _outcome, []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "no-followups", []), do: :ok
 
   defp validate_created_issue_numbers(
