@@ -20,4 +20,30 @@ defmodule PtcManager.GitHubClientTest do
     reason = {:github_http_error, 403, "rate limited", 42_000}
     assert PullRequestClient.classify_error(reason) == {:retry, {:after, 42_000, reason}}
   end
+
+  test "extracts unique GitHub closing issue references from a PR body" do
+    body = """
+    Fixes #1701.
+    Closes https://github.com/owner/repo/issues/1708
+    Resolves: #1701
+    Related to #999.
+    """
+
+    assert PullRequestClient.linked_issue_numbers(body, "owner/repo") == [1701, 1708]
+  end
+
+  test "ignores invalid, excessive, and cross-repository closing references" do
+    body =
+      [
+        "Fixes #0",
+        "Closes https://github.com/other/project/issues/42",
+        "Closes https://github.com/owner/repo/issues/99",
+        "Fixes owner/repo#100"
+        | Enum.map(1..12, &"Resolves ##{&1}")
+      ]
+      |> Enum.join("\n")
+
+    assert PullRequestClient.linked_issue_numbers(body, "owner/repo") ==
+             [99, 100 | Enum.to_list(1..8)]
+  end
 end

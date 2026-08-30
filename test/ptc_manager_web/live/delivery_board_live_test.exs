@@ -21,6 +21,30 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert has_element?(view, "#lane-ready")
   end
 
+  test "keeps cards in stable oldest-first order and shows their GitHub issues", %{conn: conn} do
+    older = approved_job("Older issue") |> set_job_state("working")
+    newer = approved_job("Newer issue") |> set_job_state("working")
+
+    older_time = ~U[2026-08-30 10:00:00.000000Z]
+    newer_time = ~U[2026-08-30 11:00:00.000000Z]
+
+    older |> Job.changeset(%{started_at: older_time}) |> Repo.update!()
+    newer |> Job.changeset(%{started_at: newer_time}) |> Repo.update!()
+
+    older_issue = Repo.get!(PtcManager.Operations.Issue, older.issue_id)
+    newer_issue = Repo.get!(PtcManager.Operations.Issue, newer.issue_id)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert html =~ "GitHub issue"
+    assert html =~ older_issue.html_url
+    assert html =~ newer_issue.html_url
+
+    {older_position, _} = :binary.match(html, "board-job-#{older.id}")
+    {newer_position, _} = :binary.match(html, "board-job-#{newer.id}")
+    assert older_position < newer_position
+  end
+
   test "moves open pull requests between review, attention, and ready-to-merge", %{conn: conn} do
     review_job = approved_job("Wait for CI") |> set_job_state("pr_open")
     _review_publication = publication_fixture(review_job, "pending", "mergeable")
@@ -170,10 +194,12 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
   test "shows external GitHub pull requests with repair but without retrospective", %{conn: conn} do
     repository = repository_fixture()
+    linked_issue = issue_fixture(repository, %{number: 899, title: "Linked external issue"})
 
     assert {:ok, _summary} =
              Publications.sync_external_open_pull_requests(repository, [
-               external_status(repository, 901, "failure", "conflicting"),
+               external_status(repository, 901, "failure", "conflicting")
+               |> Map.put(:body, "Fixes #899"),
                external_status(repository, 902, "success", "mergeable")
              ])
 
@@ -183,6 +209,13 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#lane-stuck #board-pr-#{failing.id}", "Imported from GitHub")
+
+    assert has_element?(
+             view,
+             "#lane-stuck #board-pr-#{failing.id} a[href='#{linked_issue.html_url}']",
+             "#899 · Linked external issue"
+           )
+
     assert has_element?(view, "#repair-pr-#{failing.id}", "Fix")
     assert has_element?(view, "#repair-and-merge-pr-#{failing.id}", "Fix and merge")
 

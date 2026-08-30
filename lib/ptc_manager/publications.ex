@@ -4,6 +4,7 @@ defmodule PtcManager.Publications do
   import Ecto.Query
 
   alias PtcManager.Operations
+  alias PtcManager.GitHub.{LinkedIssues, PullRequestClient}
 
   alias PtcManager.Operations.{
     AgentRun,
@@ -1049,6 +1050,7 @@ defmodule PtcManager.Publications do
         author_login: pull.author_login,
         head_ref: pull.head_ref,
         head_repository: pull.head_repository,
+        linked_issue_numbers: %{"numbers" => linked_issue_numbers(pull, repository)},
         last_error: nil
       }
       |> Map.merge(remote_health_attrs(pull))
@@ -1126,6 +1128,7 @@ defmodule PtcManager.Publications do
         author_login: Map.get(result, :author_login) || publication.author_login,
         head_ref: result.head_ref,
         head_repository: result.head_repository,
+        linked_issue_numbers: %{"numbers" => linked_issue_numbers(result, repository)},
         last_error: nil
       }
       |> Map.merge(remote_health_attrs(result))
@@ -1150,6 +1153,22 @@ defmodule PtcManager.Publications do
     "#{result.base_sha}:#{result.head_sha}"
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
+  end
+
+  defp linked_issue_numbers(pull, repository) do
+    numbers =
+      case Map.get(pull, :linked_issue_numbers) do
+        numbers when is_list(numbers) ->
+          numbers
+
+        _ ->
+          PullRequestClient.linked_issue_numbers(
+            Map.get(pull, :body, ""),
+            "#{repository.github_owner}/#{repository.github_name}"
+          )
+      end
+
+    LinkedIssues.sanitize(numbers)
   end
 
   defp eligible(query, now) do

@@ -147,7 +147,28 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  def lane_items(lanes, key), do: Map.get(lanes, key, [])
+  def lane_items(lanes, key) do
+    lanes
+    |> Map.get(key, [])
+    |> Enum.sort_by(&lane_item_sort_key/1)
+  end
+
+  defp lane_item_sort_key(item) do
+    started_at =
+      case item.started_at do
+        %DateTime{} = value -> DateTime.to_unix(value, :microsecond)
+        _ -> 0
+      end
+
+    {
+      started_at,
+      repository_label(item),
+      item.number || 0,
+      card_id(item)
+    }
+  end
+
+  def linked_issues(item), do: Map.get(item, :linked_issues, [])
 
   def status_label(state) do
     case state do

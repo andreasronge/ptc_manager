@@ -3,7 +3,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
 
   @behaviour PtcManager.GitHub.PullRequests
 
-  alias PtcManager.GitHub.Client
+  alias PtcManager.GitHub.{Client, LinkedIssues}
   alias PtcManager.Operations.PrPublication
 
   @per_page 100
@@ -105,20 +105,24 @@ defmodule PtcManager.GitHub.PullRequestClient do
         true -> "open"
       end
 
+    body = pull["body"] || ""
+    base_repository = get_in(pull, ["base", "repo", "full_name"])
+
     result = %{
       pr_number: pull["number"],
       pr_url: pull["html_url"],
       state: state,
       draft: pull["draft"] == true,
-      body: pull["body"] || "",
+      body: body,
       head_sha: get_in(pull, ["head", "sha"]),
       head_ref: get_in(pull, ["head", "ref"]),
       head_repository: get_in(pull, ["head", "repo", "full_name"]),
       base_sha: get_in(pull, ["base", "sha"]),
       base_ref: get_in(pull, ["base", "ref"]),
-      base_repository: get_in(pull, ["base", "repo", "full_name"]),
+      base_repository: base_repository,
       title: pull["title"],
-      author_login: get_in(pull, ["user", "login"])
+      author_login: get_in(pull, ["user", "login"]),
+      linked_issue_numbers: linked_issue_numbers(body, base_repository)
     }
 
     if valid_normalized?(result), do: {:ok, result}, else: {:error, :invalid_pull_request}
@@ -131,6 +135,10 @@ defmodule PtcManager.GitHub.PullRequestClient do
       is_binary(result.base_sha) and is_binary(result.base_ref) and
       is_binary(result.base_repository) and is_binary(result.title)
   end
+
+  @doc false
+  def linked_issue_numbers(body, repository_full_name \\ nil),
+    do: LinkedIssues.from_body(body, repository_full_name)
 
   defp fetch_open_pages(_repository, page, _pulls) when page > @max_pages,
     do: {:blocked, :pull_request_pagination_limit_reached}

@@ -1172,7 +1172,8 @@ defmodule PtcManager.Operations do
           title: (item.publication && item.publication.title) || item.issue.title,
           number: item.publication && item.publication.pr_number,
           url: item.publication && item.publication.pr_url,
-          started_at: item.active_job.started_at || item.active_job.inserted_at
+          started_at: item.active_job.started_at || item.active_job.inserted_at,
+          linked_issues: [item.issue]
         })
       end)
 
@@ -1191,6 +1192,7 @@ defmodule PtcManager.Operations do
     analyses = latest_pr_analyses(publication_ids)
     approvals = analyses |> Map.values() |> latest_merge_approvals()
     actions = latest_agent_actions()
+    linked_issues = linked_issues_for_publications(external_publications)
 
     external_items =
       Enum.map(external_publications, fn publication ->
@@ -1212,11 +1214,59 @@ defmodule PtcManager.Operations do
           issue_agent_action: nil,
           pr_agent_action: Map.get(actions, {"pull_request", publication.id}),
           pr_retrospective_action: nil,
-          pr_retrospective_issue_actions: []
+          pr_retrospective_issue_actions: [],
+          linked_issues: Map.get(linked_issues, publication.id, [])
         }
       end)
 
     managed_items ++ external_items
+  end
+
+  defp linked_issues_for_publications(publications) do
+    references =
+      for publication <- publications,
+          number <- get_in(publication.linked_issue_numbers || %{}, ["numbers"]) || [],
+          do: {publication.id, publication.repository_id, number}
+
+    known_issues =
+      references
+      |> Enum.group_by(&elem(&1, 1), &elem(&1, 2))
+      |> Enum.flat_map(fn {repository_id, numbers} ->
+        numbers
+        |> Enum.uniq()
+        |> Enum.chunk_every(400)
+        |> Enum.flat_map(fn chunk ->
+          Issue
+          |> where(
+            [issue],
+            issue.repository_id == ^repository_id and issue.number in ^chunk
+          )
+          |> Repo.all()
+        end)
+      end)
+      |> Map.new(&{{&1.repository_id, &1.number}, &1})
+
+    repositories = Map.new(publications, &{&1.repository_id, &1.repository})
+
+    Enum.group_by(
+      references,
+      &elem(&1, 0),
+      fn {_publication_id, repository_id, number} ->
+        Map.get(known_issues, {repository_id, number}) ||
+          external_issue_reference(repositories, repository_id, number)
+      end
+    )
+  end
+
+  defp external_issue_reference(repositories, repository_id, number) do
+    repository = Map.fetch!(repositories, repository_id)
+
+    %{
+      number: number,
+      title: nil,
+      html_url:
+        "https://github.com/#{repository.github_owner}/#{repository.github_name}/issues/#{number}"
+    }
   end
 
   def list_agent_runs do

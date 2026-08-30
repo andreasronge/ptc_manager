@@ -3,6 +3,8 @@ defmodule PtcManager.Operations.PrPublication do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias PtcManager.GitHub.LinkedIssues
+
   @states ~w(queued publishing published blocked)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
@@ -38,6 +40,7 @@ defmodule PtcManager.Operations.PrPublication do
     field :checks_total, :integer, default: 0
     field :checks_failed, :integer, default: 0
     field :checks_pending, :integer, default: 0
+    field :linked_issue_numbers, :map, default: %{"numbers" => []}
 
     belongs_to :job, PtcManager.Operations.Job
     belongs_to :repository, PtcManager.Operations.Repository
@@ -82,7 +85,8 @@ defmodule PtcManager.Operations.PrPublication do
       :checks_state,
       :checks_total,
       :checks_failed,
-      :checks_pending
+      :checks_pending,
+      :linked_issue_numbers
     ])
     |> validate_required([
       :state,
@@ -103,6 +107,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_number(:checks_total, greater_than_or_equal_to: 0)
     |> validate_number(:checks_failed, greater_than_or_equal_to: 0)
     |> validate_number(:checks_pending, greater_than_or_equal_to: 0)
+    |> validate_linked_issue_numbers()
     |> validate_number(:pr_number, greater_than: 0)
     |> validate_length(:idempotency_key, is: 64)
     |> validate_length(:branch_name, max: 240)
@@ -151,5 +156,19 @@ defmodule PtcManager.Operations.PrPublication do
     else
       validate_required(changeset, [:job_id])
     end
+  end
+
+  defp validate_linked_issue_numbers(changeset) do
+    validate_change(changeset, :linked_issue_numbers, fn :linked_issue_numbers, value ->
+      case value do
+        %{"numbers" => numbers} when is_list(numbers) ->
+          if LinkedIssues.valid?(numbers),
+            do: [],
+            else: [linked_issue_numbers: "must contain at most ten unique valid issue numbers"]
+
+        _ ->
+          [linked_issue_numbers: "must contain a numbers list"]
+      end
+    end)
   end
 end
