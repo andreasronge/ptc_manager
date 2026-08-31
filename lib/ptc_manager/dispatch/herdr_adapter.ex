@@ -4,6 +4,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   @behaviour PtcManager.Dispatch.Adapter
 
   alias PtcManager.Herdr.Command
+  alias PtcManager.Gateway
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.PromptConfiguration
   alias PtcManager.ReviewPolicy
@@ -13,20 +14,30 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   @agent_action_command_grace_ms 5_000
 
   @impl true
-  def dispatch(%{job: job, issue: issue, repository: repository}) do
+  def dispatch(context), do: dispatch(context, [])
+
+  @doc false
+  def dispatch(%{job: job, issue: issue, repository: repository}, opts) when is_list(opts) do
+    command = Keyword.get(opts, :command, Command)
+
     with :ok <- enabled?(),
          {:ok, path} <- repository_path(repository) do
-      dispatch_external(path, repository, job, issue)
+      dispatch_external(path, repository, job, issue, command)
     else
       {:error, reason} -> {:error, {:safe, reason}}
     end
   end
 
   @impl true
-  def remove_worktree(%{herdr_workspace: workspace} = allocation) when is_binary(workspace) do
-    args = remove_worktree_args(allocation)
+  def remove_worktree(allocation), do: remove_worktree(allocation, [])
 
-    case run(args) do
+  @doc false
+  def remove_worktree(%{herdr_workspace: workspace} = allocation, opts)
+      when is_binary(workspace) and is_list(opts) do
+    args = remove_worktree_args(allocation)
+    command = Keyword.get(opts, :command, Command)
+
+    case run_with(command, args) do
       {:ok, _output} ->
         :ok
 
@@ -35,7 +46,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  def remove_worktree(_allocation), do: {:error, :worktree_workspace_missing}
+  def remove_worktree(_allocation, _opts), do: {:error, :worktree_workspace_missing}
 
   @doc "Starts a named Herdr agent in a fresh worktree rooted at an imported PR head."
   def start_pull_request_action(action, publication, repository) do
@@ -153,12 +164,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       if(terminal_pull_request?(allocation), do: ["--force"], else: [])
   end
 
-  defp dispatch_external(path, repository, job, issue) do
-    with {:ok, created} <- create_worktree(path, repository, job),
+  defp dispatch_external(path, repository, job, issue, command) do
+    with {:ok, created} <- create_worktree(command, path, repository, job),
          {:ok, workspace_id, pane_id} <- decode_worktree(created),
          agent_name = agent_name(job),
-         {:ok, agent_key} <- start_agent(agent_name, pane_id),
-         :ok <- prompt_agent(agent_name, issue, job) do
+         {:ok, agent_key} <- start_agent(command, agent_name, pane_id),
+         :ok <- prompt_agent(command, agent_name, issue, job) do
       session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
       {:ok,
@@ -206,8 +217,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       else: {:error, :repository_path_unavailable}
   end
 
-  defp create_worktree(path, repository, job) do
-    run([
+  defp create_worktree(command, path, repository, job) do
+    args = [
       "worktree",
       "create",
       "--cwd",
@@ -221,7 +232,72 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       "--label",
       "issue-#{job.issue.number}",
       "--no-focus"
-    ])
+    ]
+
+    case run_with(command, args) do
+      {:ok, _output} = created ->
+        created
+
+      {:error, create_error} ->
+        with {:ok, base_sha} <- capture_git(["-C", path, "rev-parse", repository.default_branch]) do
+          adopt_created_worktree(command, path, job, base_sha, create_error)
+        end
+    end
+  end
+
+  defp adopt_created_worktree(command, repository_path, job, base_sha, create_error) do
+    worktree_path = job.worktree_allocation.path
+
+    with :ok <-
+           exact_created_worktree(
+             repository_path,
+             worktree_path,
+             job.branch_name,
+             base_sha
+           ),
+         {:ok, output} <-
+           run_with(command, [
+             "worktree",
+             "open",
+             "--cwd",
+             repository_path,
+             "--path",
+             worktree_path,
+             "--label",
+             "issue-#{job.issue.number}",
+             "--no-focus"
+           ]) do
+      {:ok, output}
+    else
+      {:error, recovery_error} ->
+        {:error, {:worktree_create_unconfirmed, create_error, recovery_error}}
+    end
+  end
+
+  defp exact_created_worktree(repository_path, path, branch, base_sha) do
+    with {:ok, %{type: :directory}} <- File.lstat(path),
+         {:ok, repository_common_dir} <-
+           capture_git([
+             "-C",
+             repository_path,
+             "rev-parse",
+             "--path-format=absolute",
+             "--git-common-dir"
+           ]),
+         {:ok, ^repository_common_dir} <-
+           capture_git(["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"]),
+         {:ok, ^path} <-
+           capture_git(["-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel"]),
+         {:ok, ^branch} <- capture_git(["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"]),
+         {:ok, ^base_sha} <- capture_git(["-C", path, "rev-parse", "HEAD"]),
+         {:ok, ""} <-
+           capture_git(["-C", path, "status", "--porcelain=v1", "--untracked-files=all"]) do
+      :ok
+    else
+      {:ok, %{type: :symlink}} -> {:error, :unsafe_worktree_symlink}
+      {:ok, _other} -> {:error, :worktree_create_identity_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp fetch_pull_request_head(repository_path, action, publication, repository) do
@@ -357,7 +433,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     )
   end
 
-  defp start_agent(name, pane_id) do
+  defp start_agent(name, pane_id), do: start_agent(Command, name, pane_id)
+
+  defp start_agent(command, name, pane_id) do
     kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
 
     agent_args =
@@ -368,7 +446,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
     command_timeout = timeout + @agent_start_command_grace_ms
 
-    case run(
+    case run_with(
+           command,
            [
              "agent",
              "start",
@@ -398,8 +477,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  defp prompt_agent(name, issue, job) do
-    case run(["agent", "prompt", name, build_prompt(job.repository, issue, job)]) do
+  defp prompt_agent(command, name, issue, job) do
+    case run_with(command, ["agent", "prompt", name, build_prompt(job.repository, issue, job)]) do
       {:ok, _output} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -480,5 +559,6 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp worktree_missing?(_allocation), do: false
 
   defp run(args, timeout \\ nil), do: Command.run(args, timeout)
+  defp run_with(command, args, timeout \\ nil), do: Gateway.call(command, :run, [args, timeout])
   defp bounded(output), do: output |> String.trim() |> String.slice(-1_000, 1_000)
 end

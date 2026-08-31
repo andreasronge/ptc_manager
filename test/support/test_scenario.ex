@@ -104,6 +104,23 @@ defmodule PtcManager.TestScenario do
     GenServer.call(scenario.pid, {:operation_outcome, operation, outcome})
   end
 
+  def operation_outcomes(%__MODULE__{} = scenario, operation, outcomes)
+      when operation in [
+             :list_open_issues,
+             :get_issue,
+             :start_pull_request_action,
+             :prompt_pull_request_action,
+             :pull_request_action_head,
+             :sync_action_postflight,
+             :run_command
+           ] and is_list(outcomes) do
+    if Enum.all?(outcomes, &(&1 in [:ok, :fail_before, :effect_then_error])) do
+      GenServer.call(scenario.pid, {:operation_outcomes, operation, outcomes})
+    else
+      raise ArgumentError, "operation outcomes must be deterministic non-pausing modes"
+    end
+  end
+
   def repair_statuses(%__MODULE__{} = scenario, preflight, postflight) do
     GenServer.call(scenario.pid, {:repair_statuses, preflight, postflight})
   end
@@ -225,6 +242,7 @@ defmodule PtcManager.TestScenario do
        cleanup_outcome:
          outcome_setting(Keyword.get(opts, :cleanup_outcome, :ok), opts[:pause_owner]),
        operation_outcomes: %{},
+       operation_sequences: %{},
        repair_statuses: nil,
        herdr_transport: Keyword.get(opts, :herdr_transport, :online),
        paused_calls: %{},
@@ -263,7 +281,19 @@ defmodule PtcManager.TestScenario do
      %{
        state
        | operation_outcomes:
-           Map.put(state.operation_outcomes, operation, outcome_setting(outcome, caller))
+           Map.put(state.operation_outcomes, operation, outcome_setting(outcome, caller)),
+         operation_sequences: Map.delete(state.operation_sequences, operation)
+     }}
+  end
+
+  def handle_call({:operation_outcomes, operation, outcomes}, _from, state) do
+    sequence = Enum.map(outcomes, &outcome_setting(&1, nil))
+
+    {:reply, :ok,
+     %{
+       state
+       | operation_outcomes: Map.delete(state.operation_outcomes, operation),
+         operation_sequences: Map.put(state.operation_sequences, operation, sequence)
      }}
   end
 
@@ -468,7 +498,7 @@ defmodule PtcManager.TestScenario do
   end
 
   def handle_call({:run_command, command, args, options}, from, state) do
-    {mode, _pause_owner} = Map.get(state.operation_outcomes, :run_command, {:ok, nil})
+    {mode, _pause_owner} = operation_setting(state, :run_command)
 
     result =
       case mode do
@@ -537,7 +567,7 @@ defmodule PtcManager.TestScenario do
   end
 
   defp external_operation_reply(state, applied, from, operation, target, success) do
-    {mode, pause_owner} = Map.get(state.operation_outcomes, operation, {:ok, nil})
+    {{mode, pause_owner}, state, applied} = consume_operation_setting(state, applied, operation)
 
     {result, next_state, reply_mode} =
       case mode do
@@ -594,6 +624,29 @@ defmodule PtcManager.TestScenario do
 
   defp outcome_setting(:pause_after_effect, owner), do: {:pause_after_effect, owner}
   defp outcome_setting(mode, _owner), do: {mode, nil}
+
+  defp operation_setting(state, operation) do
+    case Map.get(state.operation_sequences, operation, []) do
+      [setting | _rest] -> setting
+      [] -> Map.get(state.operation_outcomes, operation, {:ok, nil})
+    end
+  end
+
+  defp consume_operation_setting(state, applied, operation) do
+    case Map.get(state.operation_sequences, operation, []) do
+      [setting | rest] ->
+        sequences =
+          if rest == [],
+            do: Map.delete(state.operation_sequences, operation),
+            else: Map.put(state.operation_sequences, operation, rest)
+
+        {setting, %{state | operation_sequences: sequences},
+         %{applied | operation_sequences: sequences}}
+
+      [] ->
+        {Map.get(state.operation_outcomes, operation, {:ok, nil}), state, applied}
+    end
+  end
 
   defp operation_source(operation) when operation in [:list_open_issues, :get_issue], do: :github
   defp operation_source(:pull_request_action_head), do: :git
