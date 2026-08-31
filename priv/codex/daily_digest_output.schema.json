@@ -25,7 +25,6 @@
     "pull_request_numbers": {
       "type": "array",
       "maxItems": 100,
-      "uniqueItems": true,
       "items": {"type": "integer", "minimum": 1}
     }
   }

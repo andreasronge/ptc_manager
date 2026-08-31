@@ -150,6 +150,14 @@ defmodule PtcManager.DailyDigestsTest do
              |> CodexAdapter.validate_result("daily_digest")
   end
 
+  test "Codex output schema leaves uniqueness enforcement to application validation" do
+    schema_path =
+      Application.app_dir(:ptc_manager, "priv/codex/daily_digest_output.schema.json")
+
+    assert {:ok, schema} = schema_path |> File.read!() |> Jason.decode()
+    refute Map.has_key?(schema["properties"]["pull_request_numbers"], "uniqueItems")
+  end
+
   test "read-only Codex execution cannot auto-approve a broader sandbox" do
     assert CodexAdapter.isolation_args("read-only") == ["--sandbox", "read-only"]
     refute "--approve-for-me" in CodexAdapter.isolation_args("read-only")
