@@ -82,17 +82,19 @@ defmodule PtcManager.Repository.SourceSnapshot do
   end
 
   defp clone_snapshot(repository_path, path, action_id, source_sha) do
-    with {_output, 0} <-
-           git_command([
-             "-c",
-             "safe.directory=#{repository_path}",
-             "clone",
-             "--no-hardlinks",
-             "--no-checkout",
-             "--",
-             repository_path,
-             path
-           ]),
+    bundle_path = Path.join([path, ".git", "ptc-manager-source.bundle"])
+
+    # A local clone starts upload-pack in a child Git process that re-checks the
+    # worker-owned .git directory without inheriting this command's narrow
+    # safe.directory setting. Create the bundle while Git is already operating
+    # in the trusted source checkout, then import it into a coordinator-owned
+    # repository without hardlinks back to the mutable source.
+    with {_output, 0} <- git_command(["init", "--quiet", "--", path]),
+         {_output, 0} <-
+           git_command(git_args(repository_path, ["bundle", "create", bundle_path, "HEAD"])),
+         {_output, 0} <-
+           git_command(["-C", path, "fetch", "--no-tags", "--", bundle_path, source_sha]),
+         :ok <- File.rm(bundle_path),
          {_output, 0} <- git_command(["-C", path, "checkout", "--detach", source_sha]),
          :ok <- write_marker(path, repository_path, action_id, source_sha),
          :ok <- make_read_only(path) do

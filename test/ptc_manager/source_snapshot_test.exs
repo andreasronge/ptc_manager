@@ -301,12 +301,32 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
                stderr_to_stdout: true
              )
 
+    git_proxy = Path.join(path, "reject-local-clone")
+
+    File.write!(
+      git_proxy,
+      """
+      #!/bin/sh
+      for argument do
+        if [ "$argument" = "clone" ]; then
+          echo "local clone transport is forbidden in this test" >&2
+          exit 97
+        fi
+      done
+      exec /usr/bin/git "$@"
+      """
+    )
+
+    File.chmod!(git_proxy, 0o700)
+    Application.put_env(:ptc_manager, :planning_git_binary, git_proxy)
+
     repository = %Repository{local_path: path, default_branch: "main"}
 
     assert {:ok, snapshot} = SourceSnapshot.prepare(repository, 42, %{})
     assert File.stat!(snapshot.path).gid == File.stat!(snapshot_root).gid
     assert File.read!(Path.join(snapshot.path, "evidence.txt")) == "original\n"
     assert File.read!(Path.join(snapshot.path, "current-evidence.txt")) == "original\n"
+    refute File.exists?(Path.join([snapshot.path, ".git", "ptc-manager-source.bundle"]))
     assert :ok = SourceSnapshot.verify(repository, snapshot.path, snapshot.sha)
 
     assert {:ok, second_snapshot} = SourceSnapshot.prepare(repository, 43, %{})
