@@ -8,6 +8,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
+  alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.SourceSnapshot
 
   @impl true
@@ -184,11 +185,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   defp repository_path(_action, repository), do: repository_path(repository)
 
   defp repository_path(repository) do
-    path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-
-    if is_binary(path) and File.dir?(path),
-      do: {:ok, path},
-      else: {:error, :repository_path_unavailable}
+    Checkout.available_path(repository)
   end
 
   defp decode_output(path, action_key) do

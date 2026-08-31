@@ -43,6 +43,16 @@ defmodule PtcManager.Operations.Repository do
       less_than_or_equal_to: 3
     )
     |> validate_length(:implementation_test_command, max: 2_000)
+    |> validate_change(:local_path, fn :local_path, path ->
+      if Path.type(path) == :absolute,
+        do: [],
+        else: [local_path: "must be an absolute path"]
+    end)
+    |> update_change(:local_path, &normalize_local_path/1)
     |> unique_constraint([:github_owner, :github_name])
+    |> unique_constraint(:local_path)
   end
+
+  defp normalize_local_path(path) when is_binary(path) and path != "", do: Path.expand(path)
+  defp normalize_local_path(path), do: path
 end

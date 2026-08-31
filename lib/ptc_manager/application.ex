@@ -14,6 +14,7 @@ defmodule PtcManager.Application do
       PtcManager.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
+      PtcManager.Repository.StartupPreflight,
       {DNSCluster, query: Application.get_env(:ptc_manager, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: PtcManager.PubSub},
       {Task.Supervisor, name: PtcManager.TaskSupervisor},

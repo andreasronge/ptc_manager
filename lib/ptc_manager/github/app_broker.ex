@@ -5,6 +5,7 @@ defmodule PtcManager.GitHub.AppBroker do
 
   alias PtcManager.Operations.PrPublication
   alias PtcManager.Publications
+  alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.{Contract, GitProbe}
 
   @api "https://api.github.com"
@@ -142,12 +143,13 @@ defmodule PtcManager.GitHub.AppBroker do
   end
 
   defp valid_context(repository, issue, publication) do
-    source_path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-
-    with :ok <- valid_target_context(repository, issue, publication) do
-      if is_binary(source_path) and Path.type(source_path) == :absolute and File.dir?(source_path),
-        do: {:ok, Path.expand(source_path)},
-        else: {:blocked, :invalid_repository_path}
+    with :ok <- valid_target_context(repository, issue, publication),
+         {:ok, source_path} <- Checkout.available_path(repository) do
+      {:ok, source_path}
+    else
+      {:error, :repository_path_unavailable} -> {:blocked, :invalid_repository_path}
+      {:error, reason} -> {:blocked, {:invalid_repository_checkout, reason}}
+      {:blocked, _reason} = blocked -> blocked
     end
   end
 

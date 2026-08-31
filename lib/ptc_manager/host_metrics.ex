@@ -96,8 +96,7 @@ defmodule PtcManager.HostMetrics do
   end
 
   defp disk_path do
-    Application.get_env(:ptc_manager, :worktree_root) ||
-      Application.get_env(:ptc_manager, :repository_path) || "/"
+    Application.get_env(:ptc_manager, :worktree_root) || "/"
   end
 
   defp load_average do

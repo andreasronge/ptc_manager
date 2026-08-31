@@ -4,6 +4,7 @@ defmodule PtcManager.Repository.GitProbe do
   @behaviour PtcManager.Repository.ResultProbe
 
   alias PtcManager.Operations.{Job, Repository}
+  alias PtcManager.Repository.Checkout
 
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
   @small_output_limit 64 * 1024
@@ -27,6 +28,26 @@ defmodule PtcManager.Repository.GitProbe do
   end
 
   def repository_contract(_path, _sha), do: {:error, :invalid_repository_contract_context}
+
+  @doc "Returns the canonical checkout, shared Git directory, and GitHub origin identity."
+  def checkout_identity(%Repository{}, path) when is_binary(path) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         {:ok, configured_path} <- Checkout.canonical_directory(path),
+         {:ok, top_level} <- git(path, ["rev-parse", "--show-toplevel"]),
+         {:ok, top_level} <- canonical_checkout_path(path, top_level),
+         true <- configured_path == top_level,
+         {:ok, common_dir} <- git(path, ["rev-parse", "--git-common-dir"]),
+         {:ok, common_dir} <- canonical_checkout_path(path, common_dir),
+         {:ok, origin} <- git(path, ["remote", "get-url", "origin"]),
+         {:ok, remote_identity} <- github_remote_identity(origin) do
+      {:ok, %{top_level: top_level, common_dir: common_dir, remote_identity: remote_identity}}
+    else
+      false -> {:error, :repository_checkout_root_mismatch}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def checkout_identity(_repository, _path), do: {:error, :repository_path_unavailable}
 
   @impl true
   def verify(%Repository{} = repository, %Job{} = job) do
@@ -150,11 +171,30 @@ defmodule PtcManager.Repository.GitProbe do
   def descendant?(_path, _ancestor, _head), do: {:error, :invalid_sha}
 
   defp repository_path(repository) do
-    path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
+    Checkout.available_path(repository)
+  end
 
-    if is_binary(path) and File.dir?(path),
-      do: {:ok, Path.expand(path)},
-      else: {:error, :repository_path_unavailable}
+  defp canonical_checkout_path(repository_path, path) do
+    path = if Path.type(path) == :absolute, do: path, else: Path.expand(path, repository_path)
+
+    case Checkout.canonical_directory(path) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _reason} -> {:error, :repository_identity_unavailable}
+    end
+  end
+
+  defp github_remote_identity(origin) do
+    case Regex.run(
+           ~r{(?:^|@|://)github\.com[/:]([^/]+)/([^/]+)/?$}i,
+           String.trim(origin),
+           capture: :all_but_first
+         ) do
+      [owner, name] ->
+        {:ok, {String.downcase(owner), name |> String.trim_trailing(".git") |> String.downcase()}}
+
+      _other ->
+        {:error, :repository_origin_not_github}
+    end
   end
 
   defp valid_branch(%Job{id: id, issue_id: issue_id, branch_name: branch})

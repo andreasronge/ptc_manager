@@ -1,4 +1,9 @@
-<Layouts.app flash={@flash} current_path="/updates">
+<Layouts.app
+  flash={@flash}
+  current_path="/updates"
+  repositories={@repositories}
+  selected_repository={@selected_repository}
+>
   <section class="mb-8">
     <p class="text-xs font-semibold uppercase tracking-[0.24em] text-teal-300">Daily briefing</p>
     <div class="mt-3 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -33,7 +38,11 @@
     <aside aria-label="Daily updates" class="space-y-3 lg:sticky lg:top-24">
       <.link
         :for={digest <- @digests}
-        navigate={~p"/updates/#{digest.id}"}
+        navigate={
+          if @selected_repository,
+            do: "/updates/#{digest.id}?repo=#{URI.encode_www_form(@selected_repository)}",
+            else: ~p"/updates/#{digest.id}"
+        }
         id={"daily-digest-#{digest.id}"}
         class={[
           "block rounded-2xl border p-4 transition focus:outline-none focus:ring-2 focus:ring-teal-400/50",

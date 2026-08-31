@@ -2,6 +2,7 @@ defmodule PtcManagerWeb.DailyDigestLive do
   use PtcManagerWeb, :live_view
 
   alias PtcManager.DailyDigests
+  alias PtcManager.Operations
 
   @impl true
   def mount(_params, _session, socket) do
@@ -10,38 +11,63 @@ defmodule PtcManagerWeb.DailyDigestLive do
     {:ok,
      socket
      |> assign(:page_title, "Updates")
+     |> assign(:selected_repository, nil)
+     |> assign(:repositories, Operations.list_repositories())
      |> assign(:schedule_label, schedule_label())
      |> assign(:selected_digest, nil)
      |> load_digests()}
   end
 
   @impl true
-  def handle_params(%{"id" => id}, _uri, socket) do
+  def handle_params(params, _uri, socket) do
+    repositories = Operations.list_repositories()
+
     selected =
-      with {digest_id, ""} <- Integer.parse(id) do
-        Enum.find(socket.assigns.digests, &(&1.id == digest_id))
-      else
-        _invalid -> nil
+      case params["repo"] do
+        key when is_binary(key) ->
+          if Enum.any?(repositories, &(repository_key(&1) == key)), do: key, else: nil
+
+        _key ->
+          nil
       end
 
-    if selected do
-      {:noreply,
-       socket
-       |> assign(:selected_digest, selected)
-       |> assign(:page_title, selected.title || "Daily update")}
-    else
-      {:noreply,
-       socket
-       |> put_flash(:error, "That daily update is not available.")
-       |> push_navigate(to: ~p"/updates")}
-    end
-  end
+    socket =
+      socket
+      |> assign(:repositories, repositories)
+      |> assign(:selected_repository, selected)
+      |> assign(:selected_digest, nil)
+      |> assign(:page_title, "Updates")
+      |> load_digests()
 
-  def handle_params(_params, _uri, socket) do
-    {:noreply,
-     socket
-     |> assign(:selected_digest, nil)
-     |> assign(:page_title, "Updates")}
+    case params["id"] do
+      id when is_binary(id) ->
+        selected_digest =
+          with {digest_id, ""} <- Integer.parse(id) do
+            Enum.find(socket.assigns.digests, &(&1.id == digest_id))
+          else
+            _invalid -> nil
+          end
+
+        if selected_digest do
+          {:noreply,
+           socket
+           |> assign(:selected_digest, selected_digest)
+           |> assign(:page_title, selected_digest.title || "Daily update")}
+        else
+          target =
+            if selected,
+              do: "/updates?repo=#{URI.encode_www_form(selected)}",
+              else: ~p"/updates"
+
+          {:noreply,
+           socket
+           |> put_flash(:error, "That daily update is not available.")
+           |> push_navigate(to: target)}
+        end
+
+      _id ->
+        {:noreply, socket}
+    end
   end
 
   @impl true
@@ -98,7 +124,17 @@ defmodule PtcManagerWeb.DailyDigestLive do
   def pull_request_numbers(digest),
     do: get_in(digest.pull_request_numbers || %{}, ["numbers"]) || []
 
-  defp load_digests(socket), do: assign(socket, :digests, DailyDigests.list_digests())
+  defp load_digests(socket) do
+    digests =
+      case socket.assigns.selected_repository do
+        nil -> DailyDigests.list_digests()
+        key -> Enum.filter(DailyDigests.list_digests(), &(repository_key(&1.repository) == key))
+      end
+
+    assign(socket, :digests, digests)
+  end
+
+  defp repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
 
   defp schedule_label do
     hour = Application.get_env(:ptc_manager, :daily_digest_hour, 2)

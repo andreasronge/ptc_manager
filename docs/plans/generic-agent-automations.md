@@ -1623,6 +1623,15 @@ Acceptance:
 - Add repository authentication and gate health to configuration.
 - Add URL plus localStorage repository selection.
 
+Checkpoint A establishes the safe foundation before enabling a second
+repository: persisted checkout ownership, canonical Git root/common-directory
+and GitHub-origin validation, explicit worktree roots, legacy single-repository
+upgrade reconciliation, repository-safe external worktree names, and a stable
+repository selector on the existing Planning, Delivery, and Updates pages. It
+is browser-testable with two mocked repositories. Dependency projection,
+configuration health, and the complete two-repository dispatch/publication
+journey remain subsequent Slice 2 checkpoints.
+
 Acceptance:
 
 - two repositories cannot silently share checkout or worktree paths;

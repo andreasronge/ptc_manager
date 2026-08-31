@@ -51,8 +51,30 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      socket
      |> assign(:page_title, "Delivery board")
      |> assign(:actor, session["actor"] || "maintainer")
+     |> assign(:selected_repository, nil)
+     |> assign(:repositories, Operations.list_repositories())
      |> assign(:now, DateTime.utc_now())
      |> assign(:lane_definitions, @lane_definitions)
+     |> load_board()}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    repositories = Operations.list_repositories()
+
+    selected =
+      case params do
+        %{"repo" => key} ->
+          if Enum.any?(repositories, &(repository_key(&1) == key)), do: key, else: nil
+
+        _params ->
+          nil
+      end
+
+    {:noreply,
+     socket
+     |> assign(:repositories, repositories)
+     |> assign(:selected_repository, selected)
      |> load_board()}
   end
 
@@ -553,6 +575,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
     items =
       Operations.delivery_board_items()
+      |> filter_repository(socket.assigns.selected_repository)
       |> Enum.map(fn item ->
         run =
           cond do
@@ -582,6 +605,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
     assign(socket, lanes: lanes, item_count: length(items))
   end
+
+  defp filter_repository(items, nil), do: items
+
+  defp filter_repository(items, key) do
+    Enum.filter(items, &(repository_key(&1.repository) == key))
+  end
+
+  defp repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
 
   defp short_action_target(target_label) when is_binary(target_label) do
     case Regex.run(~r/#(\d+)$/, target_label) do

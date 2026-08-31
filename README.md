@@ -129,7 +129,8 @@ To choose a different local password:
 PTC_MANAGER_PASSWORD='choose-a-long-password' mix phx.server
 ```
 
-To use the real read-only adapters locally:
+On the first database setup, seed the initial repository checkout and then use
+the real read-only adapters locally:
 
 ```sh
 PTC_REPOSITORY_PATH=/absolute/path/to/ptc_runner \
@@ -138,6 +139,22 @@ PTC_HERDR_SESSION=default \
 PTC_HERDR_SYNC_INTERVAL_MS=10000 \
 mix phx.server
 ```
+
+`PTC_REPOSITORY_PATH` seeds an empty database. During an upgrade from the
+single-repository setup, startup may also import it into the sole repository row
+when that row has no path, or verify that it still identifies the same physical
+checkout. A conflict blocks startup with an explicit preflight error instead of
+silently switching checkouts. Remove the legacy variable before configuring a
+second repository.
+
+The resulting absolute path belongs to that repository row; it is not a
+process-wide override. Each enabled checkout must be the Git root for the
+configured GitHub origin. PtcManager canonicalizes symlinks and Git common
+directories and blocks startup and dispatch if two repository rows share a
+checkout or linked worktree. Additional repositories must each have their own
+clone. Agent work also requires one explicit absolute
+`PTC_WORKTREE_ROOT`; PtcManager does not infer a different root beside each
+checkout.
 
 For a public repository, manual GitHub synchronization works without a token.
 For a private repository or higher rate limits, set `GITHUB_READ_TOKEN` to a
@@ -218,7 +235,8 @@ repository, base, branch, and exact verified head match. This mode does not
 weaken the explicit maintainer approval required before merge.
 
 Private Codex investigation is off by default. Once Codex is authenticated on
-the machine and the configured repository path exists, enable it explicitly:
+the machine and the repository's persisted checkout path exists, enable it
+explicitly (the path below seeds a new empty database only):
 
 ```sh
 PTC_CODEX_MANAGER_ENABLED=true \
@@ -578,7 +596,8 @@ sudo -u ptc-manager-worker -H gh auth login
 sudo -u ptc-manager-external -H codex login
 ```
 
-The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
+Each checkout persisted as a repository's `local_path` is owned and writable
+only by the worker.
 The `ptc-manager-repo` group gives the coordinator, manager, verifier, and gate
 read/execute access without filesystem write access. The worker-owned
 `PTC_WORKTREE_ROOT` contains only job worktrees. It and every ancestor must be

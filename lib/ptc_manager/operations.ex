@@ -12,6 +12,7 @@ defmodule PtcManager.Operations do
   alias PtcManager.Repo
   alias PtcManager.ReviewPolicy
   alias PtcManager.RuntimeIncarnation
+  alias PtcManager.Repository.Checkout
   alias PtcManager.WorktreeSecurity
 
   alias PtcManager.Operations.{
@@ -1496,7 +1497,7 @@ defmodule PtcManager.Operations do
   def list_agent_runs do
     AgentRun
     |> order_by([run], asc: run.started_at)
-    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
     |> Repo.all()
   end
 
@@ -1505,7 +1506,7 @@ defmodule PtcManager.Operations do
     |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(queued starting working blocked unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
-    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
     |> Repo.all()
   end
 
@@ -1514,7 +1515,7 @@ defmodule PtcManager.Operations do
     |> without_orphaned_action_duplicates()
     |> where([run], run.state == "waiting")
     |> order_by([run], asc: run.last_heartbeat_at, asc: run.id)
-    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
     |> Repo.all()
   end
 
@@ -1523,19 +1524,37 @@ defmodule PtcManager.Operations do
     |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(queued starting working idle blocked waiting unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
-    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
     |> Repo.all()
   end
 
   def list_recent_agent_runs(limit \\ 5) when is_integer(limit) and limit > 0 do
+    recent_agent_runs_query()
+    |> limit(^limit)
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
+  def list_recent_agent_runs_for_repository(repository_id, limit \\ 5)
+      when is_integer(repository_id) and is_integer(limit) and limit > 0 do
+    recent_agent_runs_query()
+    |> join(:left, [run], job in Job, on: job.id == run.job_id)
+    |> join(:left, [run, job], action in AgentAction, on: action.id == run.agent_action_id)
+    |> where(
+      [run, job, action],
+      job.repository_id == ^repository_id or action.repository_id == ^repository_id
+    )
+    |> limit(^limit)
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> Repo.all()
+  end
+
+  defp recent_agent_runs_query do
     AgentRun
     |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(done failed lost))
     |> where([run], is_nil(run.status_text) or run.status_text != ^@superseded_herdr_status)
     |> order_by([run], desc: run.ended_at, desc: run.id)
-    |> limit(^limit)
-    |> preload([:worker, :agent_action, job: [:issue, :repository]])
-    |> Repo.all()
   end
 
   def list_agent_timeline(limit \\ 40) when is_integer(limit) and limit > 0 do
@@ -1544,7 +1563,7 @@ defmodule PtcManager.Operations do
     |> where([run], is_nil(run.status_text) or run.status_text != ^@superseded_herdr_status)
     |> order_by([run], desc: run.started_at, desc: run.id)
     |> limit(^limit)
-    |> preload([:worker, :agent_action, job: [:issue, :repository]])
+    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
     |> Repo.all()
   end
 
@@ -1982,21 +2001,15 @@ defmodule PtcManager.Operations do
   end
 
   defp worktree_path(repository, job_id, fencing_token) do
-    repository_path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-
-    root =
-      Application.get_env(:ptc_manager, :worktree_root) ||
-        if(is_binary(repository_path),
-          do: Path.join(Path.dirname(Path.expand(repository_path)), ".ptc-manager-worktrees")
-        )
+    root = Application.get_env(:ptc_manager, :worktree_root)
 
     with true <- is_binary(root) and Path.type(root) == :absolute,
          :ok <- WorktreeSecurity.validate_configured_root(root) do
-      slug =
-        "#{repository.github_owner}-#{repository.github_name}"
-        |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
-
-      {:ok, Path.join(Path.expand(root), "#{slug}-job-#{job_id}-f#{fencing_token}")}
+      {:ok,
+       Path.join(
+         Path.expand(root),
+         "#{Checkout.slug(repository)}-job-#{job_id}-f#{fencing_token}"
+       )}
     else
       false -> {:error, :worktree_root_unavailable}
       {:error, reason} -> {:error, reason}

@@ -17,7 +17,7 @@ defmodule PtcManager.TestScenario do
   alias PtcManager.Herdr.Sync, as: HerdrSync
   alias PtcManager.MaintainerActions.ExternalPrRepairAdapter
   alias PtcManager.Operations
-  alias PtcManager.Operations.Worker
+  alias PtcManager.Operations.{Repository, Worker}
   alias PtcManager.OperationsFixtures
   alias PtcManager.Repo
 
@@ -33,10 +33,14 @@ defmodule PtcManager.TestScenario do
     number = Keyword.get(opts, :number, System.unique_integer([:positive]))
     title = Keyword.get(opts, :title, "Implement deterministic scenario support")
 
+    local_path =
+      opts
+      |> Keyword.get(:local_path, "/tmp/ptc-manager-test-scenario")
+      |> Path.expand()
+
     repository =
-      OperationsFixtures.repository_fixture(%{
-        local_path: Keyword.get(opts, :local_path, "/tmp/ptc-manager-test-scenario")
-      })
+      Repo.get_by(Repository, local_path: local_path) ||
+        OperationsFixtures.repository_fixture(%{local_path: local_path})
 
     remote_issue = %{
       "number" => number,

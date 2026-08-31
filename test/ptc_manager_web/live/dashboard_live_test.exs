@@ -39,6 +39,110 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     end
   end
 
+  test "filters Planning by repository from the URL" do
+    first = repository_fixture(%{github_owner: "andreas", github_name: "first"})
+    second = repository_fixture(%{github_owner: "andreas", github_name: "second"})
+    first_issue = issue_fixture(first, %{title: "Only in first"})
+    second_issue = issue_fixture(second, %{title: "Only in second"})
+    proposal_fixture(first_issue)
+    proposal_fixture(second_issue)
+    {:ok, first_job} = Operations.approve_issue(first_issue.id, "maintainer")
+    {:ok, second_job} = Operations.approve_issue(second_issue.id, "maintainer")
+    worker = worker_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, first_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: first_job.id,
+        role: "implementer",
+        state: "working",
+        started_at: now,
+        last_heartbeat_at: now
+      })
+
+    {:ok, second_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: second_job.id,
+        role: "implementer",
+        state: "working",
+        started_at: now,
+        last_heartbeat_at: now
+      })
+
+    {:ok, view, _html} =
+      build_conn()
+      |> authenticated_conn()
+      |> live("/?repo=andreas%2Fsecond")
+
+    assert has_element?(view, "#repository-selector option[selected]", "andreas/second")
+    assert has_element?(view, "#issue-#{second_issue.id}", "Only in second")
+    refute has_element?(view, "#issue-#{first_issue.id}")
+    assert has_element?(view, "#agent-run-#{second_run.id}")
+    refute has_element?(view, "#agent-run-#{first_run.id}")
+    assert has_element?(view, "#active-agent-count", "1")
+
+    {:ok, all_view, _html} =
+      build_conn()
+      |> authenticated_conn()
+      |> live("/?repo=all")
+
+    assert has_element?(all_view, "#repository-selector option[selected]", "All repositories")
+    assert has_element?(all_view, "#issue-#{first_issue.id}")
+    assert has_element?(all_view, "#issue-#{second_issue.id}")
+    assert has_element?(all_view, "#agent-run-#{first_run.id}")
+    assert has_element?(all_view, "#agent-run-#{second_run.id}")
+    assert has_element?(all_view, "#active-agent-count", "2")
+  end
+
+  test "limits recent agent history after applying the repository filter" do
+    first = repository_fixture(%{github_owner: "andreas", github_name: "history-first"})
+    second = repository_fixture(%{github_owner: "andreas", github_name: "history-second"})
+    worker = worker_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    first_issue = issue_fixture(first, %{title: "Older work in selected repository"})
+    proposal_fixture(first_issue)
+    {:ok, first_job} = Operations.approve_issue(first_issue.id, "maintainer")
+
+    {:ok, first_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: first_job.id,
+        role: "implementer",
+        state: "done",
+        started_at: DateTime.add(now, -120, :second),
+        last_heartbeat_at: DateTime.add(now, -60, :second),
+        ended_at: DateTime.add(now, -60, :second)
+      })
+
+    for offset <- 1..6 do
+      issue = issue_fixture(second, %{title: "Newer other work #{offset}"})
+      proposal_fixture(issue)
+      {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
+
+      {:ok, _run} =
+        Operations.create_agent_run(%{
+          worker_id: worker.id,
+          job_id: job.id,
+          role: "implementer",
+          state: "done",
+          started_at: DateTime.add(now, -50 + offset, :second),
+          last_heartbeat_at: DateTime.add(now, -40 + offset, :second),
+          ended_at: DateTime.add(now, -40 + offset, :second)
+        })
+    end
+
+    {:ok, view, _html} =
+      build_conn()
+      |> authenticated_conn()
+      |> live("/?repo=andreas%2Fhistory-first")
+
+    assert has_element?(view, "#agent-history-run-#{first_run.id}", "Older work")
+    refute render(view) =~ "Newer other work"
+  end
+
   test "approves a fresh issue and displays the queued job", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Keep retry evidence bounded"})

@@ -1178,63 +1178,55 @@ defmodule PtcManager.PublisherTest do
     {_job, publication, _result} = verified_publication_fixture()
     publication = Repo.preload(publication, job: [:issue, :repository])
 
-    settings =
-      for key <- [
-            :github_app_id,
-            :github_app_installation_id,
-            :github_app_private_key_path,
-            :github_push_timeout_binary,
-            :github_publish_staging_root
-          ],
-          into: %{} do
-        {key, Application.get_env(:ptc_manager, key)}
-      end
-
-    on_exit(fn ->
-      Enum.each(settings, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    with_github_app_config(fn ->
+      assert {:blocked, :unexpected_job_branch} =
+               PtcManager.GitHub.AppBroker.publish(%{
+                 publication
+                 | branch_name: "someone-else/unsafe"
+               })
     end)
-
-    Application.put_env(:ptc_manager, :github_app_id, "1")
-    Application.put_env(:ptc_manager, :github_app_installation_id, "2")
-    Application.put_env(:ptc_manager, :github_app_private_key_path, "/does/not/exist")
-    Application.put_env(:ptc_manager, :github_push_timeout_binary, "/usr/bin/timeout")
-    Application.put_env(:ptc_manager, :github_publish_staging_root, System.tmp_dir!())
-
-    assert {:blocked, :unexpected_job_branch} =
-             PtcManager.GitHub.AppBroker.publish(%{
-               publication
-               | branch_name: "someone-else/unsafe"
-             })
   end
 
   test "the GitHub App broker rejects an exact job branch without matching gate evidence" do
     {_job, publication, _result} = verified_publication_fixture()
     publication = Repo.preload(publication, [job: [:issue, :repository]], force: true)
 
-    settings =
-      for key <- [
-            :github_app_id,
-            :github_app_installation_id,
-            :github_app_private_key_path,
-            :github_push_timeout_binary,
-            :github_publish_staging_root
-          ],
-          into: %{} do
-        {key, Application.get_env(:ptc_manager, key)}
-      end
-
-    on_exit(fn ->
-      Enum.each(settings, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    with_github_app_config(fn ->
+      assert {:blocked, :pre_publication_gate_not_passed} =
+               PtcManager.GitHub.AppBroker.publish(publication)
     end)
+  end
 
-    Application.put_env(:ptc_manager, :github_app_id, "1")
-    Application.put_env(:ptc_manager, :github_app_installation_id, "2")
-    Application.put_env(:ptc_manager, :github_app_private_key_path, "/does/not/exist")
-    Application.put_env(:ptc_manager, :github_push_timeout_binary, "/usr/bin/timeout")
-    Application.put_env(:ptc_manager, :github_publish_staging_root, System.tmp_dir!())
+  test "the GitHub App broker blocks a checkout with the wrong origin without crashing" do
+    {_job, publication, _result} = verified_publication_fixture()
+    publication = Repo.preload(publication, [job: [:issue, :repository]], force: true)
 
-    assert {:blocked, :pre_publication_gate_not_passed} =
-             PtcManager.GitHub.AppBroker.publish(publication)
+    job =
+      publication.job
+      |> Job.changeset(%{
+        pre_publication_status: "passed",
+        pre_publication_verified_sha: publication.head_sha,
+        pre_publication_exit_status: 0,
+        pre_publication_verified_at: DateTime.utc_now()
+      })
+      |> Repo.update!()
+
+    publication = %{publication | job: Repo.preload(job, [:issue, :repository])}
+    path = publication.job.repository.local_path
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+
+    Process.put(:checkout_probe_result, {
+      :ok,
+      %{top_level: path, common_dir: path, remote_identity: {"other", "repository"}}
+    })
+
+    on_exit(fn -> Process.delete(:checkout_probe_result) end)
+
+    with_github_app_config(fn ->
+      assert {:blocked, {:invalid_repository_checkout, :repository_origin_mismatch}} =
+               PtcManager.GitHub.AppBroker.publish(publication)
+    end)
   end
 
   test "the broker copies the bounded final-commit retrospective into its PR body" do
@@ -1334,7 +1326,10 @@ defmodule PtcManager.PublisherTest do
   end
 
   defp verified_publication_fixture do
-    repository = repository_fixture(%{local_path: "/tmp/repository"})
+    repository =
+      repository_fixture(%{
+        local_path: "/tmp/repository-#{System.unique_integer([:positive, :monotonic])}"
+      })
 
     issue = issue_fixture(repository)
     proposal_fixture(issue)
@@ -1378,6 +1373,30 @@ defmodule PtcManager.PublisherTest do
       |> Repo.update!()
 
     {verified, publication, result}
+  end
+
+  defp with_github_app_config(function) do
+    keys = [
+      :github_app_id,
+      :github_app_installation_id,
+      :github_app_private_key_path,
+      :github_push_timeout_binary,
+      :github_publish_staging_root
+    ]
+
+    settings = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    Application.put_env(:ptc_manager, :github_app_id, "1")
+    Application.put_env(:ptc_manager, :github_app_installation_id, "2")
+    Application.put_env(:ptc_manager, :github_app_private_key_path, "/does/not/exist")
+    Application.put_env(:ptc_manager, :github_push_timeout_binary, "/usr/bin/timeout")
+    Application.put_env(:ptc_manager, :github_publish_staging_root, System.tmp_dir!())
+
+    try do
+      function.()
+    after
+      Enum.each(settings, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    end
   end
 
   defp contract, do: PtcManager.RepositoryContractFixture.contract()

@@ -97,8 +97,6 @@ defmodule PtcManager.GitHub.Sync do
         synced_repository =
           repository
           |> Repository.changeset(%{
-            local_path:
-              Application.get_env(:ptc_manager, :repository_path) || repository.local_path,
             sync_status: "ok",
             last_synced_at: now,
             last_sync_error: nil

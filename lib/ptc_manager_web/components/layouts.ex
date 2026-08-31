@@ -32,6 +32,8 @@ defmodule PtcManagerWeb.Layouts do
     doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
 
   attr :current_path, :string, default: "/"
+  attr :repositories, :list, default: []
+  attr :selected_repository, :string, default: nil
 
   slot :inner_block, required: true
 
@@ -92,6 +94,33 @@ defmodule PtcManagerWeb.Layouts do
       </header>
 
       <div
+        :if={@repositories != []}
+        id="repository-scope"
+        class="border-b border-white/5 bg-slate-950/70 px-4 py-2 sm:px-6"
+      >
+        <div class="mx-auto flex max-w-7xl items-center justify-end gap-3">
+          <label for="repository-selector" class="text-xs font-medium text-slate-500">
+            Repository
+          </label>
+          <select
+            id="repository-selector"
+            data-repository-selector
+            onchange="window.ptcSelectRepository(this.value)"
+            class="max-w-[18rem] rounded-lg border border-white/10 bg-slate-900 px-3 py-1.5 text-sm text-slate-200"
+          >
+            <option value="all" selected={is_nil(@selected_repository)}>All repositories</option>
+            <option
+              :for={repository <- @repositories}
+              value={repository_key(repository)}
+              selected={@selected_repository == repository_key(repository)}
+            >
+              {repository.github_owner}/{repository.github_name}
+            </option>
+          </select>
+        </div>
+      </div>
+
+      <div
         :if={PtcManager.OperationalMode.maintenance?()}
         id="maintenance-mode-banner"
         role="status"
@@ -118,6 +147,8 @@ defmodule PtcManagerWeb.Layouts do
     </div>
     """
   end
+
+  def repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
 
   attr :href, :string, required: true
   attr :active, :boolean, default: false

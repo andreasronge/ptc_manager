@@ -33,11 +33,10 @@ defmodule PtcManager.TestGitWorkspaceTest do
     workspace = TestGitWorkspace.new!(root)
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
 
-    keys = [:dispatch_enabled, :repository_path, :worktree_root, :worktree_permission_check]
+    keys = [:dispatch_enabled, :worktree_root, :worktree_permission_check]
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
 
     Application.put_env(:ptc_manager, :dispatch_enabled, true)
-    Application.delete_env(:ptc_manager, :repository_path)
     Application.put_env(:ptc_manager, :worktree_root, workspace.worktree_root)
     Application.put_env(:ptc_manager, :worktree_permission_check, false)
 

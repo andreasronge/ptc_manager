@@ -4,6 +4,7 @@ defmodule PtcManager.Repository.SourceSnapshot do
   import Bitwise
 
   alias PtcManager.Operations.Repository
+  alias PtcManager.Repository.Checkout
 
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
   @writable_bits 0o222
@@ -488,11 +489,7 @@ defmodule PtcManager.Repository.SourceSnapshot do
   end
 
   defp repository_path(repository) do
-    path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-
-    if is_binary(path) and File.dir?(path),
-      do: {:ok, Path.expand(path)},
-      else: {:error, :repository_path_unavailable}
+    Checkout.available_path(repository)
   end
 
   defp git(path, args) do

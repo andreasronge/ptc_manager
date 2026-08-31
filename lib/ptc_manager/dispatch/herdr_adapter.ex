@@ -7,6 +7,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Gateway
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.PromptConfiguration
+  alias PtcManager.Repository.Checkout
   alias PtcManager.ReviewPolicy
   alias PtcManager.WorktreeSecurity
 
@@ -210,11 +211,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   end
 
   defp repository_path(repository) do
-    path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-
-    if is_binary(path) and File.dir?(path),
-      do: {:ok, path},
-      else: {:error, :repository_path_unavailable}
+    Checkout.available_path(repository)
   end
 
   defp create_worktree(command, path, repository, job) do
@@ -344,19 +341,18 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       {:ok,
        Path.join(
          Path.expand(root),
-         "external-pr-#{publication.pr_number}-action-#{action.id}-f#{action.attempt_count}"
+         Checkout.external_worktree_name(
+           repository,
+           publication.pr_number,
+           action.id,
+           action.attempt_count
+         )
        )}
     end
   end
 
-  defp pull_request_worktree_root(repository) do
-    repository_path = Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-
-    root =
-      Application.get_env(:ptc_manager, :worktree_root) ||
-        if(is_binary(repository_path),
-          do: Path.join(Path.dirname(repository_path), ".ptc-manager-worktrees")
-        )
+  defp pull_request_worktree_root(_repository) do
+    root = Application.get_env(:ptc_manager, :worktree_root)
 
     case is_binary(root) and Path.type(root) == :absolute do
       true -> {:ok, root}

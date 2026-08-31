@@ -6,7 +6,6 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
 
   setup do
     previous_binary = Application.get_env(:ptc_manager, :planning_git_binary)
-    previous_path = Application.get_env(:ptc_manager, :repository_path)
     previous_root = Application.get_env(:ptc_manager, :planning_snapshot_root)
 
     worktree_root =
@@ -16,12 +15,10 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
       )
 
     Application.put_env(:ptc_manager, :planning_git_binary, "/usr/bin/git")
-    Application.delete_env(:ptc_manager, :repository_path)
     Application.put_env(:ptc_manager, :planning_snapshot_root, worktree_root)
 
     on_exit(fn ->
       restore_env(:planning_git_binary, previous_binary)
-      restore_env(:repository_path, previous_path)
       restore_env(:planning_snapshot_root, previous_root)
       File.rm_rf(worktree_root)
     end)

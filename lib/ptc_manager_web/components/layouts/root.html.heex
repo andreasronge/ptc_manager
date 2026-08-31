@@ -27,6 +27,36 @@
         window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
         
         window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
+
+        const repositoryKey = "ptc-manager:repository";
+        window.ptcSelectRepository = (repository) => {
+          localStorage.setItem(repositoryKey, repository);
+
+          const url = new URL(window.location.href);
+          url.searchParams.set("repo", repository);
+          window.location.assign(url.toString());
+        };
+
+        const restoreRepository = () => {
+          const selector = document.querySelector("[data-repository-selector]");
+          if (!selector) return;
+
+          const url = new URL(window.location.href);
+          const requested = url.searchParams.get("repo");
+          if (requested) {
+            localStorage.setItem(repositoryKey, requested);
+            return;
+          }
+
+          const stored = localStorage.getItem(repositoryKey);
+          if (stored && Array.from(selector.options).some((option) => option.value === stored)) {
+            url.searchParams.set("repo", stored);
+            window.location.replace(url.toString());
+          }
+        };
+
+        window.addEventListener("DOMContentLoaded", restoreRepository);
+        window.addEventListener("phx:page-loading-stop", restoreRepository);
       })();
     </script>
   </head>

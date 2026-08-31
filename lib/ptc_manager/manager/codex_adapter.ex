@@ -5,6 +5,7 @@ defmodule PtcManager.Manager.CodexAdapter do
 
   alias PtcManager.Operations.Issue
   alias PtcManager.PromptConfiguration
+  alias PtcManager.Repository.Checkout
 
   @allowed_environment ~w(
     CODEX_HOME HOME USER LOGNAME PATH LANG LC_ALL LC_CTYPE
@@ -14,18 +15,20 @@ defmodule PtcManager.Manager.CodexAdapter do
 
   @impl true
   def analyze(%Issue{repository: repository} = issue) do
-    cond do
-      not Application.get_env(:ptc_manager, :manager_enabled, false) ->
+    with true <- Application.get_env(:ptc_manager, :manager_enabled, false),
+         {:ok, repository_path} <- Checkout.available_path(repository) do
+      run_codex(issue, repository_path)
+    else
+      false ->
         {:error, :manager_disabled}
 
-      not is_binary(repository_path(repository)) ->
-        {:error, :repository_path_missing}
+      {:error, :repository_path_unavailable} ->
+        if is_binary(repository.local_path),
+          do: {:error, :repository_path_unavailable},
+          else: {:error, :repository_path_missing}
 
-      not File.dir?(repository_path(repository)) ->
-        {:error, :repository_path_unavailable}
-
-      true ->
-        run_codex(issue, repository_path(repository))
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -153,8 +156,4 @@ defmodule PtcManager.Manager.CodexAdapter do
   end
 
   def codex_command(binary, args, _run_as_user), do: {binary, args}
-
-  defp repository_path(repository) do
-    Application.get_env(:ptc_manager, :repository_path) || repository.local_path
-  end
 end

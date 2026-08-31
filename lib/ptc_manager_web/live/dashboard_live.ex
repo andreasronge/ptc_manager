@@ -27,10 +27,19 @@ defmodule PtcManagerWeb.DashboardLive do
      socket
      |> assign(:page_title, "Dashboard")
      |> assign(:actor, session["actor"] || "maintainer")
+     |> assign(:selected_repository, nil)
      |> assign(:now, DateTime.utc_now())
      |> assign(:github_syncing, false)
      |> assign(:investigating, MapSet.new())
      |> assign(:reconciling_results, MapSet.new())
+     |> load_dashboard()}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_repository, selected_repository(params, Operations.list_repositories()))
      |> load_dashboard()}
   end
 
@@ -672,12 +681,23 @@ defmodule PtcManagerWeb.DashboardLive do
   end
 
   defp load_dashboard(socket) do
+    repositories = Operations.list_repositories()
+    selected_repository = socket.assigns.selected_repository
+
+    issues =
+      Operations.dashboard_issues(state: "open")
+      |> filter_repository(selected_repository, & &1.issue.repository)
+
     assign(socket,
-      repositories: Operations.list_repositories(),
-      issues: Operations.dashboard_issues(state: "open"),
-      active_agent_runs: Operations.list_active_agent_runs(),
-      waiting_agent_runs: Operations.list_waiting_agent_runs(),
-      recent_agent_runs: Operations.list_recent_agent_runs(),
+      repositories: repositories,
+      issues: issues,
+      active_agent_runs:
+        Operations.list_active_agent_runs()
+        |> filter_repository(selected_repository, &agent_run_repository/1),
+      waiting_agent_runs:
+        Operations.list_waiting_agent_runs()
+        |> filter_repository(selected_repository, &agent_run_repository/1),
+      recent_agent_runs: recent_agent_runs(repositories, selected_repository),
       workers: Operations.list_workers_with_worktrees(),
       manager_enabled: Manager.enabled?(),
       agent_actions_enabled: MaintainerActions.enabled?(),
@@ -690,6 +710,38 @@ defmodule PtcManagerWeb.DashboardLive do
           Publications.agent_reconciliation_needed?()
     )
   end
+
+  defp selected_repository(%{"repo" => key}, repositories) do
+    if Enum.any?(repositories, &(repository_key(&1) == key)), do: key, else: nil
+  end
+
+  defp selected_repository(_params, _repositories), do: nil
+
+  defp filter_repository(items, nil, _repository), do: items
+
+  defp filter_repository(items, key, repository) do
+    Enum.filter(items, fn item ->
+      case repository.(item) do
+        nil -> false
+        item_repository -> repository_key(item_repository) == key
+      end
+    end)
+  end
+
+  defp repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
+
+  defp recent_agent_runs(_repositories, nil), do: Operations.list_recent_agent_runs()
+
+  defp recent_agent_runs(repositories, key) do
+    repository = Enum.find(repositories, &(repository_key(&1) == key))
+    Operations.list_recent_agent_runs_for_repository(repository.id)
+  end
+
+  defp agent_run_repository(%{job: %{repository: repository}}), do: repository
+
+  defp agent_run_repository(%{agent_action: %{repository: repository}}), do: repository
+
+  defp agent_run_repository(_run), do: nil
 
   defp decode_agent_action_result(%{result_summary: body}) when is_binary(body) do
     case Jason.decode(body) do
