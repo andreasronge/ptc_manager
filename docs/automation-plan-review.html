@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>PtcManager — User Experience Plan Review</title>
+    <style>
+      :root {
+        --bg: #071018;
+        --bg-soft: #0b1722;
+        --panel: rgba(16, 31, 44, 0.92);
+        --panel-strong: #122535;
+        --line: rgba(151, 180, 199, 0.18);
+        --line-strong: rgba(151, 180, 199, 0.34);
+        --text: #edf5f8;
+        --muted: #98adba;
+        --faint: #6e8492;
+        --teal: #2dd4bf;
+        --teal-soft: rgba(45, 212, 191, 0.12);
+        --blue: #7dd3fc;
+        --blue-soft: rgba(125, 211, 252, 0.1);
+        --amber: #fbbf24;
+        --amber-soft: rgba(251, 191, 36, 0.12);
+        --rose: #fb7185;
+        --rose-soft: rgba(251, 113, 133, 0.1);
+        --violet: #c4b5fd;
+        --radius: 18px;
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        background:
+          radial-gradient(circle at 8% -5%, rgba(45, 212, 191, 0.13), transparent 31rem),
+          radial-gradient(circle at 96% 2%, rgba(125, 211, 252, 0.09), transparent 34rem),
+          var(--bg);
+        color: var(--text);
+        font: 15px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      button, select, textarea { font: inherit; }
+      button, a { -webkit-tap-highlight-color: transparent; }
+      a { color: inherit; }
+
+      .shell {
+        display: grid;
+        grid-template-columns: 250px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        padding: 28px 22px;
+        border-right: 1px solid var(--line);
+        background: rgba(7, 16, 24, 0.8);
+        backdrop-filter: blur(18px);
+      }
+
+      .brand { display: flex; align-items: center; gap: 11px; }
+      .brand-mark {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border: 1px solid rgba(45, 212, 191, 0.35);
+        border-radius: 11px;
+        background: var(--teal-soft);
+        color: var(--teal);
+        font-weight: 800;
+      }
+      .brand strong { display: block; letter-spacing: -0.02em; }
+      .brand small { color: var(--muted); }
+
+      .side-nav { display: grid; gap: 6px; margin-top: 40px; }
+      .side-nav a {
+        padding: 10px 12px;
+        border-radius: 10px;
+        color: var(--muted);
+        text-decoration: none;
+      }
+      .side-nav a:hover, .side-nav a:focus-visible {
+        outline: none;
+        background: rgba(255,255,255,0.05);
+        color: var(--text);
+      }
+
+      .review-meter {
+        position: absolute;
+        right: 22px;
+        bottom: 26px;
+        left: 22px;
+        padding: 15px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+      }
+      .review-meter-row { display: flex; justify-content: space-between; color: var(--muted); }
+      .meter-track { height: 6px; margin-top: 10px; overflow: hidden; border-radius: 9px; background: #20313d; }
+      .meter-fill { width: 0; height: 100%; border-radius: inherit; background: var(--teal); transition: width 180ms ease; }
+
+      main { min-width: 0; padding: 0 5vw 90px; }
+      .hero {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 74px 0 48px;
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--teal);
+        font-size: 12px;
+        font-weight: 760;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+      .eyebrow::before { content: ""; width: 17px; height: 1px; background: currentColor; }
+      h1 {
+        max-width: 900px;
+        margin: 14px 0 18px;
+        font-size: clamp(40px, 6vw, 78px);
+        line-height: 0.98;
+        letter-spacing: -0.055em;
+      }
+      .hero-copy { max-width: 740px; color: var(--muted); font-size: clamp(17px, 2vw, 21px); }
+      .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-height: 42px;
+        padding: 0 15px;
+        border: 1px solid var(--line-strong);
+        border-radius: 11px;
+        background: rgba(255,255,255,0.04);
+        color: var(--text);
+        cursor: pointer;
+        text-decoration: none;
+      }
+      .button:hover { border-color: rgba(45,212,191,0.6); }
+      .button.primary { border-color: transparent; background: var(--teal); color: #04201d; font-weight: 750; }
+      .button.subtle { min-height: 36px; padding: 0 12px; font-size: 13px; }
+
+      .repo-context {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin-top: 36px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(12, 25, 35, 0.66);
+      }
+      .repo-context label { color: var(--muted); }
+      select {
+        min-height: 38px;
+        padding: 0 34px 0 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: 9px;
+        background: var(--panel-strong);
+        color: var(--text);
+      }
+      .health { display: inline-flex; align-items: center; gap: 7px; color: #a7f3d0; font-size: 13px; }
+      .health::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 5px var(--teal-soft); }
+
+      section { max-width: 1120px; margin: 0 auto; padding: 58px 0; scroll-margin-top: 20px; }
+      .section-head { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 26px; }
+      .section-head h2 { margin: 0; font-size: clamp(28px, 4vw, 43px); letter-spacing: -0.035em; }
+      .section-head p { max-width: 540px; margin: 0; color: var(--muted); }
+
+      .principle {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 16px;
+      }
+      .statement, .boundary-card, .scenario, .roadmap-card, .decision-card {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: linear-gradient(145deg, rgba(18,37,53,0.93), rgba(10,23,33,0.9));
+        box-shadow: var(--shadow);
+      }
+      .statement { padding: clamp(24px, 4vw, 42px); }
+      .statement blockquote { margin: 0; font-size: clamp(24px, 3.4vw, 40px); line-height: 1.15; letter-spacing: -0.035em; }
+      .statement p { margin: 22px 0 0; color: var(--muted); }
+      .boundary-card { padding: 25px; }
+      .boundary-card h3 { margin: 0 0 16px; }
+      .boundary-list { display: grid; gap: 12px; }
+      .boundary-item { display: grid; grid-template-columns: 31px 1fr; gap: 11px; }
+      .boundary-item span:first-child { color: var(--teal); font-weight: 800; }
+      .boundary-item p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+      }
+      .flow-step {
+        position: relative;
+        min-height: 165px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        background: rgba(13,28,39,0.8);
+      }
+      .flow-step:not(:last-child)::after {
+        content: "→";
+        position: absolute;
+        z-index: 2;
+        top: 50%;
+        right: -11px;
+        width: 20px;
+        border-radius: 99px;
+        background: var(--bg);
+        color: var(--faint);
+        text-align: center;
+      }
+      .step-no { color: var(--teal); font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+      .flow-step h3 { margin: 18px 0 7px; font-size: 16px; }
+      .flow-step p { margin: 0; color: var(--muted); font-size: 13px; }
+
+      .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+      .filter {
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 99px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .filter[aria-pressed="true"] { border-color: rgba(45,212,191,.55); background: var(--teal-soft); color: var(--teal); }
+
+      .scenario-list { display: grid; gap: 16px; }
+      .scenario { overflow: hidden; box-shadow: none; }
+      .scenario[hidden] { display: none; }
+      .scenario-summary {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: center;
+        width: 100%;
+        padding: 21px 23px;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .scenario-summary:hover { background: rgba(255,255,255,.018); }
+      .scenario-index {
+        display: grid;
+        width: 38px;
+        height: 38px;
+        place-items: center;
+        border-radius: 12px;
+        background: var(--blue-soft);
+        color: var(--blue);
+        font: 750 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .scenario-title h3 { margin: 0; font-size: 18px; }
+      .scenario-title p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+      .scenario-status { display: flex; align-items: center; gap: 10px; }
+      .review-dot { width: 9px; height: 9px; border-radius: 50%; background: #405463; }
+      .review-dot.agree { background: var(--teal); box-shadow: 0 0 0 5px var(--teal-soft); }
+      .review-dot.change { background: var(--amber); box-shadow: 0 0 0 5px var(--amber-soft); }
+      .chevron { color: var(--faint); transition: transform 180ms ease; }
+      .scenario.open .chevron { transform: rotate(180deg); }
+
+      .scenario-body { display: none; padding: 0 23px 25px 77px; }
+      .scenario.open .scenario-body { display: block; }
+      .journey-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .journey-block { padding: 17px; border: 1px solid var(--line); border-radius: 13px; background: rgba(4,12,18,.35); }
+      .journey-block h4 { margin: 0 0 9px; color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+      .journey-block ol, .journey-block ul { margin: 0; padding-left: 19px; }
+      .journey-block li + li { margin-top: 7px; }
+      .done { border-color: rgba(45,212,191,.24); background: var(--teal-soft); }
+      .done h4 { color: var(--teal); }
+
+      .mock-screen { margin-top: 13px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 14px; background: #08131c; }
+      .mock-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+      .mock-dots { display: flex; gap: 5px; }
+      .mock-dots i { width: 7px; height: 7px; border-radius: 50%; background: #344956; }
+      .mock-content { display: grid; grid-template-columns: 145px 1fr; min-height: 190px; }
+      .mock-nav { padding: 13px; border-right: 1px solid var(--line); color: var(--faint); font-size: 11px; }
+      .mock-nav div { padding: 7px 8px; border-radius: 7px; }
+      .mock-nav .active { background: var(--teal-soft); color: var(--teal); }
+      .mock-main { padding: 15px; }
+      .mock-main-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 13px; }
+      .mock-main-head strong { font-size: 13px; }
+      .pill { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border-radius: 99px; background: rgba(255,255,255,.06); color: var(--muted); font-size: 10px; }
+      .pill.teal { background: var(--teal-soft); color: var(--teal); }
+      .pill.amber { background: var(--amber-soft); color: var(--amber); }
+      .mock-card { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+      .mock-card + .mock-card { margin-top: 8px; }
+      .mock-card strong { display: block; font-size: 12px; }
+      .mock-card p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+      .mock-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+      .mock-button { padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--text); font-size: 10px; }
+      .mock-button.primary { border-color: transparent; background: var(--teal); color: #05211d; font-weight: 700; }
+      .spinner { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border: 1.5px solid rgba(45,212,191,.25); border-top-color: var(--teal); border-radius: 50%; animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .implementation-note { margin-top: 13px; padding: 12px 14px; border-left: 2px solid var(--violet); background: rgba(196,181,253,.06); color: #d9d3f8; font-size: 13px; }
+      .review-controls { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; align-items: start; margin-top: 17px; padding-top: 17px; border-top: 1px solid var(--line); }
+      .review-choice { position: relative; }
+      .review-choice input { position: absolute; opacity: 0; pointer-events: none; }
+      .review-choice span { display: inline-flex; min-height: 38px; align-items: center; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); cursor: pointer; }
+      .review-choice input:checked + span { border-color: rgba(45,212,191,.55); background: var(--teal-soft); color: var(--teal); }
+      .review-choice.change input:checked + span { border-color: rgba(251,191,36,.55); background: var(--amber-soft); color: var(--amber); }
+      textarea { width: 100%; min-height: 74px; resize: vertical; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #071119; color: var(--text); }
+      textarea:focus { outline: 2px solid rgba(45,212,191,.22); border-color: rgba(45,212,191,.55); }
+
+      .routing-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 14px; background: rgba(12,25,35,.72); }
+      .routing-table th, .routing-table td { padding: 14px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+      .routing-table th { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+      .routing-table tr:last-child td { border-bottom: 0; }
+      .routing-table td:nth-child(2) { color: var(--blue); }
+      .routing-table small { display: block; color: var(--muted); }
+
+      .roadmap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+      .roadmap-card { padding: 21px; box-shadow: none; }
+      .roadmap-card .phase { color: var(--teal); font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+      .roadmap-card h3 { margin: 15px 0 8px; }
+      .roadmap-card p { margin: 0; color: var(--muted); }
+      .roadmap-card ul { padding-left: 18px; color: var(--muted); }
+
+      .decision-card { padding: clamp(22px, 4vw, 38px); }
+      .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .decision { padding: 16px; border: 1px solid var(--line); border-radius: 13px; }
+      .decision h3 { margin: 0 0 7px; font-size: 15px; }
+      .decision p { margin: 0; color: var(--muted); font-size: 13px; }
+      .export-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px; align-items: center; margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
+      .export-row p { margin: 0; color: var(--muted); }
+      .export-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 12px 15px; border: 1px solid rgba(45,212,191,.4); border-radius: 11px; background: #0e2928; color: #baf8ef; box-shadow: var(--shadow); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s ease; }
+      .toast.show { opacity: 1; transform: translateY(0); }
+
+      @media (max-width: 920px) {
+        .shell { display: block; }
+        .sidebar { position: relative; height: auto; padding: 18px 5vw; border-right: 0; border-bottom: 1px solid var(--line); }
+        .side-nav { display: none; }
+        .review-meter { position: static; margin-top: 15px; }
+        main { padding-inline: 5vw; }
+        .hero { padding-top: 52px; }
+        .principle { grid-template-columns: 1fr; }
+        .flow { grid-template-columns: 1fr 1fr; }
+        .flow-step:not(:last-child)::after { display: none; }
+        .roadmap { grid-template-columns: 1fr 1fr; }
+      }
+
+      @media (max-width: 640px) {
+        main { padding-bottom: 55px; }
+        section { padding: 42px 0; }
+        .section-head { display: block; }
+        .section-head p { margin-top: 9px; }
+        .flow, .journey-grid, .decision-grid, .roadmap { grid-template-columns: 1fr; }
+        .scenario-summary { grid-template-columns: auto 1fr; padding: 17px; }
+        .scenario-status { grid-column: 2; justify-content: space-between; }
+        .scenario-body { padding: 0 17px 20px; }
+        .mock-content { grid-template-columns: 1fr; }
+        .mock-nav { display: none; }
+        .review-controls { grid-template-columns: 1fr 1fr; }
+        .review-controls textarea { grid-column: 1 / -1; }
+        .routing-table { display: block; overflow-x: auto; white-space: nowrap; }
+        .export-row { align-items: stretch; }
+        .export-actions, .export-actions .button { width: 100%; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">P</div>
+          <div><strong>PtcManager</strong><small>User plan review</small></div>
+        </div>
+        <nav class="side-nav" aria-label="Page sections">
+          <a href="#promise">The promise</a>
+          <a href="#flow">How it works</a>
+          <a href="#scenarios">Scenarios</a>
+          <a href="#routing">Agent routing</a>
+          <a href="#delivery">How we build it</a>
+          <a href="#decisions">Your review</a>
+        </nav>
+        <div class="review-meter" aria-live="polite">
+          <div class="review-meter-row"><span>Scenarios reviewed</span><strong id="review-count">0 / 8</strong></div>
+          <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
+        </div>
+      </aside>
+
+      <main>
+        <header class="hero">
+          <span class="eyebrow">Experience proposal · August 2026</span>
+          <h1>Run your repositories like a small, visible engineering team.</h1>
+          <p class="hero-copy">
+            This page translates the automation architecture into the things you would actually see and do.
+            Review each scenario, mark what feels right, and leave notes where the workflow needs to change.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#scenarios">Review the scenarios</a>
+            <a class="button" href="plans/generic-agent-automations.md">Read the technical plan</a>
+          </div>
+          <div class="repo-context">
+            <label for="repo-select">Imagine you are managing</label>
+            <select id="repo-select">
+              <option value="andreasronge/ptc_runner">andreasronge/ptc_runner</option>
+              <option value="andreasronge/ptc_manager">andreasronge/ptc_manager</option>
+            </select>
+            <span class="health">Repository and GitHub access healthy</span>
+          </div>
+        </header>
+
+        <section id="promise">
+          <div class="section-head">
+            <h2>The product promise</h2>
+            <p>The interface should hide orchestration complexity without hiding what agents are allowed to do.</p>
+          </div>
+          <div class="principle">
+            <article class="statement">
+              <blockquote>“I choose the work. PtcManager queues it, gives it to a suitable agent, and shows me the result.”</blockquote>
+              <p>You approve implementation and merging. Routine investigation, scheduling, status tracking, and cleanup happen around those decisions.</p>
+            </article>
+            <article class="boundary-card">
+              <h3>Who owns what?</h3>
+              <div class="boundary-list">
+                <div class="boundary-item"><span>1</span><div><strong>You</strong><p>Priorities, approvals, prompt configuration, and final decisions.</p></div></div>
+                <div class="boundary-item"><span>2</span><div><strong>PtcManager</strong><p>Durable queue, schedules, locks, agent choice, audit trail, and presentation.</p></div></div>
+                <div class="boundary-item"><span>3</span><div><strong>Herdr</strong><p>Starts the chosen agent and retains its terminal session and output.</p></div></div>
+                <div class="boundary-item"><span>4</span><div><strong>GitHub</strong><p>Authoritative issues, pull requests, checks, labels, and merge state.</p></div></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="flow">
+          <div class="section-head">
+            <h2>One flow, many kinds of work</h2>
+            <p>A manual button and a nightly schedule use the same visible, auditable path.</p>
+          </div>
+          <div class="flow">
+            <article class="flow-step"><span class="step-no">STEP 01</span><h3>Trigger</h3><p>You press a contextual button, choose Run now, or a schedule becomes due.</p></article>
+            <article class="flow-step"><span class="step-no">STEP 02</span><h3>Snapshot</h3><p>PtcManager freezes the repository, target, prompt version, permissions, and source SHA.</p></article>
+            <article class="flow-step"><span class="step-no">STEP 03</span><h3>Queue</h3><p>The work waits safely for the right lane, repository lock, and agent capacity.</p></article>
+            <article class="flow-step"><span class="step-no">STEP 04</span><h3>Prepare &amp; run</h3><p>PtcManager verifies and bootstraps the exact workspace first; only then does Herdr start or resume the selected agent.</p></article>
+            <article class="flow-step"><span class="step-no">STEP 05</span><h3>Reconcile</h3><p>The UI explains the outcome while GitHub remains the source of truth.</p></article>
+          </div>
+        </section>
+
+        <section id="scenarios">
+          <div class="section-head">
+            <h2>Review real scenarios</h2>
+            <p>Open a scenario to see the expected journey. Your choices and notes stay only in this browser.</p>
+          </div>
+          <div class="filters" role="group" aria-label="Filter scenarios">
+            <button class="filter" data-filter="all" aria-pressed="true">All</button>
+            <button class="filter" data-filter="planning" aria-pressed="false">Planning</button>
+            <button class="filter" data-filter="delivery" aria-pressed="false">Delivery</button>
+            <button class="filter" data-filter="automation" aria-pressed="false">Scheduled</button>
+            <button class="filter" data-filter="operations" aria-pressed="false">Operations</button>
+          </div>
+
+          <div class="scenario-list" id="scenario-list">
+            <article class="scenario open" data-id="prepare-issue" data-category="planning">
+              <button class="scenario-summary" aria-expanded="true">
+                <span class="scenario-index">01</span>
+                <span class="scenario-title"><h3>Prepare an unclear GitHub issue</h3><p>Turn a vague issue into something you can decide on.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill teal">Planning</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>An issue in Planning with its GitHub state and existing labels.</li><li>A configured <strong>Prepare issue</strong> button.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Open the issue card.</li><li>Press Prepare issue.</li><li>Keep browsing or leave the page.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>The action enters the planning queue using an exact source SHA.</li><li>An eligible read-capable Herdr agent investigates code and linked issues.</li><li>It may update the issue and apply one agreed workflow label.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>You receive a plain-language explanation.</li><li>If a decision is needed, the UI offers concrete choices and examples.</li><li>GitHub shows the updated issue; PtcManager shows what changed.</li></ul></div>
+                </div>
+                <div class="mock-screen">
+                  <div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Planning · <b data-repo-name>andreasronge/ptc_runner</b></span></div>
+                  <div class="mock-content"><div class="mock-nav"><div class="active">Planning</div><div>Delivery</div><div>Operations</div><div>Automations</div></div><div class="mock-main"><div class="mock-main-head"><strong>Issue inbox</strong><span class="pill">Open</span></div><div class="mock-card"><strong>#1701 · CLI denies a shipped export</strong><p>Needs one maintainer decision before implementation.</p><div class="mock-actions"><span class="mock-button primary">Prepare issue</span><span class="mock-button">Review issue</span></div></div></div></div>
+                </div>
+                <p class="implementation-note"><strong>Built by:</strong> generic planning action, contextual manual trigger, common result panel, and GitHub reconciliation.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="review-issue" data-category="planning">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">02</span>
+                <span class="scenario-title"><h3>Review a tricky issue up to three times</h3><p>Use independent review without making every task expensive.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill teal">Planning</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>A Review issue action with its visible configurable prompt.</li><li>The exact source SHA the review will study.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Check that this action's prompt asks for the depth you want.</li><li>Start the review.</li><li>Read one consolidated, simple result.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>The job can run beside merge work because it reads an immutable snapshot.</li><li>Any eligible Herdr planning agent follows the configurable prompt, including its requested number of review passes.</li><li>The issue is updated only with durable implementation facts, not the private simple-language summary.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>The issue is ready, blocked by a named dependency, rejected, or waiting for your decision.</li><li>Review provenance includes the SHA and number of passes.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Action drawer</span></div><div class="mock-content"><div class="mock-nav"><div>Issue #1701</div><div class="active">Review</div></div><div class="mock-main"><div class="mock-main-head"><strong>Review issue</strong><span class="pill teal">Source 10dd0371</span></div><div class="mock-card"><strong>Configured prompt</strong><p>Investigate and improve the issue. For difficult questions, challenge the result in up to three passes before reporting.</p><div class="mock-actions"><span class="mock-button primary">Start review</span><span class="mock-button">View full prompt</span></div></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> immutable action version, configurable review prompt, exact planning snapshot, and the generic Herdr result protocol.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="implement" data-category="delivery planning">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">03</span>
+                <span class="scenario-title"><h3>Approve an issue for implementation</h3><p>The agent owns branch, tests, reviews, push, and PR creation.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill teal">Approval</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>An implementation-ready issue and a short private explanation.</li><li><strong>Approve and start</strong>, using the action's exact visible prompt.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Confirm the issue is worth doing.</li><li>Press Approve and start.</li><li>Watch it move from queued to working to PR published.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>PtcManager snapshots the prompt, claims the target, and asks Herdr to create an isolated worktree.</li><li>It verifies the path, SHA, branch, credentials, tools, and repository bootstrap before starting any agent.</li><li>The prompt tells the selected agent to implement, run gates and configured reviews, push, and create the PR.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>A PR is linked to the issue with validation evidence.</li><li>The retained agent session remains available for repair or follow-up.</li><li>You are asked to decide on merge, not to operate Git yourself.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Planning → Delivery</span></div><div class="mock-content"><div class="mock-nav"><div class="active">Ready</div><div>In queue</div><div>Working</div></div><div class="mock-main"><div class="mock-main-head"><strong>#1740 · Add clearer gate output</strong><span class="pill teal">Ready</span></div><div class="mock-card"><strong>Simple summary</strong><p>Make failed checks say which tool is missing and how to install it.</p><div class="mock-actions"><span class="mock-button primary">Approve and start</span><span class="mock-button">View prompt</span></div></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> implementation execution profile, approval record, durable work queue, isolated worktree, and retained Herdr session.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="fix-merge" data-category="delivery">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">04</span>
+                <span class="scenario-title"><h3>Fix failing CI or conflicts, then merge</h3><p>One prioritized action owns the PR until GitHub confirms the merge.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill amber">Delivery</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>The PR in Needs attention, with failed checks or conflict reason.</li><li>One configured <strong>Fix and merge</strong> button.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Press Fix and merge.</li><li>Optionally inspect read-only live output.</li><li>Intervene only if the agent reports a real decision or blocker.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>The merge job receives priority over other repository writers.</li><li>The original retained session is resumed; an imported PR gets a new isolated session.</li><li>The agent repairs, updates safely, reruns gates, waits for checks, and merges the exact PR.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>GitHub confirms merged, or the UI explains the concrete blocker.</li><li>The completed worktree is removed after merged or declined.</li><li>The PR cannot remain incorrectly shown as blocked after reconciliation.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Delivery board</span></div><div class="mock-content"><div class="mock-nav"><div>In queue</div><div>Working</div><div class="active">Needs attention</div><div>Ready to merge</div></div><div class="mock-main"><div class="mock-main-head"><strong>PR #1722 · Fix viewer gate</strong><span class="pill amber">CI failed</span></div><div class="mock-card"><strong>Closes issue #1708</strong><p>Viewer JavaScript tests failed because Node was unavailable.</p><div class="mock-actions"><span class="mock-button primary">Fix and merge</span><span class="mock-button">View checks ↗</span></div></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> retained PR repair profile, repository merge lock, exact-PR prompt, GitHub reconciliation, and terminal cleanup.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="nightly-ci" data-category="automation planning">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">05</span>
+                <span class="scenario-title"><h3>Investigate failed nightly CI automatically</h3><p>Wake up to a focused issue, not a red workflow you have to diagnose.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill teal">Scheduled</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>An enabled automation with its prompt, schedule, next run, and last outcome.</li><li>The same action is available as Check nightly CI now.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Configure the workflow and run time once.</li><li>Review new or updated GitHub issues when failures occur.</li><li>Pause the schedule whenever you want.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>Oban persists the due time across restarts.</li><li>An agent inspects the completed workflow, failed jobs, logs, code, and existing issues.</li><li>Stable markers prevent retries from creating duplicate issues.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>No failure produces a quiet “no changes” result.</li><li>A real failure creates or updates one focused GitHub issue with evidence and links.</li><li>The run is visible in Operations and automation history.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Automations</span></div><div class="mock-content"><div class="mock-nav"><div class="active">Automations</div><div>Agent profiles</div><div>History</div></div><div class="mock-main"><div class="mock-main-head"><strong>Nightly CI investigator</strong><span class="pill teal">Enabled</span></div><div class="mock-card"><strong>Every day at 06:30 · Europe/Stockholm</strong><p>Next: tomorrow 06:30 · Last: issue #1742 updated</p><div class="mock-actions"><span class="mock-button primary">Run now</span><span class="mock-button">Edit</span><span class="mock-button">History</span></div></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> repository-target action, scheduled trigger, Oban Lite occurrence, stable side-effect marker, and trusted GitHub profile.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="second-repo" data-category="automation operations">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">06</span>
+                <span class="scenario-title"><h3>Add PtcManager as a second repository</h3><p>Reuse useful actions without inheriting unsafe assumptions.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill">Multi-repo</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>A repository selector on Planning, Delivery, Operations, and Automations.</li><li>Repository health for checkout, GitHub, gates, and agent support.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Add the private repository and dedicated worker checkout.</li><li>Duplicate selected actions, then review their prompts.</li><li>Enable only the actions you want.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>Copied actions start disabled and schedules are not silently enabled.</li><li>Every prompt, lock, worktree, link, and result remains repository-scoped.</li><li>The daily update stays disabled for PtcManager by default.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>A read-only action succeeds against PtcManager.</li><li>One small implementation passes the repository-owned gate and creates the correct PR.</li><li>No job reads or deploys the live release checkout.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Duplicate automation</span></div><div class="mock-content"><div class="mock-nav"><div>ptc_runner</div><div class="active">ptc_manager</div></div><div class="mock-main"><div class="mock-main-head"><strong>Prepare issue</strong><span class="pill amber">Disabled</span></div><div class="mock-card"><strong>Review before enabling</strong><p>Repository path healthy · GitHub private access healthy · gate not yet configured</p><div class="mock-actions"><span class="mock-button primary">Edit copy</span><span class="mock-button">View prompt</span></div></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> repository-safe paths, URL-backed selector, duplicate-and-edit workflow, health checks, and repository-owned gate contract.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="capacity" data-category="operations">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">07</span>
+                <span class="scenario-title"><h3>Start more work than there are agents</h3><p>Nothing is lost, duplicated, or misleadingly shown as running.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill">Operations</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>The action immediately appears as queued.</li><li>Its reason says waiting for agent capacity, a repository lock, or another merge.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Queue several safe jobs without babysitting them.</li><li>Use Operations to understand order and capacity.</li><li>Optionally reprioritize or cancel work that has not started.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>PtcManager atomically reserves profile capacity from separate light and heavy pools.</li><li>Light planning snapshots may run beside a heavy merge; repository writers remain serialized.</li><li>Queued work starts when a matching profile, resource slot, and lock become available.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>Each action moves through one consistent queued, working, waiting, and complete vocabulary.</li><li>No two workers accidentally claim the final agent slot.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Operations</span></div><div class="mock-content"><div class="mock-nav"><div class="active">Queue</div><div>Agents</div><div>History</div></div><div class="mock-main"><div class="mock-main-head"><strong>3 queued · 1 active</strong><span class="pill teal">Light 1/2 · Heavy 1/2</span></div><div class="mock-card"><strong><span class="spinner"></span>Review issue #1743</strong><p>Planning lane · waiting for a light slot · source a4c91b2</p></div><div class="mock-card"><strong>Fix and merge PR #1741</strong><p>Priority writer · waiting for PR #1740 merge reconciliation</p></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> durable queue, typed lanes and locks, configurable light/heavy limits, atomic profile claims, explicit waiting reasons, and consistent status components.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+
+            <article class="scenario" data-id="agent-crash" data-category="operations">
+              <button class="scenario-summary" aria-expanded="false">
+                <span class="scenario-index">08</span>
+                <span class="scenario-title"><h3>An agent or coordinator stops unexpectedly</h3><p>Recovery favors safety and explanation over guessing.</p></span>
+                <span class="scenario-status"><i class="review-dot"></i><span class="pill amber">Recovery</span><span class="chevron">⌄</span></span>
+              </button>
+              <div class="scenario-body">
+                <div class="journey-grid">
+                  <div class="journey-block"><h4>What you see</h4><ul><li>Reconnecting, reconciling, or needs attention—not a false failure or duplicate run.</li><li>The last retained terminal snapshot and audit events.</li></ul></div>
+                  <div class="journey-block"><h4>What you do</h4><ol><li>Usually nothing while reconciliation checks Herdr and GitHub.</li><li>Open Action details if it remains ambiguous.</li><li>Retry only when the UI confirms it is safe.</li></ol></div>
+                  <div class="journey-block"><h4>What happens</h4><ul><li>Deterministic worktree, agent, and prompt-delivery identities are stored before each external step.</li><li>After a crash, PtcManager adopts the existing workspace or agent instead of duplicating it.</li><li>An uncertain prompt is not resent automatically; invalid results and ambiguous panes or cleanup paths keep their context for review.</li></ul></div>
+                  <div class="journey-block done"><h4>Done when</h4><ul><li>The original run is reattached, completed from GitHub truth, or clearly marked safe to retry.</li><li>No worktree is removed while its PR or agent may still need it.</li></ul></div>
+                </div>
+                <div class="mock-screen"><div class="mock-topbar"><span class="mock-dots"><i></i><i></i><i></i></span><span>Run detail</span></div><div class="mock-content"><div class="mock-nav"><div class="active">Status</div><div>Output</div><div>Prompt</div><div>Audit</div></div><div class="mock-main"><div class="mock-main-head"><strong>Fix and merge PR #1741</strong><span class="pill amber"><span class="spinner"></span>Reconciling</span></div><div class="mock-card"><strong>Checking retained Herdr agent</strong><p>Agent merge_pr1741_a82_f1 · slot remains reserved · no duplicate will start</p><div class="mock-actions"><span class="mock-button">View output</span><span class="mock-button">View audit</span></div></div></div></div></div>
+                <p class="implementation-note"><strong>Built by:</strong> preallocated Herdr identity, launch leases and fencing, Herdr-aware crash reconciliation, and conservative cleanup.</p>
+                <div class="review-controls"></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="routing">
+          <div class="section-head">
+            <h2>Which agent gets which job?</h2>
+            <p>Actions ask for capabilities. They do not permanently hard-code a vendor.</p>
+          </div>
+          <table class="routing-table">
+            <thead><tr><th>Work</th><th>User-facing choice</th><th>Initial behavior on Hetzner</th></tr></thead>
+            <tbody>
+              <tr><td>Prepare or investigate an issue</td><td>Any eligible planning agent</td><td>Codex now; Claude may join after a read-only pilot.<small>Requires a read snapshot and the configured GitHub access.</small></td></tr>
+              <tr><td>Make an issue implementation-ready</td><td>Any eligible planning agent</td><td>The configurable prompt may request 0–3 passes from the selected Herdr agent.<small>No Codex-specific skill or parser is required.</small></td></tr>
+              <tr><td>Implement an issue</td><td>Any eligible writer</td><td>Codex is currently the only healthy unattended profile.<small>Review behavior remains part of the visible configurable prompt.</small></td></tr>
+              <tr><td>Repair or merge a managed PR</td><td>Resume the original agent</td><td>The exact retained session wins, even if it is Claude later.<small>Imported PRs receive a new eligible writer.</small></td></tr>
+              <tr><td>Nightly CI and private updates</td><td>Any eligible planning agent</td><td>Choose by health and capacity, then measure outcomes.<small>Do not invent “best agent” rules without local evidence.</small></td></tr>
+              <tr><td>Future deployment</td><td>Require deploy capability</td><td>Run a fixed repository-owned script; agent brand is irrelevant.<small>The agent monitors and explains but does not invent commands.</small></td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="delivery">
+          <div class="section-head">
+            <h2>How this can be completed</h2>
+            <p>Deliver in usable slices. Do not wait for the entire generic system before validating it with real work.</p>
+          </div>
+          <div class="roadmap">
+            <article class="roadmap-card"><span class="phase">PHASE 01</span><h3>Make two repositories safe</h3><p>Repository paths, checked-in gates, authentication health, and source snapshots.</p><ul><li>Dedicated PtcManager checkout</li><li>Exact-SHA gate evidence</li><li>Repository selector</li></ul></article>
+            <article class="roadmap-card"><span class="phase">PHASE 02</span><h3>Make actions configurable</h3><p>Persisted definitions, visible prompts, prepared workspaces, generic results, and agent profiles.</p><ul><li>Workspace preflight</li><li>Capability router</li><li>Light/heavy capacity</li></ul></article>
+            <article class="roadmap-card"><span class="phase">PHASE 03</span><h3>Generate the experience</h3><p>Manual triggers produce Planning and Delivery buttons, common results, and run detail.</p><ul><li>Automations screen</li><li>Contextual buttons</li><li>Mobile review flow</li></ul></article>
+            <article class="roadmap-card"><span class="phase">PHASE 04</span><h3>Add durable schedules</h3><p>Oban Lite stores one future occurrence and survives restarts without duplicate work.</p><ul><li>Schedule editor</li><li>Pause and Run now</li><li>Operations history</li></ul></article>
+            <article class="roadmap-card"><span class="phase">PHASE 05</span><h3>Migrate and prove</h3><p>Move daily updates through Herdr, add nightly CI, then onboard PtcManager.</p><ul><li>No direct model launch</li><li>Real GitHub test</li><li>One small implementation PR</li></ul></article>
+            <article class="roadmap-card"><span class="phase">LATER</span><h3>Increase autonomy carefully</h3><p>Event triggers, deploy actions, more agent profiles, and measured routing preferences.</p><ul><li>Claude read-only pilot</li><li>Workflow events</li><li>Deployment lane</li></ul></article>
+          </div>
+        </section>
+
+        <section id="decisions">
+          <div class="section-head">
+            <h2>Your review</h2>
+            <p>The architecture can support these choices, but the interface should reflect your preferred defaults.</p>
+          </div>
+          <div class="decision-card">
+            <div class="decision-grid">
+              <article class="decision"><h3>Prepare merge decision</h3><p>Should this remain a default button, or be an optional automation you enable only for selected repositories?</p></article>
+              <article class="decision"><h3>Trusted scheduled actions</h3><p>Should enabling a schedule with broad GitHub access require a one-time warning and confirmation?</p></article>
+              <article class="decision"><h3>Run now while paused</h3><p>Should Run now remain available with confirmation even when its repeating schedule is paused?</p></article>
+              <article class="decision"><h3>Second agent profile</h3><p>After Codex routing works, should Claude receive a small read-only A/B pilot before write access?</p></article>
+            </div>
+            <div class="export-row">
+              <p id="review-summary-text">Review 8 scenarios, then export your decisions and notes.</p>
+              <div class="export-actions">
+                <button class="button" id="reset-review">Reset</button>
+                <button class="button" id="copy-review">Copy summary</button>
+                <button class="button primary" id="download-review">Download Markdown</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status">Review summary copied</div>
+
+    <script>
+      (() => {
+        const STORAGE_KEY = "ptc-manager-plan-review-v1";
+        const scenarios = [...document.querySelectorAll(".scenario")];
+        const state = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+
+        const controlMarkup = (id) => `
+          <label class="review-choice">
+            <input type="radio" name="review-${id}" value="agree" />
+            <span>✓ Works for me</span>
+          </label>
+          <label class="review-choice change">
+            <input type="radio" name="review-${id}" value="change" />
+            <span>✎ Needs change</span>
+          </label>
+          <textarea aria-label="Notes for this scenario" placeholder="What would you change or clarify?"></textarea>`;
+
+        scenarios.forEach((scenario) => {
+          const id = scenario.dataset.id;
+          const controls = scenario.querySelector(".review-controls");
+          controls.innerHTML = controlMarkup(id);
+          const saved = state[id] || {};
+          const selected = controls.querySelector(`input[value="${saved.status || ""}"]`);
+          if (selected) selected.checked = true;
+          controls.querySelector("textarea").value = saved.note || "";
+
+          scenario.querySelector(".scenario-summary").addEventListener("click", () => {
+            const open = scenario.classList.toggle("open");
+            scenario.querySelector(".scenario-summary").setAttribute("aria-expanded", String(open));
+          });
+
+          controls.addEventListener("input", () => {
+            const checked = controls.querySelector("input:checked");
+            state[id] = { status: checked ? checked.value : "", note: controls.querySelector("textarea").value };
+            persist();
+          });
+        });
+
+        document.querySelectorAll(".filter").forEach((button) => {
+          button.addEventListener("click", () => {
+            document.querySelectorAll(".filter").forEach((item) => item.setAttribute("aria-pressed", "false"));
+            button.setAttribute("aria-pressed", "true");
+            const filter = button.dataset.filter;
+            scenarios.forEach((scenario) => {
+              scenario.hidden = filter !== "all" && !scenario.dataset.category.split(" ").includes(filter);
+            });
+          });
+        });
+
+        const repoSelect = document.getElementById("repo-select");
+        repoSelect.value = state.repository || repoSelect.value;
+        const updateRepo = () => {
+          document.querySelectorAll("[data-repo-name]").forEach((node) => node.textContent = repoSelect.value);
+          state.repository = repoSelect.value;
+          persist(false);
+        };
+        repoSelect.addEventListener("change", updateRepo);
+
+        function persist(render = true) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          if (render) renderProgress();
+        }
+
+        function renderProgress() {
+          let reviewed = 0;
+          scenarios.forEach((scenario) => {
+            const status = state[scenario.dataset.id]?.status;
+            const dot = scenario.querySelector(".review-dot");
+            dot.className = `review-dot${status ? ` ${status}` : ""}`;
+            if (status) reviewed += 1;
+          });
+          document.getElementById("review-count").textContent = `${reviewed} / ${scenarios.length}`;
+          document.getElementById("meter-fill").style.width = `${(reviewed / scenarios.length) * 100}%`;
+          document.getElementById("review-summary-text").textContent = reviewed === scenarios.length
+            ? "All scenarios reviewed. Export the result when you are ready."
+            : `${scenarios.length - reviewed} scenario${scenarios.length - reviewed === 1 ? "" : "s"} still need your review.`;
+        }
+
+        function reviewMarkdown() {
+          const lines = [
+            "# PtcManager user-plan review",
+            "",
+            `Repository context: ${repoSelect.value}`,
+            `Reviewed: ${new Date().toISOString()}`,
+            ""
+          ];
+          scenarios.forEach((scenario) => {
+            const title = scenario.querySelector("h3").textContent;
+            const entry = state[scenario.dataset.id] || {};
+            lines.push(`## ${title}`, "", `Decision: ${entry.status === "agree" ? "Works for me" : entry.status === "change" ? "Needs change" : "Not reviewed"}`);
+            if (entry.note) lines.push("", entry.note.trim());
+            lines.push("");
+          });
+          return lines.join("\n");
+        }
+
+        function showToast(message) {
+          const toast = document.getElementById("toast");
+          toast.textContent = message;
+          toast.classList.add("show");
+          window.setTimeout(() => toast.classList.remove("show"), 1800);
+        }
+
+        document.getElementById("copy-review").addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(reviewMarkdown());
+            showToast("Review summary copied");
+          } catch (_error) {
+            showToast("Clipboard unavailable — use Download Markdown");
+          }
+        });
+
+        document.getElementById("download-review").addEventListener("click", () => {
+          const url = URL.createObjectURL(new Blob([reviewMarkdown()], { type: "text/markdown" }));
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "ptc-manager-user-plan-review.md";
+          link.click();
+          URL.revokeObjectURL(url);
+          showToast("Markdown review downloaded");
+        });
+
+        document.getElementById("reset-review").addEventListener("click", () => {
+          scenarios.forEach((scenario) => {
+            delete state[scenario.dataset.id];
+            scenario.querySelectorAll("input").forEach((input) => input.checked = false);
+            scenario.querySelector("textarea").value = "";
+          });
+          persist();
+          showToast("Review reset");
+        });
+
+        updateRepo();
+        renderProgress();
+      })();
+    </script>
+  </body>
+</html>
