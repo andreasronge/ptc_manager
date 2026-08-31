@@ -36,6 +36,9 @@ and preserve the exact prompt and repository state used by every run.
 - Send new automation work through Herdr and select any capable available agent
   by default, with optional preferred or required capabilities; independently
   choose read-only access, trusted direct `gh` access, or brokered publication.
+- Treat Herdr agent kinds as opaque integration identifiers. Adding a healthy
+  kind must require configuration and capability checks, not a PtcManager code
+  branch or a vendor-specific result parser.
 - Show the complete resolved prompt, including generated coordinator text.
 - Keep hard enforcement outside prompt prose.
 - Retain every run, its trigger, prompt version, source SHA, agent, output, and
@@ -739,6 +742,9 @@ The responsibility boundary is therefore:
 PtcManager must not launch `codex`, `claude`, `cursor-agent`, or another model
 CLI directly for new generic automation work. It selects a configured agent
 profile, then calls Herdr with the profile's exact kind and launch arguments.
+Outside the temporary compatibility adapters, production dispatch,
+reconciliation, result ingestion, retry, and UI code may not switch on known
+kind names. A newly configured Herdr kind uses those same paths unchanged.
 The request and resulting invocation record contain:
 
 - immutable prompt and result contract;
@@ -762,7 +768,7 @@ operational installation, not a claim that one model is universally better:
 | Field | Purpose |
 | --- | --- |
 | `key`, `display_name` | Stable configured worker identity |
-| `herdr_kind` | Open string passed to Herdr, such as `codex`, `claude`, or `cursor` |
+| `herdr_kind` | Opaque open string passed unchanged to Herdr; examples may include `codex`, `claude`, or `cursor` |
 | `enabled` | Administrative availability switch |
 | `max_concurrency`, `priority` | Optional per-profile ceiling and deterministic preference |
 | `capabilities` | Objective tested abilities required by execution profiles |
@@ -788,6 +794,12 @@ by the worker. They verify the executable, authentication, configured Herdr
 integration, and a safe start/prompt/read lifecycle where practical. The UI
 shows `ready`, `busy`, `unhealthy`, or `not installed`, including the failing
 check and its time.
+
+“Any agent” means any Herdr kind whose worker profile passes the objective
+capabilities required by the action and supports unattended start, prompt,
+status/output, and result submission. It does not mean PtcManager should try an
+installed but unauthenticated or interactive-only integration. The distinction
+is operational health, not a built-in allowlist of model vendors.
 
 Add durable `agent_profile_slot_claims` rather than computing capacity from a
 non-atomic count. Assignment runs in one SQLite write transaction that rechecks
@@ -930,6 +942,12 @@ eligible after it is installed, authenticated, and health-tested for the worker
 identity. Cursor does likewise later. A retained existing Claude session may
 only receive a same-task follow-up when PtcManager has its exact session,
 worktree, and credential provenance.
+
+Slice 4 is not considered operationally model-neutral until the same safe
+read-only generic action has completed through Codex and at least one second
+real Herdr kind (prefer Claude on the current host), in addition to the invented
+kind contract test. Lack of a second healthy installation may delay that pilot,
+but must never be “solved” with a Codex-specific application branch.
 
 The existing direct Codex paths are temporary compatibility implementations for
 current manager analysis and daily updates. Migrating those actions means
@@ -1176,6 +1194,37 @@ The repository owns the executable gate. A developer pre-push hook, PtcManager,
 and GitHub CI should delegate to the same checked-in scripts. The
 credential-bearing publisher continues to disable Git hooks.
 
+### Reuse the `ptc_runner` duplication ratchet
+
+For `ptc_manager`, `mix precommit` should include the same duplication policy
+already proven in `ptc_runner`, not a newly designed detector. The reviewed
+source is `ptc_runner` commit `1a21d3f7c9ed6b6d489b8173ba215ef120b9d2b0`;
+adopt these assets and behavior from that commit:
+
+- ExDNA `~> 1.5` as a development/test-only dependency;
+- `.ex_dna.exs` with the same excluded boilerplate macros and minimum AST mass;
+- `scripts/duplication_gate.sh check|bless`;
+- the Python baseline ratchet and its fingerprint/remnant semantics;
+- the existing line-movement, literal-change, growth, one-to-one remnant, and
+  unrelated-clone regression tests;
+- a repository-local `.duplication-baseline.json`, initially blessed from the
+  current `ptc_manager` tree.
+
+The initial adoption deliberately vendors the small gate implementation with a
+source-commit provenance note so PtcManager can run locally and in CI without a
+sibling `ptc_runner` checkout or network fetch. It is reuse by exact port plus
+parity tests, not an independent rewrite. PtcManager owns only its baseline and
+the list of scanned paths. If a third repository adopts the gate or either copy
+needs a behavior change, extract the ratchet into a small standalone versioned
+tool consumed by all repositories rather than allowing copies to drift.
+
+The PtcManager gate scans its Elixir source and tests, runs from both
+`mix precommit` and CI, fails only on new or grown clones, and retains the same
+operator choices: extract shared logic, suppress an intentionally independent
+copy with a reason, or explicitly bless accepted debt. The generic PtcManager
+repository contract invokes `mix precommit`; it does not need to know that this
+repository's gate happens to use ExDNA.
+
 Before brokered publication, PtcManager runs the frozen command as a
 credential-free worker against the exact candidate SHA, requires a clean
 worktree afterward, and stores command, exit status, duration, bounded output,
@@ -1205,6 +1254,19 @@ A server outage leaves the due job in SQLite; it runs after restart. Because
 only one future occurrence existed, the initial policy runs at most one overdue
 occurrence and then computes the next future time rather than backfilling every
 missed interval.
+
+Schedule calculations use the trigger's IANA time zone, but occurrence identity
+is always the resolved UTC `due_at`. For a nonexistent local time during the
+spring DST gap, schedule the occurrence at the first valid instant after the
+gap. For a repeated local time during the autumn DST fold, run once at the
+earlier resolved instant. If a shifted gap occurrence collides with another
+genuine cron match at that same UTC instant—for example `0 2,3 * * *`—the two
+matches deliberately coalesce into one occurrence and its audit metadata lists
+both nominal local matches. A time-zone or cron edit increments
+`schedule_version` and recomputes the one future occurrence from the edit time;
+it never reuses or backfills the invalidated local occurrence. Deterministic
+tests cover both folds and gaps, wall-clock rollback, a time-zone edit across a
+transition, an outage spanning a transition, and the shifted/genuine collision.
 
 Changing, pausing, or resuming a schedule increments `schedule_version`,
 cancels its known future Oban job, and records an audit event. Pausing,
@@ -1284,9 +1346,65 @@ Acceptance:
 - every proposed field is visible in or required by a user journey;
 - advanced controls do not dominate the normal create/edit flow.
 
+### Slice 0.5: deterministic integration test rig
+
+- Add the shared `PtcManager.TestScenario` support described in the Test
+  strategy, with stateful GitHub, Herdr, agent, clock, and fault controls.
+- Put Herdr control behind one injectable command/gateway boundary rather than
+  creating more fake shell scripts in individual test files.
+- Put GitHub HTTP transport behind an injectable boundary while retaining the
+  existing domain-level issue and PR behaviours.
+- Put credential-free and credential-bearing Git/port execution behind an
+  injectable runner so push-success/ack-loss and timeout windows can be tested.
+- Use real temporary Git repositories and worktrees for workspace tests.
+- Add parity scenarios for current implementation dispatch, PR repair,
+  publication, reconciliation, and cleanup. Add each new golden journey in the
+  later slice that introduces its production path; this slice does not fake a
+  future scheduler, generic result broker, or multi-repository coordinator.
+- Migrate duplicated one-off fakes into the rig when their tests are touched;
+  do not block this slice on rewriting the complete existing suite.
+
+Acceptance:
+
+- tests advance work explicitly without `Process.sleep/1` or live poller timing;
+- every external operation exercised by the current parity scenarios can fail
+  before its side effect or after its side effect but before acknowledgement;
+- a scenario exposes a readable ordered trace of database, GitHub, Herdr, agent,
+  result, and UI events when it fails;
+- no required CI test launches a real LLM or mutates a maintainer repository;
+- the initial parity scenarios run repeatedly with the same result.
+
+### Slice 0.75: deployment maintenance and canary admission
+
+- Add a deployment maintenance mode that starts the release with all pollers,
+  Oban queues when present, result ingestion, mutations, and dispatch paused.
+- Add a canary-only admission mode that permits one explicitly identified
+  read-only invocation while preserved and newly queued ordinary work remains
+  paused.
+- Teach the checked-in deployment task to restore a SQLite snapshot only before
+  maintenance mode is lifted; after any new effect it may pause and perform only
+  a schema-compatible code rollback or forward repair.
+- Add a disposable-target deployment harness that exercises maintenance entry,
+  pre-effect failure and restore, canary-only admission, post-effect failure,
+  and ordinary-work resume. The harness activates only capabilities present in
+  that slice; it does not require generic dispatch or Oban before they exist.
+
+Acceptance:
+
+- the web/read-only health surface can be checked while every ordinary worker
+  and write path is paused;
+- exactly one allowlisted canary can traverse an available action path without
+  releasing preserved work;
+- ordinary work resumes only after the canary succeeds;
+- no automated rollback restores an older database after a durable or external
+  effect may have occurred.
+
 ### Slice 1: exact-SHA pre-publication gate
 
 - Implement `ptc_manager` issue #1.
+- Port the reviewed `ptc_runner` duplication gate assets and regression tests,
+  add the ExDNA dependency, bless only PtcManager's initial local baseline, and
+  run the check from both `mix precommit` and CI.
 - Add the repository contract parser and frozen per-job gate configuration.
 - Run the gate credential-free and persist exact-SHA evidence.
 - Keep publisher hooks disabled.
@@ -1295,8 +1413,13 @@ Acceptance:
 
 Acceptance:
 
+- the unchanged PtcManager tree passes its initial baseline, an injected new or
+  grown clone fails, resolved debt passes with the same update message, and the
+  ported `ptc_runner` fixtures produce byte-equivalent classifications;
 - the broker refuses branch push or PR creation without a passing, current
   gate, exact target, and fencing token;
+- push-success/ack-loss, gate partial failure, and changed-head scenarios leave
+  one externally verifiable outcome and never blindly repeat a publication;
 - the first strictly gated `ptc_manager` implementation pilot uses brokered
   publication rather than trusted-direct credentials.
 
@@ -1310,6 +1433,8 @@ Acceptance:
 Acceptance:
 
 - two repositories cannot silently share checkout or worktree paths;
+- the two-repository golden journey proves similar issue, branch, and PR
+  numbers remain isolated through dispatch, result, publication, and cleanup;
 - changing the repository filter is stable across refresh and link navigation.
 
 ### Slice 3: persisted action definitions
@@ -1347,6 +1472,9 @@ Acceptance:
 - Add one generic Herdr dispatch adapter that passes the selected explicit kind,
   plus common result validation and synchronization. Do not add direct
   model-specific process adapters for new automations.
+- Add a contract scenario registering an invented Herdr kind such as
+  `test-maintainer`, with no Codex/Claude/Cursor code or executable present, and
+  complete dispatch, prompt, result, reconciliation, retention, and cleanup.
 - Add automation invocations linking existing `agent_actions` or implementation
   `jobs` without replacing either queue.
 - Introduce durable lock claims and fencing tokens, migrate current merge and
@@ -1362,8 +1490,11 @@ Acceptance:
   have all passed preflight;
 - a failed preflight starts no agent, and crash recovery adopts the persisted
   worktree identity rather than creating a duplicate;
-- generic Codex, Claude, and Cursor runs use the same validated result envelope
-  without parsing their terminal prose or receiving database credentials;
+- generic Codex, Claude, Cursor, and an unknown test kind use the same validated
+  result envelope without parsing terminal prose or receiving database
+  credentials;
+- no non-compatibility production module branches on a known Herdr kind name;
+  adding a ready profile for a new kind requires no application-code change;
 - the default selector uses any capable Herdr agent, a preference may fall back,
   and a requirement stays queued when no matching agent exists;
 - a Herdr-supported but uninstalled or unauthenticated kind is ineligible;
@@ -1383,6 +1514,10 @@ Acceptance:
   rejected;
 - Operations still shows implementation jobs and maintainer actions correctly;
 - lock compatibility is atomic and matches the planning/writer/merge policy.
+- this slice adds the golden journeys for worktree-create acknowledgement loss,
+  prompt uncertainty, stale eligibility during bootstrap, cleanup/resume races,
+  light-versus-heavy capacity, generic result resubmission, and externally
+  merged PR reconciliation.
 
 ### Slice 5: manual triggers and generated buttons
 
@@ -1433,6 +1568,8 @@ Acceptance:
 Acceptance:
 
 - a scheduled run survives an application restart;
+- the real-Oban/on-disk-SQLite black-box suite proves restart recovery,
+  `SQLITE_BUSY` handling, and single materialization outside SQL Sandbox;
 - unconditional occurrence uniqueness and insert-or-get materialize only one
   invocation even after a post-commit worker crash;
 - pausing either the trigger or parent automation prevents future
@@ -1443,6 +1580,11 @@ Acceptance:
 - an exhausted materialization failure is visible and the following scheduled
   occurrence still runs;
 - schedules cannot be attached to issue or PR actions in the first release;
+- DST spring gaps run at the first valid instant, autumn folds run once at the
+  earlier instant, and time-zone edits, wall-clock rollback, and outages across
+  both transitions preserve one future occurrence; a shifted gap match and a
+  genuine match at the same UTC instant coalesce once with both nominal matches
+  retained in audit metadata;
 - configured profile capacity and PtcManager queue rules still decide when
   Herdr starts the selected agent.
 
@@ -1509,6 +1651,227 @@ Acceptance:
   become necessary; multiple remote Herdr workers alone do not require it.
 
 ## Test strategy
+
+### Confidence model
+
+No single full-system test can prove an asynchronous agent system correct. The
+release gate therefore combines four deliberately small layers:
+
+1. domain tests for state machines, validation, locks, fencing, and invariants;
+2. deterministic integration scenarios using real SQLite and Git with stateful
+   fake GitHub, Herdr, and agents;
+3. LiveView journeys over the same scenario rig for user-visible asynchronous
+   states;
+4. opt-in contract and deployment canaries against the actual Hetzner worker
+   and a dedicated GitHub test repository.
+
+Required CI never depends on model quality, external network availability, or
+real Codex/Claude usage. Real-service tests prove adapter compatibility and
+deployment wiring, not reasoning quality.
+
+### Deterministic scenario rig
+
+Add shared test support rather than another collection of file-local fakes:
+
+- `PtcManager.TestScenario` owns the scenario, fixtures, virtual time, ordered
+  event trace, and `drain/1` or `advance/2` operations;
+- a stateful `TestGitHub` holds issues, labels, assignees, PRs, heads, checks,
+  merges, workflow runs, and an audit of reads and mutations;
+- a stateful `TestHerdr` holds worktrees, workspaces, panes, agents, prompt
+  attempts, terminal output, and removals;
+- a deterministic `TestAgent` reacts to a prompt with a configured sequence:
+  remain working, stop, submit a valid/invalid result, or make declared GitHub
+  changes before settling;
+- real temporary Git repositories and worktrees exercise revision, branch,
+  cleanliness, symlink, ownership, gate, and cleanup logic;
+- a virtual clock controls leases, retries, schedule occurrences, timeouts, and
+  backoff without wall-clock sleeps;
+- Oban uses manual testing mode so scenarios inspect and execute due jobs
+  explicitly rather than running background queues.
+
+Manual Oban mode is for fast deterministic orchestration tests, not evidence of
+process-restart or SQLite-engine behavior. A separate, small black-box suite
+uses a dedicated on-disk SQLite file and the real Oban Lite supervision tree.
+It commits at a named fault boundary, terminates the application and Repo,
+reopens the same file in a fresh application instance, and verifies that the
+single durable action resumes. That suite also uses two independent database
+connections to cover `SQLITE_BUSY`, lock retry, interrupted shutdown, and
+poller/engine recovery. It does not run inside the normal SQL sandbox.
+
+The scenario runner calls the same public `run_once`, worker, synchronization,
+and LiveView entry points used by production. It does not reach into schemas to
+force the expected final state after the initial fixture is built.
+
+Every fake external command supports at least these outcomes:
+
+- `ok`: apply the side effect and acknowledge it;
+- `fail_before`: return an error without applying the side effect;
+- `effect_then_error`: apply the side effect but lose or replace the
+  acknowledgement;
+- `pause_after_effect`: apply the side effect and block on a test barrier so a
+  competing worker, state change, or simulated coordinator restart can run.
+
+`effect_then_error` is the most important mode: it reproduces the uncertainty
+windows that otherwise create duplicate worktrees, agents, prompts, PRs,
+issues, results, or merges. Scenario assertions check both durable state and
+the external event trace—for example, not merely that a job finished, but that
+only one prompt and one GitHub mutation occurred.
+
+The faultable boundary covers more than HTTP and Herdr. It includes the Git
+port runner used for exact-SHA fetch/push, the result broker's durable accept
+and acknowledgement, and repository bootstrap/gate execution. Required
+scenarios include push-success/ack-loss, PR-create/merge-success/ack-loss,
+result-persist/ack-loss, and bootstrap/gate partial failure. The fake models
+only observable protocols; it does not reimplement GitHub or Herdr internals.
+
+The initial rig may run `async: false` while SQLite and remaining application
+configuration are process-global. New orchestration code should accept explicit
+gateway, clock, and runtime dependencies so the rig does not add more
+`Application.put_env/3` coordination. Parallelization is a later optimization,
+not a prerequisite for deterministic coverage.
+
+### High-risk scenario matrix
+
+| Risk | Injected event | Required assertion |
+| --- | --- | --- |
+| Duplicate workspace or agent | Herdr applies create/start, then loses the reply | Recovery adopts the deterministic identity; one workspace and agent exist |
+| Duplicate prompt or GitHub side effect | Herdr accepts prompt, then times out | State is `prompt_delivery_unknown`; no automatic resend or second PR/issue |
+| Stale approved work | Issue closes, becomes blocked, or is claimed during bootstrap | Agent never starts; refreshed GitHub reason is visible |
+| Queue/capacity race | Concurrent dispatchers compete for the final light/heavy/profile slot | One durable winner; every loser remains visibly queued with a reason |
+| Unsafe worktree cleanup | Cleanup races a retained-session resume or crashes mid-removal | One fenced winner; active/wrong-path worktree is never deleted; retry is safe |
+| Untrusted or ambiguous result | Wrong token/run, invalid schema, symlink, oversized or changed staging file | Broker rejects it, final store is unchanged, and retained correction is possible |
+| Duplicate scheduled work | Coordinator stops after occurrence/job materialization | Restart produces one occurrence, invocation, and domain record, then schedules the next future run |
+| GitHub changed outside PtcManager | PR merges, head advances, CI changes, or issue assignment changes mid-run | Reconciliation follows GitHub truth without publishing, repairing, or blocking twice |
+| Cross-repository leakage | Two repositories use similar issue/branch numbers concurrently | Paths, locks, prompts, credentials, results, links, and cleanup remain repository-scoped |
+| Deployment/migration regression | Release restarts with queued, retained, and scheduled work | Migration preserves identities and queue state; pollers resume without duplicate execution |
+
+Maintain a small set of named golden journeys rather than a combinatorial suite:
+
+1. approve one ready issue through prepared worktree, agent result, and linked PR;
+2. lose the worktree-create acknowledgement and adopt the single worktree;
+3. lose prompt acknowledgement and retain one unknown session without resend;
+4. change GitHub eligibility during bootstrap and prove no agent starts;
+5. race cleanup against retained-session resume;
+6. fill a heavy pool while a light planning action still completes;
+7. after Slice 7, restart after scheduled materialization and prove one
+   invocation, including the real-engine SQLite restart case;
+8. reject a cross-run result and successfully resubmit through the same retained
+   agent;
+9. reconcile a PR merged outside PtcManager while repair is pending;
+10. run similar targets in two repositories without cross-contamination.
+
+### Adapter contract tests
+
+The deterministic rig tests PtcManager behavior; thin contract tests protect the
+real adapters:
+
+- recorded Herdr JSON fixtures cover every supported response envelope and
+  error classification;
+- a temporary executable verifies exact Herdr CLI arguments, environment
+  scrubbing, timeouts, and bounded output;
+- an injectable GitHub transport or local HTTP stub verifies method, URL,
+  pagination, headers, rate limits, decoding, and error classification without
+  public network access;
+- a temporary Git/port runner verifies exact arguments, environment isolation,
+  output bounds, timeouts, and success-with-lost-acknowledgement handling;
+- a tagged `:external` Hetzner test verifies real Herdr health plus
+  worktree-create/list/remove against a disposable repository, without starting
+  a paid LLM;
+- a tagged `:external` GitHub test uses a dedicated private sandbox repository,
+  never `ptc_runner` or `ptc_manager`; read-only probes run before ordinary
+  deployments, while mutation/merge canaries require explicit enablement.
+
+Fixture tests do not replace the external canary because Herdr and GitHub may
+change independently. External tests do not replace deterministic scenarios
+because network tests cannot reproduce crash windows reliably.
+
+### LiveView journeys
+
+Use existing Phoenix LiveView test helpers with `TestScenario`; a full browser
+is not required for most asynchronous UI behavior. A journey clicks the real
+button, drains one controlled stage at a time, and asserts the same target shows
+consistent `queued`, `preparing`, `working`, `reconciling`, `needs attention`,
+and completed states across the originating card, Operations, and run detail.
+
+Keep a very small real-browser suite for behavior implemented in JavaScript:
+repository selection in localStorage, drawers that remain open across LiveView
+updates, mobile navigation, and read-only terminal/result panels. Do not put
+the full orchestration matrix in browser automation.
+
+### Deployment confidence gate
+
+Every deploy records the exact commit and evidence for these stages. Each stage
+requires only capabilities already introduced and enabled by the slice being
+deployed: the real-Oban restart suite becomes required with Slice 7, and the
+generic-action canary becomes required with Slice 4. Earlier slices use the
+existing credential-free direct-adapter parity canary supplied by Slice 0.75;
+that canary proves its actual queue → compatibility adapter → persisted result
+→ UI path and does not pretend Herdr or the generic result broker exists yet.
+
+1. **Required CI:** warning-free compile, formatting check, domain tests,
+   deterministic integration scenarios, local adapter contract tests, LiveView
+   journeys, applicable migration tests, and—once Oban exists—the on-disk
+   SQLite/real-Oban restart suite.
+2. **Pre-deploy target check:** no managed run is in an unsafe interruption
+   window; database backup succeeds; pending migration and rollback compatibility
+   are reported; Herdr, GitHub read access, disk, permissions, toolchains, and
+   repository contracts are healthy.
+3. **Maintenance start:** use the checked-in deployment task and start the new
+   release in maintenance mode. Web health and read-only inspection are
+   available, but pollers, Oban queues, result ingestion, ordinary mutations,
+   and agent dispatch remain paused. Run migrations once and retain the previous
+   release plus database backup.
+4. **Pre-effect verification:** confirm the expected release SHA and migrations,
+   component supervision/configuration, repository health, and preservation of
+   pre-deploy queued, retained, and scheduled identities without executing them.
+   Only after these checks pass may the deployment leave maintenance mode.
+5. **Canary-only admission:** keep ordinary and preserved work paused, enable
+   only the infrastructure needed by one allowlisted, credential-free read-only
+   canary, and verify the newest available path. Before Slice 4 this is queue →
+   direct compatibility adapter → persisted result → UI. From Slice 4 onward it
+   is the full queue → Herdr → brokered result → UI journey. Before enabling a
+   new write/publish path, separately run one explicit sandbox-repository write
+   canary under the same allowlist rule.
+6. **Active verification:** only after the canary passes, enable the available
+   planning/writer pollers, result broker, Oban scheduler, configured agent
+   profiles, and ordinary traffic. Verify the preserved identities remain
+   singular and eligible work resumes once.
+
+Rollback follows an explicit effect boundary:
+
+- before maintenance mode is lifted, no new PtcManager external or durable
+  business effect is allowed; a failed migration or pre-effect check may stop
+  the service and restore both the previous release and its SQLite snapshot;
+- after maintenance mode is lifted, the database snapshot is never restored
+  automatically. A failure pauses dispatch and writes, preserves evidence, and
+  uses a schema-compatible application rollback or forward repair. An operator
+  may restore a database only after proving there are no newer local or external
+  effects to orphan.
+
+Exercise maintenance entry, pre-effect snapshot restore, post-effect pause, and
+schema-compatible code rollback on a disposable deployment target; shell syntax
+or script-text assertions alone are insufficient. A write canary whose GitHub
+outcome is unknown is never retried automatically. Production actions remain
+disabled behind their feature flag until the corresponding golden scenario,
+adapter contract, and sandbox canary have passed.
+
+### Definition of deployable
+
+A slice is deployable only when:
+
+- every new external side effect has `ok`, `fail_before`, and
+  `effect_then_error` coverage;
+- every new durable state has restart/reconciliation coverage, and states
+  driven by Oban or SQLite concurrency have the real-engine on-disk restart case;
+- every destructive operation has containment, ownership, fence, competing
+  owner, and partial-failure coverage;
+- every new queue or lock rule has a concurrent-claim test;
+- every user-triggered action has one LiveView journey with immediate feedback;
+- when a slice adds or changes migrations, they are tested from the previously
+  deployed schema with representative records applicable to that slice;
+- required CI is green and the target pre-deploy check passes;
+- when a slice adds or changes an executable action path, the post-deploy
+  read-only canary completes and its run is visible in Operations.
 
 ### Domain tests
 
@@ -1580,7 +1943,8 @@ Acceptance:
 - a cleanup worker and retained-session resume racing for one worktree produce
   exactly one fenced winner, including after a partial Herdr/Git removal crash;
 - a fake generic Herdr kind can submit the same `ptc-result` envelope as Codex,
-  proving that dispatch and result ingestion are model-neutral;
+  and completes the full lifecycle, proving dispatch, reconciliation, result
+  ingestion, UI provenance, and cleanup are model-neutral;
 - crafted configuration cannot route a writer/merge profile through the light
   pool, and stale GitHub open/label/assignee state prevents materialization;
 - authenticated GitHub fixtures cover nightly workflow outcomes;
@@ -1644,6 +2008,10 @@ pre-publication gate and repository-path isolation are deployed and verified.
   the capability/profile router, passes Herdr an explicit kind, and records the
   assignment; it does not directly launch or permanently hard-code Codex,
   Claude Code, or Cursor.
+- Herdr kinds are opaque to generic production code. An invented kind must pass
+  the complete lifecycle contract test, and the Hetzner pilot validates the
+  same read-only action with at least two real kinds before claiming operational
+  model neutrality.
 - Any capable Herdr agent is the default. Specific kinds or skills are required
   only when the action genuinely depends on them.
 - Triage and implementation-readiness review are ordinary configurable Herdr
@@ -1663,6 +2031,10 @@ pre-publication gate and repository-path isolation are deployed and verified.
   `ptc-result` submission. Final artifacts are coordinator-owned and immutable;
   agents do not write the database, and PtcManager does not parse terminal prose
   as structured output.
+- Required CI uses deterministic stateful GitHub/Herdr/agent fakes, real
+  temporary Git, virtual time, and explicit external-effect fault injection.
+  Real-service canaries are small, tagged, and confined to dedicated sandbox
+  targets.
 - Scheduled occurrences have unconditional identities independent of run
   outcome.
 - The default PR repair experience is one `Fix and merge` button/action.
@@ -1671,6 +2043,9 @@ pre-publication gate and repository-path isolation are deployed and verified.
 - Repository selection is URL-backed and remembered in browser localStorage.
 - Oban Lite supplies durable scheduling on SQLite.
 - Deployment is a later typed action, not part of the first automation release.
+- PtcManager adopts the reviewed `ptc_runner` ExDNA duplication ratchet and its
+  tests exactly, while keeping a repository-local baseline and no runtime
+  dependency on the `ptc_runner` checkout.
 
 ## Independent design review
 
@@ -1718,6 +2093,33 @@ generic-result review selected a validated brokered envelope rather than
 model-specific JSON parsing or direct database access. The workspace review
 made repository bootstrap and complete preflight prerequisites to agent start.
 
+A second independent review focused specifically on whether the test and deploy
+plan could justify production confidence. Its five findings were accepted:
+
+1. Deployment now starts in a worker-disabled maintenance mode and defines an
+   effect boundary: SQLite snapshot restore is allowed only before any new
+   durable or external effect; afterward recovery pauses work and goes forward
+   or uses schema-compatible code rollback.
+2. Slice 0.5 now builds reusable seams plus parity scenarios for current paths;
+   future golden journeys are added by the slices that introduce those paths,
+   and global deployability requirements apply only when relevant.
+3. Manual Oban tests are complemented by a real-Oban, on-disk SQLite restart
+   suite with independent connections, lock contention, and interrupted
+   shutdown coverage.
+4. Fault injection includes Git/port publication, result acknowledgement, and
+   bootstrap/gate runners, while local adapter contract tests are required CI.
+5. Schedule semantics now define and test DST gaps, folds, time-zone edits,
+   clock rollback, and outages across a transition.
+
+Its follow-up found three remaining sequencing ambiguities, also addressed:
+Slice 0.75 now owns maintenance and canary admission; deployment requirements
+are capability-dependent until generic dispatch and Oban exist; and ordinary
+work remains paused until an allowlisted canary passes. DST gap collisions now
+have an explicit coalescing rule and retain both nominal matches for audit.
+A final check clarified that the pre-Slice-4 canary exercises the existing
+direct compatibility adapter; the full Herdr and brokered-result canary becomes
+mandatory only when Slice 4 introduces those boundaries.
+
 ## Research basis
 
 - [Herdr agent automation](https://herdr.dev/docs/agent-automation/) documents
@@ -1731,6 +2133,9 @@ made repository bootstrap and complete preflight prerequisites to agent start.
 - [Herdr integrations](https://herdr.dev/docs/integrations/) documents
   installation per agent and confirms that integration state supplies lifecycle
   or session information rather than task routing.
+- [Oban testing](https://hexdocs.pm/oban/testing.html) documents manual testing
+  mode for explicitly inspecting and executing queued jobs without background
+  queues, which fits deterministic scheduler scenarios.
 - [Codex use cases](https://developers.openai.com/codex/use-cases) demonstrate
   coding, review, analysis, and automation uses.
 - [Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage)
@@ -1771,7 +2176,3 @@ therefore be based on local health and measured PtcManager outcomes.
    inspect?
 11. At what local time should the first Nightly investigation run until an
    event-driven trigger is added?
-12. After the generic router is working with Codex, should Claude be the second
-   automated profile installed for an A/B pilot, or should it remain an
-   interactive-only agent until more capacity is needed? The recommendation is
-   a small read-only pilot before allowing write/merge jobs.
