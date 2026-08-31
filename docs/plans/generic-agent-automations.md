@@ -99,7 +99,8 @@ checks, labels, and merge state.
 Issue workflow and execution workflow have separate sources of truth:
 
 - GitHub owns whether an issue is open or closed, its assignees, and its
-  repository-configured workflow labels.
+  repository-configured workflow labels, native `blocked by`/`blocking`
+  relationships, and PR open/merged/closed state.
 - PtcManager owns whether one of its invocations is queued, running, retained,
   reconciling, or complete, plus its internal target and resource claims.
 
@@ -326,7 +327,7 @@ Each repository configures a deliberately small workflow-label mapping. The
 initial recommendation is:
 
 - `ptc:ready` — the open issue is sufficiently defined and feasible to approve;
-- `ptc:blocked` — another issue or external condition must change first;
+- `ptc:blocked` — a non-issue external condition must change first;
 - `ptc:needs-decision` — the agent needs a named maintainer choice.
 
 No separate `claimed` label is required initially. GitHub assignees and the
@@ -335,10 +336,10 @@ PtcManager shows an external-claim icon when synchronization sees such a signal,
 including work started outside PtcManager.
 
 An issue is eligible for the Ready lane when GitHub reports it open with the
-configured ready label, without the configured blocked or needs-decision labels.
-An active PtcManager target claim or an external GitHub claim is displayed
-separately and prevents a second automatic start unless the maintainer explicitly
-overrides it.
+configured ready label, without the configured blocked or needs-decision labels,
+and with no unsatisfied native GitHub dependency. An active PtcManager target
+claim or an external GitHub claim is displayed separately and prevents a second
+automatic start unless the maintainer explicitly overrides it.
 
 Immediately before materialization, PtcManager refreshes and records the
 authoritative GitHub target state. It refuses a stale start when the issue has
@@ -350,6 +351,55 @@ The prompted agent still performs the GitHub assignment, claim comment, issue
 rewrite, and label mutations. Claims created entirely outside PtcManager are
 necessarily best-effort coordination through GitHub; preventing a simultaneous
 external race would require a shared claim broker later.
+
+### Native issue dependencies and blocked work
+
+GitHub's native issue dependency relationship is authoritative for issue A
+blocking issue B. PtcManager synchronizes `blockedBy` and `blocking` as a
+read-only local projection for board rendering, queue eligibility, audit, and
+fast reconciliation; it does not offer a second editable dependency graph.
+Agents use the GitHub CLI/API relationship operations, not prose such as
+“depends on #123” as the machine-readable contract. PtcManager verifies the
+relationship from GitHub after the agent settles.
+
+`ptc:ready` and dependency state are intentionally independent. An issue may be
+well-defined and retain `ptc:ready` while waiting for another issue. Its card
+shows `Ready · blocked by #A` with linked blocker titles and states. The generic
+`ptc:blocked` label remains available for external blockers that cannot be
+represented by a GitHub issue dependency, such as an upstream release or
+missing third-party access.
+
+Dependency satisfaction follows explicit rules:
+
+- an open blocker is unsatisfied;
+- a blocker closed as completed is satisfied;
+- a dependency explicitly removed in GitHub is satisfied;
+- a blocker closed as not planned is not silently satisfied: the dependent
+  issue becomes `dependency needs decision` until a maintainer removes or
+  replaces the relationship, closes the dependent issue, or explicitly accepts
+  the outcome;
+- reopening a blocker makes the dependency unsatisfied again;
+- every blocker must be satisfied before implementation can start;
+- an inaccessible or deleted cross-repository blocker is unknown and therefore
+  blocks dispatch rather than failing open.
+
+PtcManager detects dependency cycles, including cross-repository cycles it can
+observe. Every issue in a cycle remains blocked and the UI shows the shortest
+known cycle, for example `#A → #B → #A`, as `needs attention`; no issue in the
+cycle starts automatically.
+
+A maintainer may choose **Approve when unblocked** for an otherwise ready issue.
+That creates one durable invocation in `waiting_on_dependencies`, but allocates
+no Herdr agent, resource slot, repository lock, or worktree. When synchronization
+observes all blockers satisfied, the normal atomic eligibility check may
+materialize it once. Without that prior approval, the issue merely moves back to
+Ready and still requires approval. Queue and Operations show each blocker and
+why it is or is not satisfied.
+
+Dependency state is refreshed when either side synchronizes, when an agent
+reports a relationship change, before workspace creation, after bootstrap, and
+immediately before agent start or publication. A late blocker addition therefore
+prevents launch or publication even when the board was stale.
 
 The simple-language triage explanation remains private PtcManager output and is
 not copied into the issue. Durable implementation facts and decisions belong in
@@ -720,6 +770,64 @@ and records partial progress so a crash resumes removal rather than recreating
 or deleting an unrelated workspace. Ambiguity moves the worktree to
 `quarantined` for operator review. Worktree capacity is tracked independently
 from active light/heavy agent capacity.
+
+### Targets closed or merged while work exists
+
+A GitHub target never silently disappears merely because it becomes terminal.
+The Planning or Delivery card leaves the active lane, but its invocation remains
+in Operations and run history with a prominent, acknowledgeable warning naming
+the observed GitHub state, synchronization time, last source/head SHA, agent,
+and retained output. A short `Recently changed externally` section keeps such
+items discoverable from the originating screen; retention duration is a UI
+setting, while the durable audit record is not deleted.
+
+Reconciliation applies these stage-specific rules:
+
+- **Queued or waiting:** an externally closed issue, merged PR, or PR closed
+  without merge becomes terminal before capacity or a worktree is allocated.
+  The run records `closed externally`, `merged externally`, or `closed without
+  merge`, releases its claims, and never starts an agent.
+- **Preparing or bootstrapping:** the existing authoritative refresh prevents
+  agent launch. The run records the external change, releases active capacity,
+  and schedules fenced cleanup of the unused workspace.
+- **Agent actively working:** PtcManager immediately marks the run
+  `external change detected`, blocks new prompts and every brokered publish or
+  merge using its fence, and shows the warning. It does not kill the terminal or
+  delete the worktree underneath a live process by default. It lets the current
+  Herdr turn settle, accepts any final report only as audit evidence, reconciles
+  GitHub as authoritative, and then transitions according to the terminal facts
+  below. Cleanup runs only when no open PR or explicit maintainer decision still
+  requires the retained context.
+  Trusted-direct `gh` cannot be technically revoked, so its warning and prompt
+  instruct the agent to stop; this limitation remains explicit in the UI.
+- **Retained or previously completed:** no work resumes. History remains
+  visible, the retained session is made ineligible for further prompts, and
+  cleanup waits for the normal fencing and Herdr-idle proof.
+
+The terminal outcome depends on the GitHub facts:
+
+- a PR confirmed merged is success, even when another actor merged it;
+- a PR closed without merge is declined/cancelled, not a failure disguised as
+  success;
+- an issue closed with no open managed PR ends its implementation invocation;
+- if an issue closes while its managed PR remains open, the PR stays visible in
+  Delivery and the run becomes `needs attention`: the maintainer chooses whether
+  to continue the PR, close it, or reopen the issue;
+- if a PR closes without merge while its issue remains open, the issue may
+  return to Planning/Ready after cleanup, but the old approval is not reused and
+  a new implementation requires a new explicit approval.
+
+Reopening an issue or PR never resurrects a terminal invocation automatically.
+Synchronization projects the reopened GitHub item back into the appropriate
+board, while any new work receives a new invocation, eligibility check, prompt
+snapshot, and usually a new worktree. An old retained session may be reused only
+through an explicit same-task recovery action that proves its worktree and fence
+still valid.
+
+Cleanup requires both terminal GitHub state and proof that no Herdr process is
+active. A working process delays cleanup; an unreachable or ambiguous process
+quarantines the workspace. This preserves evidence and prevents an external
+closure race from deleting files an agent is still using.
 
 ### Herdr is the launch and session boundary
 
@@ -1427,6 +1535,9 @@ Acceptance:
 
 - Remove the global checkout override.
 - Add repository-safe checkout, worktree, sync, publication, and cleanup tests.
+- Synchronize native GitHub `blockedBy`/`blocking` relationships as a read-only
+  repository-scoped projection, including accessible cross-repository links,
+  blocker state reasons, unknown blockers, and cycle detection.
 - Add repository authentication and gate health to configuration.
 - Add URL plus localStorage repository selection.
 
@@ -1435,6 +1546,9 @@ Acceptance:
 - two repositories cannot silently share checkout or worktree paths;
 - the two-repository golden journey proves similar issue, branch, and PR
   numbers remain isolated through dispatch, result, publication, and cleanup;
+- native dependencies are linked to exact repository/issue identities, and an
+  inaccessible cross-repository blocker fails closed rather than being confused
+  with an issue of the same number;
 - changing the repository filter is stable across refresh and link navigation.
 
 ### Slice 3: persisted action definitions
@@ -1477,6 +1591,9 @@ Acceptance:
   complete dispatch, prompt, result, reconciliation, retention, and cleanup.
 - Add automation invocations linking existing `agent_actions` or implementation
   `jobs` without replacing either queue.
+- Add `waiting_on_dependencies` eligibility and reconciliation so a previously
+  approved issue consumes no agent, profile slot, lock, or worktree until every
+  authoritative blocker is satisfied.
 - Introduce durable lock claims and fencing tokens, migrate current merge and
   writer serialization, then remove the old unconditional target index.
 - Migrate current prompt customizations into immutable definition versions.
@@ -1512,6 +1629,8 @@ Acceptance:
 - every non-generic current action dispatches through an explicit typed profile;
 - invalid profile, target, agent, credential, result, and lock combinations are
   rejected;
+- dependency addition, removal, completion, not-planned closure, reopening,
+  unknown state, and cycles atomically gate dispatch and publication;
 - Operations still shows implementation jobs and maintainer actions correctly;
 - lock compatibility is atomic and matches the planning/writer/merge policy.
 - this slice adds the golden journeys for worktree-create acknowledgement loss,
@@ -1525,6 +1644,9 @@ Acceptance:
 - Render Planning and Delivery buttons from applicable triggers.
 - Seed editable generic `Triage issue` and `Make implementation-ready` actions,
   including the minimal repository label mapping and claim convention.
+- Add linked blocker summaries, `Approve when unblocked`, dependency-cycle and
+  unknown-blocker warnings, and `Recently changed externally` history to the
+  Planning/Delivery surfaces and run detail.
 - Replace the two default repair buttons with one configured `Fix and merge`
   action.
 - Add immediate queue feedback and links to run detail.
@@ -1533,9 +1655,12 @@ Acceptance:
 
 - creating, moving, renaming, pausing, or deleting a manual trigger changes the
   relevant button without an Elixir catalog edit;
-- issue readiness is derived from GitHub labels and open/closed state while
-  PtcManager owns only its run/claim state; an external assignee or claim
-  comment is shown without becoming a second PtcManager issue state machine;
+- issue readiness is derived from GitHub labels, open/closed state, native
+  dependencies, and blocker state reasons while PtcManager owns only its
+  run/claim state; an external assignee or claim comment is shown without
+  becoming a second PtcManager issue state machine;
+- cards never silently disappear after an external close or merge; active work
+  shows an immediate warning and durable Operations link;
 - invalid surface and target combinations cannot be saved.
 
 ### Slice 6: Automations UX and common results
@@ -1737,11 +1862,13 @@ not a prerequisite for deterministic coverage.
 | Duplicate workspace or agent | Herdr applies create/start, then loses the reply | Recovery adopts the deterministic identity; one workspace and agent exist |
 | Duplicate prompt or GitHub side effect | Herdr accepts prompt, then times out | State is `prompt_delivery_unknown`; no automatic resend or second PR/issue |
 | Stale approved work | Issue closes, becomes blocked, or is claimed during bootstrap | Agent never starts; refreshed GitHub reason is visible |
+| Dependency eligibility drift | Blocker completes, is reopened, closes not planned, becomes inaccessible, or forms a cycle | Waiting work starts once only after explicit satisfaction; unknown/cyclic work remains visibly blocked |
 | Queue/capacity race | Concurrent dispatchers compete for the final light/heavy/profile slot | One durable winner; every loser remains visibly queued with a reason |
 | Unsafe worktree cleanup | Cleanup races a retained-session resume or crashes mid-removal | One fenced winner; active/wrong-path worktree is never deleted; retry is safe |
 | Untrusted or ambiguous result | Wrong token/run, invalid schema, symlink, oversized or changed staging file | Broker rejects it, final store is unchanged, and retained correction is possible |
 | Duplicate scheduled work | Coordinator stops after occurrence/job materialization | Restart produces one occurrence, invocation, and domain record, then schedules the next future run |
 | GitHub changed outside PtcManager | PR merges, head advances, CI changes, or issue assignment changes mid-run | Reconciliation follows GitHub truth without publishing, repairing, or blocking twice |
+| Target closes during active work | Issue closes or PR merges/closes while a Herdr turn is working | Warning appears immediately; new brokered effects stop; session/output remain until safe settle and fenced cleanup |
 | Cross-repository leakage | Two repositories use similar issue/branch numbers concurrently | Paths, locks, prompts, credentials, results, links, and cleanup remain repository-scoped |
 | Deployment/migration regression | Release restarts with queued, retained, and scheduled work | Migration preserves identities and queue state; pollers resume without duplicate execution |
 
@@ -1751,14 +1878,18 @@ Maintain a small set of named golden journeys rather than a combinatorial suite:
 2. lose the worktree-create acknowledgement and adopt the single worktree;
 3. lose prompt acknowledgement and retain one unknown session without resend;
 4. change GitHub eligibility during bootstrap and prove no agent starts;
-5. race cleanup against retained-session resume;
-6. fill a heavy pool while a light planning action still completes;
-7. after Slice 7, restart after scheduled materialization and prove one
+5. preapprove blocked issue B, complete blocker A, and start B exactly once
+   without prior resource allocation; then cover not-planned and cycle variants;
+6. close an issue and merge/close a PR during an active turn, preserving warning,
+   output, terminal classification, and safe cleanup;
+7. race cleanup against retained-session resume;
+8. fill a heavy pool while a light planning action still completes;
+9. after Slice 7, restart after scheduled materialization and prove one
    invocation, including the real-engine SQLite restart case;
-8. reject a cross-run result and successfully resubmit through the same retained
+10. reject a cross-run result and successfully resubmit through the same retained
    agent;
-9. reconcile a PR merged outside PtcManager while repair is pending;
-10. run similar targets in two repositories without cross-contamination.
+11. reconcile a PR merged outside PtcManager while repair is pending;
+12. run similar targets in two repositories without cross-contamination.
 
 ### Adapter contract tests
 
@@ -1885,8 +2016,13 @@ A slice is deployable only when:
 - independent light/heavy pool limits, profile ceilings, host-pressure pauses,
   rightmost-first priority, aging, and light planning during a heavy merge;
 - issue readiness from repository-configured labels, internal target claims,
-  externally assigned/comment-claimed issues, and reconciliation after an
-  agent changes GitHub state;
+  externally assigned/comment-claimed issues, native same/cross-repository
+  dependencies, multiple blockers, completed versus not-planned blockers,
+  dependency removal/reopening, unknown blockers, cycle detection, and
+  reconciliation after an agent changes GitHub state;
+- preapproved `waiting_on_dependencies` work becoming eligible exactly once
+  without consuming capacity beforehand, while unapproved work merely returns
+  to Ready;
 - prepared-workspace stage transitions, pre-bootstrap containment/ownership/SHA
   and credential checks, idempotent bounded bootstrap, post-bootstrap
   revalidation, failed preflight without agent start, deterministic worktree
@@ -1950,6 +2086,14 @@ A slice is deployable only when:
 - authenticated GitHub fixtures cover nightly workflow outcomes;
 - generated buttons create the expected definition version and trigger context;
 - GitHub reconciliation overrides incorrect agent-reported state.
+- an issue or PR closed before claim, during bootstrap, during active Herdr
+  work, and while retained produces the stage-appropriate durable outcome,
+  warning, fencing, and cleanup behavior;
+- a PR merged externally succeeds, a PR closed without merge is declined, an
+  issue closed while its PR remains open requires a decision, and reopening any
+  target creates no automatic resurrection of the old invocation;
+- cleanup waits for Herdr idle/done after external closure and quarantines an
+  unreachable or ambiguous live process.
 
 ### Browser tests
 
@@ -1962,6 +2106,10 @@ A slice is deployable only when:
 - show the trusted-direct credential warning and brokered-mode explanation;
 - full resolved-prompt inspection;
 - queued/running/completed/failing status feedback;
+- linked `Blocked by` summaries, `Approve when unblocked`, dependency cycles,
+  unknown blockers, and automatic movement after blocker completion;
+- immediate `Changed on GitHub while agent was working` feedback plus a
+  discoverable recently-changed card and permanent Operations history;
 - navigation from board button to Operations and run output.
 
 ## Rollout and compatibility
@@ -2018,8 +2166,16 @@ pre-publication gate and repository-path isolation are deployed and verified.
   actions. Repeating a review up to N times is prompt behavior, not a Codex
   skill requirement or a separate executor.
 - GitHub is authoritative for issue content, open/closed state, assignees, and
-  the minimal repository-configured workflow labels. PtcManager is authoritative
-  only for its queue, run, lock, capacity, and history records.
+  the minimal repository-configured workflow labels, native issue dependencies,
+  blocker state reasons, and PR terminal state. PtcManager is authoritative only
+  for its queue, run, lock, capacity, and history records.
+- Native GitHub dependencies represent issue-to-issue blocking; `ptc:blocked`
+  is reserved for external conditions. Ready-but-blocked work may be preapproved
+  but consumes no resources until every blocker is explicitly satisfied.
+- An issue or PR closed or merged during work never silently disappears. New
+  brokered effects stop, the active Herdr turn settles without destructive
+  cleanup underneath it, and a warning plus permanent run history explains the
+  terminal outcome.
 - PtcManager takes a minimal atomic internal target claim; agents perform GitHub
   assignment, comments, rewrites, and label changes according to their prompts.
 - Workers expose separate configurable light and heavy capacity pools. Immutable
@@ -2122,6 +2278,13 @@ mandatory only when Slice 4 introduces those boundaries.
 
 ## Research basis
 
+- [GitHub issue dependencies](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-issue-dependencies)
+  documents native `blocked by`/`blocking` relationships, their board/icon
+  presentation, GitHub CLI mutation flags, and structured `blockedBy` and
+  `blocking` fields.
+- [GitHub issue-dependency REST API](https://docs.github.com/en/rest/issues/issue-dependencies)
+  documents repository-scoped list/add/remove operations used for authoritative
+  reconciliation and brokered write access.
 - [Herdr agent automation](https://herdr.dev/docs/agent-automation/) documents
   explicit `agent start --kind`, prompt, wait, status, and read operations.
 - [Herdr socket API](https://herdr.dev/docs/socket-api/) documents the raw
