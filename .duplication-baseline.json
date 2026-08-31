@@ -1,0 +1,226 @@
+{
+  "clones": {
+    "0323d1ae813b5dc5f2007d4cdb204a6ef5918269d84f66aa7daffd1604b0dc97": {
+      "describe": "type_i mass=44 test/ptc_manager/maintainer_actions_test.exs:1461 <-> test/ptc_manager/maintainer_actions_test.exs:1509",
+      "files": [
+        "test/ptc_manager/maintainer_actions_test.exs"
+      ],
+      "mass": 44,
+      "occurrences": [
+        {
+          "file": "test/ptc_manager/maintainer_actions_test.exs",
+          "snippet": "d85fa11e7a4ece82fab60ffb5b62656f63b8d1d08101155f58d5f6fd55e000e7"
+        },
+        {
+          "file": "test/ptc_manager/maintainer_actions_test.exs",
+          "snippet": "d85fa11e7a4ece82fab60ffb5b62656f63b8d1d08101155f58d5f6fd55e000e7"
+        }
+      ],
+      "type": "type_i"
+    },
+    "03c675c50db4bcdcfd2e10823be2b4a215dfa5bfe9b2e65a53d5e77a271673a9": {
+      "describe": "type_i mass=38 lib/ptc_manager/github/pull_request_client.ex:31 <-> lib/ptc_manager/github/pull_request_client.ex:58",
+      "files": [
+        "lib/ptc_manager/github/pull_request_client.ex"
+      ],
+      "mass": 38,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/github/pull_request_client.ex",
+          "snippet": "92d9b53bafec73afcefa4478df1d1518ee73cf572de8c3a5a828e37fb80a0090"
+        },
+        {
+          "file": "lib/ptc_manager/github/pull_request_client.ex",
+          "snippet": "92d9b53bafec73afcefa4478df1d1518ee73cf572de8c3a5a828e37fb80a0090"
+        }
+      ],
+      "type": "type_i"
+    },
+    "0bc045f7f7ee82076649684933d15f089b132ed0fc3f1f1ba0cb54194d563eed": {
+      "describe": "type_i mass=38 lib/ptc_manager/maintainer_actions.ex:90 <-> lib/ptc_manager/publications.ex:1476",
+      "files": [
+        "lib/ptc_manager/maintainer_actions.ex",
+        "lib/ptc_manager/publications.ex"
+      ],
+      "mass": 38,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/maintainer_actions.ex",
+          "snippet": "6b7893d7f8bccb73f6904321bec6d664e1c71167df23dbddb89298c4d6e62ea5"
+        },
+        {
+          "file": "lib/ptc_manager/publications.ex",
+          "snippet": "6b7893d7f8bccb73f6904321bec6d664e1c71167df23dbddb89298c4d6e62ea5"
+        }
+      ],
+      "type": "type_i"
+    },
+    "14e9175e71bf0f1dc02a039b3b17430ce04f61b458d9c1b78a95cfc891817293": {
+      "describe": "type_i mass=30 lib/ptc_manager/repository/git_probe.ex:132 <-> lib/ptc_manager/repository/source_snapshot.ex:490",
+      "files": [
+        "lib/ptc_manager/repository/git_probe.ex",
+        "lib/ptc_manager/repository/source_snapshot.ex"
+      ],
+      "mass": 30,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/repository/git_probe.ex",
+          "snippet": "07dd49b4849db1464801e50913a2545fe363f4bba105a426d9cdcdae8a6bded2"
+        },
+        {
+          "file": "lib/ptc_manager/repository/source_snapshot.ex",
+          "snippet": "07dd49b4849db1464801e50913a2545fe363f4bba105a426d9cdcdae8a6bded2"
+        }
+      ],
+      "type": "type_i"
+    },
+    "1831cfe3194034d31bdf7a7aa21a29e76750bb84796083bb11b22b0ffd39edb3": {
+      "describe": "type_i mass=70 test/ptc_manager/daily_digests/evidence_test.exs:172 <-> test/ptc_manager/daily_digests/evidence_test.exs:230",
+      "files": [
+        "test/ptc_manager/daily_digests/evidence_test.exs"
+      ],
+      "mass": 70,
+      "occurrences": [
+        {
+          "file": "test/ptc_manager/daily_digests/evidence_test.exs",
+          "snippet": "efce1487e599df6328ba46815a5981852d3959ae90f78d245f5fafafd6d5506e"
+        },
+        {
+          "file": "test/ptc_manager/daily_digests/evidence_test.exs",
+          "snippet": "efce1487e599df6328ba46815a5981852d3959ae90f78d245f5fafafd6d5506e"
+        }
+      ],
+      "type": "type_i"
+    },
+    "2f41272f7fed6404c32165f518fc3e86cbc0f41325b25f03b5dce023cd71ee1c": {
+      "describe": "type_i mass=34 lib/ptc_manager/publication_status_poller.ex:7 <-> lib/ptc_manager/publisher_poller.ex:7",
+      "files": [
+        "lib/ptc_manager/publication_status_poller.ex",
+        "lib/ptc_manager/publisher_poller.ex"
+      ],
+      "mass": 34,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/publication_status_poller.ex",
+          "snippet": "7f8f5ce1c8a3cd49406fff093e92a80e8ca38c0b3d7d8f22e164a30358b08db4"
+        },
+        {
+          "file": "lib/ptc_manager/publisher_poller.ex",
+          "snippet": "7f8f5ce1c8a3cd49406fff093e92a80e8ca38c0b3d7d8f22e164a30358b08db4"
+        }
+      ],
+      "type": "type_i"
+    },
+    "37b225a59d1e865ca4ba6418d8bc247bfea1942a544391f48a3bec5719f7186e": {
+      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:261 <-> lib/ptc_manager/publications.ex:641",
+      "files": [
+        "lib/ptc_manager/publications.ex"
+      ],
+      "mass": 32,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/publications.ex",
+          "snippet": "5b5d2fe60317df7ddc3a3d76d97ac02561bca0cc29a065a05529e4349c5d1a50"
+        },
+        {
+          "file": "lib/ptc_manager/publications.ex",
+          "snippet": "b4b21885d9feed638eaba07551805cdc22132f33d31e9fa1fa0b47001250085e"
+        }
+      ],
+      "type": "type_ii"
+    },
+    "3ef6a16c9aa8c08df4aa31fe5006288af98613f27917573275d50358f37cad97": {
+      "describe": "type_i mass=38 lib/ptc_manager/github/pull_request_client.ex:195 <-> lib/ptc_manager/maintainer_actions.ex:686",
+      "files": [
+        "lib/ptc_manager/github/pull_request_client.ex",
+        "lib/ptc_manager/maintainer_actions.ex"
+      ],
+      "mass": 38,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/github/pull_request_client.ex",
+          "snippet": "ac9799367f4effdfb11a83e9d6f368548aed305f83c5d5d0d56dcaf9f4111f3b"
+        },
+        {
+          "file": "lib/ptc_manager/maintainer_actions.ex",
+          "snippet": "ac9799367f4effdfb11a83e9d6f368548aed305f83c5d5d0d56dcaf9f4111f3b"
+        }
+      ],
+      "type": "type_i"
+    },
+    "783b496d5d795552c0ca880578926d416175869c26d3fcd820b3e399fc2b1cef": {
+      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:1103 <-> lib/ptc_manager/operations.ex:1199",
+      "files": [
+        "lib/ptc_manager/operations.ex"
+      ],
+      "mass": 32,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/operations.ex",
+          "snippet": "0692d15d1f67350ca1fc70772a875ed28b0224edb09a67f4556f158dedfc9896"
+        },
+        {
+          "file": "lib/ptc_manager/operations.ex",
+          "snippet": "0692d15d1f67350ca1fc70772a875ed28b0224edb09a67f4556f158dedfc9896"
+        }
+      ],
+      "type": "type_i"
+    },
+    "9a44270558e649845f7a5f77d2af427c5fe099ba15da43c78485c35ca097fd20": {
+      "describe": "type_i mass=79 lib/ptc_manager/maintainer_actions/external_pr_repair_adapter.ex:71 <-> lib/ptc_manager/maintainer_actions/retained_herdr_adapter.ex:253",
+      "files": [
+        "lib/ptc_manager/maintainer_actions/external_pr_repair_adapter.ex",
+        "lib/ptc_manager/maintainer_actions/retained_herdr_adapter.ex"
+      ],
+      "mass": 79,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager/maintainer_actions/external_pr_repair_adapter.ex",
+          "snippet": "b6b7a7e8f263269e3351bc1e6e50aa5908d17b0871e024d609e19a404efa1301"
+        },
+        {
+          "file": "lib/ptc_manager/maintainer_actions/retained_herdr_adapter.ex",
+          "snippet": "b6b7a7e8f263269e3351bc1e6e50aa5908d17b0871e024d609e19a404efa1301"
+        }
+      ],
+      "type": "type_i"
+    },
+    "a31721e0e89fc28f61fd4e699107d6f10eb2de6d883558eb5ebca69e3207d2d9": {
+      "describe": "type_i mass=51 lib/ptc_manager_web/live/dashboard_live.ex:389 <-> lib/ptc_manager_web/live/operations_live.ex:202",
+      "files": [
+        "lib/ptc_manager_web/live/dashboard_live.ex",
+        "lib/ptc_manager_web/live/operations_live.ex"
+      ],
+      "mass": 51,
+      "occurrences": [
+        {
+          "file": "lib/ptc_manager_web/live/dashboard_live.ex",
+          "snippet": "5d0df6804b497a86ddbb19613557095414d37b243df9e79d96fe0b42939dc78d"
+        },
+        {
+          "file": "lib/ptc_manager_web/live/operations_live.ex",
+          "snippet": "5d0df6804b497a86ddbb19613557095414d37b243df9e79d96fe0b42939dc78d"
+        }
+      ],
+      "type": "type_i"
+    },
+    "fbc70885d4484ad6437957b435937ea1d958995333e2a602d5e0453a627d00c7": {
+      "describe": "type_i mass=93 test/ptc_manager/maintainer_actions_test.exs:777 <-> test/ptc_manager/maintainer_actions_test.exs:825",
+      "files": [
+        "test/ptc_manager/maintainer_actions_test.exs"
+      ],
+      "mass": 93,
+      "occurrences": [
+        {
+          "file": "test/ptc_manager/maintainer_actions_test.exs",
+          "snippet": "33c66981da1329794474f5f19520a4c222df61b11c2346d242222840ccd1519b"
+        },
+        {
+          "file": "test/ptc_manager/maintainer_actions_test.exs",
+          "snippet": "33c66981da1329794474f5f19520a4c222df61b11c2346d242222840ccd1519b"
+        }
+      ],
+      "type": "type_i"
+    }
+  }
+}

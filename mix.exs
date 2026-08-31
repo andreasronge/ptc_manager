@@ -49,6 +49,7 @@ defmodule PtcManager.MixProject do
       {:phoenix_live_view, "~> 1.1.0"},
       {:mdex, "~> 0.13.5"},
       {:tz, "~> 0.28.2"},
+      {:ex_dna, "~> 1.5", only: [:dev, :test], runtime: false},
       {:lazy_html, ">= 0.1.0", only: :test},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.3", runtime: Mix.env() == :dev},
@@ -87,7 +88,13 @@ defmodule PtcManager.MixProject do
         "esbuild ptc_manager --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warning-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warning-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "test",
+        "cmd scripts/duplication_gate.sh check"
+      ]
     ]
   end
 end
