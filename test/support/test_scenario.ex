@@ -10,6 +10,7 @@ defmodule PtcManager.TestScenario do
 
   use GenServer
 
+  alias PtcManager.TestCommandRunner.System, as: SystemCommandRunner
   alias PtcManager.Dispatch
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.GitHub.Sync, as: GitHubSync
@@ -97,7 +98,8 @@ defmodule PtcManager.TestScenario do
              :start_pull_request_action,
              :prompt_pull_request_action,
              :pull_request_action_head,
-             :sync_action_postflight
+             :sync_action_postflight,
+             :run_command
            ] and outcome in [:ok, :fail_before, :effect_then_error, :pause_after_effect] do
     GenServer.call(scenario.pid, {:operation_outcome, operation, outcome})
   end
@@ -177,6 +179,10 @@ defmodule PtcManager.TestScenario do
 
   def run(%__MODULE__{} = scenario, action) do
     ExternalPrRepairAdapter.run(action, scenario)
+  end
+
+  def run(%__MODULE__{} = scenario, command, args, options) do
+    GenServer.call(scenario.pid, {:run_command, command, args, options}, :infinity)
   end
 
   def sync_action(%__MODULE__{} = scenario, action) do
@@ -428,6 +434,25 @@ defmodule PtcManager.TestScenario do
     )
   end
 
+  def handle_call({:run_command, command, args, options}, from, state) do
+    {mode, _pause_owner} = Map.get(state.operation_outcomes, :run_command, {:ok, nil})
+
+    result =
+      case mode do
+        :fail_before -> {:error, :scenario_command_failed_before}
+        _applied -> SystemCommandRunner.run(command, args, options)
+      end
+
+    external_operation_reply(
+      state,
+      state,
+      from,
+      :run_command,
+      %{command: command, args: args},
+      result
+    )
+  end
+
   def handle_call({:sync_action, _action, result}, from, %{repair_statuses: statuses} = state)
       when not is_nil(statuses) do
     {preflight, postflight} = statuses
@@ -481,12 +506,23 @@ defmodule PtcManager.TestScenario do
   defp external_operation_reply(state, applied, from, operation, target, success) do
     {mode, pause_owner} = Map.get(state.operation_outcomes, operation, {:ok, nil})
 
-    {result, next_state} =
+    {result, next_state, reply_mode} =
       case mode do
-        :ok -> {success, applied}
-        :fail_before -> {{:error, {operation, :scenario_failed_before}}, state}
-        :effect_then_error -> {operation_ack_lost(operation), applied}
-        :pause_after_effect -> {success, applied}
+        :ok ->
+          {success, applied, :ok}
+
+        :fail_before ->
+          {{:error, {operation, :scenario_failed_before}}, state, :fail_before}
+
+        :effect_then_error ->
+          if successful?(success),
+            do: {operation_ack_lost(operation), applied, :effect_then_error},
+            else: {success, state, :ok}
+
+        :pause_after_effect ->
+          if successful?(success),
+            do: {success, applied, :pause_after_effect},
+            else: {success, state, :ok}
       end
 
     source = operation_source(operation)
@@ -494,7 +530,7 @@ defmodule PtcManager.TestScenario do
     next_state =
       record(next_state, source, operation, target, %{mode: mode, result: summarize(result)})
 
-    maybe_pause_reply(mode, next_state, from, pause_owner, operation, target, result)
+    maybe_pause_reply(reply_mode, next_state, from, pause_owner, operation, target, result)
   end
 
   defp maybe_pause_reply(
@@ -528,10 +564,18 @@ defmodule PtcManager.TestScenario do
 
   defp operation_source(operation) when operation in [:list_open_issues, :get_issue], do: :github
   defp operation_source(:pull_request_action_head), do: :git
+  defp operation_source(:run_command), do: :git
   defp operation_source(:sync_action_postflight), do: :github
   defp operation_source(_operation), do: :herdr
 
+  defp operation_ack_lost(:run_command),
+    do: {:error, {:uncertain, :scenario_command_ack_lost}}
+
   defp operation_ack_lost(operation), do: {:error, {operation, :scenario_ack_lost}}
+
+  defp successful?(:ok), do: true
+  defp successful?({:ok, _value}), do: true
+  defp successful?(_result), do: false
 
   defp dispatch_metadata(context) do
     attempt = "j#{context.job.id}-f#{context.job.fencing_token}"
