@@ -126,6 +126,25 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       })
       |> Repo.insert!()
 
+    daily_action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "daily_digest",
+        target_type: "daily_digest",
+        target_id: 9_006,
+        target_label: "example/repo · 2026-08-30",
+        prompt_version: 1,
+        prompt: "Summarize the previous day",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "scheduler",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: DateTime.add(now, 2, :microsecond)
+      })
+      |> Repo.insert!()
+
     {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/operations")
 
     assert html =~ "Capacity and agent history"
@@ -139,6 +158,8 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#queued-action-#{priority_action.id}", "Merge priority")
     assert has_element?(view, "#queued-action-#{priority_action.id}", "Writer lane")
     assert has_element?(view, "#queued-action-#{planning_action.id}", "Planning lane")
+    assert has_element?(view, "#queued-action-#{daily_action.id}", "Daily update")
+    assert has_element?(view, "#queued-action-#{daily_action.id}", "Planning lane")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "Implementation")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "3 review passes")
 

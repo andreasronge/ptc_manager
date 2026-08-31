@@ -3,7 +3,7 @@ defmodule PtcManager.Operations.AgentAction do
   import Ecto.Changeset
 
   @states ~w(queued running sync_pending done failed)
-  @target_types ~w(issue pull_request)
+  @target_types ~w(issue pull_request daily_digest)
 
   schema "agent_actions" do
     field :action_key, :string

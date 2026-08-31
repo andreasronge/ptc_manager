@@ -39,6 +39,40 @@ herdr_git_binary =
 dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
 agent_actions_enabled = System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
 
+daily_digest_enabled =
+  case System.get_env("PTC_DAILY_DIGEST_ENABLED") do
+    nil -> agent_actions_enabled
+    "true" -> true
+    "false" -> false
+    _value -> raise "PTC_DAILY_DIGEST_ENABLED must be true or false when set"
+  end
+
+if daily_digest_enabled and not agent_actions_enabled do
+  raise "PTC_DAILY_DIGEST_ENABLED requires PTC_AGENT_ACTIONS_ENABLED=true"
+end
+
+daily_digest_run_as_user =
+  System.get_env("PTC_DAILY_DIGEST_RUN_AS_USER") || System.get_env("PTC_CODEX_RUN_AS_USER")
+
+daily_digest_interval_ms =
+  System.get_env("PTC_DAILY_DIGEST_INTERVAL_MS", "60000") |> String.to_integer()
+
+if daily_digest_interval_ms < 1_000 do
+  raise "PTC_DAILY_DIGEST_INTERVAL_MS must be at least 1000"
+end
+
+daily_digest_hour = System.get_env("PTC_DAILY_DIGEST_HOUR", "2") |> String.to_integer()
+
+if daily_digest_hour not in 0..23 do
+  raise "PTC_DAILY_DIGEST_HOUR must be between 0 and 23"
+end
+
+if daily_digest_enabled and
+     (daily_digest_run_as_user in [nil, ""] or
+        daily_digest_run_as_user == System.get_env("PTC_AGENT_ACTION_RUN_AS_USER")) do
+  raise "daily updates require a dedicated PTC_DAILY_DIGEST_RUN_AS_USER without GitHub credentials"
+end
+
 publication_enabled = System.get_env("PTC_PUBLICATION_ENABLED") == "true"
 
 implementation_agent_publishes_pr =
@@ -89,6 +123,11 @@ config :ptc_manager,
       "PTC_PLANNING_SNAPSHOT_PERMISSION_CHECK",
       if(System.get_env("RELEASE_NAME"), do: "true", else: "false")
     ) == "true",
+  daily_digest_enabled: daily_digest_enabled,
+  daily_digest_interval_ms: daily_digest_interval_ms,
+  daily_digest_hour: daily_digest_hour,
+  daily_digest_time_zone: System.get_env("PTC_DAILY_DIGEST_TIME_ZONE", "Europe/Stockholm"),
+  daily_digest_run_as_user: daily_digest_run_as_user,
   external_pr_run_as_user: System.get_env("PTC_EXTERNAL_PR_RUN_AS_USER", "ptc-manager-external"),
   external_pr_group: System.get_env("PTC_EXTERNAL_PR_GROUP", "ptc-manager-external"),
   external_pr_worktree_root:
@@ -193,6 +232,7 @@ if config_env() == :test do
   config :ptc_manager,
     dispatch_enabled: false,
     agent_actions_enabled: false,
+    daily_digest_enabled: false,
     publication_enabled: false,
     pr_reconcile_enabled: false,
     worktree_reconcile_interval_ms: 0

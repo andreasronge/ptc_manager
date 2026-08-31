@@ -36,6 +36,7 @@ defmodule PtcManager.Operations do
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @merge_action_key "repair_and_merge_pr"
   @planning_action_keys ~w(
+    daily_digest
     prepare_issue
     review_issue
     resolve_issue_decision

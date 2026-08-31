@@ -39,6 +39,18 @@ defmodule PtcManager.PromptConfigurationTest do
              PromptConfiguration.save("invented_button", "Do something", "maintainer")
   end
 
+  test "bounds multibyte instructions by bytes before they can enter a CLI prompt" do
+    assert {:error, changeset} =
+             PromptConfiguration.save(
+               "daily_digest",
+               String.duplicate("🧭", 5_001),
+               "maintainer"
+             )
+
+    assert "must be at most 20000 bytes" in errors_on(changeset).instructions
+    refute PromptConfiguration.get("daily_digest")
+  end
+
   test "new button actions freeze the current customization into their prompt" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 1704})

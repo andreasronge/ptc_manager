@@ -13,9 +13,9 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 
 - a responsive issue inbox with private plain-language summaries;
 - four focused maintainer views: **Planning** for backlog decisions,
-  **Delivery** for the approval-to-merge Kanban, **Operations** for machine
-  capacity plus the agent/task timeline, and **Configuration** for button-prompt
-  instructions;
+  **Delivery** for the approval-to-merge Kanban, **Updates** for daily change
+  briefings, **Operations** for machine capacity plus the agent/task timeline,
+  and **Configuration** for agent-prompt instructions;
 - an **Approve and start** workflow backed by SQLite transactions, with a
   per-task choice of zero to three independent Codex review passes;
 - one active implementation job per issue, enforced by the database;
@@ -93,6 +93,7 @@ The authenticated routes are:
 
 - `/` — Planning backlog and maintainer actions;
 - `/board` — active delivery Kanban;
+- `/updates` — easy-to-read daily briefings of merged pull requests and dated direct commits;
 - `/operations` — live CPU, memory, build-disk and slot signals, followed by
   the latest 40 agent runs and their tasks. Select an agent to open a bounded,
   read-only terminal panel; active panels refresh every five seconds and expose
@@ -212,6 +213,39 @@ serialized writer lane until they receive equivalent snapshot isolation. The
 first version runs at most one planning action and one writing action at a time
 per PtcManager service; additional actions remain visible in the durable
 Operations queue.
+
+Daily updates reuse the planning lane instead of introducing a second job
+system. After 02:00 in `Europe/Stockholm`, a supervised scheduler idempotently
+queues one read-only update per enabled repository for the immediately preceding
+local calendar day. It deliberately does not scan or backfill older dates. The
+coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
+commits by their committer timestamp for the exact timezone-aware window. Every
+commit query is pinned to one captured default-branch head. GitHub does not
+expose the arrival time of a direct push, so that distinction is shown in the
+bounded manifest rather than guessed. An isolated, credential-free Codex
+identity receives that manifest and a read-only local snapshot, then writes a plain-language
+Markdown briefing with practical examples. PtcManager rejects model-reported
+SHA, included-change count, or PR numbers that differ from the coordinator manifest. It
+stores the structured result and provenance in SQLite. The Updates page renders
+the Markdown through an HTML sanitizer before displaying it.
+
+The generation prompt is editable on **Configuration**. Scheduling is enabled
+by default whenever `PTC_AGENT_ACTIONS_ENABLED=true`; it can be disabled
+independently. It cannot be enabled without the action worker. Configure it with:
+
+```sh
+PTC_DAILY_DIGEST_ENABLED=true
+PTC_DAILY_DIGEST_HOUR=2
+PTC_DAILY_DIGEST_TIME_ZONE=Europe/Stockholm
+PTC_DAILY_DIGEST_INTERVAL_MS=60000
+PTC_DAILY_DIGEST_RUN_AS_USER=ptc-manager-codex
+```
+
+The hour is interpreted in the configured time zone, including daylight-saving
+changes. The daily user is required whenever this feature is enabled and must
+differ from the GitHub-writing action user in every environment. Failed or
+waiting daily jobs remain visible in Operations and on the corresponding
+Updates entry.
 
 Before an issue-planning agent starts, PtcManager synchronizes the canonical
 GitHub issue, records its content digest, and captures the configured checkout's

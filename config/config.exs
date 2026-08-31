@@ -7,6 +7,8 @@
 # General application configuration
 import Config
 
+config :elixir, :time_zone_database, Tz.TimeZoneDatabase
+
 config :ptc_manager,
   ecto_repos: [PtcManager.Repo],
   generators: [timestamp_type: :utc_datetime],
@@ -31,6 +33,10 @@ config :ptc_manager,
   planning_snapshot_root: nil,
   planning_git_binary: "/usr/bin/git",
   planning_snapshot_permission_check: false,
+  daily_digest_enabled: false,
+  daily_digest_interval_ms: 60_000,
+  daily_digest_hour: 2,
+  daily_digest_time_zone: "Europe/Stockholm",
   external_pr_run_as_user: nil,
   external_pr_group: nil,
   external_pr_worktree_root: nil,

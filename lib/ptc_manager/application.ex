@@ -18,6 +18,7 @@ defmodule PtcManager.Application do
       PtcManager.Manager.Gate,
       {PtcManager.MaintainerActions.Poller, lane: :planning},
       {PtcManager.MaintainerActions.Poller, lane: :writing},
+      PtcManager.DailyDigests.Scheduler,
       PtcManager.GitHub.Poller,
       PtcManager.Herdr.Poller,
       PtcManager.Dispatch.Poller,

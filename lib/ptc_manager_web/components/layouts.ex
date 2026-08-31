@@ -64,6 +64,13 @@ defmodule PtcManagerWeb.Layouts do
               Delivery
             </.nav_link>
             <.nav_link
+              href={~p"/updates"}
+              active={String.starts_with?(@current_path, "/updates")}
+              icon="hero-newspaper-mini"
+            >
+              Updates
+            </.nav_link>
+            <.nav_link
               href={~p"/operations"}
               active={@current_path == "/operations"}
               icon="hero-chart-bar-square-mini"

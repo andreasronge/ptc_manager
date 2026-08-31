@@ -26,6 +26,8 @@ defmodule PtcManagerWeb.Router do
 
     live "/", DashboardLive, :index
     live "/board", DeliveryBoardLive, :index
+    live "/updates", DailyDigestLive, :index
+    live "/updates/:id", DailyDigestLive, :show
     live "/operations", OperationsLive, :index
     live "/configuration", ConfigurationLive, :index
     delete "/logout", AuthController, :delete

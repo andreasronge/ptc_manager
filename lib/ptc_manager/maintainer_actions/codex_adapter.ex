@@ -11,6 +11,16 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   alias PtcManager.Repository.SourceSnapshot
 
   @impl true
+  def run(%AgentAction{action_key: "daily_digest", repository: repository} = action) do
+    run_as_user =
+      Application.get_env(:ptc_manager, :daily_digest_run_as_user) ||
+        Application.get_env(:ptc_manager, :codex_run_as_user)
+
+    with {:ok, path} <- repository_path(action, repository) do
+      run_codex(action, path, sandbox: "read-only", run_as_user: run_as_user)
+    end
+  end
+
   def run(%AgentAction{action_key: action_key} = action)
       when action_key in ["repair_pr", "repair_and_merge_pr"] do
     publication = Repo.get!(PrPublication, action.target_id)
@@ -49,10 +59,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
     binary = Application.get_env(:ptc_manager, :codex_binary, "codex")
     timeout = Application.get_env(:ptc_manager, :agent_action_timeout_ms, 1_800_000)
 
-    isolation_args =
-      if Keyword.get(opts, :sandboxed, false),
-        do: ["--sandbox", "workspace-write", "--approve-for-me"],
-        else: ["--dangerously-bypass-approvals-and-sandbox"]
+    isolation_args = isolation_args(Keyword.get(opts, :sandbox))
 
     args =
       [
@@ -63,7 +70,7 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
         isolation_args ++
         [
           "--output-schema",
-          schema_path(),
+          schema_path(action.action_key),
           "--output-last-message",
           output_path,
           "-C",
@@ -115,6 +122,14 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   end
 
   @doc false
+  def isolation_args("read-only"), do: ["--sandbox", "read-only"]
+
+  def isolation_args("workspace-write"),
+    do: ["--sandbox", "workspace-write", "--approve-for-me"]
+
+  def isolation_args(_unrestricted), do: ["--dangerously-bypass-approvals-and-sandbox"]
+
+  @doc false
   def run_at(%AgentAction{} = action, repository_path) when is_binary(repository_path) do
     run_at(action, repository_path, [])
   end
@@ -153,7 +168,12 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
          },
          repository
        )
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] and
+       when action_key in [
+              "daily_digest",
+              "prepare_issue",
+              "review_issue",
+              "resolve_issue_decision"
+            ] and
               is_binary(path) and is_binary(source_sha) do
     case SourceSnapshot.verify(repository, path, source_sha) do
       :ok -> {:ok, Path.expand(path)}
@@ -183,6 +203,10 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   end
 
   @doc false
+  def validate_result(result, "daily_digest") when is_map(result) do
+    validate_daily_digest_result(result)
+  end
+
   def validate_result(result, action_key) when is_map(result) do
     result
     |> Map.put_new("suggestions", [])
@@ -192,6 +216,50 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   end
 
   def validate_result(_result, _action_key), do: {:error, :invalid_agent_action_output}
+
+  defp validate_daily_digest_result(%{
+         "status" => status,
+         "title" => title,
+         "summary" => summary,
+         "markdown" => markdown,
+         "window_started_at" => window_started_at,
+         "window_ended_at" => window_ended_at,
+         "source_head_sha" => source_head_sha,
+         "change_count" => change_count,
+         "pull_request_numbers" => pull_request_numbers
+       })
+       when status in ["published", "no-changes"] and is_binary(title) and
+              is_binary(summary) and is_binary(markdown) and is_binary(window_started_at) and
+              is_binary(window_ended_at) and is_binary(source_head_sha) and
+              is_integer(change_count) and change_count in 0..100 and
+              is_list(pull_request_numbers) do
+    valid_strings? =
+      String.trim(title) != "" and byte_size(title) <= 180 and
+        String.trim(summary) != "" and byte_size(summary) <= 4_000 and
+        String.trim(markdown) != "" and byte_size(markdown) <= 40_000
+
+    valid_window? = valid_iso8601?(window_started_at) and valid_iso8601?(window_ended_at)
+    valid_sha? = Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, source_head_sha)
+
+    valid_prs? =
+      Enum.all?(pull_request_numbers, &(is_integer(&1) and &1 > 0)) and
+        pull_request_numbers == Enum.sort(Enum.uniq(pull_request_numbers)) and
+        length(pull_request_numbers) <= 100
+
+    status_matches? =
+      (status == "published" and change_count > 0) or
+        (status == "no-changes" and change_count == 0 and pull_request_numbers == [])
+
+    if valid_strings? and valid_window? and valid_sha? and valid_prs? and status_matches?,
+      do: :ok,
+      else: {:error, :invalid_daily_digest_output}
+  end
+
+  defp validate_daily_digest_result(_result), do: {:error, :invalid_daily_digest_output}
+
+  defp valid_iso8601?(value) do
+    match?({:ok, %DateTime{}, 0}, DateTime.from_iso8601(value))
+  end
 
   defp validate_normalized_result(
          %{
@@ -377,6 +445,9 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
 
   defp valid_suggestion?(_suggestion), do: false
 
-  defp schema_path,
+  defp schema_path("daily_digest"),
+    do: Application.app_dir(:ptc_manager, "priv/codex/daily_digest_output.schema.json")
+
+  defp schema_path(_action_key),
     do: Application.app_dir(:ptc_manager, "priv/codex/agent_action_output.schema.json")
 end

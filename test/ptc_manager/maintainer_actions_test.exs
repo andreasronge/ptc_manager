@@ -6,6 +6,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.MaintainerActions.CodexAdapter
   alias PtcManager.MaintainerActions.RetainedHerdrAdapter
   alias PtcManager.MaintainerActions.Sync
+  alias PtcManager.DailyDigests
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
   alias PtcManager.PromptConfiguration
@@ -35,9 +36,47 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule FakeDailyDigestEvidence do
+    def fetch(_repository, _digest) do
+      Process.get(
+        :daily_digest_evidence_result,
+        {:ok,
+         %{
+           "source_head_sha" => String.duplicate("8", 40),
+           "change_count" => 1,
+           "pull_request_numbers" => [1722],
+           "commits" => [],
+           "pull_requests" => [],
+           "evidence_limit" => 50,
+           "evidence_truncated" => false
+         }}
+      )
+    end
+  end
+
   defmodule UnavailableSourceSnapshot do
     def prepare(_repository, _action_id, _snapshot),
       do: {:error, :repository_snapshot_worktree_failed}
+  end
+
+  defmodule OversizedPromptSourceSnapshot do
+    def prepare(repository, _action_id, _snapshot) do
+      {:ok,
+       %{
+         sha: String.duplicate("7", 40),
+         ref: repository.default_branch,
+         path: "/tmp/ptc-manager-oversized-prompt-snapshot"
+       }}
+    end
+
+    def release(_repository, action_id, snapshot) do
+      send(
+        Process.get(:agent_action_test_pid),
+        {:released_oversized_snapshot, action_id, snapshot}
+      )
+
+      :ok
+    end
   end
 
   defmodule FakeAdapter do
@@ -57,6 +96,27 @@ defmodule PtcManager.MaintainerActionsTest do
          "github_changes" => ["Applied ptc:ready"],
          "evidence" => ["Inspected lib/example.ex"],
          "created_issue_numbers" => []
+       }}
+    end
+  end
+
+  defmodule DailyDigestAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(action) do
+      send(Process.get(:agent_action_test_pid), {:ran_daily_digest, action})
+
+      {:ok,
+       %{
+         "status" => "published",
+         "title" => "A clearer maintainer day",
+         "summary" => "The included work made build feedback easier to understand.",
+         "markdown" => "## Fixed\n\nBuild failures now explain the missing prerequisite.",
+         "window_started_at" => action.target_snapshot["window_started_at"],
+         "window_ended_at" => action.target_snapshot["window_ended_at"],
+         "source_head_sha" => Process.get(:daily_digest_output_head, String.duplicate("8", 40)),
+         "change_count" => 1,
+         "pull_request_numbers" => [1722]
        }}
     end
   end
@@ -406,17 +466,170 @@ defmodule PtcManager.MaintainerActionsTest do
   setup do
     Process.put(:agent_action_test_pid, self())
     Process.put(:retrospective_sync_call_count, 0)
+    Process.put(:daily_digest_output_head, String.duplicate("8", 40))
     previous_source_snapshot = Application.get_env(:ptc_manager, :planning_source_snapshot)
+    previous_digest_evidence = Application.get_env(:ptc_manager, :daily_digest_evidence)
     Application.put_env(:ptc_manager, :planning_source_snapshot, FakeSourceSnapshot)
+    Application.put_env(:ptc_manager, :daily_digest_evidence, FakeDailyDigestEvidence)
 
     on_exit(fn ->
       if previous_source_snapshot,
         do:
           Application.put_env(:ptc_manager, :planning_source_snapshot, previous_source_snapshot),
         else: Application.delete_env(:ptc_manager, :planning_source_snapshot)
+
+      if previous_digest_evidence,
+        do: Application.put_env(:ptc_manager, :daily_digest_evidence, previous_digest_evidence),
+        else: Application.delete_env(:ptc_manager, :daily_digest_evidence)
     end)
 
     :ok
+  end
+
+  test "runs a daily update in the planning lane and stores its Markdown" do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "runner"})
+
+    assert {:ok, digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Europe/Stockholm",
+               started_at: ~U[2026-08-29 22:00:00Z],
+               ended_at: ~U[2026-08-30 22:00:00Z]
+             })
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert completed.state == "done"
+    assert_receive {:ran_daily_digest, executed}
+    assert executed.action_key == "daily_digest"
+    assert executed.target_snapshot["source_sha"] == String.duplicate("7", 40)
+    assert executed.target_snapshot["trusted_source_head_sha"] == String.duplicate("8", 40)
+    assert executed.target_snapshot["trusted_change_count"] == 1
+    assert executed.prompt =~ "Repository evidence snapshot for this action"
+    assert executed.prompt =~ "coordinator fetched the following size-bounded manifest"
+
+    published = DailyDigests.get_digest(digest.id)
+    assert published.title == "A clearer maintainer day"
+    assert published.change_count == 1
+    assert published.pull_request_numbers == %{"numbers" => [1722]}
+    assert published.source_head_sha == String.duplicate("8", 40)
+    assert DailyDigests.status(published) == "published"
+  end
+
+  test "rejects model-asserted daily provenance that differs from GET-only evidence" do
+    repository = repository_fixture()
+    Process.put(:daily_digest_output_head, String.duplicate("9", 40))
+
+    assert {:ok, digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Europe/Stockholm",
+               started_at: ~U[2026-08-29 22:00:00Z],
+               ended_at: ~U[2026-08-30 22:00:00Z]
+             })
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert failed.state == "failed"
+    assert failed.last_error =~ "daily_digest_provenance_mismatch"
+    refute DailyDigests.published?(DailyDigests.get_digest(digest.id))
+  end
+
+  test "fails safely before execution when the complete daily prompt exceeds the byte limit" do
+    repository = repository_fixture()
+    Application.put_env(:ptc_manager, :planning_source_snapshot, OversizedPromptSourceSnapshot)
+
+    assert {:ok, digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Europe/Stockholm",
+               started_at: ~U[2026-08-29 22:00:00Z],
+               ended_at: ~U[2026-08-30 22:00:00Z]
+             })
+
+    digest.agent_action
+    |> AgentAction.changeset(%{prompt: String.duplicate("🧭", 25_001)})
+    |> Repo.update!()
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert failed.state == "failed"
+    assert failed.last_error =~ "daily_digest_prompt_too_large"
+    assert_receive {:released_oversized_snapshot, action_id, snapshot}
+    assert action_id == digest.agent_action.id
+    assert snapshot["source_path"] == "/tmp/ptc-manager-oversized-prompt-snapshot"
+    refute_receive {:ran_daily_digest, _action}
+  end
+
+  test "fails a daily update when bounded evidence can never fit" do
+    repository = repository_fixture()
+    Process.put(:daily_digest_evidence_result, {:error, :daily_digest_evidence_too_large})
+
+    assert {:ok, digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Europe/Stockholm",
+               started_at: ~U[2026-08-29 22:00:00Z],
+               ended_at: ~U[2026-08-30 22:00:00Z]
+             })
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert failed.state == "failed"
+    assert failed.last_error =~ "daily_digest_evidence_too_large"
+    refute failed.next_sync_attempt_at
+    refute_receive {:ran_daily_digest, _action}
+    refute DailyDigests.published?(DailyDigests.get_digest(digest.id))
+  end
+
+  test "defers a daily update when GitHub evidence transport is temporarily unavailable" do
+    repository = repository_fixture()
+
+    Process.put(
+      :daily_digest_evidence_result,
+      {:error, {:github_transport_error, :timeout}}
+    )
+
+    assert {:ok, digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Europe/Stockholm",
+               started_at: ~U[2026-08-29 22:00:00Z],
+               ended_at: ~U[2026-08-30 22:00:00Z]
+             })
+
+    assert {:ok, deferred} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert deferred.id == digest.agent_action.id
+    assert deferred.state == "queued"
+    assert deferred.next_sync_attempt_at
+    assert deferred.last_error =~ "github_transport_error"
+    refute_receive {:ran_daily_digest, _action}
   end
 
   test "queues a generic issue action once with its immutable prompt" do

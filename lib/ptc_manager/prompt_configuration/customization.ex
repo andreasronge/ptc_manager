@@ -17,6 +17,11 @@ defmodule PtcManager.PromptConfiguration.Customization do
     |> update_change(:instructions, &String.trim/1)
     |> validate_required([:action_key, :instructions, :updated_by])
     |> validate_length(:instructions, max: 20_000)
+    |> validate_change(:instructions, fn :instructions, instructions ->
+      if byte_size(instructions) <= 20_000,
+        do: [],
+        else: [instructions: "must be at most 20000 bytes"]
+    end)
     |> unique_constraint(:action_key)
   end
 end

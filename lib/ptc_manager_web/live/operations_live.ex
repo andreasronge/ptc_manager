@@ -233,6 +233,7 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def queued_action_label(%{action_key: "repair_and_merge_pr"}), do: "Fix and merge"
   def queued_action_label(%{action_key: "repair_pr"}), do: "Fix PR"
+  def queued_action_label(%{action_key: "daily_digest"}), do: "Daily update"
   def queued_action_label(action), do: String.replace(action.action_key, "_", " ")
 
   def queued_action_lane_label(action) do
