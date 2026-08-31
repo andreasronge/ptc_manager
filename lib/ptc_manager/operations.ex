@@ -764,17 +764,17 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def expire_job_leases(now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)) do
+  def expire_job_leases(lease_now \\ utc_now(), lifecycle_now \\ utc_now()) do
     expired =
       Job
       |> where(
         [job],
         job.state in ["starting", "working", "idle", "blocked"] and
-          not is_nil(job.lease_expires_at) and job.lease_expires_at <= ^now
+          not is_nil(job.lease_expires_at) and job.lease_expires_at <= ^lease_now
       )
       |> Repo.all()
 
-    count = Enum.count(expired, &expire_job_lease(&1, now))
+    count = Enum.count(expired, &expire_job_lease(&1, lease_now, lifecycle_now))
     if count > 0, do: notify_changed(__MODULE__)
     count
   end
@@ -782,7 +782,8 @@ defmodule PtcManager.Operations do
   def lease_job(job_id, worker_key, remote_issue, lease_ms, opts \\ [])
       when is_integer(job_id) and is_binary(worker_key) and is_map(remote_issue) and
              is_list(opts) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    lease_now = Keyword.get_lazy(opts, :now, &utc_now/0)
+    lifecycle_now = Keyword.get_lazy(opts, :lifecycle_now, &utc_now/0)
     capacity = Keyword.get(opts, :capacity, configured_agent_capacity())
     agent_kind = Keyword.get(opts, :agent_kind, configured_agent_kind())
     publication_source = configured_publication_source()
@@ -795,13 +796,13 @@ defmodule PtcManager.Operations do
              :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
              :ok <- issue_dependencies_resolved(Repo, job.issue),
-             {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, now),
-             :ok <- dispatch_capacity_available(Repo, worker, capacity, now),
+             {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, lifecycle_now),
+             :ok <- dispatch_capacity_available(Repo, worker, capacity, lifecycle_now),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
              :ok <- remote_issue_matches_approval(remote_issue, job.approval) do
           fencing_token = job.fencing_token + 1
           branch_name = "ptc-manager/issue-#{job.issue.number}-job-#{job.id}"
-          lease_expires_at = DateTime.add(now, lease_ms, :millisecond)
+          lease_expires_at = DateTime.add(lease_now, lease_ms, :millisecond)
 
           {updated, _rows} =
             Job
@@ -816,11 +817,11 @@ defmodule PtcManager.Operations do
                 fencing_token: fencing_token,
                 lease_owner: worker_key,
                 lease_expires_at: lease_expires_at,
-                started_at: now,
+                started_at: lifecycle_now,
                 branch_name: branch_name,
                 publication_source: publication_source,
                 last_error: nil,
-                updated_at: now
+                updated_at: lifecycle_now
               ]
             )
 
@@ -832,7 +833,7 @@ defmodule PtcManager.Operations do
               state: "reserved",
               path: worktree_path,
               agent_kind: agent_kind,
-              last_used_at: now
+              last_used_at: lifecycle_now
             })
             |> Repo.insert!()
 
@@ -880,7 +881,7 @@ defmodule PtcManager.Operations do
             if WorktreeSecurity.infrastructure_error?(reason) do
               Repo.rollback(reason)
             else
-              rejected = reject_job!(job, reason, now)
+              rejected = reject_job!(job, reason, lifecycle_now)
               {:rejected, reason, rejected}
             end
         end
@@ -893,15 +894,20 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def mark_job_working(job_id, fencing_token, worker_key, dispatch) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
+  def mark_job_working(
+        job_id,
+        fencing_token,
+        worker_key,
+        dispatch,
+        lease_now \\ utc_now(),
+        lifecycle_now \\ utc_now()
+      ) do
     result =
       Repo.transaction(fn ->
         job = Repo.get!(Job, job_id)
 
-        with :ok <- valid_lease(job, fencing_token, worker_key, now),
-             worker <- get_or_create_dispatch_worker!(worker_key, dispatch, now) do
+        with :ok <- valid_lease(job, fencing_token, worker_key, lease_now),
+             worker <- get_or_create_dispatch_worker!(worker_key, dispatch, lifecycle_now) do
           working_job =
             job
             |> Job.changeset(%{state: "working", lease_expires_at: dispatch.lease_expires_at})
@@ -915,7 +921,7 @@ defmodule PtcManager.Operations do
             herdr_workspace: dispatch.workspace_id,
             path: Map.get(dispatch, :worktree_path) || allocation.path,
             agent_kind: Map.get(dispatch, :agent_kind) || allocation.agent_kind,
-            last_used_at: now,
+            last_used_at: lifecycle_now,
             last_error: nil
           })
           |> Repo.update!()
@@ -929,8 +935,8 @@ defmodule PtcManager.Operations do
               state: "working",
               agent_name: Map.get(dispatch, :agent_name),
               status_text: "Implementing the approved issue in an isolated worktree.",
-              started_at: now,
-              last_heartbeat_at: now,
+              started_at: lifecycle_now,
+              last_heartbeat_at: lifecycle_now,
               herdr_workspace: dispatch.workspace_id,
               herdr_pane: dispatch.pane_id,
               herdr_session: dispatch.session,
@@ -1004,26 +1010,36 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def mark_dispatch_failed(job_id, fencing_token, worker_key, reason) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  def mark_dispatch_failed(
+        job_id,
+        fencing_token,
+        worker_key,
+        reason,
+        lease_now \\ utc_now(),
+        lifecycle_now \\ utc_now()
+      ) do
     message = bounded_error(reason)
 
     result =
       Repo.transaction(fn ->
         job = Repo.get!(Job, job_id)
 
-        with :ok <- valid_lease(job, fencing_token, worker_key, now) do
+        with :ok <- valid_lease(job, fencing_token, worker_key, lease_now) do
           failed =
             job
             |> Job.changeset(%{
               state: "failed",
-              ended_at: now,
+              ended_at: lifecycle_now,
               lease_expires_at: nil,
               last_error: message
             })
             |> Repo.update!()
 
-          mark_allocation!(job.id, %{state: "removed", removed_at: now, last_used_at: now})
+          mark_allocation!(job.id, %{
+            state: "removed",
+            removed_at: lifecycle_now,
+            last_used_at: lifecycle_now
+          })
 
           insert_audit!(%{
             actor: "worker:#{worker_key}",
@@ -1045,21 +1061,27 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def mark_dispatch_uncertain(job_id, fencing_token, worker_key, reason) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  def mark_dispatch_uncertain(
+        job_id,
+        fencing_token,
+        worker_key,
+        reason,
+        lease_now \\ utc_now(),
+        lifecycle_now \\ utc_now()
+      ) do
     message = bounded_error(reason)
 
     result =
       Repo.transaction(fn ->
         job = Repo.get!(Job, job_id)
 
-        with :ok <- valid_lease(job, fencing_token, worker_key, now) do
+        with :ok <- valid_lease(job, fencing_token, worker_key, lease_now) do
           reconciling =
             job
             |> Job.changeset(%{
               state: "reconciling",
               lease_expires_at: nil,
-              reconciling_at: now,
+              reconciling_at: lease_now,
               absence_observed_at: nil,
               last_error: message
             })
@@ -1067,7 +1089,7 @@ defmodule PtcManager.Operations do
 
           mark_allocation!(job.id, %{
             state: "attention",
-            last_used_at: now,
+            last_used_at: lifecycle_now,
             last_error: message
           })
 
@@ -2014,7 +2036,7 @@ defmodule PtcManager.Operations do
       job.fencing_token != fencing_token -> {:error, :stale_fencing_token}
       job.lease_owner != worker_key -> {:error, :wrong_lease_owner}
       is_nil(job.lease_expires_at) -> {:error, :lease_expired}
-      DateTime.compare(job.lease_expires_at, now) == :lt -> {:error, :lease_expired}
+      DateTime.compare(job.lease_expires_at, now) != :gt -> {:error, :lease_expired}
       true -> :ok
     end
   end
@@ -2687,7 +2709,7 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp expire_job_lease(job, now) do
+  defp expire_job_lease(job, lease_now, lifecycle_now) do
     Repo.transaction(fn ->
       {updated, _rows} =
         Job
@@ -2695,23 +2717,23 @@ defmodule PtcManager.Operations do
           [candidate],
           candidate.id == ^job.id and candidate.fencing_token == ^job.fencing_token and
             candidate.state in ["starting", "working", "idle", "blocked"] and
-            candidate.lease_expires_at <= ^now
+            candidate.lease_expires_at <= ^lease_now
         )
         |> Repo.update_all(
           set: [
             state: "reconciling",
             lease_expires_at: nil,
-            reconciling_at: now,
+            reconciling_at: lease_now,
             absence_observed_at: nil,
             last_error: "The worker lease expired; remote activity must be reconciled.",
-            updated_at: now
+            updated_at: lifecycle_now
           ]
         )
 
       if updated == 1 do
         mark_allocation!(job.id, %{
           state: "attention",
-          last_used_at: now,
+          last_used_at: lifecycle_now,
           last_error: "The worker lease expired; remote activity must be reconciled."
         })
 
@@ -2735,6 +2757,7 @@ defmodule PtcManager.Operations do
   end
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
+  defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
   defp rejection_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp rejection_error(reason), do: bounded_error(reason)
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)

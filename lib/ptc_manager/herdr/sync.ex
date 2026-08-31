@@ -3,8 +3,9 @@ defmodule PtcManager.Herdr.Sync do
 
   import Ecto.Query
 
-  alias PtcManager.Operations
+  alias PtcManager.Clock
   alias PtcManager.Gateway
+  alias PtcManager.Operations
 
   alias PtcManager.Operations.{
     AgentRun,
@@ -21,7 +22,11 @@ defmodule PtcManager.Herdr.Sync do
   @missing_retained_error "Herdr confirmed that the retained managed agent is no longer present."
 
   def sync(opts \\ []) do
-    snapshot_started_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    clock = Keyword.get(opts, :clock, PtcManager.Clock.System)
+
+    # This marker is compared with Ecto's database-write timestamps, so it must
+    # use the same real wall-clock domain even when lease time is virtualized.
+    snapshot_started_at = Clock.utc_now(PtcManager.Clock.System)
     client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :herdr_client))
 
     session =
@@ -48,14 +53,28 @@ defmodule PtcManager.Herdr.Sync do
           agents,
           stale_after_ms,
           reconcile_after_ms,
-          snapshot_started_at
+          snapshot_started_at,
+          Clock.utc_now(PtcManager.Clock.System),
+          Clock.utc_now(clock)
         )
 
       {:error, reason} ->
-        mark_degraded(session, reason, stale_after_ms)
+        mark_degraded(
+          session,
+          reason,
+          stale_after_ms,
+          Clock.utc_now(PtcManager.Clock.System),
+          Clock.utc_now(clock)
+        )
 
       other ->
-        mark_degraded(session, {:unexpected_client_result, other}, stale_after_ms)
+        mark_degraded(
+          session,
+          {:unexpected_client_result, other},
+          stale_after_ms,
+          Clock.utc_now(PtcManager.Clock.System),
+          Clock.utc_now(clock)
+        )
     end
   end
 
@@ -64,18 +83,18 @@ defmodule PtcManager.Herdr.Sync do
          remote_agents,
          stale_after_ms,
          reconcile_after_ms,
-         snapshot_started_at
+         snapshot_started_at,
+         agent_now,
+         lease_now
        ) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
     result =
       Repo.transaction(fn ->
-        worker = upsert_worker(session, "online", now)
+        worker = upsert_worker(session, "online", agent_now)
 
         normalized =
           Enum.map(remote_agents, fn agent ->
             agent
-            |> normalize_agent(session, now)
+            |> normalize_agent(session, agent_now)
             |> Map.put(:snapshot_started_at, snapshot_started_at)
             |> maybe_attach_managed_attempt(worker.worker_key)
             |> maybe_attach_agent_action_attempt(worker)
@@ -96,9 +115,9 @@ defmodule PtcManager.Herdr.Sync do
 
             if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
               run = upsert_agent_run(worker, existing_run, attrs)
-              superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, now)
-              reconcile_worktree_identity(run, attrs, now)
-              reconcile_job(run, attrs.state, now)
+              superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
+              reconcile_worktree_identity(run, attrs, agent_now)
+              reconcile_job(run, attrs.state, agent_now, lease_now)
               [run.id | superseded_ids]
             else
               [existing_run.id]
@@ -111,12 +130,19 @@ defmodule PtcManager.Herdr.Sync do
             existing_runs,
             observed_keys,
             observed_run_ids,
-            now,
-            snapshot_started_at
+            agent_now,
+            snapshot_started_at,
+            lease_now
           )
 
         absent_count =
-          resolve_absent_reconciling_jobs(worker, normalized, now, reconcile_after_ms)
+          resolve_absent_reconciling_jobs(
+            worker,
+            normalized,
+            lease_now,
+            reconcile_after_ms,
+            agent_now
+          )
 
         %{
           worker: worker,
@@ -132,10 +158,10 @@ defmodule PtcManager.Herdr.Sync do
         {:ok, summary}
 
       {:error, reason} ->
-        mark_degraded(session, reason, stale_after_ms)
+        mark_degraded(session, reason, stale_after_ms, agent_now, lease_now)
     end
   rescue
-    error -> mark_degraded(session, error, stale_after_ms)
+    error -> mark_degraded(session, error, stale_after_ms, agent_now, lease_now)
   end
 
   defp normalize_agent(agent, session, now) when is_map(agent) do
@@ -300,7 +326,8 @@ defmodule PtcManager.Herdr.Sync do
          observed_keys,
          observed_run_ids,
          now,
-         snapshot_started_at
+         snapshot_started_at,
+         lease_now
        ) do
     missing_runs =
       existing_runs
@@ -330,7 +357,7 @@ defmodule PtcManager.Herdr.Sync do
         )
       end
 
-      reconcile_job(lost, "lost", now)
+      reconcile_job(lost, "lost", now, lease_now)
     end)
 
     length(missing_runs)
@@ -358,13 +385,14 @@ defmodule PtcManager.Herdr.Sync do
     end
   end
 
-  defp mark_degraded(session, reason, stale_after_ms) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
+  defp mark_degraded(session, reason, stale_after_ms, agent_now, lease_now) do
     result =
       Repo.transaction(fn ->
         worker = upsert_worker(session, "degraded", nil)
-        {lost_count, uncertain_count} = mark_stale_runs_lost(worker, now, stale_after_ms)
+
+        {lost_count, uncertain_count} =
+          mark_stale_runs_lost(worker, agent_now, stale_after_ms, lease_now)
+
         %{worker: worker, lost_count: lost_count, uncertain_count: uncertain_count}
       end)
 
@@ -380,7 +408,7 @@ defmodule PtcManager.Herdr.Sync do
     _error -> {:error, reason}
   end
 
-  defp mark_stale_runs_lost(worker, now, stale_after_ms) do
+  defp mark_stale_runs_lost(worker, agent_now, stale_after_ms, lease_now) do
     active_runs =
       AgentRun
       |> where([run], run.worker_id == ^worker.id and run.state not in ^@terminal_states)
@@ -388,12 +416,12 @@ defmodule PtcManager.Herdr.Sync do
 
     stale_runs =
       Enum.filter(active_runs, fn run ->
-        DateTime.diff(now, run.last_heartbeat_at, :millisecond) >= stale_after_ms
+        DateTime.diff(agent_now, run.last_heartbeat_at, :millisecond) >= stale_after_ms
       end)
 
     Enum.reduce(stale_runs, {0, 0}, fn run, {lost_count, uncertain_count} ->
       if run.job_id do
-        mark_managed_run_uncertain(run, now)
+        mark_managed_run_uncertain(run, agent_now, lease_now)
         {lost_count, uncertain_count + 1}
       else
         lost =
@@ -401,11 +429,11 @@ defmodule PtcManager.Herdr.Sync do
           |> AgentRun.changeset(%{
             state: "lost",
             status_text: "Herdr could not confirm this agent after the heartbeat deadline.",
-            ended_at: now
+            ended_at: agent_now
           })
           |> Repo.update!()
 
-        reconcile_job(lost, "lost", now)
+        reconcile_job(lost, "lost", agent_now, lease_now)
         {lost_count + 1, uncertain_count}
       end
     end)
@@ -419,12 +447,13 @@ defmodule PtcManager.Herdr.Sync do
   defp normalize_state(value) when value in ["lost", "missing"], do: "lost"
   defp normalize_state(_value), do: "unknown"
 
-  defp reconcile_job(%AgentRun{job_id: nil}, _agent_state, _now), do: :ok
+  defp reconcile_job(%AgentRun{job_id: nil}, _agent_state, _agent_now, _lease_now), do: :ok
 
   defp reconcile_job(
          %AgentRun{state: run_state} = run,
          agent_state,
-         now
+         _agent_now,
+         lease_now
        )
        when run_state in @terminal_states and agent_state not in @terminal_states do
     case owned_job(run) do
@@ -435,7 +464,7 @@ defmodule PtcManager.Herdr.Sync do
         |> Job.changeset(%{
           state: "reconciling",
           lease_expires_at: nil,
-          reconciling_at: now,
+          reconciling_at: lease_now,
           absence_observed_at: nil,
           last_error: "A terminal managed agent identity became active again."
         })
@@ -446,19 +475,19 @@ defmodule PtcManager.Herdr.Sync do
     end
   end
 
-  defp reconcile_job(%AgentRun{} = run, agent_state, now) do
+  defp reconcile_job(%AgentRun{} = run, agent_state, agent_now, lease_now) do
     case owned_job(run) do
       %Job{fencing_token: token, state: state} = job
       when token == run.fencing_token and
              state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
-        update_job_from_agent(job, agent_state, now)
+        update_job_from_agent(job, agent_state, agent_now, lease_now)
 
       _job ->
         :ok
     end
   end
 
-  defp update_job_from_agent(job, agent_state, now) do
+  defp update_job_from_agent(job, agent_state, agent_now, lease_now) do
     state = job_state(agent_state, job.state)
 
     attrs =
@@ -466,7 +495,7 @@ defmodule PtcManager.Herdr.Sync do
         state in ~w(failed lost) ->
           %{
             state: state,
-            ended_at: now,
+            ended_at: agent_now,
             lease_expires_at: nil,
             reconciling_at: nil,
             absence_observed_at: nil
@@ -476,7 +505,7 @@ defmodule PtcManager.Herdr.Sync do
           %{
             state: state,
             lease_expires_at: nil,
-            reconciling_at: now,
+            reconciling_at: lease_now,
             absence_observed_at: nil
           }
 
@@ -485,7 +514,7 @@ defmodule PtcManager.Herdr.Sync do
 
           %{
             state: state,
-            lease_expires_at: DateTime.add(now, lease_ms, :millisecond),
+            lease_expires_at: DateTime.add(lease_now, lease_ms, :millisecond),
             reconciling_at: nil,
             absence_observed_at: nil
           }
@@ -494,7 +523,11 @@ defmodule PtcManager.Herdr.Sync do
     job |> Job.changeset(attrs) |> Repo.update!()
 
     if state in ~w(failed lost) do
-      mark_worktree_attention(job.id, "The implementation agent ended in state #{state}.", now)
+      mark_worktree_attention(
+        job.id,
+        "The implementation agent ended in state #{state}.",
+        agent_now
+      )
     end
 
     :ok
@@ -623,7 +656,7 @@ defmodule PtcManager.Herdr.Sync do
 
   defp supersede_duplicate_action_runs(_worker, _run, _attrs, _now), do: []
 
-  defp mark_managed_run_uncertain(run, now) do
+  defp mark_managed_run_uncertain(run, agent_now, lease_now) do
     run
     |> AgentRun.changeset(%{
       state: "unknown",
@@ -638,7 +671,7 @@ defmodule PtcManager.Herdr.Sync do
         |> Job.changeset(%{
           state: "reconciling",
           lease_expires_at: nil,
-          reconciling_at: job.reconciling_at || now,
+          reconciling_at: job.reconciling_at || lease_now,
           absence_observed_at: nil,
           last_error: "Herdr transport is unavailable; remote activity must be reconciled."
         })
@@ -647,7 +680,7 @@ defmodule PtcManager.Herdr.Sync do
         mark_worktree_attention(
           job.id,
           "Herdr transport is unavailable; remote activity must be reconciled.",
-          now
+          agent_now
         )
 
       _job ->
@@ -655,7 +688,13 @@ defmodule PtcManager.Herdr.Sync do
     end
   end
 
-  defp resolve_absent_reconciling_jobs(worker, normalized, now, reconcile_after_ms) do
+  defp resolve_absent_reconciling_jobs(
+         worker,
+         normalized,
+         lease_now,
+         reconcile_after_ms,
+         lifecycle_now
+       ) do
     observed_names = MapSet.new(normalized, & &1.agent_name)
 
     Job
@@ -669,23 +708,23 @@ defmodule PtcManager.Herdr.Sync do
 
       old_enough =
         job.reconciling_at &&
-          DateTime.diff(now, job.reconciling_at, :millisecond) >= reconcile_after_ms
+          DateTime.diff(lease_now, job.reconciling_at, :millisecond) >= reconcile_after_ms
 
       cond do
         !old_enough || MapSet.member?(observed_names, attempt_name) ->
           false
 
         job.absence_observed_at ->
-          fail_absent_attempt(job, now)
+          fail_absent_attempt(job, lifecycle_now)
 
         true ->
-          record_absence_observation(job, now)
+          record_absence_observation(job, lease_now, lifecycle_now)
           false
       end
     end)
   end
 
-  defp record_absence_observation(job, now) do
+  defp record_absence_observation(job, lease_now, lifecycle_now) do
     {updated, _rows} =
       Job
       |> where(
@@ -694,14 +733,14 @@ defmodule PtcManager.Herdr.Sync do
           candidate.fencing_token == ^job.fencing_token and
           is_nil(candidate.absence_observed_at)
       )
-      |> Repo.update_all(set: [absence_observed_at: now, updated_at: now])
+      |> Repo.update_all(set: [absence_observed_at: lease_now, updated_at: lifecycle_now])
 
     if updated == 1 do
       insert_reconciliation_audit!(job, "job.agent_absence_observed")
     end
   end
 
-  defp fail_absent_attempt(job, now) do
+  defp fail_absent_attempt(job, lifecycle_now) do
     {updated, _rows} =
       Job
       |> where(
@@ -713,9 +752,9 @@ defmodule PtcManager.Herdr.Sync do
       |> Repo.update_all(
         set: [
           state: "failed",
-          ended_at: now,
+          ended_at: lifecycle_now,
           last_error: "Herdr confirmed that no managed agent exists for this attempt.",
-          updated_at: now
+          updated_at: lifecycle_now
         ]
       )
 
@@ -723,7 +762,7 @@ defmodule PtcManager.Herdr.Sync do
       mark_worktree_attention(
         job.id,
         "Herdr confirmed that no managed agent exists for this attempt.",
-        now
+        lifecycle_now
       )
 
       insert_reconciliation_audit!(job, "job.absent_agent_confirmed")

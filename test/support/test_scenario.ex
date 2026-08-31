@@ -123,18 +123,35 @@ defmodule PtcManager.TestScenario do
     GenServer.call(scenario.pid, {:set_agent_state, agent_name, state})
   end
 
+  def remove_agent(%__MODULE__{} = scenario, agent_name) when is_binary(agent_name) do
+    GenServer.call(scenario.pid, {:remove_agent, agent_name})
+  end
+
   def agents(%__MODULE__{} = scenario), do: GenServer.call(scenario.pid, :agents)
   def trace(%__MODULE__{} = scenario), do: GenServer.call(scenario.pid, :trace)
+
+  def utc_now(%__MODULE__{} = scenario), do: GenServer.call(scenario.pid, :utc_now)
+
+  def advance_time(%__MODULE__{} = scenario, amount, unit \\ :second)
+      when is_integer(amount) do
+    GenServer.call(scenario.pid, {:advance_time, amount, unit})
+  end
 
   def advance(scenario, stage, opts \\ [])
 
   def advance(%__MODULE__{} = scenario, :dispatch, opts) do
-    defaults = [github: scenario, adapter: scenario, worker_key: "herdr:scenario"]
+    defaults = [
+      github: scenario,
+      adapter: scenario,
+      clock: scenario,
+      worker_key: "herdr:scenario"
+    ]
+
     Dispatch.run_once(Keyword.merge(opts, defaults))
   end
 
   def advance(%__MODULE__{} = scenario, :herdr_sync, opts) do
-    HerdrSync.sync(Keyword.merge(opts, client: scenario, session: "scenario"))
+    HerdrSync.sync(Keyword.merge(opts, client: scenario, clock: scenario, session: "scenario"))
   end
 
   def advance(%__MODULE__{} = scenario, {:github_sync, repository}, opts) do
@@ -211,6 +228,10 @@ defmodule PtcManager.TestScenario do
        repair_statuses: nil,
        herdr_transport: Keyword.get(opts, :herdr_transport, :online),
        paused_calls: %{},
+       now:
+         opts
+         |> Keyword.get_lazy(:now, fn -> DateTime.utc_now() end)
+         |> DateTime.truncate(:microsecond),
        trace: [],
        next_sequence: 1
      }}
@@ -220,6 +241,13 @@ defmodule PtcManager.TestScenario do
   def handle_call({:put_issue, repository_id, issue}, _from, state) do
     key = {repository_id, issue["number"]}
     {:reply, :ok, put_in(state, [:issues, key], issue)}
+  end
+
+  def handle_call(:utc_now, _from, state), do: {:reply, state.now, state}
+
+  def handle_call({:advance_time, amount, unit}, _from, state) do
+    now = DateTime.add(state.now, amount, unit) |> DateTime.truncate(:microsecond)
+    {:reply, now, %{state | now: now}}
   end
 
   def handle_call({:dispatch_outcome, outcome}, {caller, _tag}, state) do
@@ -257,6 +285,11 @@ defmodule PtcManager.TestScenario do
         end
       end)
 
+    {:reply, :ok, %{state | agents: agents}}
+  end
+
+  def handle_call({:remove_agent, agent_name}, _from, state) do
+    agents = Enum.reject(state.agents, &(&1["name"] == agent_name))
     {:reply, :ok, %{state | agents: agents}}
   end
 

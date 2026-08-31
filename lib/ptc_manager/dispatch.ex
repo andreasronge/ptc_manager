@@ -2,6 +2,7 @@ defmodule PtcManager.Dispatch do
   @moduledoc "Leases one approved job only after a synchronous GitHub freshness check."
 
   alias PtcManager.GitHub.IssueSnapshot
+  alias PtcManager.Clock
   alias PtcManager.Gateway
   alias PtcManager.Operations
   alias PtcManager.Worktrees
@@ -11,8 +12,12 @@ defmodule PtcManager.Dispatch do
     adapter = Keyword.get(opts, :adapter, Application.fetch_env!(:ptc_manager, :dispatch_adapter))
     worker_key = Keyword.get(opts, :worker_key, configured_worker_key())
     lease_ms = Keyword.get(opts, :lease_ms, configured_lease_ms())
+    clock = Keyword.get(opts, :clock, PtcManager.Clock.System)
 
-    Operations.expire_job_leases()
+    Operations.expire_job_leases(
+      Clock.utc_now(clock),
+      Clock.utc_now(PtcManager.Clock.System)
+    )
 
     case Operations.next_queued_job() do
       nil ->
@@ -21,16 +26,20 @@ defmodule PtcManager.Dispatch do
       job ->
         with {:ok, capacity} <- dispatch_capacity(worker_key, opts),
              :ok <- Worktrees.ensure_slot(worker_key, capacity, adapter) do
-          dispatch_job(job, github, adapter, worker_key, lease_ms, capacity)
+          dispatch_job(job, github, adapter, worker_key, lease_ms, capacity, clock)
         end
     end
   end
 
-  defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity) do
+  defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity, clock) do
     with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
          {:ok, canonical} <- normalize_remote(remote, job.repository.id),
          {:ok, leased} <-
-           Operations.lease_job(job.id, worker_key, canonical, lease_ms, capacity: capacity) do
+           Operations.lease_job(job.id, worker_key, canonical, lease_ms,
+             capacity: capacity,
+             now: Clock.utc_now(clock),
+             lifecycle_now: Clock.utc_now(PtcManager.Clock.System)
+           ) do
       context = %{
         job: leased,
         issue: leased.issue,
@@ -40,10 +49,27 @@ defmodule PtcManager.Dispatch do
       case Gateway.call(adapter, :dispatch, [context]) do
         {:ok, dispatch} ->
           dispatch = Map.put(dispatch, :lease_expires_at, leased.lease_expires_at)
-          Operations.mark_job_working(leased.id, leased.fencing_token, worker_key, dispatch)
+
+          Operations.mark_job_working(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            dispatch,
+            Clock.utc_now(clock),
+            Clock.utc_now(PtcManager.Clock.System)
+          )
 
         {:error, {:safe, reason}} ->
-          _ = Operations.mark_dispatch_failed(leased.id, leased.fencing_token, worker_key, reason)
+          _ =
+            Operations.mark_dispatch_failed(
+              leased.id,
+              leased.fencing_token,
+              worker_key,
+              reason,
+              Clock.utc_now(clock),
+              Clock.utc_now(PtcManager.Clock.System)
+            )
+
           {:error, reason}
 
         {:error, {:uncertain, reason}} ->
@@ -52,7 +78,9 @@ defmodule PtcManager.Dispatch do
               leased.id,
               leased.fencing_token,
               worker_key,
-              reason
+              reason,
+              Clock.utc_now(clock),
+              Clock.utc_now(PtcManager.Clock.System)
             )
 
           {:error, reason}
@@ -63,7 +91,9 @@ defmodule PtcManager.Dispatch do
               leased.id,
               leased.fencing_token,
               worker_key,
-              reason
+              reason,
+              Clock.utc_now(clock),
+              Clock.utc_now(PtcManager.Clock.System)
             )
 
           {:error, reason}
@@ -76,7 +106,9 @@ defmodule PtcManager.Dispatch do
               leased.id,
               leased.fencing_token,
               worker_key,
-              reason
+              reason,
+              Clock.utc_now(clock),
+              Clock.utc_now(PtcManager.Clock.System)
             )
 
           {:error, reason}

@@ -9,6 +9,122 @@ defmodule PtcManager.TestScenarioTest do
   alias PtcManager.TestScenario
   alias PtcManager.Worktrees
 
+  test "advances lease expiry with the scenario clock and no wall-clock sleep" do
+    now = ~U[2026-08-31 12:00:00.000000Z]
+    scenario = start_supervised!({TestScenario, now: now}) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 100)
+
+    assert {:ok, %{job: working}} =
+             TestScenario.advance(scenario, :dispatch, lease_ms: 1_000)
+
+    assert DateTime.compare(working.started_at, now) == :gt
+    assert working.lease_expires_at == DateTime.add(now, 1_000, :millisecond)
+
+    assert DateTime.add(now, 1_000, :millisecond) ==
+             TestScenario.advance_time(scenario, 1_000, :millisecond)
+
+    assert {:ok, :empty} = TestScenario.advance(scenario, :dispatch)
+
+    expired = Repo.get!(Job, job.id)
+    assert expired.state == "reconciling"
+    assert expired.reconciling_at == DateTime.add(now, 1_000, :millisecond)
+    assert expired.last_error =~ "lease expired"
+  end
+
+  test "does not accept a dispatch acknowledgement after its virtual lease expires" do
+    now = ~U[2026-08-31 12:00:00.000000Z]
+    scenario = start_supervised!({TestScenario, now: now}) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 99)
+    :ok = TestScenario.dispatch_outcome(scenario, :pause_after_effect)
+
+    task =
+      Task.async(fn -> TestScenario.advance(scenario, :dispatch, lease_ms: 1_000) end)
+
+    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}
+    assert job_id == job.id
+    assert length(TestScenario.agents(scenario)) == 1
+
+    TestScenario.advance_time(scenario, 1_000, :millisecond)
+    :ok = TestScenario.resume(scenario, reference)
+
+    assert {:error, :lease_expired} = Task.await(task)
+    assert Repo.get!(Job, job.id).state == "starting"
+
+    assert {:ok, :empty} = TestScenario.advance(scenario, :dispatch)
+    assert Repo.get!(Job, job.id).state == "reconciling"
+    assert length(TestScenario.agents(scenario)) == 1
+  end
+
+  test "Herdr heartbeat refreshes a lease using the same virtual clock" do
+    now = ~U[2026-08-31 12:00:00.000000Z]
+    scenario = start_supervised!({TestScenario, now: now}) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 98)
+
+    assert {:ok, %{job: _working}} =
+             TestScenario.advance(scenario, :dispatch, lease_ms: 1_000)
+
+    heartbeat_at = TestScenario.advance_time(scenario, 500, :millisecond)
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    lease_ms = Application.fetch_env!(:ptc_manager, :dispatch_lease_ms)
+    refreshed = Repo.get!(Job, job.id)
+    assert refreshed.lease_expires_at == DateTime.add(heartbeat_at, lease_ms, :millisecond)
+
+    TestScenario.advance_time(scenario, lease_ms, :millisecond)
+    assert {:ok, :empty} = TestScenario.advance(scenario, :dispatch)
+    assert Repo.get!(Job, job.id).state == "reconciling"
+  end
+
+  test "a future lease clock does not move managed agent lifecycle timestamps" do
+    future = DateTime.add(DateTime.utc_now(), 3_600, :second) |> DateTime.truncate(:microsecond)
+    scenario = start_supervised!({TestScenario, now: future}) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 97)
+
+    assert {:ok, %{job: _working}} = TestScenario.advance(scenario, :dispatch)
+
+    [agent] = TestScenario.agents(scenario)
+    :ok = TestScenario.set_agent_state(scenario, agent["name"], "failed")
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    run = Repo.get_by!(AgentRun, job_id: job.id)
+    assert run.state == "failed"
+    assert DateTime.compare(run.ended_at, run.started_at) != :lt
+    assert DateTime.compare(run.started_at, future) == :lt
+  end
+
+  test "absent-agent reconciliation uses virtual deadlines and real lifecycle time" do
+    future = DateTime.add(DateTime.utc_now(), 3_600, :second) |> DateTime.truncate(:microsecond)
+    scenario = start_supervised!({TestScenario, now: future}) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 96)
+    :ok = TestScenario.dispatch_outcome(scenario, :effect_then_error)
+
+    assert {:error, :scenario_dispatch_ack_lost} =
+             TestScenario.advance(scenario, :dispatch)
+
+    [agent] = TestScenario.agents(scenario)
+    :ok = TestScenario.remove_agent(scenario, agent["name"])
+
+    assert {:ok, %{absent_count: 0}} =
+             TestScenario.advance(scenario, :herdr_sync, reconcile_after_ms: 1_000)
+
+    refute Repo.get!(Job, job.id).absence_observed_at
+
+    deadline = TestScenario.advance_time(scenario, 1_000, :millisecond)
+
+    assert {:ok, %{absent_count: 0}} =
+             TestScenario.advance(scenario, :herdr_sync, reconcile_after_ms: 1_000)
+
+    assert Repo.get!(Job, job.id).absence_observed_at == deadline
+
+    assert {:ok, %{absent_count: 1}} =
+             TestScenario.advance(scenario, :herdr_sync, reconcile_after_ms: 1_000)
+
+    failed = Repo.get!(Job, job.id)
+    assert failed.state == "failed"
+    assert DateTime.compare(failed.ended_at, failed.started_at) != :lt
+    assert DateTime.compare(failed.ended_at, future) == :lt
+  end
+
   test "adopts a single Herdr agent after start succeeds but acknowledgement is lost" do
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
     %{job: job} = TestScenario.approved_implementation!(scenario)
@@ -52,8 +168,8 @@ defmodule PtcManager.TestScenarioTest do
     :ok = TestScenario.herdr_transport(scenario, :online)
     assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
 
-    assert Repo.get!(Job, job.id).state == "working"
     assert Repo.one!(AgentRun).state == "working"
+    assert Repo.get!(Job, job.id).state == "working"
 
     operations = Enum.map(TestScenario.trace(scenario), &{&1.source, &1.operation})
 
@@ -131,7 +247,10 @@ defmodule PtcManager.TestScenarioTest do
   end
 
   test "external PR repair and cleanup stay inside the stateful Herdr boundary" do
-    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+    scenario =
+      start_supervised!({TestScenario, now: ~U[2026-08-31 12:00:00.000000Z]})
+      |> TestScenario.gateway()
+
     repository = repository_fixture(%{local_path: "/tmp/ptc-manager-test-scenario"})
     original_head = String.duplicate("b", 40)
     status = external_pr_status(repository, 105, original_head)
@@ -158,6 +277,13 @@ defmodule PtcManager.TestScenarioTest do
     run = Repo.get_by!(AgentRun, agent_action_id: action.id)
     assert run.herdr_workspace
     assert length(TestScenario.agents(scenario)) == 1
+
+    :ok = TestScenario.set_agent_state(scenario, run.agent_name, "failed")
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    failed_run = Repo.get!(AgentRun, run.id)
+    assert failed_run.state == "failed"
+    assert DateTime.compare(failed_run.ended_at, failed_run.started_at) != :lt
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
