@@ -4,8 +4,12 @@ defmodule PtcManager.Repo.Migrations.ImportExternalPullRequests do
   @disable_ddl_transaction true
 
   def up do
+    dynamic_repo = PtcManager.Repo.get_dynamic_repo()
+
     execute(fn ->
-      PtcManager.Repo.checkout(fn -> rebuild_publications_table() end)
+      %{adapter: adapter} = meta = Ecto.Adapter.lookup_meta(dynamic_repo)
+
+      adapter.checkout(meta, [], fn -> rebuild_publications_table(dynamic_repo) end)
     end)
   end
 
@@ -13,17 +17,20 @@ defmodule PtcManager.Repo.Migrations.ImportExternalPullRequests do
     raise "20260830073000 cannot be reversed safely after importing external pull requests"
   end
 
-  defp rebuild_publications_table do
-    query!("PRAGMA foreign_keys = OFF")
-    query!("PRAGMA legacy_alter_table = ON")
+  defp rebuild_publications_table(repo) do
+    query!(repo, "PRAGMA foreign_keys = OFF")
+    query!(repo, "PRAGMA legacy_alter_table = ON")
 
     try do
-      query!("BEGIN IMMEDIATE")
+      query!(repo, "BEGIN IMMEDIATE")
 
       try do
-        query!("ALTER TABLE pr_publications RENAME TO pr_publications_before_external_import")
+        query!(
+          repo,
+          "ALTER TABLE pr_publications RENAME TO pr_publications_before_external_import"
+        )
 
-        query!("""
+        query!(repo, """
         CREATE TABLE pr_publications (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           job_id INTEGER CONSTRAINT pr_publications_job_id_fkey REFERENCES jobs(id) ON DELETE CASCADE,
@@ -64,7 +71,7 @@ defmodule PtcManager.Repo.Migrations.ImportExternalPullRequests do
         )
         """)
 
-        query!("""
+        query!(repo, """
         INSERT INTO pr_publications (
           id, job_id, repository_id, state, idempotency_key, fencing_token,
           branch_name, base_sha, head_sha, diff_digest, attempt_count, attempt_token,
@@ -93,48 +100,56 @@ defmodule PtcManager.Repo.Migrations.ImportExternalPullRequests do
         JOIN repositories ON repositories.id = jobs.repository_id
         """)
 
-        query!("DROP TABLE pr_publications_before_external_import")
-        query!("CREATE UNIQUE INDEX pr_publications_job_id_index ON pr_publications (job_id)")
+        query!(repo, "DROP TABLE pr_publications_before_external_import")
 
         query!(
+          repo,
+          "CREATE UNIQUE INDEX pr_publications_job_id_index ON pr_publications (job_id)"
+        )
+
+        query!(
+          repo,
           "CREATE UNIQUE INDEX pr_publications_idempotency_key_index ON pr_publications (idempotency_key)"
         )
 
         query!(
+          repo,
           "CREATE INDEX pr_publications_state_next_attempt_at_index ON pr_publications (state, next_attempt_at)"
         )
 
         query!(
+          repo,
           "CREATE INDEX pr_publications_pr_state_pr_checked_at_index ON pr_publications (pr_state, pr_checked_at)"
         )
 
-        query!("""
+        query!(repo, """
         CREATE UNIQUE INDEX pr_publications_repository_pr_number_index
         ON pr_publications (repository_id, pr_number)
         WHERE repository_id IS NOT NULL AND pr_number IS NOT NULL
         """)
 
         query!(
+          repo,
           "CREATE INDEX pr_publications_repository_id_source_pr_state_index ON pr_publications (repository_id, source, pr_state)"
         )
 
-        case query!("PRAGMA foreign_key_check").rows do
+        case query!(repo, "PRAGMA foreign_key_check").rows do
           [] ->
-            query!("COMMIT")
+            query!(repo, "COMMIT")
 
           rows ->
             raise "foreign-key violations after rebuilding pr_publications: #{inspect(rows)}"
         end
       rescue
         error ->
-          _ = Ecto.Adapters.SQL.query(PtcManager.Repo, "ROLLBACK", [])
+          _ = Ecto.Adapters.SQL.query(repo, "ROLLBACK", [])
           reraise error, __STACKTRACE__
       end
     after
-      query!("PRAGMA legacy_alter_table = OFF")
-      query!("PRAGMA foreign_keys = ON")
+      query!(repo, "PRAGMA legacy_alter_table = OFF")
+      query!(repo, "PRAGMA foreign_keys = ON")
     end
   end
 
-  defp query!(sql), do: Ecto.Adapters.SQL.query!(PtcManager.Repo, sql, [])
+  defp query!(repo, sql), do: Ecto.Adapters.SQL.query!(repo, sql, [])
 end

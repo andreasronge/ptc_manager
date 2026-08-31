@@ -57,6 +57,7 @@ timestamp=$(date -u +%Y%m%d%H%M%S)
 release_id="${short_sha}-${timestamp}"
 remote_archive="/tmp/ptc-manager-${release_id}.tar"
 remote_script="/tmp/ptc-manager-deploy-${release_id}"
+remote_failure_policy="/tmp/ptc-manager-failure-policy-${release_id}"
 
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   echo "refusing to deploy a dirty worktree; commit or stash all changes first" >&2
@@ -84,9 +85,10 @@ fi
 deploy_tmp=$(mktemp -d "${TMPDIR:-/tmp}/ptc-manager-deploy.XXXXXX")
 local_archive="$deploy_tmp/source.tar"
 local_remote_script="$deploy_tmp/remote-deploy-herdr"
+local_failure_policy="$deploy_tmp/deployment-failure-policy"
 
 cleanup_local() {
-  rm -f -- "$local_archive" "$local_remote_script"
+  rm -f -- "$local_archive" "$local_remote_script" "$local_failure_policy"
   rmdir -- "$deploy_tmp" 2>/dev/null || true
 }
 
@@ -101,14 +103,16 @@ trap 'exit 130' HUP INT TERM
 
 git archive --format=tar --output="$local_archive" "$commit_sha"
 tar -xOf "$local_archive" deploy/remote-deploy-herdr >"$local_remote_script"
+tar -xOf "$local_archive" deploy/deployment-failure-policy >"$local_failure_policy"
 
 echo "Uploading committed source..."
 scp -q "$local_archive" "$deploy_target:$remote_archive"
 scp -q "$local_remote_script" "$deploy_target:$remote_script"
+scp -q "$local_failure_policy" "$deploy_target:$remote_failure_policy"
 
 echo "Building and installing on $deploy_target..."
 # Values interpolated below are locally generated or restricted to a safe SSH alias.
 # shellcheck disable=SC2029
-ssh "$deploy_target" "chmod 700 '$remote_script' && '$remote_script' '$release_id' '$remote_archive'"
+ssh "$deploy_target" "chmod 700 '$remote_script' '$remote_failure_policy' && '$remote_script' '$release_id' '$remote_archive' '$remote_failure_policy'"
 
 echo "Deployment complete: $release_id"

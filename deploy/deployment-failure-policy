@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  post_effect)
+    printf '%s\n' preserve_current
+    ;;
+  swapping_pre_effect)
+    printf '%s\n' restore_snapshot
+    ;;
+  service_stopped)
+    printf '%s\n' restart_existing
+    ;;
+  pre_stop|handling_failure|complete)
+    printf '%s\n' no_action
+    ;;
+  *)
+    echo "invalid deployment phase: ${1:-<empty>}" >&2
+    exit 2
+    ;;
+esac

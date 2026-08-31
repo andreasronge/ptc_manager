@@ -3,6 +3,7 @@ set -eu
 
 release_id=${1:-}
 source_archive=${2:-}
+failure_policy=${3:-}
 
 case "$release_id" in
   *[!A-Za-z0-9.-]*|'')
@@ -15,6 +16,14 @@ case "$source_archive" in
   /tmp/ptc-manager-*.tar) ;;
   *)
     echo "invalid source archive path" >&2
+    exit 2
+    ;;
+esac
+
+case "$failure_policy" in
+  /tmp/ptc-manager-failure-policy-*) ;;
+  *)
+    echo "invalid deployment failure policy path" >&2
     exit 2
     ;;
 esac
@@ -50,7 +59,7 @@ remote_script=$0
 deployment_phase=pre_stop
 
 cleanup_remote() {
-  rm -f -- "$source_archive" "$remote_script" "$agent_filter" "$environment_file_parser" \
+  rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$environment_file_parser" \
     "$worker_git_candidate" "$sudoers_candidate"
   sudo rm -f -- "$maintenance_override_backup"
 
@@ -428,9 +437,10 @@ rollback() {
 finish() {
   exit_status=$?
   trap - EXIT HUP INT TERM
+  failure_action=$("$failure_policy" "$deployment_phase")
 
-  case "$deployment_phase" in
-    post_effect)
+  case "$failure_action" in
+    preserve_current)
       deployment_phase=handling_failure
       install_maintenance_override || true
 
@@ -440,15 +450,16 @@ finish() {
 
       echo "Deployment stopped after the canary effect boundary; the new release and current database remain in maintenance mode for forward repair." >&2
       ;;
-    swapping_pre_effect)
+    restore_snapshot)
       rollback
       ;;
-    service_stopped)
+    restart_existing)
       deployment_phase=handling_failure
       echo "Deployment stopped before the release swap; restarting the existing release." >&2
       restore_preexisting_maintenance_override || true
       sudo systemctl start "$service_name" || true
       ;;
+    no_action) ;;
   esac
 
   cleanup_remote
@@ -463,6 +474,7 @@ command -v curl >/dev/null
 command -v sqlite3 >/dev/null
 command -v flock >/dev/null
 command -v jq >/dev/null
+[ -x "$failure_policy" ]
 [ -x "$mise_binary" ]
 [ -x "$manual_herdr" ]
 [ -x "$worker_herdr" ]

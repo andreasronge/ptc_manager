@@ -426,6 +426,13 @@ remain paused in maintenance mode for forward repair. Successful deployments
 report both backup paths, retain the three newest release/database backup
 pairs, and prune older successful backups.
 
+The test suite also creates a fully migrated disposable SQLite target. It
+proves that a pre-effect failure restores its snapshot, that ordinary manager
+work remains paused until the allowlisted canary activates it, and that a
+post-effect restart preserves the canary's durable result instead of restoring
+older state. This complements the deployment script checks with executable
+database and domain behavior.
+
 ## Hetzner systemd and Tailscale
 
 Build the release, copy `_build/prod/rel/ptc_manager` to `/opt/ptc_manager`, and

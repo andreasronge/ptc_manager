@@ -7,6 +7,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @local_script Path.join(@project_root, "deploy/deploy-herdr")
   @remote_script Path.join(@project_root, "deploy/remote-deploy-herdr")
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
+  @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
   @environment_file_parser Path.join(
                              @project_root,
@@ -14,9 +15,21 @@ defmodule Mix.Tasks.PtcDeployTest do
                            )
 
   test "deployment scripts have valid POSIX shell syntax" do
-    for script <- [@local_script, @remote_script, @worker_git] do
+    for script <- [@local_script, @remote_script, @worker_git, @failure_policy] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
+  end
+
+  test "deployment failure policy classifies the effect boundary" do
+    assert policy_for("swapping_pre_effect") == "restore_snapshot"
+    assert policy_for("post_effect") == "preserve_current"
+    assert policy_for("service_stopped") == "restart_existing"
+    assert policy_for("complete") == "no_action"
+
+    assert {_output, status} =
+             System.cmd(@failure_policy, ["unknown"], stderr_to_stdout: true)
+
+    assert status == 2
   end
 
   test "Mix task exposes the guarded deployment workflow" do
@@ -155,6 +168,11 @@ defmodule Mix.Tasks.PtcDeployTest do
     fixture = write_json_fixture(payload)
     {output, 0} = System.cmd("jq", ["-r", "-f", @agent_filter, fixture])
     output |> String.trim() |> String.to_integer()
+  end
+
+  defp policy_for(phase) do
+    {output, 0} = System.cmd(@failure_policy, [phase])
+    String.trim(output)
   end
 
   defp write_json_fixture(payload) do
