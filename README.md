@@ -80,7 +80,7 @@ close issues, edit issue text, or trust labels as commands. See
 
 ## Run locally
 
-Requirements: Elixir, Erlang/OTP, SQLite, and a C compiler toolchain.
+Requirements: Elixir, Erlang/OTP, SQLite, `lsof`, and a C compiler toolchain.
 
 ```sh
 mix setup
@@ -88,6 +88,24 @@ mix phx.server
 ```
 
 Open <http://localhost:4000> and sign in with `ptc-manager-dev`.
+
+### Isolated browser checkpoint
+
+To inspect the real LiveViews with deterministic mock issues, jobs, workers,
+and agent activity, use the dedicated demo database. The reset task refuses to
+touch the ordinary development database:
+
+```sh
+PTC_DEMO_MODE=true PTC_DATABASE_PATH=tmp/ptc_manager_demo.db mix ptc.demo.reset
+PTC_DEMO_MODE=true PTC_DATABASE_PATH=tmp/ptc_manager_demo.db PORT=4100 mix phx.server
+```
+
+Open <http://localhost:4100>, sign in with `ptc-manager-dev`, and check
+Planning, Delivery, and Operations. No GitHub, Herdr, or LLM credentials are
+used, even if effectful PtcManager variables exist in your shell. To restore
+the exact starting state, stop the demo Phoenix server, run the reset command
+again, and then restart it. The reset also refuses to continue when `lsof`
+reports that another process still has the demo database open.
 
 The authenticated routes are:
 

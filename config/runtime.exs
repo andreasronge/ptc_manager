@@ -20,13 +20,21 @@ if System.get_env("PHX_SERVER") do
   config :ptc_manager, PtcManagerWeb.Endpoint, server: true
 end
 
+demo_mode = System.get_env("PTC_DEMO_MODE") == "true"
+
 github_sync_interval_ms =
-  System.get_env("PTC_GITHUB_SYNC_INTERVAL_MS", "0") |> String.to_integer()
+  if(demo_mode,
+    do: 0,
+    else: System.get_env("PTC_GITHUB_SYNC_INTERVAL_MS", "0") |> String.to_integer()
+  )
 
 herdr_sync_interval_ms =
-  System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
+  if(demo_mode,
+    do: 0,
+    else: System.get_env("PTC_HERDR_SYNC_INTERVAL_MS", "0") |> String.to_integer()
+  )
 
-herdr_run_as_user = System.get_env("PTC_HERDR_RUN_AS_USER")
+herdr_run_as_user = if(demo_mode, do: nil, else: System.get_env("PTC_HERDR_RUN_AS_USER"))
 
 herdr_git_binary =
   System.get_env("PTC_HERDR_GIT_BINARY") ||
@@ -36,15 +44,19 @@ herdr_git_binary =
       "/usr/local/bin/ptc-manager-worker-git"
     end
 
-dispatch_enabled = System.get_env("PTC_DISPATCH_ENABLED") == "true"
-agent_actions_enabled = System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
+dispatch_enabled = not demo_mode and System.get_env("PTC_DISPATCH_ENABLED") == "true"
+agent_actions_enabled = not demo_mode and System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
 
 daily_digest_enabled =
-  case System.get_env("PTC_DAILY_DIGEST_ENABLED") do
-    nil -> agent_actions_enabled
-    "true" -> true
-    "false" -> false
-    _value -> raise "PTC_DAILY_DIGEST_ENABLED must be true or false when set"
+  if demo_mode do
+    false
+  else
+    case System.get_env("PTC_DAILY_DIGEST_ENABLED") do
+      nil -> agent_actions_enabled
+      "true" -> true
+      "false" -> false
+      _value -> raise "PTC_DAILY_DIGEST_ENABLED must be true or false when set"
+    end
   end
 
 if daily_digest_enabled and not agent_actions_enabled do
@@ -55,13 +67,20 @@ daily_digest_run_as_user =
   System.get_env("PTC_DAILY_DIGEST_RUN_AS_USER") || System.get_env("PTC_CODEX_RUN_AS_USER")
 
 daily_digest_interval_ms =
-  System.get_env("PTC_DAILY_DIGEST_INTERVAL_MS", "60000") |> String.to_integer()
+  if(demo_mode,
+    do: 60_000,
+    else: System.get_env("PTC_DAILY_DIGEST_INTERVAL_MS", "60000") |> String.to_integer()
+  )
 
 if daily_digest_interval_ms < 1_000 do
   raise "PTC_DAILY_DIGEST_INTERVAL_MS must be at least 1000"
 end
 
-daily_digest_hour = System.get_env("PTC_DAILY_DIGEST_HOUR", "2") |> String.to_integer()
+daily_digest_hour =
+  if(demo_mode,
+    do: 2,
+    else: System.get_env("PTC_DAILY_DIGEST_HOUR", "2") |> String.to_integer()
+  )
 
 if daily_digest_hour not in 0..23 do
   raise "PTC_DAILY_DIGEST_HOUR must be between 0 and 23"
@@ -73,24 +92,29 @@ if daily_digest_enabled and
   raise "daily updates require a dedicated PTC_DAILY_DIGEST_RUN_AS_USER without GitHub credentials"
 end
 
-publication_enabled = System.get_env("PTC_PUBLICATION_ENABLED") == "true"
+publication_enabled = not demo_mode and System.get_env("PTC_PUBLICATION_ENABLED") == "true"
 
 implementation_agent_publishes_pr =
-  System.get_env("PTC_IMPLEMENTATION_AGENT_PUBLISHES_PR", "false") == "true"
+  not demo_mode and System.get_env("PTC_IMPLEMENTATION_AGENT_PUBLISHES_PR", "false") == "true"
 
 pr_reconcile_enabled =
-  case System.get_env("PTC_PR_RECONCILE_ENABLED") do
-    nil -> implementation_agent_publishes_pr or github_sync_interval_ms > 0
-    "true" -> true
-    "false" -> false
-    _value -> raise "PTC_PR_RECONCILE_ENABLED must be true or false when set"
+  if demo_mode do
+    false
+  else
+    case System.get_env("PTC_PR_RECONCILE_ENABLED") do
+      nil -> implementation_agent_publishes_pr or github_sync_interval_ms > 0
+      "true" -> true
+      "false" -> false
+      _value -> raise "PTC_PR_RECONCILE_ENABLED must be true or false when set"
+    end
   end
 
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
 config :ptc_manager,
-  github_read_token: System.get_env("GITHUB_READ_TOKEN"),
-  repository_path: System.get_env("PTC_REPOSITORY_PATH"),
+  demo_mode: demo_mode,
+  github_read_token: if(demo_mode, do: nil, else: System.get_env("GITHUB_READ_TOKEN")),
+  repository_path: if(demo_mode, do: nil, else: System.get_env("PTC_REPOSITORY_PATH")),
   github_sync_interval_ms: github_sync_interval_ms,
   herdr_sync_interval_ms: herdr_sync_interval_ms,
   herdr_session: System.get_env("PTC_HERDR_SESSION", "default"),
@@ -215,7 +239,7 @@ config :ptc_manager,
     |> String.to_integer(),
   implementation_agent_publishes_pr: implementation_agent_publishes_pr,
   implementation_test_command: System.get_env("PTC_IMPLEMENTATION_TEST_COMMAND"),
-  manager_enabled: System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
+  manager_enabled: not demo_mode and System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
   manager_concurrency:
     System.get_env("PTC_CODEX_MANAGER_CONCURRENCY", "1") |> String.to_integer(),
   codex_binary: System.get_env("PTC_CODEX_BINARY", "codex"),

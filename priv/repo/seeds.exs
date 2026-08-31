@@ -1,19 +1,27 @@
 alias PtcManager.Operations
-alias PtcManager.Operations.Repository
+alias PtcManager.Operations.{Job, Repository, WorktreeAllocation}
 alias PtcManager.Repo
 
 if Repo.aggregate(Repository, :count) == 0 do
   now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  demo_mode = Application.get_env(:ptc_manager, :demo_mode, false)
 
   {:ok, repository} =
     Operations.create_repository(%{
       github_owner: "andreasronge",
       github_name: "ptc_runner",
       default_branch: "main",
-      local_path: System.get_env("PTC_REPOSITORY_PATH"),
+      local_path: if(demo_mode, do: nil, else: System.get_env("PTC_REPOSITORY_PATH")),
       required_pre_pr_reviews:
-        Application.get_env(:ptc_manager, :required_pre_pr_reviews_default, 2),
-      implementation_test_command: Application.get_env(:ptc_manager, :implementation_test_command)
+        if(demo_mode,
+          do: 2,
+          else: Application.get_env(:ptc_manager, :required_pre_pr_reviews_default, 2)
+        ),
+      implementation_test_command:
+        if(demo_mode,
+          do: nil,
+          else: Application.get_env(:ptc_manager, :implementation_test_command)
+        )
     })
 
   issue_attrs = fn number, title, minutes_ago ->
@@ -27,6 +35,9 @@ if Repo.aggregate(Repository, :count) == 0 do
       html_url: "https://github.com/andreasronge/ptc_runner/issues/#{number}",
       body: "Demo issue body for local interface testing.",
       state: "open",
+      workflow_label: "ptc:ready",
+      dependencies_projected: true,
+      github_assignment_projected: true,
       body_digest: body_digest,
       content_digest:
         Base.encode16(:crypto.hash(:sha256, "#{title}:#{body_digest}"), case: :lower),
@@ -99,10 +110,38 @@ if Repo.aggregate(Repository, :count) == 0 do
         "codex" => true,
         "claude" => true,
         "implementation_slots" =>
-          Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+          if(demo_mode,
+            do: 1,
+            else: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+          )
       },
       last_heartbeat_at: now
     })
+
+  active_job =
+    active_job
+    |> Job.changeset(%{
+      state: "working",
+      fencing_token: 1,
+      lease_owner: worker.worker_key,
+      lease_expires_at: DateTime.add(now, 86_400, :second),
+      started_at: now,
+      branch_name: "ptc-manager/issue-1320-job-#{active_job.id}",
+      publication_source: "broker"
+    })
+    |> Repo.update!()
+
+  %WorktreeAllocation{}
+  |> WorktreeAllocation.changeset(%{
+    worker_id: worker.id,
+    job_id: active_job.id,
+    state: "active",
+    path: Path.join(System.tmp_dir!(), "ptc-manager-demo-worktree"),
+    herdr_workspace: "ptc-runner-1320",
+    agent_kind: "demo",
+    last_used_at: now
+  })
+  |> Repo.insert!()
 
   {:ok, _manager_run} =
     Operations.create_agent_run(%{
@@ -128,7 +167,8 @@ if Repo.aggregate(Repository, :count) == 0 do
       last_heartbeat_at: DateTime.add(now, -2, :second),
       herdr_workspace: "ptc-runner-1320",
       herdr_pane: "w2:p1",
-      herdr_session: "implementer-demo"
+      herdr_session: "implementer-demo",
+      fencing_token: active_job.fencing_token
     })
 
   IO.puts(

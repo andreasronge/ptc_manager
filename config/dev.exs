@@ -4,7 +4,7 @@ config :ptc_manager, :admin_password, System.get_env("PTC_MANAGER_PASSWORD") || 
 
 # Configure your database
 config :ptc_manager, PtcManager.Repo,
-  database: Path.expand("../ptc_manager_dev.db", __DIR__),
+  database: System.get_env("PTC_DATABASE_PATH") || Path.expand("../ptc_manager_dev.db", __DIR__),
   pool_size: 5,
   stacktrace: true,
   show_sensitive_data_on_connection_error: true
