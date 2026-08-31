@@ -742,7 +742,6 @@ bootstrap:
   command: ./scripts/ptc/bootstrap
   timeout_minutes: 10
 verification:
-  implementation: mix precommit
   before_publish: ./scripts/ci/pre-publication
   timeout_minutes: 45
 ```
@@ -1364,7 +1363,6 @@ bootstrap:
   command: ./scripts/ptc/bootstrap
   timeout_minutes: 10
 verification:
-  implementation: mix precommit
   before_publish: ./scripts/ci/pre-publication
   timeout_minutes: 45
 ```
@@ -1372,6 +1370,12 @@ verification:
 The repository owns the executable gate. A developer pre-push hook, PtcManager,
 and GitHub CI should delegate to the same checked-in scripts. The
 credential-bearing publisher continues to disable Git hooks.
+
+The exact candidate commit also owns this contract and the scripts it invokes.
+The broker evidence proves that the recorded candidate command ran against the
+recorded SHA; it does not make a malicious candidate's self-weakened policy
+trustworthy. Gate-policy changes therefore require explicit human review, and
+protected-branch CI remains the final merge boundary.
 
 ### Reuse the `ptc_runner` duplication ratchet
 
@@ -1591,7 +1595,11 @@ Acceptance:
 - Run the gate credential-free and persist exact-SHA evidence.
 - Keep publisher hooks disabled.
 - Add pass, failure, changed-head, timeout, bounded-output, and dirty-worktree
-  tests.
+  tests, including replacement-ref, assume-unchanged, clean-filter, transformed
+  checkout, and rejected-submodule regressions.
+- Provision a root-owned, credential-free gate toolchain and run the real
+  checked-in bootstrap and pre-publication scripts as a pre-stop deployment
+  canary.
 
 Acceptance:
 

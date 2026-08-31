@@ -8,10 +8,10 @@ Usage: mix ptc.deploy [--target SSH_TARGET] [--dry-run]
 Deploy a clean PtcManager Git commit to the Herdr machine. Defaults:
   SSH target: herdr-box
 
-The command runs `mix precommit`, builds the release remotely, backs up the
-SQLite database, installs the release in maintenance mode, lets release startup
-run migrations, checks /health, and runs one read-only canary before reporting
-success.
+The command runs the checked-in bootstrap and pre-publication gates, builds the
+release remotely, backs up the SQLite database, installs the release in
+maintenance mode, lets release startup run migrations, checks /health, and runs
+one read-only canary before reporting success.
 EOF
 }
 
@@ -75,7 +75,8 @@ if [ "$dry_run" = true ]; then
 fi
 
 echo "Running local verification..."
-env MIX_ENV=test mix precommit
+env MIX_ENV=test ./scripts/ptc/bootstrap
+env MIX_ENV=test ./scripts/ci/pre-publication
 
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   echo "local verification changed the worktree; review and commit those changes first" >&2

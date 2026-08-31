@@ -1,5 +1,12 @@
 import Config
 
+env_default = fn name, default ->
+  case System.get_env(name) do
+    value when value in [nil, ""] -> default
+    value -> value
+  end
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration
@@ -196,6 +203,9 @@ config :ptc_manager,
     System.get_env("PTC_PUBLICATION_INTERVAL_MS", "5000") |> String.to_integer(),
   publication_claim_timeout_ms:
     System.get_env("PTC_PUBLICATION_CLAIM_TIMEOUT_MS", "180000") |> String.to_integer(),
+  publication_gate_renewal_interval_ms:
+    System.get_env("PTC_PUBLICATION_GATE_RENEWAL_INTERVAL_MS", "60000")
+    |> String.to_integer(),
   publication_max_attempts:
     System.get_env("PTC_PUBLICATION_MAX_ATTEMPTS", "5") |> String.to_integer(),
   publication_retry_base_ms:
@@ -221,6 +231,18 @@ config :ptc_manager,
   git_binary: System.get_env("PTC_GIT_BINARY", "git"),
   git_run_as_user: System.get_env("PTC_GIT_RUN_AS_USER"),
   git_verifier_home: System.get_env("PTC_GIT_VERIFIER_HOME"),
+  pre_publication_run_as_user:
+    env_default.("PTC_PRE_PUBLICATION_RUN_AS_USER", "ptc-manager-gate"),
+  pre_publication_home: env_default.("PTC_PRE_PUBLICATION_HOME", "/var/lib/ptc_manager-gate"),
+  pre_publication_mix_home:
+    env_default.("PTC_PRE_PUBLICATION_MIX_HOME", "/opt/ptc-manager-gate-mix"),
+  pre_publication_path: env_default.("PTC_PRE_PUBLICATION_PATH", "/usr/local/bin:/usr/bin:/bin"),
+  pre_publication_git_binary: env_default.("PTC_PRE_PUBLICATION_GIT_BINARY", "/usr/bin/git"),
+  pre_publication_timeout_binary:
+    env_default.(
+      "PTC_PRE_PUBLICATION_TIMEOUT_BINARY",
+      env_default.("PTC_GIT_TIMEOUT_BINARY", nil)
+    ),
   git_timeout_ms: System.get_env("PTC_GIT_TIMEOUT_MS", "15000") |> String.to_integer(),
   git_timeout_binary: System.get_env("PTC_GIT_TIMEOUT_BINARY"),
   external_pr_command_timeout_ms:

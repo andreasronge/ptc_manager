@@ -1,0 +1,7 @@
+version: 1
+bootstrap:
+  command: ./scripts/ptc/bootstrap
+  timeout_minutes: 10
+verification:
+  before_publish: ./scripts/ci/pre-publication
+  timeout_minutes: 45

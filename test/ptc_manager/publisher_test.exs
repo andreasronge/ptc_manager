@@ -53,8 +53,64 @@ defmodule PtcManager.PublisherTest do
     end
   end
 
+  defmodule FakeGate do
+    def verify(publication) do
+      send(Application.fetch_env!(:ptc_manager, :publisher_test_pid), {
+        :gate_called,
+        publication.id
+      })
+
+      Application.get_env(:ptc_manager, :publisher_gate_result) ||
+        {:ok,
+         %{
+           status: "passed",
+           verified_sha: publication.head_sha,
+           config_digest: publication.job.pre_publication_config_digest,
+           exit_status: 0,
+           output: "gate passed",
+           output_truncated: false,
+           duration_ms: 25
+         }}
+    end
+  end
+
+  defmodule SlowGate do
+    def verify(publication) do
+      send(Application.fetch_env!(:ptc_manager, :publisher_test_pid), {
+        :slow_gate_started,
+        publication.id
+      })
+
+      Process.sleep(Application.fetch_env!(:ptc_manager, :publisher_slow_gate_ms))
+
+      {:ok,
+       %{
+         status: "passed",
+         verified_sha: publication.head_sha,
+         config_digest: publication.job.pre_publication_config_digest,
+         exit_status: 0,
+         output: "slow gate passed",
+         output_truncated: false,
+         duration_ms: Application.fetch_env!(:ptc_manager, :publisher_slow_gate_ms)
+       }}
+    end
+  end
+
   setup do
     Process.put(:publisher_test_pid, self())
+
+    previous_test_pid = Application.get_env(:ptc_manager, :publisher_test_pid)
+    previous_gate_result = Application.get_env(:ptc_manager, :publisher_gate_result)
+    previous_slow_gate_ms = Application.get_env(:ptc_manager, :publisher_slow_gate_ms)
+
+    Application.put_env(:ptc_manager, :publisher_test_pid, self())
+
+    on_exit(fn ->
+      restore_env(:publisher_test_pid, previous_test_pid)
+      restore_env(:publisher_gate_result, previous_gate_result)
+      restore_env(:publisher_slow_gate_ms, previous_slow_gate_ms)
+    end)
+
     :ok
   end
 
@@ -69,16 +125,27 @@ defmodule PtcManager.PublisherTest do
     }
 
     Process.put(:publisher_broker_result, {:ok, remote})
+    publication_id = publication.id
 
-    assert {:ok, published} = Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+    assert {:ok, published} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
+
     assert_receive :probe_called
-    assert_receive {:broker_called, publication_id}
-    assert publication_id == publication.id
+    assert_receive {:gate_called, ^publication_id}
+    assert_receive {:broker_called, ^publication_id}
     assert published.state == "published"
     assert published.pr_number == 73
     assert published.pr_url == remote.pr_url
     assert published.remote_head_sha == result.head_sha
     assert Repo.get!(Job, job.id).state == "pr_open"
+
+    gated_job = Repo.get!(Job, job.id)
+    assert gated_job.pre_publication_status == "passed"
+    assert gated_job.pre_publication_verified_sha == result.head_sha
+    assert gated_job.pre_publication_exit_status == 0
+    assert gated_job.pre_publication_output == "gate passed"
+    assert gated_job.pre_publication_duration_ms == 25
+    assert gated_job.pre_publication_verified_at
 
     assert Repo.aggregate(
              from(audit in AuditEvent,
@@ -151,7 +218,9 @@ defmodule PtcManager.PublisherTest do
            )
 
     refute_receive :probe_called
-    assert {:ok, :empty} = Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+
+    assert {:ok, :empty} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
   end
 
   test "adopts an already imported PR into its agent publication" do
@@ -636,7 +705,8 @@ defmodule PtcManager.PublisherTest do
     Process.put(:publisher_probe_result, {:ok, result})
     Process.put(:publisher_broker_result, {:retry, :offline})
 
-    assert {:error, :offline} = Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+    assert {:error, :offline} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
 
     queued = Repo.get!(PrPublication, publication.id)
     assert queued.state == "queued"
@@ -644,7 +714,9 @@ defmodule PtcManager.PublisherTest do
     assert queued.next_attempt_at
     assert queued.last_error =~ "offline"
     assert Repo.get!(Job, job.id).state == "ready_for_pr"
-    assert {:ok, :empty} = Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+
+    assert {:ok, :empty} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
   end
 
   test "a GitHub rate limit honors its delay without consuming the retry budget" do
@@ -661,7 +733,7 @@ defmodule PtcManager.PublisherTest do
     before = DateTime.utc_now()
 
     assert {:error, {:after, 3_600_000, ^rate_limit}} =
-             Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
 
     queued = Repo.get!(PrPublication, publication.id)
     assert queued.state == "queued"
@@ -679,12 +751,83 @@ defmodule PtcManager.PublisherTest do
     )
 
     assert {:error, :verified_branch_changed} =
-             Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
 
     assert_receive :probe_called
     refute_receive {:broker_called, _publication_id}
     assert Repo.get!(PrPublication, publication.id).state == "blocked"
     assert Repo.get!(Job, job.id).state == "publish_blocked"
+  end
+
+  test "a failing pre-publication command blocks before the credential-bearing broker runs" do
+    {job, publication, result} = verified_publication_fixture()
+    publication_id = publication.id
+    Process.put(:publisher_probe_result, {:ok, result})
+
+    Application.put_env(
+      :ptc_manager,
+      :publisher_gate_result,
+      {:ok,
+       %{
+         status: "failed",
+         verified_sha: result.head_sha,
+         config_digest: job.pre_publication_config_digest,
+         exit_status: 7,
+         output: "dialyzer failed",
+         output_truncated: false,
+         duration_ms: 321
+       }}
+    )
+
+    assert {:error, :pre_publication_gate_failed} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
+
+    assert_receive {:gate_called, ^publication_id}
+    refute_receive {:broker_called, _publication_id}
+
+    failed = Repo.get!(Job, job.id)
+    assert failed.state == "publish_blocked"
+    assert failed.pre_publication_status == "failed"
+    assert failed.pre_publication_verified_sha == result.head_sha
+    assert failed.pre_publication_exit_status == 7
+    assert failed.pre_publication_output == "dialyzer failed"
+  end
+
+  test "renews the fenced publication claim while a slow gate is running" do
+    {_job, publication, result} = verified_publication_fixture()
+    Process.put(:publisher_probe_result, {:ok, result})
+
+    remote = %{
+      pr_number: 74,
+      pr_url: "https://github.com/owner/repo/pull/74",
+      head_sha: result.head_sha
+    }
+
+    Process.put(:publisher_broker_result, {:ok, remote})
+
+    previous_claim_timeout =
+      Application.get_env(:ptc_manager, :publication_claim_timeout_ms)
+
+    previous_renewal_interval =
+      Application.get_env(:ptc_manager, :publication_gate_renewal_interval_ms)
+
+    Application.put_env(:ptc_manager, :publication_claim_timeout_ms, 40)
+    Application.put_env(:ptc_manager, :publication_gate_renewal_interval_ms, 5)
+    Application.put_env(:ptc_manager, :publisher_slow_gate_ms, 120)
+
+    on_exit(fn ->
+      restore_env(:publication_claim_timeout_ms, previous_claim_timeout)
+      restore_env(:publication_gate_renewal_interval_ms, previous_renewal_interval)
+    end)
+
+    assert {:ok, published} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: SlowGate)
+
+    assert_receive {:slow_gate_started, publication_id}
+    assert publication_id == publication.id
+    assert_receive {:broker_called, ^publication_id}
+    assert published.state == "published"
+    assert Repo.get!(Job, published.job_id).pre_publication_output == "slow gate passed"
   end
 
   test "an expired publication attempt is reclaimed and fences the old result" do
@@ -735,7 +878,7 @@ defmodule PtcManager.PublisherTest do
     Process.put(:publisher_broker_result, {:blocked, :github_app_not_configured})
 
     assert {:error, :github_app_not_configured} =
-             Publisher.run_once(probe: FakeProbe, broker: FakeBroker)
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
 
     assert {:ok, queued} = Publications.retry_blocked(publication.id, "andreas")
     assert queued.state == "queued"
@@ -753,7 +896,8 @@ defmodule PtcManager.PublisherTest do
                job.id,
                job.fencing_token,
                job.result_attempt_token,
-               result
+               result,
+               contract()
              )
 
     assert Repo.aggregate(PrPublication, :count) == 1
@@ -1063,6 +1207,36 @@ defmodule PtcManager.PublisherTest do
              })
   end
 
+  test "the GitHub App broker rejects an exact job branch without matching gate evidence" do
+    {_job, publication, _result} = verified_publication_fixture()
+    publication = Repo.preload(publication, [job: [:issue, :repository]], force: true)
+
+    settings =
+      for key <- [
+            :github_app_id,
+            :github_app_installation_id,
+            :github_app_private_key_path,
+            :github_push_timeout_binary,
+            :github_publish_staging_root
+          ],
+          into: %{} do
+        {key, Application.get_env(:ptc_manager, key)}
+      end
+
+    on_exit(fn ->
+      Enum.each(settings, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    end)
+
+    Application.put_env(:ptc_manager, :github_app_id, "1")
+    Application.put_env(:ptc_manager, :github_app_installation_id, "2")
+    Application.put_env(:ptc_manager, :github_app_private_key_path, "/does/not/exist")
+    Application.put_env(:ptc_manager, :github_push_timeout_binary, "/usr/bin/timeout")
+    Application.put_env(:ptc_manager, :github_publish_staging_root, System.tmp_dir!())
+
+    assert {:blocked, :pre_publication_gate_not_passed} =
+             PtcManager.GitHub.AppBroker.publish(publication)
+  end
+
   test "the broker copies the bounded final-commit retrospective into its PR body" do
     path =
       Path.join(
@@ -1194,7 +1368,8 @@ defmodule PtcManager.PublisherTest do
                claimed.id,
                claimed.fencing_token,
                claimed.result_attempt_token,
-               result
+               result,
+               contract()
              )
 
     publication =
@@ -1204,6 +1379,8 @@ defmodule PtcManager.PublisherTest do
 
     {verified, publication, result}
   end
+
+  defp contract, do: PtcManager.RepositoryContractFixture.contract()
 
   defp external_publication_fixture(job, branch, head_sha, pr_number) do
     %PrPublication{}
@@ -1277,6 +1454,9 @@ defmodule PtcManager.PublisherTest do
   defp timeout_binary! do
     System.find_executable("timeout") || raise "timeout executable is required for this test"
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
+  defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
 
   defp base_repository(job) do
     repository = Repo.get!(Repository, job.repository_id)

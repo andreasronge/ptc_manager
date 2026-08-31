@@ -7,3 +7,4 @@ ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-exte
 ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-external-cleanup
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-external-push
 ptc-manager ALL=(ptc-manager-verifier) NOPASSWD: /usr/bin/env
+ptc-manager ALL=(ptc-manager-gate) NOPASSWD: /usr/bin/env

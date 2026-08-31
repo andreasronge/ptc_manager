@@ -17,6 +17,14 @@ defmodule PtcManager.ResultReconcilerTest do
     end
   end
 
+  defmodule FakeContract do
+    def for_result(_job, _result), do: {:ok, PtcManager.RepositoryContractFixture.contract()}
+  end
+
+  defmodule MissingContract do
+    def for_result(_job, _result), do: {:error, :repository_contract_missing}
+  end
+
   setup do
     Process.put(:result_test_pid, self())
     :ok
@@ -35,7 +43,13 @@ defmodule PtcManager.ResultReconcilerTest do
     Process.put(:result_probe_result, {:ok, result})
 
     job_id = job.id
-    assert {:ok, ready} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+
+    assert {:ok, ready} =
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: FakeContract
+             )
+
     assert_receive {:probe, _repository_id, ^job_id}
     assert ready.state == "ready_for_pr"
     assert ready.result_base_sha == result.base_sha
@@ -76,15 +90,98 @@ defmodule PtcManager.ResultReconcilerTest do
        }}
     )
 
-    assert {:ok, _ready} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    assert {:ok, _ready} =
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: MissingContract
+             )
+
     assert Repo.get_by!(PrPublication, job_id: job.id).source == "agent"
+    refute Repo.get!(Job, job.id).pre_publication_status
+  end
+
+  test "a missing repository contract cannot make a result publication-eligible" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+
+    Process.put(
+      :result_probe_result,
+      {:ok,
+       %{
+         base_sha: String.duplicate("a", 40),
+         head_sha: String.duplicate("b", 40),
+         diff_digest: String.duplicate("c", 64),
+         commit_count: 1
+       }}
+    )
+
+    assert {:error, {:repository_contract_invalid, :repository_contract_missing}} =
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: MissingContract
+             )
+
+    pending = Repo.get!(Job, job.id)
+    assert pending.state == "awaiting_reconciliation"
+    assert pending.last_error =~ "repository_contract_missing"
+    refute Repo.get_by(PrPublication, job_id: job.id)
+  end
+
+  test "reverification refreshes a pre-upgrade unpublished broker publication" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+
+    result = %{
+      base_sha: String.duplicate("a", 40),
+      head_sha: String.duplicate("b", 40),
+      diff_digest: String.duplicate("c", 64),
+      commit_count: 1
+    }
+
+    old_publication =
+      %PrPublication{}
+      |> PrPublication.changeset(%{
+        job_id: job.id,
+        repository_id: job.repository_id,
+        state: "blocked",
+        idempotency_key: String.duplicate("d", 64),
+        fencing_token: job.fencing_token,
+        branch_name: job.branch_name,
+        base_sha: result.base_sha,
+        head_sha: result.head_sha,
+        diff_digest: result.diff_digest,
+        attempt_count: 3,
+        last_error: "pre_publication_gate_not_configured",
+        source: "broker"
+      })
+      |> Repo.insert!()
+
+    Process.put(:result_probe_result, {:ok, result})
+
+    assert {:ok, ready} =
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: FakeContract
+             )
+
+    assert ready.state == "ready_for_pr"
+    assert ready.pre_publication_status == "pending"
+
+    refreshed = Repo.get_by!(PrPublication, job_id: job.id)
+    assert refreshed.id == old_publication.id
+    assert refreshed.state == "queued"
+    assert refreshed.attempt_count == 0
+    assert refreshed.last_error == nil
+    assert refreshed.idempotency_key != old_publication.idempotency_key
   end
 
   test "a missing branch stays active and can be retried without GitHub writes" do
     {_repository, _issue, job} = awaiting_job_fixture()
     Process.put(:result_probe_result, {:error, :branch_missing})
 
-    assert {:error, :branch_missing} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    assert {:error, :branch_missing} =
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: FakeContract
+             )
 
     pending = Repo.get!(Job, job.id)
     assert pending.state == "awaiting_reconciliation"
@@ -104,7 +201,10 @@ defmodule PtcManager.ResultReconcilerTest do
     )
 
     assert {:ok, %{state: "ready_for_pr"}} =
-             ResultReconciler.run_job(job.id, probe: FakeProbe)
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: FakeContract
+             )
   end
 
   test "stale reconciliation results cannot overwrite a newer fenced attempt" do
@@ -123,7 +223,8 @@ defmodule PtcManager.ResultReconcilerTest do
                job.id,
                job.fencing_token - 1,
                claimed.result_attempt_token,
-               result
+               result,
+               contract()
              )
 
     assert Repo.get!(Job, job.id).state == "verifying_result"
@@ -159,7 +260,8 @@ defmodule PtcManager.ResultReconcilerTest do
                job.id,
                job.fencing_token,
                first.result_attempt_token,
-               result
+               result,
+               contract()
              )
 
     assert Repo.get!(Job, job.id).result_attempt_token == second.result_attempt_token
@@ -182,7 +284,8 @@ defmodule PtcManager.ResultReconcilerTest do
                job.id,
                job.fencing_token,
                claimed.result_attempt_token,
-               result
+               result,
+               contract()
              )
 
     assert Repo.get!(Job, job.id).state == "verifying_result"
@@ -199,7 +302,7 @@ defmodule PtcManager.ResultReconcilerTest do
       commit_count: 1
     }
 
-    args = [job.id, job.fencing_token, claimed.result_attempt_token, result]
+    args = [job.id, job.fencing_token, claimed.result_attempt_token, result, contract()]
     assert {:ok, first} = apply(Operations, :mark_result_verified, args)
     assert {:ok, second} = apply(Operations, :mark_result_verified, args)
     assert first.id == second.id
@@ -262,4 +365,6 @@ defmodule PtcManager.ResultReconcilerTest do
 
     {repository, issue, job}
   end
+
+  defp contract, do: PtcManager.RepositoryContractFixture.contract()
 end

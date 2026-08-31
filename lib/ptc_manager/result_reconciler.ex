@@ -20,16 +20,19 @@ defmodule PtcManager.ResultReconciler do
 
   defp verify_job(job, opts) do
     probe = Keyword.get(opts, :probe, Application.fetch_env!(:ptc_manager, :result_probe))
+    contract_provider = Keyword.get(opts, :contract_provider, PtcManager.Repository.Contract)
 
     case probe.verify(job.repository, job) do
       {:ok, result} ->
-        if valid_result?(result) do
+        with true <- valid_result?(result),
+             {:ok, contract} <- publication_contract(job, result, contract_provider) do
           outcome =
             Operations.mark_result_verified(
               job.id,
               job.fencing_token,
               job.result_attempt_token,
-              result
+              result,
+              contract
             )
 
           if match?({:ok, _job}, outcome) do
@@ -38,7 +41,8 @@ defmodule PtcManager.ResultReconciler do
 
           outcome
         else
-          record_failure(job, {:invalid_probe_result, result})
+          false -> record_failure(job, {:invalid_probe_result, result})
+          {:error, reason} -> record_failure(job, {:repository_contract_invalid, reason})
         end
 
       {:error, reason} ->
@@ -78,4 +82,9 @@ defmodule PtcManager.ResultReconciler do
 
   defp valid_sha?(sha),
     do: is_binary(sha) and Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, sha)
+
+  defp publication_contract(%{publication_source: "agent"}, _result, _provider),
+    do: {:ok, nil}
+
+  defp publication_contract(job, result, provider), do: provider.for_result(job, result)
 end

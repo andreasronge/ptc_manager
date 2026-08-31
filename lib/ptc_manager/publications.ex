@@ -271,6 +271,59 @@ defmodule PtcManager.Publications do
     if updated == 1, do: :ok, else: {:error, :publication_claim_expired}
   end
 
+  def record_pre_publication_gate(publication_id, fencing_token, attempt_token, evidence)
+      when is_integer(publication_id) and is_integer(fencing_token) and
+             is_binary(attempt_token) and is_map(evidence) do
+    now = now()
+
+    outcome =
+      if valid_gate_evidence?(evidence) do
+        Repo.transaction(fn ->
+          publication = load(publication_id)
+
+          with :ok <- active_publication_claim(publication, fencing_token, attempt_token, now),
+               true <- evidence.verified_sha == publication.head_sha,
+               true <- evidence.config_digest == publication.job.pre_publication_config_digest do
+            job =
+              publication.job
+              |> Job.changeset(%{
+                pre_publication_status: evidence.status,
+                pre_publication_verified_sha: evidence.verified_sha,
+                pre_publication_exit_status: evidence.exit_status,
+                pre_publication_output: evidence.output,
+                pre_publication_duration_ms: evidence.duration_ms,
+                pre_publication_verified_at: now
+              })
+              |> Repo.update!()
+
+            insert_audit!(%{
+              actor: "coordinator",
+              action: "pr_publication.pre_publication_gate_recorded",
+              target_type: "pr_publication",
+              target_id: publication.id,
+              details: %{
+                "status" => evidence.status,
+                "verified_sha" => evidence.verified_sha,
+                "exit_status" => evidence.exit_status,
+                "duration_ms" => evidence.duration_ms,
+                "output_truncated" => Map.get(evidence, :output_truncated, false),
+                "config_digest" => evidence.config_digest
+              }
+            })
+
+            %{publication | job: job}
+          else
+            false -> Repo.rollback(:stale_pre_publication_gate_evidence)
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        end)
+      else
+        {:error, :invalid_pre_publication_gate_evidence}
+      end
+
+    notify(outcome)
+  end
+
   def complete(publication_id, fencing_token, attempt_token, result)
       when is_integer(publication_id) and is_integer(fencing_token) and
              is_binary(attempt_token) and is_map(result) do
@@ -1284,6 +1337,39 @@ defmodule PtcManager.Publications do
       github_url?(result.pr_url) and
       is_binary(result[:head_sha]) and
       Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, result.head_sha)
+  end
+
+  defp valid_gate_evidence?(evidence) do
+    evidence[:status] in ["passed", "failed"] and
+      is_binary(evidence[:verified_sha]) and
+      Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, evidence.verified_sha) and
+      is_binary(evidence[:config_digest]) and
+      Regex.match?(~r/\A[0-9a-f]{64}\z/, evidence.config_digest) and
+      is_integer(evidence[:exit_status]) and evidence.exit_status >= 0 and
+      is_binary(evidence[:output]) and byte_size(evidence.output) <= 65_536 and
+      is_integer(evidence[:duration_ms]) and evidence.duration_ms >= 0
+  end
+
+  defp active_publication_claim(publication, fencing_token, attempt_token, now) do
+    cond do
+      publication.state != "publishing" ->
+        {:error, :invalid_publication_state}
+
+      publication.fencing_token != fencing_token ->
+        {:error, :stale_fencing_token}
+
+      publication.attempt_token != attempt_token ->
+        {:error, :stale_publication_attempt}
+
+      is_nil(publication.attempt_expires_at) ->
+        {:error, :publication_claim_expired}
+
+      DateTime.compare(publication.attempt_expires_at, now) != :gt ->
+        {:error, :publication_claim_expired}
+
+      true ->
+        :ok
+    end
   end
 
   defp valid_remote_status?(result) do

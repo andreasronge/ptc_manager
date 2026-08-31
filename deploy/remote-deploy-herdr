@@ -45,6 +45,19 @@ mise_binary=/home/agent/.local/bin/mise
 node_version=22.23.2
 worker_node_dir="/opt/ptc-manager-node-${node_version}"
 worker_node_staging=
+erlang_version=29.0.3
+elixir_version=1.20.2-otp-29
+gate_mise_root=/opt/ptc-manager-gate-mise
+gate_mise_data="$gate_mise_root/data"
+gate_mise_cache="$gate_mise_root/cache"
+gate_mise_state="$gate_mise_root/state"
+gate_mise_config="$gate_mise_root/config"
+gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
+gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
+gate_mix_home=/opt/ptc-manager-gate-mix
+gate_contract_probe=
+gate_source_archive=
+gate_tool_home=
 manual_herdr=/home/agent/.local/bin/herdr
 worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
@@ -69,6 +82,18 @@ cleanup_remote() {
 
   case "$worker_node_staging" in
     /opt/ptc-manager-node-*) sudo rm -rf -- "$worker_node_staging" ;;
+  esac
+
+  case "$gate_contract_probe" in
+    /var/lib/ptc_manager-gate/deployment-contract.*) sudo rm -rf -- "$gate_contract_probe" ;;
+  esac
+
+  case "$gate_source_archive" in
+    /var/lib/ptc_manager-gate/source-*.tar) sudo rm -f -- "$gate_source_archive" ;;
+  esac
+
+  case "$gate_tool_home" in
+    /tmp/ptc-manager-gate-toolchain.*) sudo rm -rf -- "$gate_tool_home" ;;
   esac
 }
 
@@ -377,6 +402,113 @@ install_worker_node() {
   sudo -u ptc-manager-worker -H /usr/local/bin/corepack --version >/dev/null
 }
 
+install_gate_beam_toolchain() {
+  sudo install -d -o root -g root -m 0755 "$gate_mise_root" "$gate_mise_data" \
+    "$gate_mise_cache" "$gate_mise_state" "$gate_mise_config"
+
+  sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
+    MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
+    MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
+    "$mise_binary" install "erlang@${erlang_version}" "elixir@${elixir_version}"
+
+  installed_erlang=$(sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
+    MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
+    MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
+    "$mise_binary" where "erlang@${erlang_version}")
+  installed_elixir=$(sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
+    MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
+    MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
+    "$mise_binary" where "elixir@${elixir_version}")
+
+  if [ "$installed_erlang" != "$gate_erlang_dir" ] ||
+    [ "$installed_elixir" != "$gate_elixir_dir" ]; then
+    echo "gate BEAM toolchain was installed outside its root-owned prefix" >&2
+    return 1
+  fi
+
+  for executable in "$gate_erlang_dir/bin/erl" "$gate_erlang_dir/bin/erlc" \
+    "$gate_erlang_dir/bin/escript" "$gate_elixir_dir/bin/elixir" \
+    "$gate_elixir_dir/bin/elixirc" "$gate_elixir_dir/bin/iex" "$gate_elixir_dir/bin/mix"; do
+    if ! sudo test -x "$executable"; then
+      echo "gate BEAM command is missing or not executable: $executable" >&2
+      return 1
+    fi
+  done
+
+  if ! sudo find "$gate_erlang_dir" "$gate_elixir_dir" -type l -print |
+    while IFS= read -r link; do
+      target=$(sudo readlink -f "$link")
+      case "$target" in
+        "$gate_mise_root"/*) ;;
+        *)
+          echo "gate toolchain symlink escapes its root-owned prefix: $link" >&2
+          exit 1
+          ;;
+      esac
+    done; then
+    return 1
+  fi
+
+  sudo install -d -o root -g root -m 0755 "$gate_mix_home"
+
+  gate_tool_home=$(sudo mktemp -d /tmp/ptc-manager-gate-toolchain.XXXXXX)
+  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
+    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
+    "$gate_elixir_dir/bin/mix" local.hex --force --if-missing
+  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
+    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
+    "$gate_elixir_dir/bin/mix" local.rebar --force --if-missing
+  sudo rm -rf -- "$gate_tool_home"
+  gate_tool_home=
+
+  sudo chown -R root:root "$gate_mise_root" "$gate_mix_home"
+  sudo chmod -R a+rX,go-w "$gate_mise_root" "$gate_mix_home"
+
+  if ! sudo find "$gate_mix_home/archives" -maxdepth 1 -type d -name 'hex-*' \
+    -print -quit | grep -q .; then
+    echo "gate Mix home does not contain a Hex archive" >&2
+    return 1
+  fi
+
+  if ! sudo find "$gate_mix_home" -type f -name rebar3 -perm -u+x -print -quit | grep -q .; then
+    echo "gate Mix home does not contain an executable rebar3" >&2
+    return 1
+  fi
+
+  for command in erl erlc escript; do
+    sudo ln -sfn "$gate_erlang_dir/bin/$command" "/usr/local/bin/$command"
+  done
+
+  for command in elixir elixirc iex mix; do
+    sudo ln -sfn "$gate_elixir_dir/bin/$command" "/usr/local/bin/$command"
+  done
+
+  sudo -u ptc-manager-gate env -i HOME=/var/lib/ptc_manager-gate \
+    MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C \
+    /usr/local/bin/mix --version >/dev/null
+  sudo -u ptc-manager-gate env -i HOME=/var/lib/ptc_manager-gate \
+    MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C \
+    /usr/local/bin/mix help hex >/dev/null
+}
+
+verify_gate_contract() {
+  gate_contract_probe=$(sudo -u ptc-manager-gate \
+    mktemp -d "/var/lib/ptc_manager-gate/deployment-contract.XXXXXX")
+  sudo -u ptc-manager-gate mkdir "$gate_contract_probe/home" "$gate_contract_probe/repository"
+  sudo -u ptc-manager-gate tar -xf "$gate_source_archive" -C "$gate_contract_probe/repository"
+
+  sudo -u ptc-manager-gate env -i HOME="$gate_contract_probe/home" \
+    HEX_HOME="$gate_contract_probe/home/.hex" \
+    REBAR_CACHE_DIR="$gate_contract_probe/home/.cache/rebar3" \
+    MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C MIX_ENV=test \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
+    /bin/sh -c 'cd "$1" && ./scripts/ptc/bootstrap && ./scripts/ci/pre-publication' \
+    ptc-manager-gate-contract "$gate_contract_probe/repository"
+
+  sudo rm -rf -- "$gate_contract_probe"
+  gate_contract_probe=
+}
+
 prune_successful_backups() {
   sudo find /opt -maxdepth 1 -type d -name 'ptc_manager-before-*' -printf '%T@ %p\n' |
     sort -nr |
@@ -474,6 +606,7 @@ command -v curl >/dev/null
 command -v sqlite3 >/dev/null
 command -v flock >/dev/null
 command -v jq >/dev/null
+command -v python3 >/dev/null
 [ -x "$failure_policy" ]
 [ -x "$mise_binary" ]
 [ -x "$manual_herdr" ]
@@ -527,6 +660,12 @@ configured_health_port=$(read_environment_setting PORT $coordinator_environment_
 configured_coordinator_session=$(read_environment_setting PTC_HERDR_SESSION $coordinator_environment_files)
 # shellcheck disable=SC2086
 configured_worktree_root=$(read_environment_setting PTC_WORKTREE_ROOT $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_gate_user=$(read_environment_setting PTC_PRE_PUBLICATION_RUN_AS_USER $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_gate_home=$(read_environment_setting PTC_PRE_PUBLICATION_HOME $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_gate_mix_home=$(read_environment_setting PTC_PRE_PUBLICATION_MIX_HOME $coordinator_environment_files)
 
 running_database_path=$(read_process_setting "$service_pid" DATABASE_PATH "")
 running_health_port=$(read_process_setting "$service_pid" PORT 4000)
@@ -535,6 +674,16 @@ running_worktree_root=$(read_process_setting "$service_pid" PTC_WORKTREE_ROOT ""
 
 configured_health_port=${configured_health_port:-4000}
 configured_coordinator_session=${configured_coordinator_session:-default}
+configured_gate_user=${configured_gate_user:-ptc-manager-gate}
+configured_gate_home=${configured_gate_home:-/var/lib/ptc_manager-gate}
+configured_gate_mix_home=${configured_gate_mix_home:-/opt/ptc-manager-gate-mix}
+
+if [ "$configured_gate_user" != "ptc-manager-gate" ] ||
+  [ "$configured_gate_home" != "/var/lib/ptc_manager-gate" ] ||
+  [ "$configured_gate_mix_home" != "/opt/ptc-manager-gate-mix" ]; then
+  echo "pre-publication gates must use the isolated ptc-manager-gate identity" >&2
+  exit 1
+fi
 
 if [ "$running_database_path" != "$configured_database_path" ] ||
   [ "$running_health_port" != "$configured_health_port" ] ||
@@ -602,6 +751,18 @@ ensure_no_managed_runs
 ensure_no_busy_herdr_agents
 capture_maintenance_override
 ensure_private_worktree_root "$worktree_root"
+if ! id -u ptc-manager-gate >/dev/null 2>&1; then
+  sudo useradd --system --home /var/lib/ptc_manager-gate --gid ptc-manager-repo \
+    --shell /usr/sbin/nologin ptc-manager-gate
+fi
+if id -nG ptc-manager-gate | tr ' ' '\n' | grep -Fx ptc-manager-publish >/dev/null; then
+  echo "ptc-manager-gate must not belong to the publication-staging group" >&2
+  exit 1
+fi
+sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 \
+  /var/lib/ptc_manager-gate
+gate_source_archive="/var/lib/ptc_manager-gate/source-${release_id}.tar"
+sudo install -o root -g ptc-manager-repo -m 0640 "$source_archive" "$gate_source_archive"
 sudo chmod 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   /var/lib/ptc_manager-output/planning-snapshots
@@ -627,6 +788,8 @@ echo "Building production release..."
   env MIX_ENV=prod mix assets.deploy
 "$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix release
+install_gate_beam_toolchain
+verify_gate_contract
 
 [ -x "$new_release/bin/ptc_manager" ]
 ensure_no_busy_herdr_agents

@@ -35,6 +35,10 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - verified base, head, commit count, and diff digest visible before PR acceptance;
 - a configurable test command and a review-skill pass count frozen per task;
 - exact-SHA branch push and draft-PR creation through a GitHub App broker;
+- a strict checked-in `.ptc-manager.yml` contract whose bootstrap and
+  pre-publication commands are frozen from the exact candidate commit;
+- a credential-free, disposable verifier checkout that must pass the frozen
+  gate cleanly before the GitHub App broker can push that SHA;
 - worker-advertised implementation capacity instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
 - canonical PR status and GitHub link in the dashboard;
@@ -149,6 +153,48 @@ a GitHub App installed only on the managed repository with repository
 Store its private key outside the repository, readable only by the coordinator.
 Configure the App ID, installation ID, and PEM path, then set
 `PTC_PUBLICATION_ENABLED=true`.
+
+Every repository that uses brokered publication must commit a strict
+`.ptc-manager.yml` contract. Unknown or missing fields fail closed:
+
+```yaml
+version: 1
+bootstrap:
+  command: ./scripts/ptc/bootstrap
+  timeout_minutes: 10
+verification:
+  before_publish: ./scripts/ci/pre-publication
+  timeout_minutes: 45
+```
+
+Before publication, PtcManager reads the contract from the verified candidate
+commit—not from a possibly dirty filesystem copy—and freezes its bootstrap
+command, pre-publication command, timeouts, and digest on the job. It then
+creates a fresh checkout owned by `ptc-manager-gate`, runs both commands
+with an empty environment and OS-enforced timeouts, verifies the checkout stayed
+clean, and stores the exact SHA, exit status, duration, and at most 64 KiB of
+output. A changed head, failed command, timeout, dirty checkout, missing
+contract, or stale evidence prevents the broker from being called. The
+exact-SHA checks disable Git replacement objects and compare tracked contents
+and executable modes with a second fresh checkout, so repository-local replace
+refs, index flags, and clean filters cannot hide a different contract or
+modified file. Built-in checkout transformations such as `eol` and `ident` are
+supported. Repository-local clean/smudge/process filters—including Git LFS—fail
+closed in this first slice because their configuration cannot safely be copied
+into the independent reference checkout. The frozen commands and timeouts are
+also re-hashed before passed evidence is reused. The
+credential-bearing publisher still disables Git hooks: untrusted repository
+hooks must never run in the process holding the GitHub App token.
+
+Brokered publication currently rejects repositories containing Git submodules.
+Recursive submodule verification is intentionally deferred; failing closed is
+safer than accepting a clean gitlink whose nested worktree is dirty.
+
+The candidate commit owns this contract and the scripts it invokes. This gate
+therefore proves which candidate command ran and what it returned; it is not a
+defence against a malicious author weakening their own gate. A PR that changes
+gate policy needs explicit human review, and protected-branch CI remains the
+merge boundary.
 
 In broker mode, the generated task tells the implementation agent to run the
 configured tests, invoke the `codex-review` skill the configured number of
@@ -378,8 +424,9 @@ The target defaults to the `herdr-box` SSH host from the local SSH config. Use
 `mix ptc.deploy --dry-run` to show the resolved commit and release identifier
 without running checks or changing either machine.
 
-The task runs `mix precommit`, uploads a Git archive rather than uncommitted
-files, and builds the production release on the server with its mise-managed
+The task runs the checked-in bootstrap and pre-publication scripts, uploads a
+Git archive rather than uncommitted files, and builds the production release on
+the server with its mise-managed
 Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
 checks both managed runs and the manual and worker Herdr sessions. Non-idle
 agents make deployment stop safely; idle Herdr sessions continue running and
@@ -406,6 +453,13 @@ under `/opt/ptc-manager-node-<version>` and expose `node`, `npm`, `npx`, and
 receive the same Node version even though the worker service cannot read the
 interactive `agent` account's mise installation. The deployment verifies Node
 as the `ptc-manager-worker` user before replacing the application release.
+They similarly use mise to install pinned Erlang and Elixir builds directly
+under a root-owned `/opt/ptc-manager-gate-mise` prefix, reject symlinks escaping
+that prefix, and install only Hex and Rebar under
+`/opt/ptc-manager-gate-mix`. Before the service is stopped, deployment runs the
+real checked-in bootstrap and pre-publication scripts from an explicitly
+gate-readable copy of the source archive as `ptc-manager-gate`, with a fresh
+HOME and no credentials.
 
 The task reads the actual `DATABASE_PATH` and `PORT` from the running systemd
 service, creates a consistent SQLite backup, and replaces `/opt/ptc_manager`.
@@ -451,6 +505,7 @@ sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex 
 sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo,ptc-manager-output,ptc-manager-external --shell /usr/sbin/nologin ptc-manager-worker
 sudo useradd --system --home /var/lib/ptc_manager-external --gid ptc-manager-external --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager-external
 sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --groups ptc-manager-publish --shell /usr/sbin/nologin ptc-manager-verifier
+sudo useradd --system --home /var/lib/ptc_manager-gate --gid ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-gate
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 /var/lib/ptc_manager-output/planning-snapshots
@@ -458,6 +513,7 @@ sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_m
 sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 0700 /var/lib/ptc_manager-external
 sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
+sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-gate
 sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
 sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2750 /srv/ptc_manager-worktrees
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 2770 /srv/ptc_manager-external
@@ -497,7 +553,12 @@ the optional agent-publication trial. Outside that explicit mode, the
 implementation prompt instructs coding agents not to use it. A later
 credential broker can enforce that separation technically. Private read-only manager investigations run as
 `ptc-manager-codex`. Bounded branch verification runs as
-`ptc-manager-verifier` with an empty environment and no credentials. None of
+`ptc-manager-verifier`; repository-owned pre-publication gates run as
+`ptc-manager-gate`. Both use an empty environment and have no credentials.
+Unlike the Git verifier, the gate identity is not a member of the
+publication-staging group. Gate commands execute in a temporary gate-owned clone
+of the exact commit, so they can create build artifacts without receiving write
+access to the agent's retained worktree. None of
 these accounts can read the root-only coordinator environment or inspect its
 process. The `ptc-manager-external` account can write only its disposable
 checkout root, has no repository-group membership, and must never be logged in
@@ -518,7 +579,7 @@ sudo -u ptc-manager-external -H codex login
 ```
 
 The checkout at `PTC_REPOSITORY_PATH` is owned and writable only by the worker.
-The `ptc-manager-repo` group gives the coordinator, manager, and verifier
+The `ptc-manager-repo` group gives the coordinator, manager, verifier, and gate
 read/execute access without filesystem write access. The worker-owned
 `PTC_WORKTREE_ROOT` contains only job worktrees. It and every ancestor must be
 non-writable by group and other identities; the deployment enforces mode
@@ -530,7 +591,7 @@ checkout is clean and its exact head is on the PR branch. Dirty, missing, or
 unpushed non-terminal work is retained for attention. A merged or closed PR is
 the explicit exception: its abandoned checkout is removed with Herdr's force
 option because GitHub has already made the work terminal.
-The separate `ptc-manager-publish` group lets only the coordinator and verifier
+The separate `ptc-manager-publish` group lets only the coordinator and Git verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
 The coordinator and private manager share only the setgid
 `ptc-manager-output` directory at `PTC_CODEX_OUTPUT_DIR`; the
@@ -541,7 +602,12 @@ The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed
 paths, individual blobs, total blob bytes, and generated diff bytes. A result
 outside those limits remains pending for maintainer review; it never becomes PR
-eligible automatically.
+eligible automatically. Repository bootstrap and pre-publication commands use
+the same empty credential environment and nested OS timeouts; configure their
+tool search path with `PTC_PRE_PUBLICATION_PATH` when Elixir, Node, or another
+required tool is not installed under `/usr/local/bin`, `/usr/bin`, or `/bin`.
+The standard deployment provisions the pinned BEAM tools there and sets the
+root-owned archive path with `PTC_PRE_PUBLICATION_MIX_HOME`.
 
 Use the same Herdr session name in the coordinator and dedicated Herdr service.
 The coordinator selects it with Herdr's explicit `--session` option after

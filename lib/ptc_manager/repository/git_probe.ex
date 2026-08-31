@@ -8,6 +8,26 @@ defmodule PtcManager.Repository.GitProbe do
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
   @small_output_limit 64 * 1024
 
+  @doc "Reads the bounded repository contract from an immutable commit."
+  def repository_contract(path, sha) when is_binary(path) and is_binary(sha) do
+    cond do
+      Path.type(path) != :absolute or not File.dir?(path) ->
+        {:error, :worktree_path_unavailable}
+
+      not Regex.match?(@sha, sha) ->
+        {:error, :invalid_sha}
+
+      true ->
+        case run_git(path, ["show", "#{sha}:.ptc-manager.yml"], {:collect, @small_output_limit}) do
+          {:ok, content} -> {:ok, content}
+          {:error, {:git_failed, "show", _status}} -> {:error, :repository_contract_missing}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  def repository_contract(_path, _sha), do: {:error, :invalid_repository_contract_context}
+
   @impl true
   def verify(%Repository{} = repository, %Job{} = job) do
     with {:ok, path} <- repository_path(repository) do
@@ -425,6 +445,7 @@ defmodule PtcManager.Repository.GitProbe do
       "PATH=/usr/bin:/bin",
       "LC_ALL=C",
       "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_NO_REPLACE_OBJECTS=1",
       "GIT_LITERAL_PATHSPECS=1",
       "GIT_TERMINAL_PROMPT=0"
       | executable

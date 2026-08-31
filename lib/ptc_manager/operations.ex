@@ -760,7 +760,7 @@ defmodule PtcManager.Operations do
       )
 
     if updated == 1 do
-      job = Job |> preload([:issue, :repository]) |> Repo.get!(job_id)
+      job = Job |> preload([:issue, :repository, :worktree_allocation]) |> Repo.get!(job_id)
       notify_changed(__MODULE__)
       {:ok, job}
     else
@@ -1126,10 +1126,12 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def mark_result_verified(job_id, fencing_token, attempt_token, result)
+  def mark_result_verified(job_id, fencing_token, attempt_token, result, contract)
       when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) and
-             is_map(result) do
+             is_map(result) and
+             (is_nil(contract) or is_struct(contract, PtcManager.Repository.Contract)) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    pre_publication_attrs = pre_publication_attrs(contract)
 
     outcome =
       if valid_result_fields?(result) do
@@ -1145,17 +1147,18 @@ defmodule PtcManager.Operations do
                 job.result_attempt_expires_at > ^now
             )
             |> Repo.update_all(
-              set: [
-                state: "ready_for_pr",
-                result_base_sha: result.base_sha,
-                result_head_sha: result.head_sha,
-                result_diff_digest: result.diff_digest,
-                result_commit_count: result.commit_count,
-                result_verified_at: now,
-                result_attempt_expires_at: nil,
-                last_error: nil,
-                updated_at: now
-              ]
+              set:
+                [
+                  state: "ready_for_pr",
+                  result_base_sha: result.base_sha,
+                  result_head_sha: result.head_sha,
+                  result_diff_digest: result.diff_digest,
+                  result_commit_count: result.commit_count,
+                  result_verified_at: now,
+                  result_attempt_expires_at: nil,
+                  last_error: nil,
+                  updated_at: now
+                ] ++ pre_publication_attrs
             )
 
           if updated == 1 do
@@ -1168,8 +1171,7 @@ defmodule PtcManager.Operations do
               last_error: nil
             })
 
-            %PrPublication{}
-            |> PrPublication.changeset(%{
+            publication_attrs = %{
               job_id: job.id,
               repository_id: job.repository_id,
               state: "queued",
@@ -1185,28 +1187,33 @@ defmodule PtcManager.Operations do
               title: job.issue.title,
               head_ref: job.branch_name,
               head_repository: "#{job.repository.github_owner}/#{job.repository.github_name}"
-            })
-            |> Repo.insert!()
+            }
+
+            create_or_refresh_unpublished_publication!(job, publication_attrs)
 
             insert_audit!(%{
               actor: "coordinator",
               action: "job.result_verified",
               target_type: "job",
               target_id: job_id,
-              details: %{
-                "fencing_token" => fencing_token,
-                "base_sha" => result.base_sha,
-                "head_sha" => result.head_sha,
-                "diff_digest" => result.diff_digest,
-                "commit_count" => result.commit_count
-              }
+              details:
+                Map.merge(
+                  %{
+                    "fencing_token" => fencing_token,
+                    "base_sha" => result.base_sha,
+                    "head_sha" => result.head_sha,
+                    "diff_digest" => result.diff_digest,
+                    "commit_count" => result.commit_count
+                  },
+                  pre_publication_audit_details(contract)
+                )
             })
 
             job
           else
             job = Repo.get!(Job, job_id)
 
-            if verified_result_matches?(job, fencing_token, attempt_token, result),
+            if verified_result_matches?(job, fencing_token, attempt_token, result, contract),
               do: job,
               else: Repo.rollback(result_attempt_failure(job, fencing_token, attempt_token, now))
           end
@@ -2077,12 +2084,73 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp verified_result_matches?(job, fencing_token, attempt_token, result) do
+  defp verified_result_matches?(job, fencing_token, attempt_token, result, contract) do
     job.state == "ready_for_pr" and job.fencing_token == fencing_token and
       job.result_attempt_token == attempt_token and job.result_base_sha == result.base_sha and
       job.result_head_sha == result.head_sha and
       job.result_diff_digest == result.diff_digest and
-      job.result_commit_count == result.commit_count
+      job.result_commit_count == result.commit_count and pre_publication_matches?(job, contract)
+  end
+
+  defp pre_publication_attrs(nil) do
+    [
+      pre_publication_bootstrap_command: nil,
+      pre_publication_bootstrap_timeout_ms: nil,
+      pre_publication_command: nil,
+      pre_publication_timeout_ms: nil,
+      pre_publication_config_digest: nil,
+      pre_publication_status: nil,
+      pre_publication_verified_sha: nil,
+      pre_publication_exit_status: nil,
+      pre_publication_output: nil,
+      pre_publication_duration_ms: nil,
+      pre_publication_verified_at: nil
+    ]
+  end
+
+  defp pre_publication_attrs(contract) do
+    [
+      pre_publication_bootstrap_command: contract.bootstrap_command,
+      pre_publication_bootstrap_timeout_ms: contract.bootstrap_timeout_minutes * 60_000,
+      pre_publication_command: contract.before_publish_command,
+      pre_publication_timeout_ms: contract.verification_timeout_minutes * 60_000,
+      pre_publication_config_digest: PtcManager.Repository.Contract.publication_digest(contract),
+      pre_publication_status: "pending",
+      pre_publication_verified_sha: nil,
+      pre_publication_exit_status: nil,
+      pre_publication_output: nil,
+      pre_publication_duration_ms: nil,
+      pre_publication_verified_at: nil
+    ]
+  end
+
+  defp pre_publication_audit_details(nil), do: %{}
+
+  defp pre_publication_audit_details(contract) do
+    %{
+      "pre_publication_bootstrap_command" => contract.bootstrap_command,
+      "pre_publication_bootstrap_timeout_ms" => contract.bootstrap_timeout_minutes * 60_000,
+      "pre_publication_command" => contract.before_publish_command,
+      "pre_publication_timeout_ms" => contract.verification_timeout_minutes * 60_000,
+      "pre_publication_config_digest" =>
+        PtcManager.Repository.Contract.publication_digest(contract)
+    }
+  end
+
+  defp pre_publication_matches?(job, nil) do
+    is_nil(job.pre_publication_bootstrap_command) and
+      is_nil(job.pre_publication_bootstrap_timeout_ms) and
+      is_nil(job.pre_publication_command) and is_nil(job.pre_publication_timeout_ms) and
+      is_nil(job.pre_publication_config_digest)
+  end
+
+  defp pre_publication_matches?(job, contract) do
+    job.pre_publication_bootstrap_command == contract.bootstrap_command and
+      job.pre_publication_bootstrap_timeout_ms == contract.bootstrap_timeout_minutes * 60_000 and
+      job.pre_publication_command == contract.before_publish_command and
+      job.pre_publication_timeout_ms == contract.verification_timeout_minutes * 60_000 and
+      job.pre_publication_config_digest ==
+        PtcManager.Repository.Contract.publication_digest(contract)
   end
 
   defp result_error_matches?(job, fencing_token, attempt_token, message) do
@@ -2105,6 +2173,32 @@ defmodule PtcManager.Operations do
       is_binary(result[:diff_digest]) and
       Regex.match?(~r/\A[0-9a-f]{64}\z/, result.diff_digest) and
       is_integer(result[:commit_count]) and result.commit_count > 0
+  end
+
+  defp create_or_refresh_unpublished_publication!(job, attrs) do
+    case Repo.get_by(PrPublication, job_id: job.id) do
+      nil ->
+        %PrPublication{}
+        |> PrPublication.changeset(attrs)
+        |> Repo.insert!()
+
+      %PrPublication{source: "broker", pr_number: nil, state: state} = publication
+      when state in ["queued", "publishing", "blocked"] ->
+        publication
+        |> PrPublication.changeset(
+          Map.merge(attrs, %{
+            attempt_count: 0,
+            attempt_token: nil,
+            attempt_expires_at: nil,
+            next_attempt_at: nil,
+            last_error: nil
+          })
+        )
+        |> Repo.update!()
+
+      %PrPublication{} ->
+        Repo.rollback(:publication_already_exists)
+    end
   end
 
   defp eligible_result_jobs(query, now) do

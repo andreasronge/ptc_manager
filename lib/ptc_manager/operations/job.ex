@@ -27,6 +27,17 @@ defmodule PtcManager.Operations.Job do
     field :result_checked_at, :utc_datetime_usec
     field :result_attempt_token, :string
     field :result_attempt_expires_at, :utc_datetime_usec
+    field :pre_publication_bootstrap_command, :string
+    field :pre_publication_bootstrap_timeout_ms, :integer
+    field :pre_publication_command, :string
+    field :pre_publication_timeout_ms, :integer
+    field :pre_publication_config_digest, :string
+    field :pre_publication_status, :string
+    field :pre_publication_verified_sha, :string
+    field :pre_publication_exit_status, :integer
+    field :pre_publication_output, :string
+    field :pre_publication_duration_ms, :integer
+    field :pre_publication_verified_at, :utc_datetime_usec
 
     belongs_to :repository, PtcManager.Operations.Repository
     belongs_to :issue, PtcManager.Operations.Issue
@@ -63,7 +74,18 @@ defmodule PtcManager.Operations.Job do
       :result_verified_at,
       :result_checked_at,
       :result_attempt_token,
-      :result_attempt_expires_at
+      :result_attempt_expires_at,
+      :pre_publication_bootstrap_command,
+      :pre_publication_bootstrap_timeout_ms,
+      :pre_publication_command,
+      :pre_publication_timeout_ms,
+      :pre_publication_config_digest,
+      :pre_publication_status,
+      :pre_publication_verified_sha,
+      :pre_publication_exit_status,
+      :pre_publication_output,
+      :pre_publication_duration_ms,
+      :pre_publication_verified_at
     ])
     |> validate_required([
       :repository_id,
@@ -85,6 +107,22 @@ defmodule PtcManager.Operations.Job do
     |> validate_length(:branch_name, max: 240)
     |> validate_length(:last_error, max: 500)
     |> validate_length(:result_attempt_token, max: 64)
+    |> validate_length(:pre_publication_bootstrap_command, max: 2_000)
+    |> validate_length(:pre_publication_command, max: 2_000)
+    |> validate_length(:pre_publication_output, max: 65_536)
+    |> validate_inclusion(:pre_publication_status, ["pending", "running", "passed", "failed"])
+    |> validate_number(:pre_publication_timeout_ms,
+      greater_than: 0,
+      less_than_or_equal_to: 86_400_000
+    )
+    |> validate_number(:pre_publication_bootstrap_timeout_ms,
+      greater_than: 0,
+      less_than_or_equal_to: 86_400_000
+    )
+    |> validate_number(:pre_publication_exit_status, greater_than_or_equal_to: 0)
+    |> validate_number(:pre_publication_duration_ms, greater_than_or_equal_to: 0)
+    |> validate_format(:pre_publication_config_digest, ~r/\A[0-9a-f]{64}\z/)
+    |> validate_format(:pre_publication_verified_sha, @sha)
     |> validate_format(:result_base_sha, @sha)
     |> validate_format(:result_head_sha, @sha)
     |> validate_format(:result_diff_digest, ~r/\A[0-9a-f]{64}\z/)

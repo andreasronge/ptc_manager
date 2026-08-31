@@ -117,6 +117,33 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
   end
 
+  test "remote deployment provisions and exercises the isolated gate toolchain" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "install_gate_beam_toolchain"
+    assert script =~ "verify_gate_contract"
+    assert script =~ "gate_mise_root=/opt/ptc-manager-gate-mise"
+    assert script =~ "MISE_DATA_DIR=\"$gate_mise_data\""
+    assert script =~ "gate_erlang_dir=\"$gate_mise_data/installs/erlang/${erlang_version}\""
+    assert script =~ "gate_elixir_dir=\"$gate_mise_data/installs/elixir/${elixir_version}\""
+    assert script =~ "gate_mix_home=/opt/ptc-manager-gate-mix"
+    assert script =~ "sudo -u ptc-manager-gate env -i"
+    assert script =~ "local.hex --force --if-missing"
+    assert script =~ "local.rebar --force --if-missing"
+    assert script =~ "gate toolchain symlink escapes its root-owned prefix"
+    assert script =~ "sudo install -o root -g ptc-manager-repo -m 0640"
+    assert script =~ "tar -xf \"$gate_source_archive\""
+    assert script =~ "command -v python3"
+    assert script =~ "./scripts/ptc/bootstrap && ./scripts/ci/pre-publication"
+    assert script =~ "GIT_NO_REPLACE_OBJECTS=1"
+
+    assert byte_index(script, "env MIX_ENV=prod mix release") <
+             byte_index(script, "install_gate_beam_toolchain\nverify_gate_contract")
+
+    assert byte_index(script, "install_gate_beam_toolchain\nverify_gate_contract") <
+             byte_index(script, "echo \"Stopping service and backing up SQLite...\"")
+  end
+
   test "remote deployment creates the coordinator-owned planning snapshot root" do
     script = File.read!(@remote_script)
 

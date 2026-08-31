@@ -5,7 +5,7 @@ defmodule PtcManager.GitHub.AppBroker do
 
   alias PtcManager.Operations.PrPublication
   alias PtcManager.Publications
-  alias PtcManager.Repository.GitProbe
+  alias PtcManager.Repository.{Contract, GitProbe}
 
   @api "https://api.github.com"
   @api_version "2022-11-28"
@@ -172,6 +172,17 @@ defmodule PtcManager.GitHub.AppBroker do
         publication.base_sha != publication.job.result_base_sha or
           publication.diff_digest != publication.job.result_diff_digest ->
         {:blocked, :stale_publication_context}
+
+      publication.job.pre_publication_status != "passed" or
+        publication.job.pre_publication_verified_sha != publication.head_sha or
+        publication.job.pre_publication_exit_status != 0 or
+        not is_binary(publication.job.pre_publication_bootstrap_command) or
+        not is_integer(publication.job.pre_publication_bootstrap_timeout_ms) or
+        not is_binary(publication.job.pre_publication_command) or
+        not is_integer(publication.job.pre_publication_timeout_ms) or
+        not is_binary(publication.job.pre_publication_config_digest) or
+          not Contract.frozen_publication_digest_matches?(publication.job) ->
+        {:blocked, :pre_publication_gate_not_passed}
 
       true ->
         :ok
