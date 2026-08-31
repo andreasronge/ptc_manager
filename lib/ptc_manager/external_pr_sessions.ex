@@ -4,6 +4,7 @@ defmodule PtcManager.ExternalPrSessions do
   import Ecto.Query
 
   alias PtcManager.Dispatch.HerdrAdapter
+  alias PtcManager.Gateway
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, AgentRun, PrPublication}
   alias PtcManager.Repo
@@ -32,7 +33,7 @@ defmodule PtcManager.ExternalPrSessions do
         {:ok, :empty}
 
       run ->
-        case adapter.remove_action_workspace(run.herdr_workspace) do
+        case Gateway.call(adapter, :remove_action_workspace, [run.herdr_workspace]) do
           :ok -> finish_cleanup(run)
           {:error, reason} -> {:error, {:external_pr_session_cleanup_failed, reason}}
         end

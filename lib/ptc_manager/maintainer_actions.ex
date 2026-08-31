@@ -6,6 +6,7 @@ defmodule PtcManager.MaintainerActions do
 
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.Sync, as: ActionSync
+  alias PtcManager.Gateway
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.DailyDigests
   alias PtcManager.DailyDigests.Evidence, as: DailyDigestEvidence
@@ -205,7 +206,7 @@ defmodule PtcManager.MaintainerActions do
              {:ok, {action, token}} <- Operations.claim_agent_action(prepared.id) do
           result =
             try do
-              adapter.run(action)
+              Gateway.call(adapter, :run, [action])
             after
               release_planning_source_snapshot(action)
             end
@@ -243,7 +244,7 @@ defmodule PtcManager.MaintainerActions do
 
   defp prepare_for_execution(%{action_key: action_key} = action, sync)
        when action_key in ["pr_retrospective", "create_retrospective_issue"] do
-    case sync.sync_action(action) do
+    case call_sync(sync, action) do
       {:ok, _summary} ->
         issue_numbers =
           Repo.all(
@@ -264,7 +265,7 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(%{action_key: "resolve_issue_decision"} = action, sync) do
-    case sync.sync_action(action) do
+    case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
 
@@ -289,7 +290,7 @@ defmodule PtcManager.MaintainerActions do
 
   defp prepare_for_execution(%{action_key: action_key} = action, sync)
        when action_key in ["prepare_issue", "review_issue"] do
-    case sync.sync_action(action) do
+    case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
 
@@ -331,7 +332,7 @@ defmodule PtcManager.MaintainerActions do
     if PrPublication.external?(publication) do
       fail_preflight(action.id, :external_pull_request_has_no_isolated_merge_reviewer)
     else
-      case sync.sync_action(action) do
+      case call_sync(sync, action) do
         {:ok, %{pull_request: status}} ->
           Operations.record_agent_action_target_snapshot(
             action.id,
@@ -358,7 +359,7 @@ defmodule PtcManager.MaintainerActions do
 
   defp prepare_for_execution(%{action_key: action_key} = action, sync)
        when action_key in ["repair_pr", "repair_and_merge_pr"] do
-    case sync.sync_action(action) do
+    case call_sync(sync, action) do
       {:ok, %{pull_request: status}} ->
         if repair_needed?(status) do
           with {:ok, prepared} <-
@@ -708,11 +709,20 @@ defmodule PtcManager.MaintainerActions do
     if action.action_key == "daily_digest" do
       {:ok, %{daily_digest: true}}
     else
-      if is_atom(sync) and Code.ensure_loaded?(sync) and function_exported?(sync, :sync_action, 2),
-        do: sync.sync_action(action, result),
-        else: sync.sync_action(action)
+      cond do
+        is_atom(sync) and Code.ensure_loaded?(sync) and function_exported?(sync, :sync_action, 2) ->
+          Gateway.call(sync, :sync_action, [action, result])
+
+        is_struct(sync) and function_exported?(sync.__struct__, :sync_action, 3) ->
+          Gateway.call(sync, :sync_action, [action, result])
+
+        true ->
+          call_sync(sync, action)
+      end
     end
   end
+
+  defp call_sync(sync, action), do: Gateway.call(sync, :sync_action, [action])
 
   defp reconcile_action(action, sync) do
     execution_result = stored_execution_result(action)

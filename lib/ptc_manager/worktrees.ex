@@ -3,6 +3,8 @@ defmodule PtcManager.Worktrees do
 
   alias PtcManager.Operations
   alias PtcManager.ExternalPrSessions
+  alias PtcManager.Dispatch.HerdrAdapter
+  alias PtcManager.Gateway
   alias PtcManager.Repository.GitProbe
 
   def ensure_slot(worker_key, capacity, adapter, probe \\ GitProbe)
@@ -24,8 +26,12 @@ defmodule PtcManager.Worktrees do
     end
   end
 
-  def cleanup_terminal_once(adapter \\ configured_adapter(), probe \\ GitProbe) do
-    case ExternalPrSessions.cleanup_terminal_once() do
+  def cleanup_terminal_once(
+        adapter \\ configured_adapter(),
+        probe \\ GitProbe,
+        external_adapter \\ configured_external_adapter()
+      ) do
+    case ExternalPrSessions.cleanup_terminal_once(external_adapter) do
       {:ok, :empty} -> cleanup_managed_terminal_once(adapter, probe)
       other -> other
     end
@@ -90,7 +96,7 @@ defmodule PtcManager.Worktrees do
     do: {:error, :worktree_clean_head_unavailable, allocation, allocation.cleanup_token}
 
   defp remove_claimed(allocation, adapter, token) do
-    case adapter.remove_worktree(allocation) do
+    case Gateway.call(adapter, :remove_worktree, [allocation]) do
       :ok ->
         case Operations.complete_worktree_cleanup(allocation.id, token) do
           {:ok, _allocation} -> :ok
@@ -107,4 +113,7 @@ defmodule PtcManager.Worktrees do
 
   defp configured_adapter,
     do: Application.fetch_env!(:ptc_manager, :dispatch_adapter)
+
+  defp configured_external_adapter,
+    do: Application.get_env(:ptc_manager, :external_pr_herdr_adapter, HerdrAdapter)
 end

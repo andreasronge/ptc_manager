@@ -6,6 +6,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   alias PtcManager.Operations.{AgentAction, Job, PrAnalysis, PrPublication}
   alias PtcManager.Publications
   alias PtcManager.Repo
+  alias PtcManager.TestScenario
 
   test "separates queued, working, and blocked deliveries", %{conn: conn} do
     queued = approved_job("Queue this change")
@@ -19,6 +20,30 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert has_element?(view, "#lane-stuck #board-job-#{blocked.id}", "Repair this change")
     assert has_element?(view, "#lane-review")
     assert has_element?(view, "#lane-ready")
+  end
+
+  test "shows deterministic acknowledgement loss and Herdr adoption without polling", %{
+    conn: conn
+  } do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario)
+    :ok = TestScenario.dispatch_outcome(scenario, :effect_then_error)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#lane-queued #board-job-#{job.id}")
+
+    assert {:error, :scenario_dispatch_ack_lost} = TestScenario.advance(scenario, :dispatch)
+    assert has_element?(view, "#lane-stuck #board-job-#{job.id}")
+
+    assert has_element?(
+             view,
+             "#lane-stuck #board-job-#{job.id}",
+             "PtcManager cannot yet confirm the agent outcome."
+           )
+
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+    assert has_element?(view, "#lane-working #board-job-#{job.id}")
+    assert has_element?(view, "#board-job-#{job.id}", "Agent working")
   end
 
   test "keeps cards in stable oldest-first order and shows their GitHub issues", %{conn: conn} do

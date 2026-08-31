@@ -118,7 +118,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
   test "imports, updates, and retires GitHub pull requests without fake jobs" do
     repository = repository_fixture(%{local_path: File.cwd!()})
-    first = external_status(repository, 91, String.duplicate("b", 40))
+    first = external_pr_status(repository, 91, String.duplicate("b", 40))
 
     assert {:ok, %{open_count: 1}} =
              Publications.sync_external_open_pull_requests(repository, [first])
@@ -189,7 +189,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
     pull =
       repository
-      |> external_status(99, String.duplicate("b", 40))
+      |> external_pr_status(99, String.duplicate("b", 40))
       |> Map.put(:head_ref, branch)
 
     assert {:ok, %{open_count: 0}} =
@@ -203,7 +203,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
     {:ok, _summary} =
       Publications.sync_external_open_pull_requests(repository, [
-        external_status(repository, 92, String.duplicate("d", 40))
+        external_pr_status(repository, 92, String.duplicate("d", 40))
       ])
 
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 92)
@@ -248,7 +248,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
   test "a previously queued external merge review is rejected before execution" do
     repository = repository_fixture()
-    status = external_status(repository, 96, String.duplicate("d", 40))
+    status = external_pr_status(repository, 96, String.duplicate("d", 40))
     {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 96)
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -280,7 +280,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
     repository = repository_fixture()
 
     Process.put(:external_pull_listing, [
-      external_status(repository, 93, String.duplicate("e", 40))
+      external_pr_status(repository, 93, String.duplicate("e", 40))
     ])
 
     assert {:ok, %{open_count: 1}} =
@@ -296,7 +296,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
   test "external repair starts a named retained Herdr session" do
     repository = repository_fixture(%{local_path: File.cwd!()})
     head_sha = String.duplicate("f", 40)
-    status = external_status(repository, 94, head_sha)
+    status = external_pr_status(repository, 94, head_sha)
     {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
 
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 94)
@@ -335,7 +335,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
   test "full action preflight preserves the fix-and-merge Herdr authorization prompt" do
     repository = repository_fixture(%{local_path: File.cwd!()})
-    status = external_status(repository, 97, String.duplicate("f", 40))
+    status = external_pr_status(repository, 97, String.duplicate("f", 40))
     {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 97)
     {:ok, action} = MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "maintainer")
@@ -358,7 +358,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
   test "external repair stays queued when the private worktree root is unavailable" do
     repository = repository_fixture(%{local_path: File.cwd!()})
-    status = external_status(repository, 98, String.duplicate("f", 40))
+    status = external_pr_status(repository, 98, String.duplicate("f", 40))
     {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 98)
     {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "maintainer")
@@ -411,7 +411,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
     repository = repository_fixture()
     original_head = String.duplicate("b", 40)
     repaired_head = String.duplicate("c", 40)
-    status = external_status(repository, 95, original_head)
+    status = external_pr_status(repository, 95, original_head)
 
     {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 95)
@@ -447,31 +447,6 @@ defmodule PtcManager.ExternalPullRequestsTest do
     assert completed.state == "done"
     assert completed.result_summary =~ "recovered_after_uncertain_push"
     assert completed.result_summary =~ repaired_head
-  end
-
-  defp external_status(repository, number, head_sha) do
-    %{
-      pr_number: number,
-      pr_url:
-        "https://github.com/#{repository.github_owner}/#{repository.github_name}/pull/#{number}",
-      state: "open",
-      draft: false,
-      title: "External repair candidate",
-      author_login: "outside-author",
-      body: "",
-      head_sha: head_sha,
-      head_ref: "external/fix-#{number}",
-      head_repository: "#{repository.github_owner}/#{repository.github_name}",
-      base_sha: String.duplicate("a", 40),
-      base_ref: repository.default_branch,
-      base_repository: "#{repository.github_owner}/#{repository.github_name}",
-      mergeability: "conflicting",
-      mergeable_state: "dirty",
-      checks_state: "failure",
-      checks_total: 1,
-      checks_failed: 1,
-      checks_pending: 0
-    }
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

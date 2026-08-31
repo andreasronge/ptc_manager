@@ -7,6 +7,7 @@ defmodule PtcManager.GitHub.Sync do
   import Ecto.Query
 
   alias PtcManager.Operations
+  alias PtcManager.Gateway
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations.{Issue, IssueDependency, Repository}
   alias PtcManager.Repo
@@ -30,7 +31,7 @@ defmodule PtcManager.GitHub.Sync do
     client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :github_client))
 
     :global.trans({{__MODULE__, repository.id}, self()}, fn ->
-      case client.get_issue(repository, number) do
+      case Gateway.call(client, :get_issue, [repository, number]) do
         {:ok, remote_issue} ->
           with {:ok, referenced_issues, unknown_references} <-
                  fetch_referenced_issues(repository, [remote_issue], client) do
@@ -46,7 +47,7 @@ defmodule PtcManager.GitHub.Sync do
   defp do_sync_repository(repository, client) do
     syncing_repository = mark_syncing(repository)
 
-    with {:ok, remote_issues} <- client.list_open_issues(syncing_repository),
+    with {:ok, remote_issues} <- Gateway.call(client, :list_open_issues, [syncing_repository]),
          {:ok, missing_issues, unknown_references} <-
            fetch_missing_issues(syncing_repository, remote_issues, client) do
       persist_snapshot(syncing_repository, remote_issues, missing_issues, unknown_references)
@@ -307,7 +308,7 @@ defmodule PtcManager.GitHub.Sync do
     allow_unknown? = Keyword.get(opts, :allow_unknown, false)
 
     Enum.reduce_while(numbers, {:ok, [], %{}}, fn number, {:ok, snapshots, unknowns} ->
-      case client.get_issue(repository, number) do
+      case Gateway.call(client, :get_issue, [repository, number]) do
         {:ok, remote_issue} ->
           {:cont, {:ok, [remote_issue | snapshots], unknowns}}
 

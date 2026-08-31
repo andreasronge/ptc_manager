@@ -71,6 +71,31 @@ defmodule PtcManager.OperationsFixtures do
     worker
   end
 
+  def external_pr_status(repository, number, head_sha) do
+    %{
+      pr_number: number,
+      pr_url:
+        "https://github.com/#{repository.github_owner}/#{repository.github_name}/pull/#{number}",
+      state: "open",
+      draft: false,
+      title: "External repair candidate",
+      author_login: "outside-author",
+      body: "",
+      head_sha: head_sha,
+      head_ref: "external/fix-#{number}",
+      head_repository: "#{repository.github_owner}/#{repository.github_name}",
+      base_sha: String.duplicate("a", 40),
+      base_ref: repository.default_branch,
+      base_repository: "#{repository.github_owner}/#{repository.github_name}",
+      mergeability: "conflicting",
+      mergeable_state: "dirty",
+      checks_state: "failure",
+      checks_total: 1,
+      checks_failed: 1,
+      checks_pending: 0
+    }
+  end
+
   def now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
   def digest(value) do

@@ -4,6 +4,7 @@ defmodule PtcManager.Herdr.Sync do
   import Ecto.Query
 
   alias PtcManager.Operations
+  alias PtcManager.Gateway
 
   alias PtcManager.Operations.{
     AgentRun,
@@ -40,7 +41,7 @@ defmodule PtcManager.Herdr.Sync do
         Application.get_env(:ptc_manager, :dispatch_reconcile_after_ms, 60_000)
       )
 
-    case client.list_agents() do
+    case Gateway.call(client, :list_agents, []) do
       {:ok, agents} when is_list(agents) ->
         persist_snapshot(
           session,

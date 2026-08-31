@@ -2,6 +2,7 @@ defmodule PtcManager.Dispatch do
   @moduledoc "Leases one approved job only after a synchronous GitHub freshness check."
 
   alias PtcManager.GitHub.IssueSnapshot
+  alias PtcManager.Gateway
   alias PtcManager.Operations
   alias PtcManager.Worktrees
 
@@ -26,7 +27,7 @@ defmodule PtcManager.Dispatch do
   end
 
   defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity) do
-    with {:ok, remote} <- github.get_issue(job.repository, job.issue.number),
+    with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
          {:ok, canonical} <- normalize_remote(remote, job.repository.id),
          {:ok, leased} <-
            Operations.lease_job(job.id, worker_key, canonical, lease_ms, capacity: capacity) do
@@ -36,7 +37,7 @@ defmodule PtcManager.Dispatch do
         repository: leased.repository
       }
 
-      case adapter.dispatch(context) do
+      case Gateway.call(adapter, :dispatch, [context]) do
         {:ok, dispatch} ->
           dispatch = Map.put(dispatch, :lease_expires_at, leased.lease_expires_at)
           Operations.mark_job_working(leased.id, leased.fencing_token, worker_key, dispatch)

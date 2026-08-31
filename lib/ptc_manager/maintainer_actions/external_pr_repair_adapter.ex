@@ -4,6 +4,7 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
   @behaviour PtcManager.MaintainerActions.Adapter
 
   alias PtcManager.Dispatch.HerdrAdapter
+  alias PtcManager.Gateway
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
@@ -11,20 +12,26 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
   @action_keys ~w(repair_pr repair_and_merge_pr)
 
   @impl true
-  def run(%AgentAction{action_key: action_key, target_id: publication_id} = action)
+  def run(%AgentAction{} = action) do
+    herdr = Application.get_env(:ptc_manager, :external_pr_herdr_adapter, HerdrAdapter)
+    run(action, herdr)
+  end
+
+  def run(
+        %AgentAction{action_key: action_key, target_id: publication_id} = action,
+        herdr
+      )
       when action_key in @action_keys do
     publication =
       PrPublication
       |> Repo.get!(publication_id)
       |> Repo.preload(:repository)
 
-    herdr = Application.get_env(:ptc_manager, :external_pr_herdr_adapter, HerdrAdapter)
-
     with true <- PrPublication.external?(publication),
          %{local_path: repository_path} = repository when is_binary(repository_path) <-
            publication.repository,
          {:ok, dispatch} <-
-           herdr.start_pull_request_action(action, publication, repository),
+           Gateway.call(herdr, :start_pull_request_action, [action, publication, repository]),
          {:ok, _run} <-
            Operations.attach_agent_action_herdr_run(
              action.id,
@@ -32,7 +39,7 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
              dispatch
            ),
          {:ok, output} <-
-           herdr.prompt_pull_request_action(dispatch.agent_name, action.prompt) do
+           Gateway.call(herdr, :prompt_pull_request_action, [dispatch.agent_name, action.prompt]) do
       settle_action(herdr, action, dispatch, output)
     else
       false -> {:error, :pull_request_is_managed}
@@ -44,13 +51,13 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
     error -> {:error, {:external_pr_repair_failed, error.__struct__}}
   end
 
-  def run(%AgentAction{}), do: {:error, :unsupported_external_pr_action}
+  def run(%AgentAction{}, _herdr), do: {:error, :unsupported_external_pr_action}
 
   defp settle_action(herdr, action, dispatch, output) do
     if settled_state(output) == "blocked" do
       {:ok, result("repair-blocked", "The Herdr repair agent needs attention.")}
     else
-      with {:ok, head} <- herdr.pull_request_action_head(dispatch.worktree_path),
+      with {:ok, head} <- Gateway.call(herdr, :pull_request_action_head, [dispatch.worktree_path]),
            true <- head != action.target_snapshot["head_sha"],
            {:ok, _action} <-
              Operations.record_agent_action_repair_intent(
