@@ -755,9 +755,86 @@ by worker/profile health, not repeatedly installed by each repository script.
 
 If any preflight stage fails, no agent is started. Operations displays `failed
 before agent start`, the exact failed stage, bounded command output, and safe
-retry or cleanup choices. Crash recovery finds a workspace using the persisted
-deterministic launch/worktree identity and adopts it instead of creating a
-duplicate.
+retry or cleanup choices. The recovery state machine below finds a workspace
+using the persisted deterministic launch/worktree identity and adopts it instead
+of creating a duplicate.
+
+### Worker and agent crash recovery
+
+Each worker reports a stable `worker_id`, an ephemeral `worker_incarnation_id`
+for the current host/service boot, and a separate `herdr_incarnation_id`. Every
+agent start already has its own immutable launch-attempt identity. Keeping these
+identities separate distinguishes a host reboot, a Herdr restart, a coordinator
+restart, and one crashed agent without guessing from a missing heartbeat.
+
+A changed incarnation or interrupted authoritative heartbeat moves affected
+active attempts to `recovery_pending`. It does not release their resource-slot,
+repository-lock, branch, worktree, prompt-delivery, or publication claims and
+does not authorize duplicate execution. The worker is unavailable for new work
+until it supplies the configured consecutive healthy snapshots; the initial
+default is two snapshots across a bounded observation window.
+
+Recovery then reconciles each fenced attempt in this order:
+
+1. verify the exact Herdr workspace, pane, agent, process, worktree, branch, and
+   launch-attempt identities;
+2. reconcile prompt-delivery state and any submitted result before sending more
+   input;
+3. inspect the retained worktree's source SHA, current HEAD, commits,
+   cleanliness, gate evidence, and bounded terminal output;
+4. refresh GitHub's authoritative issue, PR, remote-head, check, and merge
+   state;
+5. choose exactly one outcome below and record the evidence used.
+
+The allowed outcomes are:
+
+- A matching agent that is still working or blocked is adopted and its lease is
+  renewed without another prompt.
+- A matching native session that is idle may receive one bounded continuation
+  prompt only after result, worktree, and GitHub reconciliation prove that work
+  is incomplete. The agent must first inspect retained commits, tests, result
+  artifacts, and any existing PR before changing files or repeating a GitHub
+  side effect.
+- A terminal session or apparently completed branch enters result
+  reconciliation. It is never prompted merely because Herdr reports `idle` or
+  `done`.
+- An agent absent from consecutive authoritative snapshots may be replaced in
+  the retained worktree only after the prior launch attempt is fenced and the
+  old process is proven absent. The replacement receives a new fencing token,
+  launch-attempt identity, and recovery-context packet.
+- Ambiguous process, session, prompt, worktree, branch, result, or GitHub state
+  remains fail-closed in `needs_attention`; the worktree and claims stay
+  retained until a maintainer resolves or quarantines them.
+
+The recovery-context packet contains the invocation and old/new attempt IDs,
+new fencing token, repository and target, worktree and branch identities,
+source/local/remote SHAs, known issue and PR state, retained output and result,
+completed and failed gates, and an explicit instruction not to repeat a side
+effect before checking whether it already occurred.
+
+PtcManager never authorizes two attempts to write the same worktree or branch.
+Brokered GitHub effects enforce the current fence and reject stale attempts. In
+trusted-direct mode, however, an old authenticated agent cannot be technically
+prevented from using `gh`; replacement therefore requires proof that its process
+is gone, and ambiguous state is quarantined rather than described as safely
+fenced.
+
+Confirmed resource-exhaustion failures such as exit 137 or an observed OOM are
+classified separately from transport loss and ordinary agent failure. Their
+recovery attempts are serialized per worker, use bounded retry counts and
+backoff, and do not start while host-pressure admission is closed. Recovery
+keeps the original resource class and follows ordinary delivery priority, so a
+merge recovery remains ahead of unrelated implementation work without creating
+a restart storm.
+
+Operations and run detail show the worker restart reason when known, old and
+new incarnations, `recovery_pending`, `reconciling`, `resuming`, `replaced`, or
+`needs_attention` state, attempt count, last evidence time, next retry, retained
+claims, and whether maintainer action is required. Audit history records every
+observation, fence change, adoption, continuation, replacement, and release.
+Agent status alone is never proof of success.
+
+### Cleanup lifecycle
 
 Cleanup is a separate fenced lifecycle. Merge, PR closure, decline, explicit
 abandonment, or failed preparation may atomically change an unowned worktree
@@ -946,16 +1023,10 @@ attempt and includes the stable invocation marker so the agent must first check
 for an existing result or GitHub side effect. This is conservative at-least-once
 recovery with duplicate safeguards, not a false exactly-once claim.
 
-After a coordinator crash, reconciliation searches by the preallocated agent
-name and launch-attempt metadata before release. A still-working session is
-adopted and refreshes the claim; a settled session enters result reconciliation.
-It also reconciles the persisted prompt attempt before sending any input.
-If the agent name is absent, reconciliation must also prove that the intended
-pane is back at a safe shell prompt before retrying or releasing. An unknown
-foreground process, duplicate labelled workspace, unreachable Herdr server, or
-ambiguous launch remains quarantined with its slot claimed for operator review.
-An expired lease or absent returned session ID is never enough by itself to
-release capacity.
+Coordinator, worker, Herdr, and individual-agent failure all use the single
+worker-and-agent recovery state machine above. An expired lease, missing
+heartbeat, or absent returned session ID is never enough by itself to release
+capacity or create a replacement.
 
 #### Light and heavy capacity
 
@@ -1465,6 +1536,9 @@ Acceptance:
 - Put credential-free and credential-bearing Git/port execution behind an
   injectable runner so push-success/ack-loss and timeout windows can be tested.
 - Use real temporary Git repositories and worktrees for workspace tests.
+- Model stable worker identity, worker and Herdr incarnations, authoritative
+  snapshot sequences, retained processes, and confirmed resource-exhaustion
+  failures so recovery can be advanced without wall-clock sleeps.
 - Add parity scenarios for current implementation dispatch, PR repair,
   publication, reconciliation, and cleanup. Add each new golden journey in the
   later slice that introduces its production path; this slice does not fake a
@@ -1871,6 +1945,7 @@ not a prerequisite for deterministic coverage.
 | Target closes during active work | Issue closes or PR merges/closes while a Herdr turn is working | Warning appears immediately; new brokered effects stop; session/output remain until safe settle and fenced cleanup |
 | Cross-repository leakage | Two repositories use similar issue/branch numbers concurrently | Paths, locks, prompts, credentials, results, links, and cleanup remain repository-scoped |
 | Deployment/migration regression | Release restarts with queued, retained, and scheduled work | Migration preserves identities and queue state; pollers resume without duplicate execution |
+| Worker or agent crash recovery | Coordinator, Herdr, host, transport, individual agent, or OOM fails at a named boundary | Claims remain fenced; work is adopted, reconciled, resumed once, replaced safely, or quarantined without duplicate prompt/publication |
 
 Maintain a small set of named golden journeys rather than a combinatorial suite:
 
@@ -1890,6 +1965,12 @@ Maintain a small set of named golden journeys rather than a combinatorial suite:
    agent;
 11. reconcile a PR merged outside PtcManager while repair is pending;
 12. run similar targets in two repositories without cross-contamination.
+13. terminate the coordinator, Herdr server, host incarnation, transport, and
+    individual agent at named boundaries before prompt, after commit, after
+    result, and after PR publication; prove adoption or fail-closed recovery;
+14. simulate confirmed OOM recovery with bounded backoff and serialized worker
+    admission, then prove capacity is eventually restored without duplicate
+    publication.
 
 ### Adapter contract tests
 
@@ -2013,6 +2094,10 @@ A slice is deployable only when:
   load routing, atomic final-slot claims, lease/fence reconciliation,
   preallocated launch identity, no-capacity queueing, retained-session
   reacquisition, and actual-agent provenance;
+- stable worker identity plus worker/Herdr incarnation changes, consecutive
+  healthy snapshot admission, recovery state transitions, retained claims,
+  adopt/reconcile/resume-once/replace/quarantine outcomes, recovery backoff, OOM
+  serialization, and trusted-direct ambiguity warnings;
 - independent light/heavy pool limits, profile ceilings, host-pressure pauses,
   rightmost-first priority, aging, and light planning during a heavy merge;
 - issue readiness from repository-configured labels, internal target claims,
@@ -2069,6 +2154,11 @@ A slice is deployable only when:
   one visible `prompt_delivery_unknown` session without automatic resend;
 - a fault after Herdr worktree creation but before agent start adopts the same
   worktree and resumes the first incomplete preflight stage;
+- Herdr termination, individual-agent termination, host-incarnation change,
+  transport loss, interruption after commit/result/publication, and simulated
+  OOM preserve fencing and retained work; each either adopts, reconciles,
+  resumes once, safely replaces, or visibly quarantines without a duplicate
+  prompt, branch writer, PR, or merge;
 - wrong-root, aliased, symlinked, wrong-owner, wrong-SHA, or credential-leaking
   workspaces are rejected before any repository bootstrap code executes;
 - bootstrap failure records `failed before agent start`, retains bounded output,
@@ -2110,6 +2200,8 @@ A slice is deployable only when:
   unknown blockers, and automatic movement after blocker completion;
 - immediate `Changed on GitHub while agent was working` feedback plus a
   discoverable recently-changed card and permanent Operations history;
+- worker restart reason, recovery state and attempt count, next retry, retained
+  claims, replacement/adoption outcome, and prominent maintainer-attention state;
 - navigation from board button to Operations and run output.
 
 ## Rollout and compatibility
