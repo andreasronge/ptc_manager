@@ -12,13 +12,17 @@ defmodule PtcManager.PublicationStatusPoller do
 
   @impl true
   def handle_info(:reconcile_pr, %{task_ref: nil} = state) do
-    task =
-      Task.Supervisor.async_nolink(
-        PtcManager.TaskSupervisor,
-        &PublicationStatusReconciler.run_once/0
-      )
+    if enabled?() do
+      task =
+        Task.Supervisor.async_nolink(
+          PtcManager.TaskSupervisor,
+          &PublicationStatusReconciler.run_once/0
+        )
 
-    {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+      {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+    else
+      {:noreply, %{state | timer_ref: nil}}
+    end
   end
 
   def handle_info({reference, result}, %{task_ref: reference} = state) do
@@ -61,8 +65,9 @@ defmodule PtcManager.PublicationStatusPoller do
   def next_delay(_result), do: interval()
 
   defp enabled? do
-    Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
-      PtcManager.Publications.agent_reconciliation_needed?()
+    PtcManager.OperationalMode.active?() and
+      (Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
+         PtcManager.Publications.agent_reconciliation_needed?())
   end
 
   defp interval, do: Application.get_env(:ptc_manager, :publication_status_interval_ms, 60_000)

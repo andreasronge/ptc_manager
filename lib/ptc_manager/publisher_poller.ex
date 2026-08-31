@@ -14,8 +14,12 @@ defmodule PtcManager.PublisherPoller do
 
   @impl true
   def handle_info(:publish, %{task_ref: nil} = state) do
-    task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &Publisher.run_once/0)
-    {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+    if enabled?() do
+      task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &Publisher.run_once/0)
+      {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+    else
+      {:noreply, %{state | timer_ref: nil}}
+    end
   end
 
   def handle_info({reference, _result}, %{task_ref: reference} = state) do
@@ -49,6 +53,10 @@ defmodule PtcManager.PublisherPoller do
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(reference), do: Process.cancel_timer(reference, async: true, info: false)
 
-  defp enabled?, do: Application.get_env(:ptc_manager, :publication_enabled, false)
+  defp enabled? do
+    PtcManager.OperationalMode.active?() and
+      Application.get_env(:ptc_manager, :publication_enabled, false)
+  end
+
   defp interval, do: Application.get_env(:ptc_manager, :publication_interval_ms, 5_000)
 end

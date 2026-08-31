@@ -22,6 +22,13 @@ end
 
 demo_mode = System.get_env("PTC_DEMO_MODE") == "true"
 
+operational_mode =
+  case System.get_env("PTC_OPERATIONAL_MODE", "active") do
+    "active" -> :active
+    "maintenance" -> :maintenance
+    _invalid -> raise "PTC_OPERATIONAL_MODE must be active or maintenance"
+  end
+
 github_sync_interval_ms =
   if(demo_mode,
     do: 0,
@@ -112,6 +119,7 @@ pr_reconcile_enabled =
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
 config :ptc_manager,
+  operational_mode: operational_mode,
   demo_mode: demo_mode,
   github_read_token: if(demo_mode, do: nil, else: System.get_env("GITHUB_READ_TOKEN")),
   repository_path: if(demo_mode, do: nil, else: System.get_env("PTC_REPOSITORY_PATH")),

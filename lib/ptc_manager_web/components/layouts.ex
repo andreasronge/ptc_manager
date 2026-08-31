@@ -91,6 +91,23 @@ defmodule PtcManagerWeb.Layouts do
         </div>
       </header>
 
+      <div
+        :if={PtcManager.OperationalMode.maintenance?()}
+        id="maintenance-mode-banner"
+        role="status"
+        class="border-b border-amber-400/20 bg-amber-400/[0.08] px-4 py-3 text-amber-100 sm:px-6"
+      >
+        <div class="mx-auto flex max-w-7xl items-start gap-3 text-sm">
+          <.icon name="hero-wrench-screwdriver-mini" class="mt-0.5 size-4 shrink-0" />
+          <p>
+            <span class="font-semibold">
+              {PtcManager.OperationalMode.label(PtcManager.OperationalMode.mode())} mode.
+            </span>
+            Read-only inspection is available; agents, queues, synchronization, and configuration changes are paused.
+          </p>
+        </div>
+      </div>
+
       <main class="px-4 py-7 sm:px-6 sm:py-10">
         <div class="mx-auto max-w-7xl">
           {render_slot(@inner_block)}

@@ -15,8 +15,14 @@ defmodule PtcManager.ResultPoller do
 
   @impl true
   def handle_info(:reconcile, %{task_ref: nil} = state) do
-    task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &ResultReconciler.run_once/0)
-    {:noreply, %{state | task_ref: task.ref}}
+    if enabled?() do
+      task =
+        Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &ResultReconciler.run_once/0)
+
+      {:noreply, %{state | task_ref: task.ref}}
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_info({reference, _result}, %{task_ref: reference} = state) do
@@ -34,17 +40,22 @@ defmodule PtcManager.ResultPoller do
 
   @impl true
   def handle_cast(:wake, %{task_ref: nil} = state) do
-    send(self(), :reconcile)
+    if enabled?(), do: send(self(), :reconcile)
     {:noreply, state}
   end
 
   def handle_cast(:wake, state), do: {:noreply, state}
 
   defp schedule do
-    case interval() do
-      interval when interval > 0 -> Process.send_after(self(), :reconcile, interval)
+    case {PtcManager.OperationalMode.active?(), interval()} do
+      {false, _interval} -> :ok
+      {true, interval} when interval > 0 -> Process.send_after(self(), :reconcile, interval)
       _ -> :ok
     end
+  end
+
+  defp enabled? do
+    PtcManager.OperationalMode.active?() and interval() > 0
   end
 
   defp interval,

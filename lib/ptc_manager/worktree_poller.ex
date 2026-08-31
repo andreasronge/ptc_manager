@@ -12,10 +12,17 @@ defmodule PtcManager.WorktreePoller do
 
   @impl true
   def handle_info(:cleanup, %{task_ref: nil} = state) do
-    task =
-      Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &Worktrees.cleanup_terminal_once/0)
+    if enabled?() do
+      task =
+        Task.Supervisor.async_nolink(
+          PtcManager.TaskSupervisor,
+          &Worktrees.cleanup_terminal_once/0
+        )
 
-    {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+      {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+    else
+      {:noreply, %{state | timer_ref: nil}}
+    end
   end
 
   def handle_info({reference, _result}, %{task_ref: reference} = state) do
@@ -46,7 +53,8 @@ defmodule PtcManager.WorktreePoller do
   end
 
   defp enabled? do
-    Application.get_env(:ptc_manager, :dispatch_enabled, false) and interval() > 0
+    PtcManager.OperationalMode.active?() and
+      Application.get_env(:ptc_manager, :dispatch_enabled, false) and interval() > 0
   end
 
   defp interval,

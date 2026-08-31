@@ -37,12 +37,16 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   @impl true
   def handle_info(:run, %{task_ref: nil} = state) do
-    task =
-      Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
-        MaintainerActions.run_once(lane: state.lane)
-      end)
+    if enabled?() do
+      task =
+        Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
+          MaintainerActions.run_once(lane: state.lane)
+        end)
 
-    {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+      {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
+    else
+      {:noreply, %{state | timer_ref: nil}}
+    end
   end
 
   def handle_info({reference, _result}, %{task_ref: reference} = state) do
@@ -83,6 +87,6 @@ defmodule PtcManager.MaintainerActions.Poller do
     if Process.whereis(name), do: GenServer.cast(name, :wake)
   end
 
-  defp enabled?, do: MaintainerActions.enabled?()
+  defp enabled?, do: PtcManager.OperationalMode.active?() and MaintainerActions.enabled?()
   defp interval, do: Application.get_env(:ptc_manager, :agent_action_interval_ms, 5_000)
 end

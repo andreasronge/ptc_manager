@@ -385,7 +385,15 @@ checks both managed runs and the manual and worker Herdr sessions. Non-idle
 agents make deployment stop safely; idle Herdr sessions continue running and
 are not restarted. Immediately before the release swap, the task stops the
 coordinator and checks the database again so no new managed work can race the
-deployment. Queued work resumes after startup.
+deployment. The new release always starts in maintenance mode: the web UI and
+`/health` remain readable, while pollers, button-triggered mutations, agents,
+and queued work stay paused.
+The deployment writes this override under `/etc/systemd/system`, so a reboot
+cannot silently resume work after a failed deployment. If an override already
+existed, a pre-effect rollback restores it byte-for-byte.
+Steady state relies on the application's `active` default; do not add
+`PTC_OPERATIONAL_MODE` to the base environment file because systemd gives
+environment-file values precedence over the maintenance override.
 
 The task discovers the coordinator's active systemd environment files and
 checks the configured manual Herdr session. If the optional
@@ -402,11 +410,21 @@ as the `ptc-manager-worker` user before replacing the application release.
 The task reads the actual `DATABASE_PATH` and `PORT` from the running systemd
 service, creates a consistent SQLite backup, and replaces `/opt/ptc_manager`.
 Starting the new release applies all pending Ecto migrations before the web
-endpoint starts. The task then checks the local HTTP endpoint and reports both
-the release and database backup paths. If the new service does not become
-healthy, it restores both backups automatically and retains the failed
-artifacts for investigation. Successful deployments retain the three newest
-release/database backup pairs and prune older successful backups.
+endpoint starts. The task requires `/health` to report maintenance mode, then
+runs one explicitly allowlisted read-only manager-adapter canary against an
+existing open issue. The canary result is persisted and its run appears in
+Operations. The credential-free deployment adapter does not depend on the
+optional interactive Codex manager. The task verifies `/health` in canary mode,
+removes the persistent systemd maintenance override, and makes exact canary
+activation its final transition. Only then do ordinary queues resume.
+
+Before the canary starts, a failure can safely restore both the previous
+release and the SQLite backup. The canary itself is the effect boundary because
+it records a durable run and proposal. A failure at or after that point never
+restores an older database automatically; the new release and current database
+remain paused in maintenance mode for forward repair. Successful deployments
+report both backup paths, retain the three newest release/database backup
+pairs, and prune older successful backups.
 
 ## Hetzner systemd and Tailscale
 

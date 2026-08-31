@@ -10,6 +10,7 @@ import Config
 config :elixir, :time_zone_database, Tz.TimeZoneDatabase
 
 config :ptc_manager,
+  operational_mode: :active,
   ecto_repos: [PtcManager.Repo],
   generators: [timestamp_type: :utc_datetime],
   github_client: PtcManager.GitHub.Client,

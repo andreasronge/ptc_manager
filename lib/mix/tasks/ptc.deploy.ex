@@ -12,8 +12,9 @@ defmodule Mix.Tasks.Ptc.Deploy do
       mix ptc.deploy --dry-run
 
   The deployment runs the local precommit checks, builds a production release
-  remotely, stops the service, backs up SQLite, installs the release, runs
-  migrations during application startup, and verifies the local HTTP endpoint.
+  remotely, stops the service, backs up SQLite, installs the release in
+  maintenance mode, runs migrations during application startup, verifies the
+  health endpoint, and admits one read-only canary before ordinary work resumes.
   """
 
   @impl Mix.Task

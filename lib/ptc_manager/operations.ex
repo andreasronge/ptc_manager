@@ -73,6 +73,9 @@ defmodule PtcManager.Operations do
   def create_agent_run(attrs),
     do: %AgentRun{} |> AgentRun.changeset(attrs) |> Repo.insert() |> broadcast_change()
 
+  def update_agent_run(%AgentRun{} = run, attrs),
+    do: run |> AgentRun.changeset(attrs) |> Repo.update() |> broadcast_change()
+
   def enqueue_agent_action(attrs) when is_map(attrs) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     attrs = Map.merge(attrs, %{state: "queued", attempt_count: 0, requested_at: now})

@@ -1,7 +1,7 @@
 defmodule PtcManager.Manager do
   @moduledoc "Creates private proposals from a configured read-only manager adapter."
 
-  alias PtcManager.{Operations, Repo}
+  alias PtcManager.{OperationalMode, Operations, Repo}
   alias PtcManager.Manager.Gate
   alias PtcManager.Operations.Proposal
 
@@ -9,9 +9,10 @@ defmodule PtcManager.Manager do
 
   def investigate_issue(issue_id, opts \\ []) when is_integer(issue_id) do
     adapter = Keyword.get(opts, :adapter, Application.fetch_env!(:ptc_manager, :manager_adapter))
-    issue = Operations.get_issue!(issue_id)
 
-    with :ok <- ensure_open(issue),
+    with :ok <- authorize_invocation(opts),
+         issue = Operations.get_issue!(issue_id),
+         :ok <- ensure_open(issue),
          {:ok, lease} <- Gate.checkout() do
       try do
         with {:ok, analysis} <- adapter.analyze(issue),
@@ -40,6 +41,13 @@ defmodule PtcManager.Manager do
 
   defp ensure_open(%{state: "open"}), do: :ok
   defp ensure_open(_issue), do: {:error, :issue_closed}
+
+  defp authorize_invocation(opts) do
+    case Keyword.fetch(opts, :canary_id) do
+      {:ok, invocation_id} -> OperationalMode.authorize_canary(invocation_id)
+      :error -> OperationalMode.authorize_ordinary_work()
+    end
+  end
 
   defp proposal_attrs(issue, analysis) do
     with {:ok, normalized} <- normalize_analysis(analysis) do

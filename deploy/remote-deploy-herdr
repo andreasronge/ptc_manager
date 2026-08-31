@@ -29,6 +29,9 @@ database_path=
 database_backup=
 failed_database=
 health_url=
+maintenance_override=/etc/systemd/system/ptc_manager.service.d/90-ptc-manager-deploy-maintenance.conf
+maintenance_override_backup="/etc/systemd/system/ptc_manager.service.d/.ptc-manager-maintenance-${release_id}.backup"
+maintenance_override_preexisting=false
 mise_binary=/home/agent/.local/bin/mise
 node_version=22.23.2
 worker_node_dir="/opt/ptc-manager-node-${node_version}"
@@ -44,12 +47,12 @@ coordinator_session=
 worker_session=
 worktree_root=
 remote_script=$0
-swapped=false
-service_stopped=false
+deployment_phase=pre_stop
 
 cleanup_remote() {
   rm -f -- "$source_archive" "$remote_script" "$agent_filter" "$environment_file_parser" \
     "$worker_git_candidate" "$sudoers_candidate"
+  sudo rm -f -- "$maintenance_override_backup"
 
   case "$build_dir" in
     /home/agent/src/ptc_manager-build-*) rm -rf -- "$build_dir" ;;
@@ -61,10 +64,13 @@ cleanup_remote() {
 }
 
 health_check() {
+  expected_mode=$1
   attempt=1
 
   while [ "$attempt" -le 30 ]; do
-    if curl -fsS -o /dev/null "$health_url"; then
+    if curl -fsS "$health_url" |
+      jq -e --arg mode "$expected_mode" \
+        '.status == "ok" and .operational_mode == $mode' >/dev/null; then
       return 0
     fi
 
@@ -73,6 +79,70 @@ health_check() {
   done
 
   return 1
+}
+
+legacy_health_check() {
+  attempt=1
+
+  while [ "$attempt" -le 30 ]; do
+    if curl -fsS -o /dev/null "http://127.0.0.1:${health_port}/"; then
+      return 0
+    fi
+
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+install_maintenance_override() {
+  capture_maintenance_override
+
+  sudo install -d -o root -g root -m 0755 "$(dirname "$maintenance_override")"
+  printf '%s\n' '[Service]' 'Environment=PTC_OPERATIONAL_MODE=maintenance' |
+    sudo tee "$maintenance_override" >/dev/null
+  sudo chmod 0644 "$maintenance_override"
+  sudo systemctl daemon-reload
+}
+
+capture_maintenance_override() {
+  sudo install -d -o root -g root -m 0755 "$(dirname "$maintenance_override")"
+
+  if sudo test -L "$maintenance_override"; then
+    echo "maintenance override must not be a symlink: $maintenance_override" >&2
+    return 1
+  fi
+
+  if sudo test -f "$maintenance_override" && [ "$maintenance_override_preexisting" = false ]; then
+    if sudo test -e "$maintenance_override_backup"; then
+      echo "maintenance override backup already exists: $maintenance_override_backup" >&2
+      return 1
+    fi
+
+    sudo install -o root -g root -m 0600 "$maintenance_override" "$maintenance_override_backup"
+    maintenance_override_preexisting=true
+  fi
+}
+
+remove_maintenance_override() {
+  sudo rm -f -- "$maintenance_override"
+  sudo systemctl daemon-reload
+}
+
+restore_preexisting_maintenance_override() {
+  if [ "$maintenance_override_preexisting" = true ]; then
+    sudo install -o root -g root -m 0644 "$maintenance_override_backup" "$maintenance_override"
+  else
+    sudo rm -f -- "$maintenance_override"
+  fi
+
+  sudo systemctl daemon-reload
+}
+
+pause_new_release() {
+  sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
+    'PtcManager.OperationalMode.enter_maintenance()' >/dev/null
 }
 
 read_process_setting() {
@@ -316,17 +386,20 @@ prune_successful_backups() {
 }
 
 rollback() {
-  swapped=false
-  service_stopped=false
+  deployment_phase=handling_failure
   rollback_status=0
   echo "New release did not become healthy; restoring the previous release and database." >&2
   sudo systemctl stop "$service_name" || rollback_status=1
 
-  if [ -d "$application_dir" ]; then
-    sudo mv "$application_dir" "$failed_release" || rollback_status=1
-  fi
+  if [ -d "$release_backup" ]; then
+    if [ -d "$application_dir" ]; then
+      sudo mv "$application_dir" "$failed_release" || rollback_status=1
+    fi
 
-  sudo mv "$release_backup" "$application_dir" || rollback_status=1
+    sudo mv "$release_backup" "$application_dir" || rollback_status=1
+  elif [ ! -d "$application_dir" ]; then
+    rollback_status=1
+  fi
 
   if [ -f "$database_path" ]; then
     sudo mv "$database_path" "$failed_database" || rollback_status=1
@@ -342,9 +415,10 @@ rollback() {
 
   sudo install -o ptc-manager -g ptc-manager -m 0600 "$database_backup" "$database_path" ||
     rollback_status=1
+  restore_preexisting_maintenance_override || rollback_status=1
   sudo systemctl start "$service_name" || rollback_status=1
 
-  if [ "$rollback_status" -eq 0 ] && health_check; then
+  if [ "$rollback_status" -eq 0 ] && legacy_health_check; then
     echo "Rollback succeeded. Failed artifacts were retained with suffix ${release_id}." >&2
   else
     echo "Rollback did not restore service health; inspect systemd immediately." >&2
@@ -355,12 +429,27 @@ finish() {
   exit_status=$?
   trap - EXIT HUP INT TERM
 
-  if [ "$swapped" = true ]; then
-    rollback
-  elif [ "$service_stopped" = true ]; then
-    echo "Deployment stopped before the release swap; restarting the existing release." >&2
-    sudo systemctl start "$service_name" || true
-  fi
+  case "$deployment_phase" in
+    post_effect)
+      deployment_phase=handling_failure
+      install_maintenance_override || true
+
+      if ! pause_new_release; then
+        sudo systemctl restart "$service_name" || true
+      fi
+
+      echo "Deployment stopped after the canary effect boundary; the new release and current database remain in maintenance mode for forward repair." >&2
+      ;;
+    swapping_pre_effect)
+      rollback
+      ;;
+    service_stopped)
+      deployment_phase=handling_failure
+      echo "Deployment stopped before the release swap; restarting the existing release." >&2
+      restore_preexisting_maintenance_override || true
+      sudo systemctl start "$service_name" || true
+      ;;
+  esac
 
   cleanup_remote
   exit "$exit_status"
@@ -479,7 +568,7 @@ esac
 
 database_backup="${database_path}-before-${release_id}"
 failed_database="${database_path}-failed-${release_id}"
-health_url="http://127.0.0.1:${health_port}/"
+health_url="http://127.0.0.1:${health_port}/health"
 
 if ! sudo test -f "$database_path"; then
   echo "configured SQLite database is missing: $database_path" >&2
@@ -499,6 +588,7 @@ fi
 
 ensure_no_managed_runs
 ensure_no_busy_herdr_agents
+capture_maintenance_override
 ensure_private_worktree_root "$worktree_root"
 sudo chmod 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
@@ -530,29 +620,39 @@ echo "Building production release..."
 ensure_no_busy_herdr_agents
 
 echo "Stopping service and backing up SQLite..."
-service_stopped=true
+deployment_phase=service_stopped
 sudo systemctl stop "$service_name"
 ensure_no_managed_runs
 sudo sqlite3 "$database_path" ".backup '$database_backup'"
 sudo chown ptc-manager:ptc-manager "$database_backup"
 sudo chmod 0600 "$database_backup"
 
+deployment_phase=swapping_pre_effect
 sudo mv "$application_dir" "$release_backup"
-swapped=true
 sudo mv "$new_release" "$application_dir"
 sudo chown -R root:root "$application_dir"
 
 echo "Starting release; startup applies pending database migrations..."
+install_maintenance_override
 sudo systemctl start "$service_name"
 
-health_check
+health_check maintenance
 
-swapped=false
-service_stopped=false
 migration_version=$(sudo sqlite3 -readonly "$database_path" \
   "select coalesce(max(version), 0) from schema_migrations;")
 
-echo "Service is healthy. Latest database migration: $migration_version"
+echo "Maintenance health passed. Latest database migration: $migration_version"
+echo "Running one allowlisted read-only deployment canary..."
+deployment_phase=post_effect
+sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
+  "case PtcManager.DeploymentCanary.run(\"deploy-${release_id}\") do {:ok, result} -> result; {:error, reason} -> raise \"deployment canary failed: #{inspect(reason)}\" end"
+health_check canary
+remove_maintenance_override
+
+sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
+  "case PtcManager.DeploymentCanary.activate(\"deploy-${release_id}\") do :ok -> :ok; {:error, reason} -> raise \"deployment activation failed: #{inspect(reason)}\" end"
+deployment_phase=complete
+echo "Service is healthy and ordinary work is active."
 echo "Release backup: $release_backup"
 echo "Database backup: $database_backup"
 prune_successful_backups

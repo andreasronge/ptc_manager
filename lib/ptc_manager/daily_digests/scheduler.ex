@@ -10,6 +10,7 @@ defmodule PtcManager.DailyDigests.Scheduler do
   @minimum_interval_ms 1_000
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def wake, do: GenServer.cast(__MODULE__, :wake)
 
   @impl true
   def init(_opts) do
@@ -18,19 +19,31 @@ defmodule PtcManager.DailyDigests.Scheduler do
 
   @impl true
   def handle_info(:tick, state) do
-    case DailyDigests.enqueue_due() do
-      {:ok, _digests} -> :ok
-      {:error, reason} -> Logger.warning("Daily update scheduling failed: #{inspect(reason)}")
+    if enabled?() do
+      case DailyDigests.enqueue_due() do
+        {:ok, _digests} -> :ok
+        {:error, reason} -> Logger.warning("Daily update scheduling failed: #{inspect(reason)}")
+      end
     end
 
     {:noreply, schedule(%{state | timer_ref: nil}, interval())}
   end
 
+  @impl true
+  def handle_cast(:wake, state) do
+    if state.timer_ref,
+      do: Process.cancel_timer(state.timer_ref, async: true, info: false)
+
+    {:noreply, schedule(%{state | timer_ref: nil}, 0)}
+  end
+
   defp schedule(state, delay) do
-    if DailyDigests.enabled?(),
+    if enabled?(),
       do: %{state | timer_ref: Process.send_after(self(), :tick, delay)},
       else: state
   end
+
+  defp enabled?, do: PtcManager.OperationalMode.active?() and DailyDigests.enabled?()
 
   @doc false
   def interval do
