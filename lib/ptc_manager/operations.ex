@@ -11,6 +11,7 @@ defmodule PtcManager.Operations do
   alias Ecto.Multi
   alias PtcManager.Repo
   alias PtcManager.ReviewPolicy
+  alias PtcManager.RuntimeIncarnation
   alias PtcManager.WorktreeSecurity
 
   alias PtcManager.Operations.{
@@ -907,7 +908,7 @@ defmodule PtcManager.Operations do
         job = Repo.get!(Job, job_id)
 
         with :ok <- valid_lease(job, fencing_token, worker_key, lease_now),
-             worker <- get_or_create_dispatch_worker!(worker_key, dispatch, lifecycle_now) do
+             {:ok, worker} <- current_dispatch_worker(Repo, worker_key) do
           working_job =
             job
             |> Job.changeset(%{state: "working", lease_expires_at: dispatch.lease_expires_at})
@@ -941,7 +942,10 @@ defmodule PtcManager.Operations do
               herdr_pane: dispatch.pane_id,
               herdr_session: dispatch.session,
               external_key: dispatch.external_key,
-              fencing_token: fencing_token
+              fencing_token: fencing_token,
+              worker_incarnation_id: worker.worker_incarnation_id,
+              herdr_incarnation_id: worker.herdr_incarnation_id,
+              coordinator_incarnation_id: worker.coordinator_incarnation_id
             })
             |> Repo.insert!()
 
@@ -975,33 +979,39 @@ defmodule PtcManager.Operations do
 
     outcome =
       Repo.transaction(fn ->
-        worker = get_or_create_dispatch_worker!(dispatch.worker_key, dispatch, now)
+        with {:ok, worker} <- current_dispatch_worker(Repo, dispatch.worker_key) do
+          run =
+            AgentRun
+            |> where(
+              [run],
+              run.agent_action_id == ^action_id and run.fencing_token == ^attempt_count and
+                run.state in ["starting", "working", "unknown"]
+            )
+            |> order_by([run], desc: run.id)
+            |> limit(1)
+            |> Repo.one!()
 
-        run =
-          AgentRun
-          |> where(
-            [run],
-            run.agent_action_id == ^action_id and run.fencing_token == ^attempt_count and
-              run.state in ["starting", "working"]
-          )
-          |> order_by([run], desc: run.id)
-          |> limit(1)
-          |> Repo.one!()
-
-        run
-        |> AgentRun.changeset(%{
-          worker_id: worker.id,
-          role: "implementer",
-          state: "working",
-          status_text: "Repairing the existing pull request in Herdr.",
-          last_heartbeat_at: now,
-          agent_name: dispatch.agent_name,
-          herdr_workspace: dispatch.workspace_id,
-          herdr_pane: dispatch.pane_id,
-          herdr_session: dispatch.session,
-          external_key: dispatch.external_key
-        })
-        |> Repo.update!()
+          with :ok <- action_run_matches_worker_incarnation(run, worker, dispatch) do
+            run
+            |> AgentRun.changeset(%{
+              worker_id: worker.id,
+              role: "implementer",
+              state: "working",
+              status_text: "Repairing the existing pull request in Herdr.",
+              last_heartbeat_at: now,
+              agent_name: dispatch.agent_name,
+              herdr_workspace: dispatch.workspace_id,
+              herdr_pane: dispatch.pane_id,
+              herdr_session: dispatch.session,
+              external_key: dispatch.external_key
+            })
+            |> Repo.update!()
+          else
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
       end)
 
     case outcome do
@@ -1582,10 +1592,14 @@ defmodule PtcManager.Operations do
 
   def dispatch_capacity(worker_key) when is_binary(worker_key) do
     case Repo.get_by(Worker, worker_key: worker_key) do
-      %Worker{status: "online", capabilities: capabilities} ->
-        case capabilities["implementation_slots"] do
-          capacity when is_integer(capacity) and capacity > 0 -> {:ok, capacity}
-          _capacity -> {:error, :worker_has_no_implementation_capacity}
+      %Worker{status: "online", capabilities: capabilities} = worker ->
+        if worker_admitted?(worker) do
+          case capabilities["implementation_slots"] do
+            capacity when is_integer(capacity) and capacity > 0 -> {:ok, capacity}
+            _capacity -> {:error, :worker_has_no_implementation_capacity}
+          end
+        else
+          {:error, :worker_unavailable}
         end
 
       %Worker{} ->
@@ -1918,15 +1932,19 @@ defmodule PtcManager.Operations do
       else: {:error, :dispatch_capacity}
   end
 
-  defp worker_execution_capacity(%Worker{status: "online", capabilities: capabilities}) do
-    case capabilities["implementation_slots"] do
-      capacity when is_integer(capacity) and capacity > 0 ->
-        {:ok, capacity}
+  defp worker_execution_capacity(%Worker{status: "online", capabilities: capabilities} = worker) do
+    if worker_admitted?(worker) do
+      case capabilities["implementation_slots"] do
+        capacity when is_integer(capacity) and capacity > 0 ->
+          {:ok, capacity}
 
-      _capacity ->
-        if capabilities["herdr"],
-          do: {:ok, configured_agent_capacity()},
-          else: {:error, :worker_has_no_implementation_capacity}
+        _capacity ->
+          if capabilities["herdr"],
+            do: {:ok, configured_agent_capacity()},
+            else: {:error, :worker_has_no_implementation_capacity}
+      end
+    else
+      {:error, :worker_unavailable}
     end
   end
 
@@ -1936,27 +1954,17 @@ defmodule PtcManager.Operations do
        when not is_integer(capacity) or capacity < 1,
        do: {:error, :invalid_agent_capacity}
 
-  defp ensure_capacity_worker(repo, worker_key, capacity, now) do
-    attrs = %{
-      worker_key: worker_key,
-      name: "Herdr #{String.replace_prefix(worker_key, "herdr:", "")}",
-      status: "online",
-      capabilities: %{
-        "herdr" => true,
-        "dispatch" => true,
-        "implementation_slots" => capacity
-      },
-      last_heartbeat_at: now
-    }
-
+  defp ensure_capacity_worker(repo, worker_key, capacity, _now) do
     case repo.get_by(Worker, worker_key: worker_key) do
       nil ->
-        {:ok, %Worker{} |> Worker.changeset(attrs) |> repo.insert!()}
+        {:error, :worker_unavailable}
 
       %Worker{status: "online", capabilities: capabilities} = worker ->
-        if capabilities["implementation_slots"] == capacity,
-          do: {:ok, worker},
-          else: {:error, :worker_capacity_changed}
+        cond do
+          not worker_admitted?(worker) -> {:error, :worker_unavailable}
+          capabilities["implementation_slots"] == capacity -> {:ok, worker}
+          true -> {:error, :worker_capacity_changed}
+        end
 
       %Worker{} ->
         {:error, :worker_unavailable}
@@ -2248,7 +2256,10 @@ defmodule PtcManager.Operations do
             ),
           started_at: now,
           last_heartbeat_at: now,
-          fencing_token: attempt_count
+          fencing_token: attempt_count,
+          worker_incarnation_id: worker.worker_incarnation_id,
+          herdr_incarnation_id: worker.herdr_incarnation_id,
+          coordinator_incarnation_id: worker.coordinator_incarnation_id
         })
         |> Repo.insert!()
 
@@ -2482,8 +2493,11 @@ defmodule PtcManager.Operations do
 
     worker =
       case Repo.get_by(Worker, worker_key: worker_key) do
-        %Worker{status: "online"} = worker -> worker
-        _worker -> Repo.rollback(:worker_unavailable)
+        %Worker{status: "online"} = worker ->
+          if worker_admitted?(worker), do: worker, else: Repo.rollback(:worker_unavailable)
+
+        _worker ->
+          Repo.rollback(:worker_unavailable)
       end
 
     if action_key == "repair_pr" and
@@ -2611,27 +2625,38 @@ defmodule PtcManager.Operations do
       else: {:error, changeset}
   end
 
-  defp get_or_create_dispatch_worker!(worker_key, dispatch, now) do
-    case Repo.get_by(Worker, worker_key: worker_key) do
-      nil ->
-        capacity = configured_agent_capacity()
+  defp current_dispatch_worker(repo, worker_key) do
+    case repo.get_by(Worker, worker_key: worker_key) do
+      %Worker{status: "online"} = worker ->
+        if worker_admitted?(worker), do: {:ok, worker}, else: {:error, :worker_unavailable}
 
-        %Worker{}
-        |> Worker.changeset(%{
-          worker_key: worker_key,
-          name: "Herdr #{dispatch.session}",
-          status: "online",
-          capabilities: %{
-            "herdr" => true,
-            "dispatch" => true,
-            "implementation_slots" => capacity
-          },
-          last_heartbeat_at: now
-        })
-        |> Repo.insert!()
+      _worker ->
+        {:error, :worker_unavailable}
+    end
+  end
 
-      worker ->
-        worker
+  defp worker_admitted?(%Worker{coordinator_incarnation_id: coordinator_incarnation_id}),
+    do: coordinator_incarnation_id == RuntimeIncarnation.current()
+
+  defp action_run_matches_worker_incarnation(run, worker, dispatch) do
+    cond do
+      run.worker_id != worker.id ->
+        {:error, :stale_worker_incarnation}
+
+      run.coordinator_incarnation_id != worker.coordinator_incarnation_id ->
+        {:error, :stale_worker_incarnation}
+
+      run.worker_incarnation_id != worker.worker_incarnation_id ->
+        {:error, :stale_worker_incarnation}
+
+      run.herdr_incarnation_id != worker.herdr_incarnation_id ->
+        {:error, :stale_worker_incarnation}
+
+      is_binary(run.external_key) and run.external_key != dispatch.external_key ->
+        {:error, :stale_herdr_session}
+
+      true ->
+        :ok
     end
   end
 

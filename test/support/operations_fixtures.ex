@@ -64,7 +64,8 @@ defmodule PtcManager.OperationsFixtures do
       name: "Worker #{suffix}",
       status: "online",
       capabilities: %{"herdr" => true},
-      last_heartbeat_at: now()
+      last_heartbeat_at: now(),
+      coordinator_incarnation_id: PtcManager.RuntimeIncarnation.current()
     }
 
     {:ok, worker} = Operations.create_worker(Map.merge(defaults, attrs))

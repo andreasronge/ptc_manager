@@ -7,6 +7,8 @@ defmodule PtcManager.Application do
 
   @impl true
   def start(_type, _args) do
+    PtcManager.RuntimeIncarnation.initialize()
+
     children = [
       PtcManagerWeb.Telemetry,
       PtcManager.Repo,

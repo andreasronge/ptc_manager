@@ -6,6 +6,7 @@ defmodule PtcManager.Herdr.Sync do
   alias PtcManager.Clock
   alias PtcManager.Gateway
   alias PtcManager.Operations
+  alias PtcManager.RuntimeIncarnation
 
   alias PtcManager.Operations.{
     AgentRun,
@@ -47,16 +48,28 @@ defmodule PtcManager.Herdr.Sync do
       )
 
     case Gateway.call(client, :list_agents, []) do
-      {:ok, agents} when is_list(agents) ->
-        persist_snapshot(
-          session,
-          agents,
-          stale_after_ms,
-          reconcile_after_ms,
-          snapshot_started_at,
-          Clock.utc_now(PtcManager.Clock.System),
-          Clock.utc_now(clock)
-        )
+      {:ok, snapshot} ->
+        with {:ok, agents, identity} <- normalize_snapshot(snapshot) do
+          persist_snapshot(
+            session,
+            agents,
+            identity,
+            stale_after_ms,
+            reconcile_after_ms,
+            snapshot_started_at,
+            Clock.utc_now(PtcManager.Clock.System),
+            Clock.utc_now(clock)
+          )
+        else
+          {:error, reason} ->
+            mark_degraded(
+              session,
+              reason,
+              stale_after_ms,
+              Clock.utc_now(PtcManager.Clock.System),
+              Clock.utc_now(clock)
+            )
+        end
 
       {:error, reason} ->
         mark_degraded(
@@ -81,6 +94,7 @@ defmodule PtcManager.Herdr.Sync do
   defp persist_snapshot(
          session,
          remote_agents,
+         identity,
          stale_after_ms,
          reconcile_after_ms,
          snapshot_started_at,
@@ -89,67 +103,39 @@ defmodule PtcManager.Herdr.Sync do
        ) do
     result =
       Repo.transaction(fn ->
-        worker = upsert_worker(session, "online", agent_now)
+        case accept_worker_snapshot(session, identity, agent_now, stale_after_ms) do
+          {:ignored, worker, reason} ->
+            %{
+              worker: worker,
+              agent_count: 0,
+              lost_count: 0,
+              absent_count: 0,
+              snapshot_ignored: reason
+            }
 
-        normalized =
-          Enum.map(remote_agents, fn agent ->
-            agent
-            |> normalize_agent(session, agent_now)
-            |> Map.put(:snapshot_started_at, snapshot_started_at)
-            |> maybe_attach_managed_attempt(worker.worker_key)
-            |> maybe_attach_agent_action_attempt(worker)
-          end)
+          {:recovering, worker, reason} ->
+            uncertain_count = quarantine_active_attempts(worker, agent_now, lease_now, reason)
 
-        existing_runs =
-          AgentRun
-          |> where([run], run.worker_id == ^worker.id and not is_nil(run.external_key))
-          |> order_by([run], desc: run.inserted_at, desc: run.id)
-          |> Repo.all()
-          |> Enum.reduce(%{}, &Map.put_new(&2, &1.external_key, &1))
+            %{
+              worker: worker,
+              agent_count: 0,
+              lost_count: 0,
+              absent_count: 0,
+              uncertain_count: uncertain_count,
+              recovery_pending: true
+            }
 
-        observed_keys = MapSet.new(normalized, & &1.external_key)
-
-        observed_run_ids =
-          Enum.flat_map(normalized, fn attrs ->
-            existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
-
-            if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
-              run = upsert_agent_run(worker, existing_run, attrs)
-              superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
-              reconcile_worktree_identity(run, attrs, agent_now)
-              reconcile_job(run, attrs.state, agent_now, lease_now)
-              [run.id | superseded_ids]
-            else
-              [existing_run.id]
-            end
-          end)
-          |> MapSet.new()
-
-        lost_count =
-          mark_missing_runs_lost(
-            existing_runs,
-            observed_keys,
-            observed_run_ids,
-            agent_now,
-            snapshot_started_at,
-            lease_now
-          )
-
-        absent_count =
-          resolve_absent_reconciling_jobs(
-            worker,
-            normalized,
-            lease_now,
-            reconcile_after_ms,
-            agent_now
-          )
-
-        %{
-          worker: worker,
-          agent_count: length(normalized),
-          lost_count: lost_count,
-          absent_count: absent_count
-        }
+          {:accepted, worker} ->
+            persist_agents_snapshot(
+              worker,
+              session,
+              remote_agents,
+              snapshot_started_at,
+              agent_now,
+              lease_now,
+              reconcile_after_ms
+            )
+        end
       end)
 
     case result do
@@ -162,6 +148,346 @@ defmodule PtcManager.Herdr.Sync do
     end
   rescue
     error -> mark_degraded(session, error, stale_after_ms, agent_now, lease_now)
+  end
+
+  defp persist_agents_snapshot(
+         worker,
+         session,
+         remote_agents,
+         snapshot_started_at,
+         agent_now,
+         lease_now,
+         reconcile_after_ms
+       ) do
+    normalized =
+      Enum.map(remote_agents, fn agent ->
+        agent
+        |> normalize_agent(session, agent_now)
+        |> Map.put(:snapshot_started_at, snapshot_started_at)
+        |> Map.merge(%{
+          worker_incarnation_id: worker.worker_incarnation_id,
+          herdr_incarnation_id: worker.herdr_incarnation_id,
+          coordinator_incarnation_id: worker.coordinator_incarnation_id
+        })
+        |> maybe_attach_managed_attempt(worker.worker_key)
+        |> maybe_attach_agent_action_attempt(worker)
+      end)
+
+    existing_runs =
+      AgentRun
+      |> where([run], run.worker_id == ^worker.id and not is_nil(run.external_key))
+      |> order_by([run], desc: run.inserted_at, desc: run.id)
+      |> Repo.all()
+      |> Enum.reduce(%{}, &Map.put_new(&2, &1.external_key, &1))
+
+    observed_keys = MapSet.new(normalized, & &1.external_key)
+
+    observed_run_ids =
+      Enum.flat_map(normalized, fn attrs ->
+        existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
+
+        if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
+          run = upsert_agent_run(worker, existing_run, attrs)
+          superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
+          reconcile_worktree_identity(run, attrs, agent_now)
+          reconcile_job(run, attrs.state, agent_now, lease_now)
+          [run.id | superseded_ids]
+        else
+          [existing_run.id]
+        end
+      end)
+      |> MapSet.new()
+
+    lost_count =
+      mark_missing_runs_lost(
+        existing_runs,
+        observed_keys,
+        observed_run_ids,
+        agent_now,
+        snapshot_started_at,
+        lease_now
+      )
+
+    absent_count =
+      resolve_absent_reconciling_jobs(
+        worker,
+        normalized,
+        lease_now,
+        reconcile_after_ms,
+        agent_now
+      )
+
+    %{
+      worker: worker,
+      agent_count: length(normalized),
+      lost_count: lost_count,
+      absent_count: absent_count
+    }
+  end
+
+  defp normalize_snapshot(agents) when is_list(agents), do: {:ok, agents, %{}}
+
+  defp normalize_snapshot(snapshot) when is_map(snapshot) do
+    agents = value(snapshot, [:agents, "agents"])
+
+    identity = %{
+      worker_incarnation_id: value(snapshot, [:worker_incarnation_id, "worker_incarnation_id"]),
+      herdr_incarnation_id: value(snapshot, [:herdr_incarnation_id, "herdr_incarnation_id"]),
+      snapshot_sequence: value(snapshot, [:snapshot_sequence, "snapshot_sequence"]),
+      restart_reason: value(snapshot, [:restart_reason, "restart_reason"])
+    }
+
+    present =
+      Enum.count(
+        [:worker_incarnation_id, :herdr_incarnation_id, :snapshot_sequence],
+        &(not is_nil(Map.fetch!(identity, &1)))
+      )
+
+    cond do
+      not is_list(agents) ->
+        {:error, :invalid_herdr_snapshot}
+
+      present == 0 ->
+        {:ok, agents, %{}}
+
+      present == 3 and is_binary(identity.worker_incarnation_id) and
+        identity.worker_incarnation_id != "" and is_binary(identity.herdr_incarnation_id) and
+        identity.herdr_incarnation_id != "" and is_integer(identity.snapshot_sequence) and
+          identity.snapshot_sequence > 0 ->
+        {:ok, agents, identity}
+
+      true ->
+        {:error, :invalid_herdr_snapshot_identity}
+    end
+  end
+
+  defp normalize_snapshot(_snapshot), do: {:error, :invalid_herdr_snapshot}
+
+  defp accept_worker_snapshot(session, identity, heartbeat_at, _stale_after_ms)
+       when identity == %{} do
+    key = "herdr:#{session}"
+
+    case Repo.get_by(Worker, worker_key: key) do
+      %Worker{worker_incarnation_id: incarnation} = worker when not is_nil(incarnation) ->
+        updated =
+          update_worker(worker, "degraded", nil, %{
+            healthy_snapshot_count: 0,
+            restart_reason: "Authoritative snapshot identity was missing.",
+            coordinator_incarnation_id: nil
+          })
+
+        {:recovering, updated,
+         "Authoritative snapshot identity was missing; retained work must be reconciled."}
+
+      _legacy_worker ->
+        worker =
+          upsert_worker(session, "online", heartbeat_at, %{
+            coordinator_incarnation_id: RuntimeIncarnation.current()
+          })
+
+        {:accepted, worker}
+    end
+  end
+
+  defp accept_worker_snapshot(session, identity, heartbeat_at, stale_after_ms) do
+    key = "herdr:#{session}"
+
+    case Repo.get_by(Worker, worker_key: key) do
+      nil ->
+        worker =
+          insert_worker(session, "online", heartbeat_at, %{
+            worker_incarnation_id: identity.worker_incarnation_id,
+            herdr_incarnation_id: identity.herdr_incarnation_id,
+            snapshot_sequence: identity.snapshot_sequence,
+            healthy_snapshot_count: 2,
+            restart_reason: identity.restart_reason,
+            coordinator_incarnation_id: RuntimeIncarnation.current()
+          })
+
+        {:accepted, worker}
+
+      %Worker{worker_incarnation_id: nil, herdr_incarnation_id: nil} = worker ->
+        worker =
+          update_worker(worker, "online", heartbeat_at, %{
+            worker_incarnation_id: identity.worker_incarnation_id,
+            herdr_incarnation_id: identity.herdr_incarnation_id,
+            snapshot_sequence: identity.snapshot_sequence,
+            healthy_snapshot_count: 2,
+            restart_reason: identity.restart_reason,
+            coordinator_incarnation_id: RuntimeIncarnation.current()
+          })
+
+        {:accepted, worker}
+
+      %Worker{} = worker ->
+        classify_worker_snapshot(worker, identity, heartbeat_at, stale_after_ms)
+    end
+  end
+
+  defp classify_worker_snapshot(worker, identity, heartbeat_at, stale_after_ms) do
+    current_identity = {worker.worker_incarnation_id, worker.herdr_incarnation_id}
+    observed_identity = {identity.worker_incarnation_id, identity.herdr_incarnation_id}
+
+    previous_identity =
+      {worker.previous_worker_incarnation_id, worker.previous_herdr_incarnation_id}
+
+    cond do
+      observed_identity == current_identity and
+          identity.snapshot_sequence <= worker.snapshot_sequence ->
+        classify_stale_snapshot(
+          worker,
+          heartbeat_at,
+          stale_after_ms,
+          :stale_sequence,
+          "Authoritative snapshot sequence stopped advancing."
+        )
+
+      observed_identity == previous_identity ->
+        classify_stale_snapshot(
+          worker,
+          heartbeat_at,
+          stale_after_ms,
+          :stale_incarnation,
+          "Only a previous worker incarnation is reporting."
+        )
+
+      observed_identity != current_identity ->
+        changed_at = heartbeat_at
+
+        updated =
+          update_worker(worker, "degraded", heartbeat_at, %{
+            previous_worker_incarnation_id: worker.worker_incarnation_id,
+            previous_herdr_incarnation_id: worker.herdr_incarnation_id,
+            worker_incarnation_id: identity.worker_incarnation_id,
+            herdr_incarnation_id: identity.herdr_incarnation_id,
+            snapshot_sequence: identity.snapshot_sequence,
+            healthy_snapshot_count: 1,
+            restart_reason: identity.restart_reason,
+            incarnation_changed_at: changed_at,
+            coordinator_incarnation_id: nil
+          })
+
+        record_incarnation_change(worker, updated, identity)
+
+        {:recovering, updated,
+         "Worker or Herdr incarnation changed; retained work must be reconciled."}
+
+      worker.status == "degraded" and worker.healthy_snapshot_count < 2 ->
+        healthy_count = worker.healthy_snapshot_count + 1
+        status = if healthy_count >= 2, do: "online", else: "degraded"
+
+        updated =
+          update_worker(worker, status, heartbeat_at, %{
+            snapshot_sequence: identity.snapshot_sequence,
+            healthy_snapshot_count: healthy_count,
+            coordinator_incarnation_id:
+              if(status == "online", do: RuntimeIncarnation.current(), else: nil)
+          })
+
+        if status == "online" do
+          {:accepted, updated}
+        else
+          {:recovering, updated, "Waiting for consecutive healthy worker snapshots."}
+        end
+
+      true ->
+        updated =
+          update_worker(worker, "online", heartbeat_at, %{
+            snapshot_sequence: identity.snapshot_sequence,
+            healthy_snapshot_count: max(worker.healthy_snapshot_count, 2),
+            coordinator_incarnation_id: RuntimeIncarnation.current()
+          })
+
+        {:accepted, updated}
+    end
+  end
+
+  defp snapshot_expired?(%Worker{last_heartbeat_at: nil}, _heartbeat_at, _stale_after_ms),
+    do: true
+
+  defp snapshot_expired?(worker, heartbeat_at, stale_after_ms),
+    do: DateTime.diff(heartbeat_at, worker.last_heartbeat_at, :millisecond) >= stale_after_ms
+
+  defp classify_stale_snapshot(
+         worker,
+         heartbeat_at,
+         stale_after_ms,
+         ignored_reason,
+         degraded_reason
+       ) do
+    if snapshot_expired?(worker, heartbeat_at, stale_after_ms) do
+      updated =
+        update_worker(worker, "degraded", nil, %{
+          healthy_snapshot_count: 0,
+          restart_reason: degraded_reason,
+          coordinator_incarnation_id: nil
+        })
+
+      {:recovering, updated, "#{degraded_reason} Retained work must be reconciled."}
+    else
+      {:ignored, worker, ignored_reason}
+    end
+  end
+
+  defp quarantine_active_attempts(worker, agent_now, lease_now, reason) do
+    jobs =
+      Job
+      |> where(
+        [job],
+        job.lease_owner == ^worker.worker_key and
+          job.state in ["starting", "working", "idle", "blocked", "reconciling"]
+      )
+      |> Repo.all()
+
+    Enum.each(jobs, &mark_job_recovery_pending(&1, agent_now, lease_now, reason))
+
+    runs =
+      AgentRun
+      |> where(
+        [run],
+        run.worker_id == ^worker.id and
+          run.state in ["starting", "working", "idle", "blocked", "unknown"]
+      )
+      |> Repo.all()
+
+    Enum.each(runs, fn run ->
+      mark_managed_run_uncertain(run, agent_now, lease_now, reason)
+    end)
+
+    max(length(jobs), length(runs))
+  end
+
+  defp mark_job_recovery_pending(job, agent_now, lease_now, reason) do
+    job
+    |> Job.changeset(%{
+      state: "reconciling",
+      lease_expires_at: nil,
+      reconciling_at: job.reconciling_at || lease_now,
+      absence_observed_at: nil,
+      last_error: reason
+    })
+    |> Repo.update!()
+
+    mark_worktree_attention(job.id, reason, agent_now)
+  end
+
+  defp record_incarnation_change(previous, current, identity) do
+    %AuditEvent{}
+    |> AuditEvent.changeset(%{
+      actor: "worker:#{current.worker_key}",
+      action: "worker.incarnation_changed",
+      target_type: "worker",
+      target_id: current.id,
+      details: %{
+        "previous_worker_incarnation_id" => previous.worker_incarnation_id,
+        "worker_incarnation_id" => current.worker_incarnation_id,
+        "previous_herdr_incarnation_id" => previous.herdr_incarnation_id,
+        "herdr_incarnation_id" => current.herdr_incarnation_id,
+        "snapshot_sequence" => identity.snapshot_sequence,
+        "restart_reason" => identity.restart_reason
+      }
+    })
+    |> Repo.insert!()
   end
 
   defp normalize_agent(agent, session, now) when is_map(agent) do
@@ -363,32 +689,52 @@ defmodule PtcManager.Herdr.Sync do
     length(missing_runs)
   end
 
-  defp upsert_worker(session, status, heartbeat_at) do
+  defp upsert_worker(session, status, heartbeat_at, extra_attrs) do
     key = "herdr:#{session}"
 
-    attrs = %{
-      worker_key: key,
-      name: "Herdr #{session}",
-      status: status,
-      capabilities: %{
-        "herdr" => true,
-        "implementation_slots" =>
-          Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
-      }
-    }
-
-    attrs = if heartbeat_at, do: Map.put(attrs, :last_heartbeat_at, heartbeat_at), else: attrs
-
     case Repo.get_by(Worker, worker_key: key) do
-      nil -> %Worker{} |> Worker.changeset(attrs) |> Repo.insert!()
-      worker -> worker |> Worker.changeset(attrs) |> Repo.update!()
+      nil -> insert_worker(session, status, heartbeat_at, extra_attrs)
+      worker -> update_worker(worker, status, heartbeat_at, extra_attrs)
     end
   end
+
+  defp insert_worker(session, status, heartbeat_at, extra_attrs) do
+    attrs = worker_attrs(session, status, heartbeat_at, extra_attrs)
+    %Worker{} |> Worker.changeset(attrs) |> Repo.insert!()
+  end
+
+  defp update_worker(worker, status, heartbeat_at, extra_attrs) do
+    attrs = worker_attrs(worker_session(worker), status, heartbeat_at, extra_attrs)
+    worker |> Worker.changeset(attrs) |> Repo.update!()
+  end
+
+  defp worker_attrs(session, status, heartbeat_at, extra_attrs) do
+    attrs =
+      %{
+        worker_key: "herdr:#{session}",
+        name: "Herdr #{session}",
+        status: status,
+        capabilities: %{
+          "herdr" => true,
+          "implementation_slots" =>
+            Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+        }
+      }
+      |> Map.merge(extra_attrs)
+
+    if heartbeat_at, do: Map.put(attrs, :last_heartbeat_at, heartbeat_at), else: attrs
+  end
+
+  defp worker_session(%Worker{worker_key: "herdr:" <> session}), do: session
 
   defp mark_degraded(session, reason, stale_after_ms, agent_now, lease_now) do
     result =
       Repo.transaction(fn ->
-        worker = upsert_worker(session, "degraded", nil)
+        worker =
+          upsert_worker(session, "degraded", nil, %{
+            healthy_snapshot_count: 0,
+            coordinator_incarnation_id: nil
+          })
 
         {lost_count, uncertain_count} =
           mark_stale_runs_lost(worker, agent_now, stale_after_ms, lease_now)
@@ -420,7 +766,7 @@ defmodule PtcManager.Herdr.Sync do
       end)
 
     Enum.reduce(stale_runs, {0, 0}, fn run, {lost_count, uncertain_count} ->
-      if run.job_id do
+      if run.job_id || run.agent_action_id do
         mark_managed_run_uncertain(run, agent_now, lease_now)
         {lost_count, uncertain_count + 1}
       else
@@ -656,11 +1002,16 @@ defmodule PtcManager.Herdr.Sync do
 
   defp supersede_duplicate_action_runs(_worker, _run, _attrs, _now), do: []
 
-  defp mark_managed_run_uncertain(run, agent_now, lease_now) do
+  defp mark_managed_run_uncertain(
+         run,
+         agent_now,
+         lease_now,
+         message \\ "Herdr transport is unavailable; remote activity must be reconciled."
+       ) do
     run
     |> AgentRun.changeset(%{
       state: "unknown",
-      status_text: "Herdr transport is unavailable; this managed agent may still be running."
+      status_text: message
     })
     |> Repo.update!()
 
@@ -673,13 +1024,13 @@ defmodule PtcManager.Herdr.Sync do
           lease_expires_at: nil,
           reconciling_at: job.reconciling_at || lease_now,
           absence_observed_at: nil,
-          last_error: "Herdr transport is unavailable; remote activity must be reconciled."
+          last_error: message
         })
         |> Repo.update!()
 
         mark_worktree_attention(
           job.id,
-          "Herdr transport is unavailable; remote activity must be reconciled.",
+          message,
           agent_now
         )
 
@@ -906,6 +1257,8 @@ defmodule PtcManager.Herdr.Sync do
     )
     |> Repo.update_all(set: [state: state, last_error: nil, last_used_at: now, updated_at: now])
   end
+
+  defp owned_job(%AgentRun{job_id: nil}), do: nil
 
   defp owned_job(%AgentRun{} = run) do
     with %Job{} = job <- Repo.get(Job, run.job_id),

@@ -32,7 +32,8 @@ defmodule PtcManager.DispatchTest do
         worker_key: "herdr:default",
         name: "Herdr default",
         status: "online",
-        capabilities: %{"herdr" => true, "implementation_slots" => 1}
+        capabilities: %{"herdr" => true, "implementation_slots" => 1},
+        coordinator_incarnation_id: PtcManager.RuntimeIncarnation.current()
       })
 
     Process.put(

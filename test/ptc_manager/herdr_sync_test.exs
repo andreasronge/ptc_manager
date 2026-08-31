@@ -7,6 +7,7 @@ defmodule PtcManager.HerdrSyncTest do
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, AgentRun, Job, Worker, WorktreeAllocation}
   alias PtcManager.Repo
+  alias PtcManager.RuntimeIncarnation
 
   defmodule FakeClient do
     @behaviour PtcManager.Herdr
@@ -31,6 +32,137 @@ defmodule PtcManager.HerdrSyncTest do
              Client.decode_agents(~s({"result":{"agents":[{"pane_id":"w1:p1"}]}}))
 
     assert {:error, :invalid_herdr_json} = Client.decode_agents("not json")
+  end
+
+  test "decodes authoritative Herdr snapshot identity when present" do
+    output =
+      Jason.encode!(%{
+        "result" => %{
+          "agents" => [%{"pane_id" => "w1:p1"}],
+          "worker_incarnation_id" => "worker-boot-2",
+          "herdr_incarnation_id" => "herdr-boot-7",
+          "snapshot_sequence" => 14,
+          "restart_reason" => "service restart"
+        }
+      })
+
+    assert {:ok,
+            %{
+              agents: [%{"pane_id" => "w1:p1"}],
+              worker_incarnation_id: "worker-boot-2",
+              herdr_incarnation_id: "herdr-boot-7",
+              snapshot_sequence: 14,
+              restart_reason: "service restart"
+            }} = Client.decode_snapshot(output)
+  end
+
+  test "an identityless snapshot cannot downgrade an enrolled worker" do
+    Process.put(
+      :herdr_result,
+      {:ok,
+       %{
+         agents: [],
+         worker_incarnation_id: "worker-boot-1",
+         herdr_incarnation_id: "herdr-boot-1",
+         snapshot_sequence: 1
+       }}
+    )
+
+    assert {:ok, %{agent_count: 0}} = Sync.sync(client: FakeClient, session: "enrolled")
+    assert Repo.get_by!(Worker, worker_key: "herdr:enrolled").status == "online"
+
+    Process.put(:herdr_result, {:ok, []})
+
+    assert {:ok, %{recovery_pending: true}} =
+             Sync.sync(client: FakeClient, session: "enrolled")
+
+    worker = Repo.get_by!(Worker, worker_key: "herdr:enrolled")
+    assert worker.status == "degraded"
+    assert worker.healthy_snapshot_count == 0
+    assert is_nil(worker.coordinator_incarnation_id)
+  end
+
+  test "a fresh coordinator fences a legacy worker until it observes a snapshot" do
+    worker =
+      worker_fixture(%{
+        worker_key: "herdr:legacy-admission",
+        capabilities: %{"herdr" => true, "implementation_slots" => 1},
+        coordinator_incarnation_id: nil
+      })
+
+    assert {:error, :worker_unavailable} = Operations.dispatch_capacity(worker.worker_key)
+
+    Process.put(:herdr_result, {:ok, []})
+    assert {:ok, %{agent_count: 0}} = Sync.sync(client: FakeClient, session: "legacy-admission")
+
+    admitted = Repo.get!(Worker, worker.id)
+    assert admitted.coordinator_incarnation_id == RuntimeIncarnation.current()
+    assert {:ok, 1} = Operations.dispatch_capacity(worker.worker_key)
+  end
+
+  test "an incarnation change quarantines and then re-adopts a Herdr repair action" do
+    %{action: action, remote: remote_agent, run: run, worker: worker} =
+      active_repair_run_fixture("action-restart", %{
+        worker_incarnation_id: "worker-boot-1",
+        herdr_incarnation_id: "herdr-boot-1",
+        snapshot_sequence: 8,
+        healthy_snapshot_count: 2,
+        coordinator_incarnation_id: RuntimeIncarnation.current()
+      })
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       %{
+         agents: [remote_agent],
+         worker_incarnation_id: "worker-boot-2",
+         herdr_incarnation_id: "herdr-boot-2",
+         snapshot_sequence: 1,
+         restart_reason: "Herdr service restart"
+       }}
+    )
+
+    assert {:ok, %{recovery_pending: true, uncertain_count: 1}} =
+             Sync.sync(client: FakeClient, session: "action-restart")
+
+    assert Repo.get!(AgentRun, run.id).state == "unknown"
+    assert Repo.get!(AgentAction, action.id).state == "running"
+    assert Repo.get!(Worker, worker.id).status == "degraded"
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       %{
+         agents: [remote_agent],
+         worker_incarnation_id: "worker-boot-2",
+         herdr_incarnation_id: "herdr-boot-2",
+         snapshot_sequence: 2
+       }}
+    )
+
+    assert {:ok, %{agent_count: 1}} = Sync.sync(client: FakeClient, session: "action-restart")
+    assert Repo.get!(AgentRun, run.id).state == "working"
+    assert Repo.get!(AgentAction, action.id).state == "running"
+  end
+
+  test "transport recovery retains and re-adopts a Herdr repair action run" do
+    %{action: action, remote: remote_agent, run: run} =
+      active_repair_run_fixture("action-outage")
+
+    Process.put(:herdr_result, {:error, :offline})
+
+    assert {:error, {:offline, %{lost_count: 0, uncertain_count: 1}}} =
+             Sync.sync(client: FakeClient, session: "action-outage", stale_after_ms: 0)
+
+    assert Repo.get!(AgentRun, run.id).state == "unknown"
+    assert Repo.get!(AgentAction, action.id).state == "running"
+
+    Process.put(:herdr_result, {:ok, [remote_agent]})
+    assert {:ok, %{agent_count: 1}} = Sync.sync(client: FakeClient, session: "action-outage")
+
+    assert Repo.get!(AgentRun, run.id).state == "working"
+    assert Repo.get!(AgentAction, action.id).state == "running"
+    assert Repo.aggregate(AgentRun, :count) == 1
   end
 
   test "reconciles current agents and marks missing activity lost" do
@@ -946,6 +1078,69 @@ defmodule PtcManager.HerdrSyncTest do
              Sync.sync(client: FakeClient, session: "restart", reconcile_after_ms: 0)
 
     assert Repo.get!(Job, job.id).state == "failed"
+  end
+
+  defp active_repair_run_fixture(session, worker_attrs \\ %{}) do
+    repository = repository_fixture()
+
+    worker =
+      worker_fixture(
+        Map.merge(
+          %{
+            worker_key: "herdr:#{session}",
+            capabilities: %{"herdr" => true, "implementation_slots" => 1}
+          },
+          worker_attrs
+        )
+      )
+
+    now = now()
+
+    action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 1_704,
+        target_label: "example/repo#1704",
+        prompt_version: 1,
+        prompt: "Repair and merge PR 1704",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "running",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now
+      })
+      |> Repo.insert!()
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "working",
+        agent_name: "merge_pr1704_a#{action.id}_f1",
+        started_at: now,
+        last_heartbeat_at: now,
+        herdr_workspace: "repair-workspace",
+        herdr_pane: "repair-workspace:p1",
+        herdr_session: session,
+        external_key: "#{session}:repair-session",
+        fencing_token: 1
+      })
+
+    remote = %{
+      "name" => run.agent_name,
+      "agent_status" => "working",
+      "workspace_id" => "repair-workspace",
+      "pane_id" => "repair-workspace:p1",
+      "agent_session" => %{"value" => "repair-session"}
+    }
+
+    %{action: action, remote: remote, run: run, worker: worker}
   end
 
   defp remote_agent(state) do

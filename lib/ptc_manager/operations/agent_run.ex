@@ -19,6 +19,9 @@ defmodule PtcManager.Operations.AgentRun do
     field :herdr_session, :string
     field :external_key, :string
     field :fencing_token, :integer, default: 0
+    field :worker_incarnation_id, :string
+    field :herdr_incarnation_id, :string
+    field :coordinator_incarnation_id, :string
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
@@ -44,7 +47,10 @@ defmodule PtcManager.Operations.AgentRun do
       :herdr_pane,
       :herdr_session,
       :external_key,
-      :fencing_token
+      :fencing_token,
+      :worker_incarnation_id,
+      :herdr_incarnation_id,
+      :coordinator_incarnation_id
     ])
     |> validate_required([:worker_id, :role, :state, :started_at, :last_heartbeat_at])
     |> validate_inclusion(:role, @roles)

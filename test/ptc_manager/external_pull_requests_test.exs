@@ -295,6 +295,22 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
   test "external repair starts a named retained Herdr session" do
     repository = repository_fixture(%{local_path: File.cwd!()})
+
+    worker_fixture(%{
+      worker_key: "herdr:test",
+      capabilities: %{"herdr" => true, "implementation_slots" => 1}
+    })
+
+    previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
+    previous_session = Application.get_env(:ptc_manager, :herdr_session)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :herdr_session, "test")
+
+    on_exit(fn ->
+      restore_env(:dispatch_enabled, previous_dispatch)
+      restore_env(:herdr_session, previous_session)
+    end)
+
     head_sha = String.duplicate("f", 40)
     status = external_pr_status(repository, 94, head_sha)
     {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])

@@ -257,6 +257,24 @@
               </dd>
             </div>
           </dl>
+          <div
+            :if={worker.status == "degraded" && worker.worker_incarnation_id}
+            id={"worker-recovery-#{worker.id}"}
+            class="mt-4 rounded-xl border border-amber-400/20 bg-amber-400/[0.07] p-3 text-xs text-amber-100"
+          >
+            <p class="font-semibold">
+              Recovery check {min(worker.healthy_snapshot_count, 2)} of 2
+            </p>
+            <p class="mt-1 text-amber-100/80">
+              New work is paused while PtcManager confirms this worker is stable. Existing worktrees and task ownership stay retained.
+            </p>
+            <p :if={worker.restart_reason} class="mt-2 text-amber-200">
+              Restart reason: {worker.restart_reason}
+            </p>
+            <p class="mt-2 break-all text-amber-100/60">
+              Worker {worker.worker_incarnation_id} · Herdr {worker.herdr_incarnation_id}
+            </p>
+          </div>
         </article>
 
         <section :if={@waiting_runs != []} id="retained-agents" class="pt-3">

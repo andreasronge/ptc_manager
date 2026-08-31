@@ -30,10 +30,10 @@ defmodule PtcManager.WorktreesTest do
     {_repository, third_job, third_remote} = approved_job_fixture(repository)
 
     {:ok, first} =
-      Operations.lease_job(first_job.id, "herdr:pool", first_remote, 60_000, capacity: 2)
+      lease_pool_job(first_job.id, first_remote, 2)
 
     {:ok, _second} =
-      Operations.lease_job(second_job.id, "herdr:pool", second_remote, 60_000, capacity: 2)
+      lease_pool_job(second_job.id, second_remote, 2)
 
     allocation = Repo.get_by!(WorktreeAllocation, job_id: first.id)
 
@@ -52,13 +52,7 @@ defmodule PtcManager.WorktreesTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
 
     assert {:ok, _third} =
-             Operations.lease_job(
-               third_job.id,
-               "herdr:pool",
-               third_remote,
-               60_000,
-               capacity: 2
-             )
+             lease_pool_job(third_job.id, third_remote, 2)
 
     assert repository.id == third_job.repository_id
   end
@@ -68,7 +62,7 @@ defmodule PtcManager.WorktreesTest do
     {_repository, second_job, _second_remote} = approved_job_fixture(repository)
 
     {:ok, _first} =
-      Operations.lease_job(first_job.id, "herdr:pool", first_remote, 60_000, capacity: 1)
+      lease_pool_job(first_job.id, first_remote, 1)
 
     assert {:error, :worktree_capacity} =
              Worktrees.ensure_slot("herdr:pool", 1, FakeAdapter, FakeProbe)
@@ -79,7 +73,7 @@ defmodule PtcManager.WorktreesTest do
 
   test "does not reclaim a warm worktree before GitHub confirms its PR head" do
     {_repository, job, remote} = approved_job_fixture()
-    {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+    {:ok, leased} = lease_pool_job(job.id, remote, 1)
     allocation = Repo.get_by!(WorktreeAllocation, job_id: leased.id)
 
     allocation
@@ -101,7 +95,7 @@ defmodule PtcManager.WorktreesTest do
     {_repository, job, remote} = approved_job_fixture()
 
     {:ok, leased} =
-      Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+      lease_pool_job(job.id, remote, 1)
 
     allocation = Repo.get_by!(WorktreeAllocation, job_id: leased.id)
 
@@ -125,7 +119,7 @@ defmodule PtcManager.WorktreesTest do
 
   test "a PR repair reserves its retained worktree until verification finishes" do
     {_repository, job, remote} = approved_job_fixture()
-    {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+    {:ok, leased} = lease_pool_job(job.id, remote, 1)
     head_sha = String.duplicate("a", 40)
     allocation = Repo.get_by!(WorktreeAllocation, job_id: leased.id)
 
@@ -153,7 +147,7 @@ defmodule PtcManager.WorktreesTest do
     {repository, active_job, active_remote} = approved_job_fixture()
 
     {:ok, _active} =
-      Operations.lease_job(active_job.id, "herdr:pool", active_remote, 60_000, capacity: 1)
+      lease_pool_job(active_job.id, active_remote, 1)
 
     {_repository, repair_job, _repair_remote} = approved_job_fixture(repository)
     worker = Repo.get_by!(PtcManager.Operations.Worker, worker_key: "herdr:pool")
@@ -226,7 +220,7 @@ defmodule PtcManager.WorktreesTest do
 
   test "a terminal worktree is never removed when the final clean-head check fails" do
     {_repository, job, remote} = approved_job_fixture()
-    {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+    {:ok, leased} = lease_pool_job(job.id, remote, 1)
     allocation = Repo.get_by!(WorktreeAllocation, job_id: leased.id)
 
     allocation
@@ -248,7 +242,7 @@ defmodule PtcManager.WorktreesTest do
 
   test "a merged PR removes its retained worktree even when the checkout is dirty" do
     {_repository, job, remote} = approved_job_fixture()
-    {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+    {:ok, leased} = lease_pool_job(job.id, remote, 1)
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     head_sha = String.duplicate("a", 40)
 
@@ -296,7 +290,7 @@ defmodule PtcManager.WorktreesTest do
 
   test "a stale concurrent cleanup cannot resurrect a removed allocation" do
     {_repository, job, remote} = approved_job_fixture()
-    {:ok, leased} = Operations.lease_job(job.id, "herdr:pool", remote, 60_000, capacity: 1)
+    {:ok, leased} = lease_pool_job(job.id, remote, 1)
     allocation = Repo.get_by!(WorktreeAllocation, job_id: leased.id)
 
     allocation
@@ -332,5 +326,15 @@ defmodule PtcManager.WorktreesTest do
     }
 
     {repository, job, remote}
+  end
+
+  defp lease_pool_job(job_id, remote, capacity) do
+    Repo.get_by(PtcManager.Operations.Worker, worker_key: "herdr:pool") ||
+      worker_fixture(%{
+        worker_key: "herdr:pool",
+        capabilities: %{"herdr" => true, "implementation_slots" => capacity}
+      })
+
+    Operations.lease_job(job_id, "herdr:pool", remote, 60_000, capacity: capacity)
   end
 end

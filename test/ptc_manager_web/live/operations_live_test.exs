@@ -57,6 +57,21 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       capabilities: %{"herdr" => true, "implementation_slots" => 8}
     })
 
+    recovering_worker =
+      worker_fixture(%{
+        name: "Restarting worker",
+        status: "degraded",
+        capabilities: %{"herdr" => true, "implementation_slots" => 4},
+        worker_incarnation_id: "worker-boot-2",
+        previous_worker_incarnation_id: "worker-boot-1",
+        herdr_incarnation_id: "herdr-boot-2",
+        previous_herdr_incarnation_id: "herdr-boot-1",
+        snapshot_sequence: 1,
+        healthy_snapshot_count: 1,
+        restart_reason: "host restart",
+        incarnation_changed_at: DateTime.utc_now()
+      })
+
     job
     |> Job.changeset(%{state: "working", lease_owner: worker.worker_key})
     |> Repo.update!()
@@ -153,6 +168,9 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#metric-disk")
     assert has_element?(view, "#timeline-run-#{run.id}", "Add bounded result contracts")
     assert html =~ "Herdr build one"
+    assert has_element?(view, "#worker-recovery-#{recovering_worker.id}", "Recovery check 1 of 2")
+    assert has_element?(view, "#worker-recovery-#{recovering_worker.id}", "host restart")
+    assert has_element?(view, "#worker-recovery-#{recovering_worker.id}", "New work is paused")
     assert has_element?(view, "#metric-agents", "1 / 2")
     assert has_element?(view, "#work-queue")
     assert has_element?(view, "#queued-action-#{priority_action.id}", "Merge priority")

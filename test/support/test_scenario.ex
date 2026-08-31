@@ -144,6 +144,18 @@ defmodule PtcManager.TestScenario do
     GenServer.call(scenario.pid, {:remove_agent, agent_name})
   end
 
+  def restart_worker(%__MODULE__{} = scenario, reason \\ "scenario host restart") do
+    GenServer.call(scenario.pid, {:restart_incarnation, :worker, reason})
+  end
+
+  def restart_herdr(%__MODULE__{} = scenario, reason \\ "scenario Herdr restart") do
+    GenServer.call(scenario.pid, {:restart_incarnation, :herdr, reason})
+  end
+
+  def replay_last_snapshot(%__MODULE__{} = scenario) do
+    GenServer.call(scenario.pid, :replay_last_snapshot)
+  end
+
   def agents(%__MODULE__{} = scenario), do: GenServer.call(scenario.pid, :agents)
   def trace(%__MODULE__{} = scenario), do: GenServer.call(scenario.pid, :trace)
 
@@ -245,6 +257,12 @@ defmodule PtcManager.TestScenario do
        operation_sequences: %{},
        repair_statuses: nil,
        herdr_transport: Keyword.get(opts, :herdr_transport, :online),
+       worker_incarnation_id: Keyword.get(opts, :worker_incarnation_id, "scenario-worker-1"),
+       herdr_incarnation_id: Keyword.get(opts, :herdr_incarnation_id, "scenario-herdr-1"),
+       snapshot_sequence: 0,
+       replay_snapshot: false,
+       restart_reason: nil,
+       incarnation_generation: 1,
        paused_calls: %{},
        now:
          opts
@@ -323,6 +341,23 @@ defmodule PtcManager.TestScenario do
     {:reply, :ok, %{state | agents: agents}}
   end
 
+  def handle_call({:restart_incarnation, kind, reason}, _from, state) do
+    generation = state.incarnation_generation + 1
+
+    state =
+      state
+      |> Map.put(:snapshot_sequence, 0)
+      |> Map.put(:restart_reason, reason)
+      |> Map.put(:incarnation_generation, generation)
+      |> Map.put(incarnation_key(kind), "scenario-#{kind}-#{generation}")
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:replay_last_snapshot, _from, state) do
+    {:reply, :ok, %{state | replay_snapshot: true}}
+  end
+
   def handle_call(:agents, _from, state), do: {:reply, state.agents, state}
   def handle_call(:trace, _from, state), do: {:reply, Enum.reverse(state.trace), state}
 
@@ -398,10 +433,27 @@ defmodule PtcManager.TestScenario do
   end
 
   def handle_call(:list_agents, _from, state) do
-    result =
+    {result, state} =
       case state.herdr_transport do
-        :online -> {:ok, state.agents}
-        :offline -> {:error, :offline}
+        :online ->
+          sequence =
+            if state.replay_snapshot,
+              do: state.snapshot_sequence,
+              else: state.snapshot_sequence + 1
+
+          snapshot = %{
+            agents: state.agents,
+            worker_incarnation_id: state.worker_incarnation_id,
+            herdr_incarnation_id: state.herdr_incarnation_id,
+            snapshot_sequence: sequence,
+            restart_reason: state.restart_reason
+          }
+
+          {{:ok, snapshot},
+           %{state | snapshot_sequence: sequence, replay_snapshot: false, restart_reason: nil}}
+
+        :offline ->
+          {{:error, :offline}, state}
       end
 
     state = record(state, :herdr, :list_agents, "scenario", summarize(result))
@@ -692,6 +744,9 @@ defmodule PtcManager.TestScenario do
   defp upsert_agent(agents, new_agent) do
     [new_agent | Enum.reject(agents, &(&1["name"] == new_agent["name"]))]
   end
+
+  defp incarnation_key(:worker), do: :worker_incarnation_id
+  defp incarnation_key(:herdr), do: :herdr_incarnation_id
 
   defp record(state, source, operation, target, outcome) do
     event = %{

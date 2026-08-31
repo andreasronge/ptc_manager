@@ -8,7 +8,7 @@ defmodule PtcManager.Herdr.Poller do
 
   @impl true
   def init(:ok) do
-    schedule_sync()
+    if enabled?(), do: send(self(), :sync)
     {:ok, %{task_ref: nil}}
   end
 
@@ -30,7 +30,7 @@ defmodule PtcManager.Herdr.Poller do
   end
 
   defp schedule_sync do
-    case Application.get_env(:ptc_manager, :herdr_sync_interval_ms, 0) do
+    case interval() do
       interval when is_integer(interval) and interval > 0 ->
         Process.send_after(self(), :sync, interval)
 
@@ -38,4 +38,7 @@ defmodule PtcManager.Herdr.Poller do
         :ok
     end
   end
+
+  defp enabled?, do: interval() > 0
+  defp interval, do: Application.get_env(:ptc_manager, :herdr_sync_interval_ms, 0)
 end

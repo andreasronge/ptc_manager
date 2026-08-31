@@ -1,9 +1,20 @@
 defmodule PtcManager.TestScenarioTest do
   use PtcManager.DataCase, async: false
 
+  alias PtcManager.MaintainerActions.ExternalPrRepairAdapter
   alias PtcManager.MaintainerActions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentRun, Issue, Job, PrPublication}
+
+  alias PtcManager.Operations.{
+    AgentRun,
+    AuditEvent,
+    Issue,
+    Job,
+    PrPublication,
+    Worker,
+    WorktreeAllocation
+  }
+
   alias PtcManager.Publications
   alias PtcManager.Repo
   alias PtcManager.TestScenario
@@ -181,6 +192,176 @@ defmodule PtcManager.TestScenarioTest do
            ]
   end
 
+  test "a worker restart retains the fenced attempt until two healthy snapshots" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 95)
+
+    assert {:ok, %{job: working}} = TestScenario.advance(scenario, :dispatch)
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    initial_worker = Repo.get_by!(Worker, worker_key: "herdr:scenario")
+    initial_run = Repo.get_by!(AgentRun, job_id: job.id)
+    initial_allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
+
+    :ok = TestScenario.restart_worker(scenario, "simulated host restart")
+
+    assert {:ok, %{recovery_pending: true, uncertain_count: 1}} =
+             TestScenario.advance(scenario, :herdr_sync)
+
+    recovering_worker = Repo.get!(Worker, initial_worker.id)
+    recovering_job = Repo.get!(Job, job.id)
+    recovering_run = Repo.get!(AgentRun, initial_run.id)
+    recovering_allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
+
+    assert recovering_worker.status == "degraded"
+    assert recovering_worker.healthy_snapshot_count == 1
+    assert recovering_worker.restart_reason == "simulated host restart"
+    assert recovering_worker.worker_incarnation_id != initial_worker.worker_incarnation_id
+
+    assert recovering_worker.previous_worker_incarnation_id ==
+             initial_worker.worker_incarnation_id
+
+    assert recovering_job.state == "reconciling"
+    assert recovering_job.fencing_token == working.fencing_token
+    assert recovering_run.state == "unknown"
+    assert recovering_allocation.id == initial_allocation.id
+    assert recovering_allocation.state == "attention"
+    assert {:error, :worker_unavailable} = Operations.dispatch_capacity("herdr:scenario")
+    assert length(TestScenario.agents(scenario)) == 1
+
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    recovered_worker = Repo.get!(Worker, initial_worker.id)
+    recovered_job = Repo.get!(Job, job.id)
+    recovered_run = Repo.get!(AgentRun, initial_run.id)
+    recovered_allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
+
+    assert recovered_worker.status == "online"
+    assert recovered_worker.healthy_snapshot_count == 2
+    assert recovered_job.state == "working"
+    assert recovered_job.fencing_token == working.fencing_token
+    assert recovered_run.state == "working"
+    assert recovered_allocation.id == initial_allocation.id
+    assert recovered_allocation.state == "active"
+    assert Repo.aggregate(AgentRun, :count) == 1
+
+    event = Repo.get_by!(AuditEvent, action: "worker.incarnation_changed")
+    assert event.target_id == initial_worker.id
+    assert event.details["restart_reason"] == "simulated host restart"
+  end
+
+  test "a duplicate authoritative snapshot cannot overwrite newer agent state" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 94)
+
+    assert {:ok, %{job: _working}} = TestScenario.advance(scenario, :dispatch)
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    [agent] = TestScenario.agents(scenario)
+    :ok = TestScenario.set_agent_state(scenario, agent["name"], "failed")
+    :ok = TestScenario.replay_last_snapshot(scenario)
+
+    assert {:ok, %{snapshot_ignored: :stale_sequence}} =
+             TestScenario.advance(scenario, :herdr_sync)
+
+    assert Repo.get_by!(AgentRun, job_id: job.id).state == "working"
+    assert Repo.get!(Job, job.id).state == "working"
+  end
+
+  test "a replayed snapshot eventually closes admission without wall-clock sleep" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 92)
+
+    assert {:ok, %{job: _working}} = TestScenario.advance(scenario, :dispatch)
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    worker = Repo.get_by!(Worker, worker_key: "herdr:scenario")
+
+    worker
+    |> Worker.changeset(%{last_heartbeat_at: DateTime.add(worker.last_heartbeat_at, -2, :second)})
+    |> Repo.update!()
+
+    :ok = TestScenario.replay_last_snapshot(scenario)
+
+    assert {:ok, %{recovery_pending: true, uncertain_count: 1}} =
+             TestScenario.advance(scenario, :herdr_sync, stale_after_ms: 1_000)
+
+    assert Repo.get!(Worker, worker.id).status == "degraded"
+    assert Repo.get!(Job, job.id).state == "reconciling"
+    assert {:error, :worker_unavailable} = Operations.dispatch_capacity("herdr:scenario")
+  end
+
+  test "an identity-enrolled worker is unavailable until this coordinator observes it" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+
+    worker =
+      worker_fixture(%{
+        worker_key: "herdr:scenario",
+        worker_incarnation_id: "scenario-worker-1",
+        herdr_incarnation_id: "scenario-herdr-1",
+        snapshot_sequence: 0,
+        healthy_snapshot_count: 2,
+        coordinator_incarnation_id: "previous-coordinator"
+      })
+
+    assert {:error, :worker_unavailable} = Operations.dispatch_capacity(worker.worker_key)
+    assert {:ok, %{agent_count: 0}} = TestScenario.advance(scenario, :herdr_sync)
+    assert {:ok, 1} = Operations.dispatch_capacity(worker.worker_key)
+  end
+
+  test "a restart fences a dispatch that is still waiting for its acknowledgement" do
+    scenario =
+      start_supervised!({TestScenario, pause_owner: self()})
+      |> TestScenario.gateway()
+
+    assert {:ok, %{agent_count: 0}} = TestScenario.advance(scenario, :herdr_sync)
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 91)
+    :ok = TestScenario.dispatch_outcome(scenario, :pause_after_effect)
+
+    task = Task.async(fn -> TestScenario.advance(scenario, :dispatch) end)
+    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}
+    assert job_id == job.id
+    assert Repo.get!(Job, job.id).state == "starting"
+    assert Repo.aggregate(AgentRun, :count) == 0
+
+    :ok = TestScenario.restart_worker(scenario, "restart during dispatch")
+
+    assert {:ok, %{recovery_pending: true, uncertain_count: 1}} =
+             TestScenario.advance(scenario, :herdr_sync)
+
+    assert Repo.get!(Job, job.id).state == "reconciling"
+    :ok = TestScenario.resume(scenario, reference)
+    assert {:error, :invalid_job_state} = Task.await(task)
+    assert Repo.aggregate(AgentRun, :count) == 0
+
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+    assert Repo.get!(Job, job.id).state == "working"
+    assert Repo.aggregate(AgentRun, :count) == 1
+  end
+
+  test "transport recovery requires consecutive authoritative snapshots once identity is known" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+    %{job: job} = TestScenario.approved_implementation!(scenario, number: 93)
+
+    assert {:ok, %{job: _working}} = TestScenario.advance(scenario, :dispatch)
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+
+    :ok = TestScenario.herdr_transport(scenario, :offline)
+
+    assert {:error, {:offline, %{uncertain_count: 1}}} =
+             TestScenario.advance(scenario, :herdr_sync, stale_after_ms: 0)
+
+    :ok = TestScenario.herdr_transport(scenario, :online)
+
+    assert {:ok, %{recovery_pending: true}} = TestScenario.advance(scenario, :herdr_sync)
+    assert Repo.get_by!(Worker, worker_key: "herdr:scenario").status == "degraded"
+    assert Repo.get!(Job, job.id).state == "reconciling"
+
+    assert {:ok, %{agent_count: 1}} = TestScenario.advance(scenario, :herdr_sync)
+    assert Repo.get_by!(Worker, worker_key: "herdr:scenario").status == "online"
+    assert Repo.get!(Job, job.id).state == "working"
+  end
+
   test "a failure before dispatch has no Herdr side effect" do
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
     %{job: job} = TestScenario.approved_implementation!(scenario)
@@ -255,6 +436,10 @@ defmodule PtcManager.TestScenarioTest do
     original_head = String.duplicate("b", 40)
     status = external_pr_status(repository, 105, original_head)
 
+    configure_herdr_actions("scenario")
+
+    assert {:ok, %{agent_count: 0}} = TestScenario.advance(scenario, :herdr_sync)
+
     assert {:ok, _summary} =
              Publications.sync_external_open_pull_requests(repository, [status])
 
@@ -312,6 +497,51 @@ defmodule PtcManager.TestScenarioTest do
     assert :prompt_pull_request_action in operations
     assert :pull_request_action_head in operations
     assert Enum.count(operations, &(&1 == :remove_action_workspace)) == 2
+  end
+
+  test "a repair start acknowledgement cannot cross an unobserved worker incarnation" do
+    scenario =
+      start_supervised!({TestScenario, pause_owner: self()})
+      |> TestScenario.gateway()
+
+    configure_herdr_actions("scenario")
+    assert {:ok, %{agent_count: 0}} = TestScenario.advance(scenario, :herdr_sync)
+
+    repository = repository_fixture(%{local_path: "/tmp/ptc-manager-test-scenario"})
+    head = String.duplicate("b", 40)
+    status = external_pr_status(repository, 107, head)
+    assert {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [status])
+
+    publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 107)
+    {:ok, action} = MaintainerActions.enqueue("repair_pr", publication.id, "scenario-maintainer")
+
+    {:ok, _prepared} =
+      Operations.record_agent_action_target_snapshot(action.id, %{"head_sha" => head})
+
+    {:ok, {claimed, _token}} = Operations.claim_agent_action(action.id)
+
+    :ok =
+      TestScenario.operation_outcome(scenario, :start_pull_request_action, :pause_after_effect)
+
+    task = Task.async(fn -> ExternalPrRepairAdapter.run(claimed, scenario) end)
+
+    assert_receive {:scenario_paused_after_effect, reference, :start_pull_request_action,
+                    action_id}
+
+    assert action_id == action.id
+    [started_agent] = TestScenario.agents(scenario)
+    :ok = TestScenario.remove_agent(scenario, started_agent["name"])
+    :ok = TestScenario.restart_worker(scenario, "restart during repair start")
+
+    assert {:ok, %{recovery_pending: true}} = TestScenario.advance(scenario, :herdr_sync)
+    assert {:ok, %{agent_count: 0}} = TestScenario.advance(scenario, :herdr_sync)
+
+    :ok = TestScenario.resume(scenario, reference)
+    assert {:error, :stale_worker_incarnation} = Task.await(task)
+
+    run = Repo.get_by!(AgentRun, agent_action_id: action.id)
+    assert run.state == "unknown"
+    refute Enum.any?(TestScenario.trace(scenario), &(&1.operation == :prompt_pull_request_action))
   end
 
   test "each external PR command has an independently configurable fault outcome" do
@@ -386,5 +616,17 @@ defmodule PtcManager.TestScenarioTest do
     :ok = TestScenario.operation_outcome(scenario, :get_issue, :ok)
     assert {:ok, %{job: working}} = TestScenario.advance(scenario, :dispatch)
     assert working.id == job.id
+  end
+
+  defp configure_herdr_actions(session) do
+    previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
+    previous_session = Application.get_env(:ptc_manager, :herdr_session)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :herdr_session, session)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :dispatch_enabled, previous_dispatch)
+      Application.put_env(:ptc_manager, :herdr_session, previous_session)
+    end)
   end
 end
