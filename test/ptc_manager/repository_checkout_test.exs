@@ -100,6 +100,41 @@ defmodule PtcManager.Repository.CheckoutTest do
     end)
   end
 
+  test "batch availability preserves sharing evidence from an origin mismatch" do
+    path = git_repository!("andreas", "batch-shared")
+    alias_path = path <> "-alias"
+    File.ln_s!(path, alias_path)
+    on_exit(fn -> File.rm(alias_path) end)
+    first = repository!("batch-shared", path, "andreas")
+    second = repository!("wrong-record", alias_path, "andreas")
+
+    with_checkout_probe(GitProbe, fn ->
+      availability = Checkout.availability([first, second])
+
+      assert Map.fetch!(availability, first.id) == {:error, :repository_checkout_shared}
+      assert Map.fetch!(availability, second.id) == {:error, :repository_checkout_shared}
+    end)
+  end
+
+  test "batch availability probes each repository checkout once" do
+    first_path = temporary_directory!("batch-first")
+    second_path = temporary_directory!("batch-second")
+    first = repository!("batch-first", first_path)
+    second = repository!("batch-second", second_path)
+
+    Process.put(:checkout_probe_count, 0)
+    on_exit(fn -> Process.delete(:checkout_probe_count) end)
+
+    with_checkout_probe(__MODULE__.CountingProbe, fn ->
+      availability = Checkout.availability([first, second])
+
+      assert Map.fetch!(availability, first.id) == {:ok, first_path}
+      assert Map.fetch!(availability, second.id) == {:ok, second_path}
+
+      assert Process.get(:checkout_probe_count) == 2
+    end)
+  end
+
   test "private analysis refuses a checkout with the wrong GitHub origin" do
     path = temporary_directory!("manager-wrong-origin")
 
@@ -205,6 +240,19 @@ defmodule PtcManager.Repository.CheckoutTest do
       })
 
     repository
+  end
+
+  defmodule CountingProbe do
+    def checkout_identity(repository, path) do
+      Process.put(:checkout_probe_count, Process.get(:checkout_probe_count, 0) + 1)
+
+      {:ok,
+       %{
+         top_level: path,
+         common_dir: path,
+         remote_identity: {repository.github_owner, repository.github_name}
+       }}
+    end
   end
 
   defp temporary_directory!(name) do

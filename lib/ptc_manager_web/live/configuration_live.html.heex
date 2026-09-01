@@ -21,6 +21,73 @@
       </p>
     </aside>
 
+    <section id="repository-health" aria-labelledby="repository-health-title">
+      <div class="mb-4">
+        <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Repositories</p>
+        <h2 id="repository-health-title" class="mt-1 text-2xl font-semibold">
+          Configuration health
+        </h2>
+        <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+          Each repository needs its own verified checkout, readable GitHub data, and a checked-in publication gate before agents can work safely.
+        </p>
+      </div>
+
+      <div class="grid gap-5 xl:grid-cols-2">
+        <article
+          :for={health <- @repository_health}
+          id={"repository-health-#{health.repository.id}"}
+          class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+        >
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <h3 class="font-semibold text-white">
+                {health.repository.github_owner}/{health.repository.github_name}
+              </h3>
+              <p class="mt-1 text-xs text-slate-500">
+                Default branch: {health.repository.default_branch}
+              </p>
+            </div>
+            <span class={[
+              "rounded-full px-2.5 py-1 text-xs font-semibold",
+              if(health.repository.enabled,
+                do: "bg-teal-400/15 text-teal-200",
+                else: "bg-white/5 text-slate-400"
+              )
+            ]}>
+              {if(health.repository.enabled, do: "Enabled", else: "Disabled")}
+            </span>
+          </div>
+
+          <dl class="mt-5 space-y-3">
+            <div
+              :for={check <- [health.checkout, health.github, health.gate]}
+              class="rounded-xl bg-white/[0.035] p-3"
+            >
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <dt class="text-sm font-medium text-slate-200">{check.label}</dt>
+                <span class={[
+                  "rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide",
+                  health_classes(check.status)
+                ]}>
+                  {check.status}
+                </span>
+              </div>
+              <dd class="mt-1 break-words font-mono text-xs leading-5 text-slate-500">
+                {health_detail(check)}
+              </dd>
+            </div>
+          </dl>
+        </article>
+
+        <div
+          :if={@repository_health == []}
+          class="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500"
+        >
+          No repositories are configured yet.
+        </div>
+      </div>
+    </section>
+
     <section id="prompt-configuration" class="grid gap-5 xl:grid-cols-2">
       <article
         :for={prompt <- @prompts}

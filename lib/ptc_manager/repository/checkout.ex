@@ -39,6 +39,33 @@ defmodule PtcManager.Repository.Checkout do
     end
   end
 
+  @doc "Validates a repository set while probing every configured checkout at most once."
+  def availability(repositories) when is_list(repositories) do
+    probes = Map.new(repositories, &probe_checkout/1)
+
+    Map.new(repositories, fn repository ->
+      result =
+        case Map.fetch!(probes, repository.id) do
+          {:probed, %{path: path, identity: identity, validation: validation}} ->
+            cond do
+              shared_identity?(repository.id, identity, probes) ->
+                {:error, :repository_checkout_shared}
+
+              validation != :ok ->
+                validation
+
+              true ->
+                {:ok, path}
+            end
+
+          {:error, _reason} = error ->
+            error
+        end
+
+      {repository.id, result}
+    end)
+  end
+
   @doc false
   def checkout_identity(%Repository{} = repository, path) when is_binary(path) do
     probe().checkout_identity(repository, path)
@@ -62,6 +89,35 @@ defmodule PtcManager.Repository.Checkout do
     if remote_identity == expected,
       do: :ok,
       else: {:error, :repository_origin_mismatch}
+  end
+
+  defp probe_checkout(%Repository{} = repository) do
+    result =
+      with {:ok, path} <- configured_path(repository),
+           true <- File.dir?(path),
+           {:ok, identity} <- checkout_identity(repository, path) do
+        {:probed,
+         %{path: path, identity: identity, validation: expected_remote(repository, identity)}}
+      else
+        false -> {:error, :repository_path_unavailable}
+        {:error, _reason} = error -> error
+      end
+
+    {repository.id, result}
+  end
+
+  defp shared_identity?(repository_id, identity, probes) do
+    Enum.any?(probes, fn
+      {^repository_id, _result} ->
+        false
+
+      {_other_id, {:probed, %{identity: other_identity}}} ->
+        identity.top_level == other_identity.top_level or
+          identity.common_dir == other_identity.common_dir
+
+      {_other_id, {:error, _reason}} ->
+        false
+    end)
   end
 
   defp exclusive_identity(%Repository{id: id}, identity) when is_integer(id) do

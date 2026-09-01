@@ -29,6 +29,13 @@ defmodule PtcManager.Repository.GitProbe do
 
   def repository_contract(_path, _sha), do: {:error, :invalid_repository_contract_context}
 
+  @doc "Resolves a local branch commit without consulting the working tree."
+  def branch_sha(path, branch)
+      when is_binary(path) and is_binary(branch) and branch != "" and byte_size(branch) <= 240,
+      do: revision(path, "refs/heads/#{branch}^{commit}")
+
+  def branch_sha(_path, _branch), do: {:error, :invalid_repository_branch}
+
   @doc "Returns the canonical checkout, shared Git directory, and GitHub origin identity."
   def checkout_identity(%Repository{}, path) when is_binary(path) do
     with true <- Path.type(path) == :absolute and File.dir?(path),

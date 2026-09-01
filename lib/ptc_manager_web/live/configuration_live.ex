@@ -2,16 +2,28 @@ defmodule PtcManagerWeb.ConfigurationLive do
   use PtcManagerWeb, :live_view
 
   alias PtcManager.MaintainerActions.Catalog
+  alias PtcManager.Operations
+  alias PtcManager.Operations.Repository
   alias PtcManager.PromptConfiguration
+  alias PtcManager.Repository.Health
 
   @impl true
   def mount(_params, session, socket) do
+    if connected?(socket), do: Operations.subscribe()
+
     {:ok,
      socket
      |> assign(:page_title, "Configuration")
      |> assign(:actor, session["actor"] || "maintainer")
      |> load_configuration()}
   end
+
+  @impl true
+  def handle_info({:operations_changed, source}, socket)
+      when source in [Repository, PtcManager.GitHub.Sync],
+      do: {:noreply, load_configuration(socket)}
+
+  def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event(
@@ -65,8 +77,24 @@ defmodule PtcManagerWeb.ConfigurationLive do
         Map.put(definition, :customization, Map.get(customizations, definition.key))
       end)
 
-    assign(socket, :prompts, prompts)
+    repositories = Operations.list_repositories()
+    availability = PtcManager.Repository.Checkout.availability(repositories)
+
+    assign(socket,
+      prompts: prompts,
+      repository_health:
+        Enum.map(repositories, &Health.summarize(&1, Map.fetch!(availability, &1.id)))
+    )
   end
+
+  def health_classes(:ready), do: "bg-teal-400/15 text-teal-200"
+  def health_classes(:attention), do: "bg-amber-400/15 text-amber-200"
+  def health_classes(:syncing), do: "bg-sky-400/15 text-sky-200"
+  def health_classes(:unchecked), do: "bg-white/5 text-slate-400"
+
+  def health_detail(%{detail: %DateTime{} = value}), do: Calendar.strftime(value, "%d %b · %H:%M")
+  def health_detail(%{detail: nil}), do: "No detail recorded."
+  def health_detail(%{detail: detail}), do: detail
 
   defp validation_message(%Ecto.Changeset{} = changeset) do
     case changeset.errors do
