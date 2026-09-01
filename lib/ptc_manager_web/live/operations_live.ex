@@ -5,6 +5,7 @@ defmodule PtcManagerWeb.OperationsLive do
   alias PtcManager.Herdr.Transcript
   alias PtcManager.Operations
   alias PtcManager.ReviewPolicy
+  alias PtcManagerWeb.TimeFormat
 
   @impl true
   def mount(_params, _session, socket) do
@@ -196,15 +197,7 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def run_task(_run), do: "Repository maintenance"
 
-  def duration(now, started_at, ended_at) do
-    seconds = DateTime.diff(ended_at || now, started_at, :second) |> max(0)
-
-    cond do
-      seconds < 60 -> "#{seconds}s"
-      seconds < 3_600 -> "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
-      true -> "#{div(seconds, 3_600)}h #{div(rem(seconds, 3_600), 60)}m"
-    end
-  end
+  def duration(now, started_at, ended_at), do: TimeFormat.duration(now, started_at, ended_at)
 
   def timestamp(datetime), do: Calendar.strftime(datetime, "%d %b · %H:%M")
 
@@ -367,11 +360,5 @@ defmodule PtcManagerWeb.OperationsLive do
 
   defp elapsed_seconds(from, to), do: DateTime.diff(to, from, :second) |> max(0)
 
-  defp format_duration(seconds) when seconds < 60, do: "#{seconds}s"
-
-  defp format_duration(seconds) when seconds < 3_600,
-    do: "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
-
-  defp format_duration(seconds),
-    do: "#{div(seconds, 3_600)}h #{div(rem(seconds, 3_600), 60)}m"
+  defp format_duration(seconds), do: TimeFormat.seconds(seconds)
 end

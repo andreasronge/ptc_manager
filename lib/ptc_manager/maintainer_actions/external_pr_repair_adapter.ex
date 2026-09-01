@@ -5,6 +5,7 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
 
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.Gateway
+  alias PtcManager.MaintainerActions.HerdrOutput
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
@@ -54,7 +55,7 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
   def run(%AgentAction{}, _herdr), do: {:error, :unsupported_external_pr_action}
 
   defp settle_action(herdr, action, dispatch, output) do
-    if settled_state(output) == "blocked" do
+    if HerdrOutput.settled_state(output) == "blocked" do
       {:ok, result("repair-blocked", "The Herdr repair agent needs attention.")}
     else
       with {:ok, head} <- Gateway.call(herdr, :pull_request_action_head, [dispatch.worktree_path]),
@@ -74,22 +75,6 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
       end
     end
   end
-
-  defp settled_state(output) when is_binary(output) do
-    case Jason.decode(output) do
-      {:ok, decoded} -> find_state(decoded)
-      _error -> if String.contains?(String.downcase(output), "blocked"), do: "blocked"
-    end
-  end
-
-  defp find_state(%{} = value) do
-    Enum.find_value(["agent_status", "status", "state"], &Map.get(value, &1)) ||
-      Enum.find_value(value, fn {_key, nested} -> find_state(nested) end)
-  end
-
-  defp find_state([head | tail]), do: find_state(head) || find_state(tail)
-  defp find_state([]), do: nil
-  defp find_state(_value), do: nil
 
   defp result(outcome, summary) do
     %{

@@ -16,6 +16,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, Issue, PrPublication, Repository}
   alias PtcManager.Repo
+  alias PtcManager.RepoTransaction
   alias PtcManager.Repository.SourceSnapshot
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Automations
@@ -53,7 +54,7 @@ defmodule PtcManager.MaintainerActions do
              "repair_and_merge_pr"
            ] and
              is_integer(publication_id) and is_binary(actor) do
-    immediate_transaction(fn ->
+    RepoTransaction.immediate(fn ->
       result =
         with %PrPublication{} = publication <-
                PrPublication
@@ -83,18 +84,6 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
-
-  defp immediate_transaction(fun) do
-    Repo.transaction(fun, mode: :immediate)
-  rescue
-    error in Exqlite.Error ->
-      if error.message == "database is locked" and
-           String.starts_with?(error.statement || "", "BEGIN IMMEDIATE") do
-        {:error, :database_busy}
-      else
-        reraise(error, __STACKTRACE__)
-      end
-  end
 
   def enqueue_issue_decision(issue_id, source_action_id, choice, custom_answer, actor)
       when is_integer(issue_id) and is_integer(source_action_id) and is_binary(choice) and

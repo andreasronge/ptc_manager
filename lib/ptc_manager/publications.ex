@@ -19,6 +19,7 @@ defmodule PtcManager.Publications do
   }
 
   alias PtcManager.Repo
+  alias PtcManager.RepoTransaction
 
   @agent_reconciliation_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
   @external_missing_marker "GitHub open-PR listing omitted this PR once; waiting for confirmation."
@@ -430,7 +431,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_agent_result?(result) do
-        immediate_transaction(fn ->
+        RepoTransaction.immediate(fn ->
           publication =
             PrPublication
             |> preload(job: [:issue, :repository, :worktree_allocation])
@@ -1557,18 +1558,6 @@ defmodule PtcManager.Publications do
     })
 
     deferred
-  end
-
-  defp immediate_transaction(fun) do
-    Repo.transaction(fun, mode: :immediate)
-  rescue
-    error in Exqlite.Error ->
-      if error.message == "database is locked" and
-           String.starts_with?(error.statement || "", "BEGIN IMMEDIATE") do
-        {:error, :database_busy}
-      else
-        reraise(error, __STACKTRACE__)
-      end
   end
 
   defp block_agent_publication!(publication, job, result, message, now) do

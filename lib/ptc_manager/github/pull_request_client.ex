@@ -28,13 +28,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
   defp fetch_status(repository, number) do
     case Client.get_json(repository_url(repository, "/pulls/#{number}")) do
       {:ok, pull} when is_map(pull) ->
-        with {:ok, result} <- normalize(pull),
-             {:ok, health} <- health(repository, pull, result.head_sha) do
-          {:ok, Map.merge(result, health)}
-        else
-          {:retry, reason} -> {:retry, reason}
-          {:error, reason} -> {:blocked, reason}
-        end
+        normalize_with_health(repository, pull)
 
       {:ok, _unexpected} ->
         {:blocked, :unexpected_github_response}
@@ -55,13 +49,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
 
     case Client.get_json(url) do
       {:ok, [pull]} when is_map(pull) ->
-        with {:ok, result} <- normalize(pull),
-             {:ok, health} <- health(repository, pull, result.head_sha) do
-          {:ok, Map.merge(result, health)}
-        else
-          {:retry, reason} -> {:retry, reason}
-          {:error, reason} -> {:blocked, reason}
-        end
+        normalize_with_health(repository, pull)
 
       {:ok, []} ->
         {:retry, :agent_pull_request_not_found}
@@ -134,6 +122,16 @@ defmodule PtcManager.GitHub.PullRequestClient do
       is_binary(result.head_ref) and is_binary(result.head_repository) and
       is_binary(result.base_sha) and is_binary(result.base_ref) and
       is_binary(result.base_repository) and is_binary(result.title)
+  end
+
+  defp normalize_with_health(repository, pull) do
+    with {:ok, result} <- normalize(pull),
+         {:ok, health} <- health(repository, pull, result.head_sha) do
+      {:ok, Map.merge(result, health)}
+    else
+      {:retry, reason} -> {:retry, reason}
+      {:error, reason} -> {:blocked, reason}
+    end
   end
 
   @doc false

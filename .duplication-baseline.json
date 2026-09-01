@@ -18,43 +18,6 @@
       ],
       "type": "type_i"
     },
-    "03c675c50db4bcdcfd2e10823be2b4a215dfa5bfe9b2e65a53d5e77a271673a9": {
-      "describe": "type_i mass=38 lib/ptc_manager/github/pull_request_client.ex:31 <-> lib/ptc_manager/github/pull_request_client.ex:58",
-      "files": [
-        "lib/ptc_manager/github/pull_request_client.ex"
-      ],
-      "mass": 38,
-      "occurrences": [
-        {
-          "file": "lib/ptc_manager/github/pull_request_client.ex",
-          "snippet": "92d9b53bafec73afcefa4478df1d1518ee73cf572de8c3a5a828e37fb80a0090"
-        },
-        {
-          "file": "lib/ptc_manager/github/pull_request_client.ex",
-          "snippet": "92d9b53bafec73afcefa4478df1d1518ee73cf572de8c3a5a828e37fb80a0090"
-        }
-      ],
-      "type": "type_i"
-    },
-    "0bc045f7f7ee82076649684933d15f089b132ed0fc3f1f1ba0cb54194d563eed": {
-      "describe": "type_i mass=38 lib/ptc_manager/maintainer_actions.ex:91 <-> lib/ptc_manager/publications.ex:1562",
-      "files": [
-        "lib/ptc_manager/maintainer_actions.ex",
-        "lib/ptc_manager/publications.ex"
-      ],
-      "mass": 38,
-      "occurrences": [
-        {
-          "file": "lib/ptc_manager/maintainer_actions.ex",
-          "snippet": "6b7893d7f8bccb73f6904321bec6d664e1c71167df23dbddb89298c4d6e62ea5"
-        },
-        {
-          "file": "lib/ptc_manager/publications.ex",
-          "snippet": "6b7893d7f8bccb73f6904321bec6d664e1c71167df23dbddb89298c4d6e62ea5"
-        }
-      ],
-      "type": "type_i"
-    },
     "1831cfe3194034d31bdf7a7aa21a29e76750bb84796083bb11b22b0ffd39edb3": {
       "describe": "type_i mass=70 test/ptc_manager/daily_digests/evidence_test.exs:172 <-> test/ptc_manager/daily_digests/evidence_test.exs:230",
       "files": [
@@ -93,7 +56,7 @@
       "type": "type_i"
     },
     "37b225a59d1e865ca4ba6418d8bc247bfea1942a544391f48a3bec5719f7186e": {
-      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:261 <-> lib/ptc_manager/publications.ex:694",
+      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:262 <-> lib/ptc_manager/publications.ex:695",
       "files": [
         "lib/ptc_manager/publications.ex"
       ],
@@ -111,7 +74,7 @@
       "type": "type_ii"
     },
     "3ef6a16c9aa8c08df4aa31fe5006288af98613f27917573275d50358f37cad97": {
-      "describe": "type_i mass=38 lib/ptc_manager/github/pull_request_client.ex:195 <-> lib/ptc_manager/maintainer_actions.ex:687",
+      "describe": "type_i mass=38 lib/ptc_manager/github/pull_request_client.ex:193 <-> lib/ptc_manager/maintainer_actions.ex:725",
       "files": [
         "lib/ptc_manager/github/pull_request_client.ex",
         "lib/ptc_manager/maintainer_actions.ex"
@@ -130,7 +93,7 @@
       "type": "type_i"
     },
     "783b496d5d795552c0ca880578926d416175869c26d3fcd820b3e399fc2b1cef": {
-      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:1141 <-> lib/ptc_manager/operations.ex:1242",
+      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:1179 <-> lib/ptc_manager/operations.ex:1280",
       "files": [
         "lib/ptc_manager/operations.ex"
       ],
@@ -143,44 +106,6 @@
         {
           "file": "lib/ptc_manager/operations.ex",
           "snippet": "0692d15d1f67350ca1fc70772a875ed28b0224edb09a67f4556f158dedfc9896"
-        }
-      ],
-      "type": "type_i"
-    },
-    "9a44270558e649845f7a5f77d2af427c5fe099ba15da43c78485c35ca097fd20": {
-      "describe": "type_i mass=79 lib/ptc_manager/maintainer_actions/external_pr_repair_adapter.ex:78 <-> lib/ptc_manager/maintainer_actions/retained_herdr_adapter.ex:253",
-      "files": [
-        "lib/ptc_manager/maintainer_actions/external_pr_repair_adapter.ex",
-        "lib/ptc_manager/maintainer_actions/retained_herdr_adapter.ex"
-      ],
-      "mass": 79,
-      "occurrences": [
-        {
-          "file": "lib/ptc_manager/maintainer_actions/external_pr_repair_adapter.ex",
-          "snippet": "b6b7a7e8f263269e3351bc1e6e50aa5908d17b0871e024d609e19a404efa1301"
-        },
-        {
-          "file": "lib/ptc_manager/maintainer_actions/retained_herdr_adapter.ex",
-          "snippet": "b6b7a7e8f263269e3351bc1e6e50aa5908d17b0871e024d609e19a404efa1301"
-        }
-      ],
-      "type": "type_i"
-    },
-    "a31721e0e89fc28f61fd4e699107d6f10eb2de6d883558eb5ebca69e3207d2d9": {
-      "describe": "type_i mass=51 lib/ptc_manager_web/live/dashboard_live.ex:398 <-> lib/ptc_manager_web/live/operations_live.ex:202",
-      "files": [
-        "lib/ptc_manager_web/live/dashboard_live.ex",
-        "lib/ptc_manager_web/live/operations_live.ex"
-      ],
-      "mass": 51,
-      "occurrences": [
-        {
-          "file": "lib/ptc_manager_web/live/dashboard_live.ex",
-          "snippet": "5d0df6804b497a86ddbb19613557095414d37b243df9e79d96fe0b42939dc78d"
-        },
-        {
-          "file": "lib/ptc_manager_web/live/operations_live.ex",
-          "snippet": "5d0df6804b497a86ddbb19613557095414d37b243df9e79d96fe0b42939dc78d"
         }
       ],
       "type": "type_i"

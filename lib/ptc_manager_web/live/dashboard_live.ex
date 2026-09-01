@@ -15,6 +15,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.PublisherPoller
   alias PtcManager.ReviewPolicy
   alias PtcManager.ResultReconciler
+  alias PtcManagerWeb.TimeFormat
 
   @impl true
   def mount(_params, session, socket) do
@@ -392,15 +393,7 @@ defmodule PtcManagerWeb.DashboardLive do
      |> load_dashboard()}
   end
 
-  def elapsed(now, started_at) do
-    seconds = max(DateTime.diff(now, started_at, :second), 0)
-
-    cond do
-      seconds < 60 -> "#{seconds}s"
-      seconds < 3_600 -> "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
-      true -> "#{div(seconds, 3_600)}h #{div(rem(seconds, 3_600), 60)}m"
-    end
-  end
+  def elapsed(now, started_at), do: TimeFormat.elapsed(now, started_at)
 
   def fresh?(%{proposal: nil}), do: false
 

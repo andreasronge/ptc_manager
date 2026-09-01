@@ -6,6 +6,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
   import Ecto.Query
 
   alias PtcManager.Herdr.Command
+  alias PtcManager.MaintainerActions.HerdrOutput
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, AgentRun, PrPublication}
   alias PtcManager.Repo
@@ -173,7 +174,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
   end
 
   defp finish_result(run, publication_id, output) do
-    blocked? = settled_state(output) == "blocked"
+    blocked? = HerdrOutput.settled_state(output) == "blocked"
     _ = settle_run_if_open(run, publication_id, blocked?)
 
     if blocked? do
@@ -250,21 +251,6 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
     |> tap(fn _outcome -> Operations.notify_changed(__MODULE__) end)
   end
 
-  defp settled_state(output) when is_binary(output) do
-    case Jason.decode(output) do
-      {:ok, decoded} -> find_state(decoded)
-      _error -> if String.contains?(String.downcase(output), "blocked"), do: "blocked"
-    end
-  end
-
-  defp find_state(%{} = value) do
-    Enum.find_value(["agent_status", "status", "state"], &Map.get(value, &1)) ||
-      Enum.find_value(value, fn {_key, nested} -> find_state(nested) end)
-  end
-
-  defp find_state([head | tail]), do: find_state(head) || find_state(tail)
-  defp find_state([]), do: nil
-  defp find_state(_value), do: nil
   defp bounded(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 180)
 
   defp result(outcome, summary) do
