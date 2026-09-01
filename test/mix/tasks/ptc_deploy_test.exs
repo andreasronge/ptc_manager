@@ -129,6 +129,23 @@ defmodule Mix.Tasks.PtcDeployTest do
              byte_index(script, "echo \"Building production release...\"")
   end
 
+  test "remote production builds consume the persistent keyed workspace cache" do
+    script = File.read!(@remote_script)
+
+    assert script =~
+             "production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces"
+
+    assert script =~
+             ~s(env MIX_ENV=prod PTC_WORKSPACE_CACHE_ROOT="$production_workspace_cache" \\)
+
+    assert script =~ "./scripts/ptc/bootstrap"
+
+    refute script =~ "env MIX_ENV=prod mix deps.get"
+
+    assert byte_index(script, "./scripts/ptc/bootstrap") <
+             byte_index(script, "env MIX_ENV=prod mix compile")
+  end
+
   test "remote deployment provisions and exercises the isolated gate toolchain" do
     script = File.read!(@remote_script)
 

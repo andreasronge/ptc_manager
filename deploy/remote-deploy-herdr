@@ -46,6 +46,7 @@ worker_mise=/usr/local/bin/mise
 node_version=22.23.2
 worker_node_dir="/opt/ptc-manager-node-${node_version}"
 worker_node_staging=
+production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 erlang_version=29.0.3
 elixir_version=1.20.2-otp-29
 gate_mise_root=/opt/ptc-manager-gate-mise
@@ -789,7 +790,8 @@ cd "$build_dir"
 
 echo "Building production release..."
 "$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
-  env MIX_ENV=prod mix deps.get
+  env MIX_ENV=prod PTC_WORKSPACE_CACHE_ROOT="$production_workspace_cache" \
+  ./scripts/ptc/bootstrap
 "$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix compile
 "$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
