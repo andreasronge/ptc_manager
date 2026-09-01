@@ -1,7 +1,7 @@
 defmodule PtcManager.Repository.WorkspaceSetup do
   @moduledoc "Runs one repository-owned setup script before an implementation agent starts."
 
-  alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
+  alias PtcManager.CommandEnvironment
   alias PtcManager.Operations.Job
   alias PtcManager.Repository.{Contract, GitProbe}
 
@@ -189,7 +189,7 @@ defmodule PtcManager.Repository.WorkspaceSetup do
             :hide,
             args: args,
             cd: path,
-            env: normalize_environment(PrivateCodexAdapter.command_environment())
+            env: normalize_environment(CommandEnvironment.scrub())
           ]
         )
 

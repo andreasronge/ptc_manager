@@ -11,9 +11,6 @@ defmodule PtcManager.DeploymentCanary do
 
   defmodule Adapter do
     @moduledoc false
-    @behaviour PtcManager.Manager.Adapter
-
-    @impl true
     def analyze(issue) do
       {:ok,
        %{
@@ -40,12 +37,9 @@ defmodule PtcManager.DeploymentCanary do
              %Worker{} = worker <- canary_worker(),
              {:ok, run} <- start_run(worker, issue, invocation_id),
              :ok <- remember_run(run),
-             {:ok, proposal} <-
-               Manager.investigate_issue(
-                 issue.id,
-                 canary_id: invocation_id,
-                 adapter: adapter
-               ),
+             :ok <- OperationalMode.authorize_canary(invocation_id),
+             {:ok, analysis} <- adapter.analyze(issue),
+             {:ok, proposal} <- Manager.store_analysis(issue, analysis),
              {:ok, _run} <- finish_run(run, "done", "Read-only deployment canary passed."),
              :ok <- OperationalMode.mark_canary_passed(invocation_id) do
           {:ok, %{run_id: run.id, issue_id: issue.id, proposal_id: proposal.id}}

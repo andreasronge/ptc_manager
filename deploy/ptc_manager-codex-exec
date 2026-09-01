@@ -1,5 +1,0 @@
-#!/bin/sh
-
-# Codex appends piped stdin to an explicit prompt. A long-running systemd
-# service keeps its stdin open, so automation must close it before exec.
-exec /usr/local/bin/codex "$@" </dev/null

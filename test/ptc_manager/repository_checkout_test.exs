@@ -2,8 +2,7 @@ defmodule PtcManager.Repository.CheckoutTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Issue, Repository}
-  alias PtcManager.Manager.CodexAdapter
+  alias PtcManager.Operations.Repository
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.CheckoutMigrationAudit
   alias PtcManager.Repository.GitProbe
@@ -135,42 +134,6 @@ defmodule PtcManager.Repository.CheckoutTest do
     end)
   end
 
-  test "private analysis refuses a checkout with the wrong GitHub origin" do
-    path = temporary_directory!("manager-wrong-origin")
-
-    repository = %Repository{
-      github_owner: "owner",
-      github_name: "expected",
-      local_path: path
-    }
-
-    Process.put(:checkout_probe_result, {
-      :ok,
-      %{top_level: path, common_dir: path, remote_identity: {"other", "repository"}}
-    })
-
-    on_exit(fn -> Process.delete(:checkout_probe_result) end)
-
-    with_manager_enabled(fn ->
-      assert {:error, :repository_origin_mismatch} =
-               CodexAdapter.analyze(%Issue{repository: repository})
-    end)
-  end
-
-  test "private analysis refuses a checkout shared by repository rows" do
-    path = temporary_directory!("manager-shared")
-    alias_path = path <> "-alias"
-    File.ln_s!(path, alias_path)
-    on_exit(fn -> File.rm(alias_path) end)
-    first = repository!("manager-first", path)
-    _second = repository!("manager-second", alias_path)
-
-    with_manager_enabled(fn ->
-      assert {:error, :repository_checkout_shared} =
-               CodexAdapter.analyze(%Issue{repository: first})
-    end)
-  end
-
   test "startup preflight imports the legacy path once for an empty repository row" do
     path = temporary_directory!("legacy")
     repository = repository!("legacy", nil)
@@ -293,17 +256,6 @@ defmodule PtcManager.Repository.CheckoutTest do
       function.()
     after
       Application.put_env(:ptc_manager, :checkout_probe, previous)
-    end
-  end
-
-  defp with_manager_enabled(function) do
-    previous = Application.get_env(:ptc_manager, :manager_enabled)
-    Application.put_env(:ptc_manager, :manager_enabled, true)
-
-    try do
-      function.()
-    after
-      Application.put_env(:ptc_manager, :manager_enabled, previous)
     end
   end
 end

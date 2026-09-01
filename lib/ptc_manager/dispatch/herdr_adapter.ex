@@ -6,7 +6,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Herdr.Command
   alias PtcManager.Automations
   alias PtcManager.Gateway
-  alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
+  alias PtcManager.CommandEnvironment
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkspaceSetup
   alias PtcManager.ReviewPolicy
@@ -450,7 +450,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     {command, command_args} = git_command_spec(args)
 
     System.cmd(command, command_args,
-      env: PrivateCodexAdapter.command_environment(),
+      env: CommandEnvironment.scrub(),
       stderr_to_stdout: true
     )
   rescue
@@ -466,7 +466,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         Application.get_env(:ptc_manager, :git_binary, "git")
       )
 
-    PrivateCodexAdapter.codex_command(
+    CommandEnvironment.command(
       binary,
       args,
       Application.get_env(:ptc_manager, :herdr_run_as_user)

@@ -5,7 +5,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   alias PtcManager.Automations
   alias PtcManager.Dispatch.HerdrAdapter
-  alias PtcManager.MaintainerActions.CodexAdapter, as: ResultValidator
+  alias PtcManager.MaintainerActions.ActionAdapter, as: ResultValidator
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentAction
   alias PtcManager.Repository.Checkout
@@ -71,8 +71,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp prepare_output(action) do
     directory =
-      Application.get_env(:ptc_manager, :agent_action_output_dir) ||
-        Application.get_env(:ptc_manager, :manager_output_dir) || System.tmp_dir!()
+      Application.get_env(:ptc_manager, :agent_action_output_dir) || System.tmp_dir!()
 
     with :ok <- File.mkdir_p(directory) do
       path = Path.join(directory, "ptc-result-action-#{action.id}-#{action.attempt_count}.json")

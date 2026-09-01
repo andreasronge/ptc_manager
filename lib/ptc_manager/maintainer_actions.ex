@@ -35,7 +35,7 @@ defmodule PtcManager.MaintainerActions do
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
   def enqueue(action_key, issue_id, actor)
-      when action_key in ["prepare_issue", "review_issue"] and
+      when action_key in ["private_issue_analysis", "prepare_issue", "review_issue"] and
              is_integer(issue_id) and is_binary(actor) do
     with %Issue{} = issue <- Issue |> Repo.get(issue_id) |> Repo.preload(:repository),
          :ok <- ensure_open(issue),
@@ -284,7 +284,7 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(%{action_key: action_key} = action, sync)
-       when action_key in ["prepare_issue", "review_issue"] do
+       when action_key in ["private_issue_analysis", "prepare_issue", "review_issue"] do
     case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
@@ -783,6 +783,28 @@ defmodule PtcManager.MaintainerActions do
       {:ok, result}
     else
       {:error, reason} -> {:error, {:daily_digest_publish_failed, reason}}
+    end
+  end
+
+  defp store_private_analysis(
+         %{action_key: "private_issue_analysis", target_id: issue_id},
+         {:ok, result},
+         _summary
+       ) do
+    issue = Repo.get!(Issue, issue_id)
+
+    analysis = %{
+      plain_summary: result["private_summary"],
+      why_it_matters: result["why_it_matters"],
+      scope: result["scope"],
+      risk: result["risk"],
+      readiness: result["outcome"],
+      technical_evidence: result["technical_evidence"]
+    }
+
+    case Manager.store_analysis(issue, analysis) do
+      {:ok, _proposal} -> {:ok, result}
+      {:error, reason} -> {:error, {:private_analysis_failed, reason}}
     end
   end
 

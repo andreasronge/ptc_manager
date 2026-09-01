@@ -1,7 +1,7 @@
 defmodule PtcManager.Herdr.Command do
   @moduledoc "Executes the Herdr CLI with a scrubbed environment and optional worker identity."
 
-  alias PtcManager.Manager.CodexAdapter
+  alias PtcManager.CommandEnvironment
 
   def run(args, timeout \\ nil) when is_list(args) do
     binary = Application.get_env(:ptc_manager, :herdr_binary, "herdr")
@@ -41,7 +41,7 @@ defmodule PtcManager.Herdr.Command do
 
   @doc false
   def environment do
-    environment = CodexAdapter.command_environment()
+    environment = CommandEnvironment.scrub()
 
     if Application.get_env(:ptc_manager, :herdr_run_as_user) in [nil, ""] do
       maybe_add_socket(environment, Application.get_env(:ptc_manager, :herdr_socket_path))

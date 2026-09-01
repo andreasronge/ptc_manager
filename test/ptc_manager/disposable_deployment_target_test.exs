@@ -5,20 +5,16 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
 
   alias PtcManager.DeploymentCanary
   alias PtcManager.DisposableDeploymentTarget
-  alias PtcManager.Manager
   alias PtcManager.OperationalMode
   alias PtcManager.Operations.{AgentRun, Issue, Proposal, Repository}
   alias PtcManager.Repo
 
   setup context do
     previous_mode = Application.get_env(:ptc_manager, :operational_mode)
-    previous_manager_enabled = Application.get_env(:ptc_manager, :manager_enabled)
     Application.put_env(:ptc_manager, :operational_mode, :maintenance)
-    Application.put_env(:ptc_manager, :manager_enabled, true)
 
     on_exit(fn ->
       restore_env(:operational_mode, previous_mode)
-      restore_env(:manager_enabled, previous_manager_enabled)
     end)
 
     target = DisposableDeploymentTarget.start!(Map.get(context, :migration_opts, []))
@@ -55,11 +51,10 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
 
   test "ordinary work stays paused until the one canary activates it", %{target: target} do
     repository = repository_fixture(%{github_owner: "checkpoint", github_name: "canary"})
-    issue = issue_fixture(repository, %{number: 201})
+    issue_fixture(repository, %{number: 201})
     worker_fixture(%{worker_key: "checkpoint-worker", status: "online"})
 
-    assert {:error, :maintenance_mode} =
-             Manager.investigate_issue(issue.id, adapter: DeploymentCanary.Adapter)
+    assert {:error, :maintenance_mode} = OperationalMode.authorize_ordinary_work()
 
     refute Repo.exists?(Proposal)
 
@@ -68,14 +63,12 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     assert Repo.get!(Proposal, summary.proposal_id)
     assert Repo.get!(AgentRun, summary.run_id).state == "done"
 
-    assert {:error, :maintenance_mode} =
-             Manager.investigate_issue(issue.id, adapter: DeploymentCanary.Adapter)
+    assert {:error, :maintenance_mode} = OperationalMode.authorize_ordinary_work()
 
     assert :ok = DeploymentCanary.activate("disposable-release", wake: fn -> :ok end)
     assert OperationalMode.mode() == :active
 
-    assert {:ok, %Proposal{}} =
-             Manager.investigate_issue(issue.id, adapter: DeploymentCanary.Adapter)
+    assert :ok = OperationalMode.authorize_ordinary_work()
 
     assert DisposableDeploymentTarget.trace(target) == [
              :target_created,

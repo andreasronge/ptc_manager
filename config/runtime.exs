@@ -77,9 +77,6 @@ if daily_digest_enabled and not agent_actions_enabled do
   raise "PTC_DAILY_DIGEST_ENABLED requires PTC_AGENT_ACTIONS_ENABLED=true"
 end
 
-daily_digest_run_as_user =
-  System.get_env("PTC_DAILY_DIGEST_RUN_AS_USER") || System.get_env("PTC_CODEX_RUN_AS_USER")
-
 daily_digest_interval_ms =
   if(demo_mode,
     do: 60_000,
@@ -98,12 +95,6 @@ daily_digest_hour =
 
 if daily_digest_hour not in 0..23 do
   raise "PTC_DAILY_DIGEST_HOUR must be between 0 and 23"
-end
-
-if daily_digest_enabled and
-     (daily_digest_run_as_user in [nil, ""] or
-        daily_digest_run_as_user == System.get_env("PTC_AGENT_ACTION_RUN_AS_USER")) do
-  raise "daily updates require a dedicated PTC_DAILY_DIGEST_RUN_AS_USER without GitHub credentials"
 end
 
 publication_enabled = not demo_mode and System.get_env("PTC_PUBLICATION_ENABLED") == "true"
@@ -188,7 +179,6 @@ config :ptc_manager,
   daily_digest_interval_ms: daily_digest_interval_ms,
   daily_digest_hour: daily_digest_hour,
   daily_digest_time_zone: System.get_env("PTC_DAILY_DIGEST_TIME_ZONE", "Europe/Stockholm"),
-  daily_digest_run_as_user: daily_digest_run_as_user,
   external_pr_run_as_user: System.get_env("PTC_EXTERNAL_PR_RUN_AS_USER", "ptc-manager-external"),
   external_pr_group: System.get_env("PTC_EXTERNAL_PR_GROUP", "ptc-manager-external"),
   external_pr_worktree_root:
@@ -283,15 +273,7 @@ config :ptc_manager,
   implementation_agent_start_timeout_ms:
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),
-  implementation_agent_publishes_pr: implementation_agent_publishes_pr,
-  manager_enabled: not demo_mode and System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
-  manager_concurrency:
-    System.get_env("PTC_CODEX_MANAGER_CONCURRENCY", "1") |> String.to_integer(),
-  codex_binary: System.get_env("PTC_CODEX_BINARY", "codex"),
-  codex_run_as_user: System.get_env("PTC_CODEX_RUN_AS_USER"),
-  manager_output_dir: System.get_env("PTC_CODEX_OUTPUT_DIR"),
-  manager_timeout_ms:
-    System.get_env("PTC_CODEX_MANAGER_TIMEOUT_MS", "120000") |> String.to_integer()
+  implementation_agent_publishes_pr: implementation_agent_publishes_pr
 
 if worktree_root = System.get_env("PTC_WORKTREE_ROOT") do
   config :ptc_manager, :worktree_root, worktree_root

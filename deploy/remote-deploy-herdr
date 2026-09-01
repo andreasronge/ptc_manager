@@ -626,7 +626,7 @@ sudo -n true
 tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
-tar -xOf "$source_archive" deploy/ptc_manager-codex.sudoers >"$sudoers_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 chmod 0755 "$worker_git_candidate"
 chmod 0440 "$sudoers_candidate"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
@@ -781,8 +781,8 @@ install_worker_node
 sudo install -o root -g root -m 0755 "$worker_git_candidate" \
   /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
-  /etc/sudoers.d/ptc_manager-codex
-
+  /etc/sudoers.d/ptc_manager
+sudo rm -f -- /etc/sudoers.d/ptc_manager-codex
 mkdir -p "$build_dir"
 tar -xf "$source_archive" -C "$build_dir"
 cd "$build_dir"

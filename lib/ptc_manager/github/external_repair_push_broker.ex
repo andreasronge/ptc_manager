@@ -1,7 +1,7 @@
 defmodule PtcManager.GitHub.ExternalRepairPushBroker do
   @moduledoc "Pushes a verified external repair through a credential-isolated broker."
 
-  alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
+  alias PtcManager.CommandEnvironment
 
   def push_external_repair(
         path,
@@ -54,7 +54,7 @@ defmodule PtcManager.GitHub.ExternalRepairPushBroker do
       limit(:git_max_total_blob_bytes, 50_000_000)
     ]
 
-    {command, command_args} = PrivateCodexAdapter.codex_command(wrapper, args, user)
+    {command, command_args} = CommandEnvironment.command(wrapper, args, user)
 
     timeout_binary =
       Application.get_env(:ptc_manager, :github_push_timeout_binary) || "/usr/bin/timeout"
@@ -71,7 +71,7 @@ defmodule PtcManager.GitHub.ExternalRepairPushBroker do
     ]
 
     case System.cmd(timeout_binary, bounded_args,
-           env: PrivateCodexAdapter.command_environment(),
+           env: CommandEnvironment.scrub(),
            stderr_to_stdout: true
          ) do
       {_output, 0} -> :ok

@@ -1127,11 +1127,9 @@ real Herdr kind (prefer Claude on the current host), in addition to the invented
 kind contract test. Lack of a second healthy installation may delay that pilot,
 but must never be “solved” with a Codex-specific application branch.
 
-The existing direct Codex paths are temporary compatibility implementations for
-current manager analysis and daily updates. Migrating those actions means
-expressing their isolation as execution-profile requirements (for example,
-`workspace:read-snapshot`, `network:none`, and `github:none`) and then removing
-the direct process adapter after parity tests.
+Private manager analysis and daily updates now use the generic Herdr action
+path. Their isolation is expressed through execution-profile and runtime
+requirements, and no direct provider process adapter remains.
 
 ### Triggers
 
@@ -1828,8 +1826,7 @@ Acceptance:
 ### Slice 8: migrate repository status updates
 
 - Create status-update action definitions per repository.
-- Move execution through a credential-free, read-only Herdr capability profile
-  before removing the direct Codex compatibility path.
+- Execute through a credential-free, read-only Herdr capability profile.
 - Migrate the existing `ptc_runner` schedule.
 - Leave the `ptc_manager` schedule disabled.
 - Remove the special-purpose scheduler after parity tests.

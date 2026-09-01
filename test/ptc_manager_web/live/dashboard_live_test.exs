@@ -461,6 +461,29 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#issue-#{issue.id}", "Agent action queued")
   end
 
+  test "queues private analysis through the same durable Herdr action UI", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Explain this issue privately"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#agent-action-private_issue_analysis-issue-#{issue.id}",
+             "Investigate privately"
+           )
+
+    view
+    |> element("#agent-action-private_issue_analysis-issue-#{issue.id}")
+    |> render_click()
+
+    assert render(view) =~ "Private issue analysis queued for an agent"
+    action = Repo.one!(AgentAction)
+    assert action.action_key == "private_issue_analysis"
+    assert action.state == "queued"
+    assert has_element?(view, "#issue-#{issue.id}", "Agent action queued")
+  end
+
   test "queues an independent issue review from the second issue action", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: "Challenge the issue before implementation"})

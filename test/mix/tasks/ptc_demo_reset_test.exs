@@ -67,7 +67,7 @@ defmodule Mix.Tasks.Ptc.Demo.ResetTest do
     expression = """
     keys = [:demo_mode, :dispatch_enabled, :agent_actions_enabled, :daily_digest_enabled,
             :publication_enabled, :pr_reconcile_enabled, :implementation_agent_publishes_pr,
-            :manager_enabled, :github_sync_interval_ms, :herdr_sync_interval_ms,
+            :github_sync_interval_ms, :herdr_sync_interval_ms,
             :github_read_token, :repository_path]
     values = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
     IO.puts("DEMO_CONFIG=" <> Jason.encode!(values))
@@ -82,7 +82,6 @@ defmodule Mix.Tasks.Ptc.Demo.ResetTest do
       {"PTC_PUBLICATION_ENABLED", "true"},
       {"PTC_PR_RECONCILE_ENABLED", "true"},
       {"PTC_IMPLEMENTATION_AGENT_PUBLISHES_PR", "true"},
-      {"PTC_CODEX_MANAGER_ENABLED", "true"},
       {"PTC_GITHUB_SYNC_INTERVAL_MS", "5000"},
       {"PTC_HERDR_SYNC_INTERVAL_MS", "5000"},
       {"GITHUB_READ_TOKEN", "must-not-be-used"},
@@ -101,7 +100,7 @@ defmodule Mix.Tasks.Ptc.Demo.ResetTest do
     assert config["demo_mode"]
 
     for key <-
-          ~w(dispatch_enabled agent_actions_enabled daily_digest_enabled publication_enabled pr_reconcile_enabled implementation_agent_publishes_pr manager_enabled) do
+          ~w(dispatch_enabled agent_actions_enabled daily_digest_enabled publication_enabled pr_reconcile_enabled implementation_agent_publishes_pr) do
       refute config[key]
     end
 

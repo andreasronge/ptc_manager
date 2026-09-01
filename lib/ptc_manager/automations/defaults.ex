@@ -235,12 +235,18 @@ defmodule PtcManager.Automations.Defaults do
     ]
   end
 
-  def triggers(key, _repository) when key in ["prepare_issue", "review_issue"] do
+  def triggers(key, _repository)
+      when key in ["private_issue_analysis", "prepare_issue", "review_issue"] do
     [
       %{
         trigger_type: "contextual",
         surface: "planning_issue",
-        label: if(key == "prepare_issue", do: "Prepare issue", else: "Review issue"),
+        label:
+          case key do
+            "private_issue_analysis" -> "Investigate privately"
+            "prepare_issue" -> "Prepare issue"
+            "review_issue" -> "Review issue"
+          end,
         enabled: true,
         configuration: %{}
       }

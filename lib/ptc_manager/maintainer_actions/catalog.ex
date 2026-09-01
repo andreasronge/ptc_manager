@@ -2,7 +2,6 @@ defmodule PtcManager.MaintainerActions.Catalog do
   @moduledoc "Button action catalog and suggested prompt builders for the durable action queue."
 
   alias PtcManager.DailyDigests.DailyDigest
-  alias PtcManager.Manager.CodexAdapter, as: PrivateAnalysisAdapter
   alias PtcManager.Operations.{Issue, Job, PrPublication, Repository}
   alias PtcManager.Automations
   alias PtcManager.Dispatch.HerdrAdapter, as: ImplementationAdapter
@@ -79,7 +78,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
     prompt =
       case action_key do
         "private_issue_analysis" ->
-          PrivateAnalysisAdapter.build_prompt(issue, instructions)
+          configured_preview(private_issue_analysis_prompt(repository, issue), instructions)
 
         "implement_issue" ->
           ImplementationAdapter.build_prompt(
@@ -164,6 +163,22 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
        prompt_version: @prompt_version,
        prompt: configured("prepare_issue", prepare_issue_prompt(repository, issue))
+     }}
+  end
+
+  def build("private_issue_analysis", %{issue: issue, repository: repository}) do
+    {:ok,
+     %{
+       repository_id: repository.id,
+       target_type: "issue",
+       target_id: issue.id,
+       target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
+       prompt_version: @prompt_version,
+       prompt:
+         configured(
+           "private_issue_analysis",
+           private_issue_analysis_prompt(repository, issue)
+         )
      }}
   end
 
@@ -365,6 +380,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def build("repair_and_merge_pr", _target), do: {:error, :pull_request_not_open}
   def build(_action_key, _target), do: {:error, :unknown_agent_action}
 
+  def label("private_issue_analysis"), do: "Private issue analysis"
   def label("prepare_issue"), do: "Prepare issue"
   def label("review_issue"), do: "Review issue"
   def label("daily_digest"), do: "Daily update"
@@ -392,6 +408,18 @@ defmodule PtcManager.MaintainerActions.Catalog do
   defp prepare_issue_prompt(repository, issue) do
     """
     <runtime_context action="prepare_issue" repository="#{repository.github_owner}/#{repository.github_name}" github_access="trusted_direct" allowed_outcomes="ready,blocked,needs-decision,reject" />
+    <issue_data>
+    Number: #{issue.number}
+    Title: #{issue.title}
+    Body:
+    #{String.slice(issue.body || "", 0, 20_000)}
+    </issue_data>
+    """
+  end
+
+  defp private_issue_analysis_prompt(repository, issue) do
+    """
+    <runtime_context action="private_issue_analysis" repository="#{repository.github_owner}/#{repository.github_name}" github_access="read" workspace="read_only" allowed_outcomes="ready,needs_information,needs_breakdown,outdated,duplicate" />
     <issue_data>
     Number: #{issue.number}
     Title: #{issue.title}

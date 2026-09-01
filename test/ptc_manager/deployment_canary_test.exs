@@ -66,27 +66,14 @@ defmodule PtcManager.DeploymentCanaryTest do
     assert run.status_text =~ "adapter_unavailable"
   end
 
-  test "the default canary does not depend on the optional Codex manager flag" do
+  test "the default canary does not depend on an external agent" do
     repository = repository_fixture()
     issue_fixture(repository)
     worker_fixture(%{status: "online"})
-    previous = Application.get_env(:ptc_manager, :manager_enabled)
-    Application.put_env(:ptc_manager, :manager_enabled, false)
-    on_exit(fn -> restore_env(:manager_enabled, previous) end)
 
     assert {:ok, summary} = DeploymentCanary.run("release-no-codex")
     assert Repo.get!(Proposal, summary.proposal_id).plain_summary =~ "Deployment canary"
     assert OperationalMode.mode() == {:canary, "release-no-codex"}
-  end
-
-  test "ordinary direct manager work is rejected while maintenance is active" do
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-
-    assert {:error, :maintenance_mode} =
-             PtcManager.Manager.investigate_issue(issue.id, adapter: PassingAdapter)
-
-    refute Repo.exists?(Proposal)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

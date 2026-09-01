@@ -4,7 +4,7 @@ defmodule PtcManager.DailyDigestsTest do
   alias PtcManager.DailyDigests
   alias PtcManager.DailyDigests.DailyDigest
   alias PtcManager.DailyDigests.Scheduler
-  alias PtcManager.MaintainerActions.CodexAdapter
+  alias PtcManager.MaintainerActions.ActionAdapter
   alias PtcManager.Operations.AgentAction
   alias PtcManager.Repo
 
@@ -132,22 +132,22 @@ defmodule PtcManager.DailyDigestsTest do
       "pull_request_numbers" => [1713, 1716]
     }
 
-    assert :ok = CodexAdapter.validate_result(result, "daily_digest")
+    assert :ok = ActionAdapter.validate_result(result, "daily_digest")
 
     assert {:error, :invalid_daily_digest_output} =
              result
              |> Map.put("pull_request_numbers", [1716, 1713])
-             |> CodexAdapter.validate_result("daily_digest")
+             |> ActionAdapter.validate_result("daily_digest")
 
     assert {:error, :invalid_daily_digest_output} =
              result
              |> Map.merge(%{"status" => "no-changes", "change_count" => 2})
-             |> CodexAdapter.validate_result("daily_digest")
+             |> ActionAdapter.validate_result("daily_digest")
 
     assert {:error, :invalid_daily_digest_output} =
              result
              |> Map.put("change_count", 101)
-             |> CodexAdapter.validate_result("daily_digest")
+             |> ActionAdapter.validate_result("daily_digest")
   end
 
   test "Codex output schema leaves uniqueness enforcement to application validation" do
@@ -156,11 +156,6 @@ defmodule PtcManager.DailyDigestsTest do
 
     assert {:ok, schema} = schema_path |> File.read!() |> Jason.decode()
     refute Map.has_key?(schema["properties"]["pull_request_numbers"], "uniqueItems")
-  end
-
-  test "read-only Codex execution cannot auto-approve a broader sandbox" do
-    assert CodexAdapter.isolation_args("read-only") == ["--sandbox", "read-only"]
-    refute "--approve-for-me" in CodexAdapter.isolation_args("read-only")
   end
 
   test "scheduler falls back to a safe interval if runtime configuration is invalid" do

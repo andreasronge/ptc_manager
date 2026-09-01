@@ -4,7 +4,6 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.GitHub.Sync, as: GitHubSync
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.IssueDecision
-  alias PtcManager.Manager
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
@@ -30,7 +29,6 @@ defmodule PtcManagerWeb.DashboardLive do
      |> assign(:selected_repository, nil)
      |> assign(:now, DateTime.utc_now())
      |> assign(:github_syncing, false)
-     |> assign(:investigating, MapSet.new())
      |> assign(:reconciling_results, MapSet.new())
      |> load_dashboard()}
   end
@@ -52,20 +50,6 @@ defmodule PtcManagerWeb.DashboardLive do
   end
 
   def handle_event("sync-github", _params, socket), do: {:noreply, socket}
-
-  def handle_event("investigate", %{"issue-id" => issue_id}, socket) do
-    with true <- Manager.enabled?(),
-         {issue_id, ""} <- Integer.parse(issue_id),
-         false <- MapSet.member?(socket.assigns.investigating, issue_id) do
-      {:noreply,
-       socket
-       |> update(:investigating, &MapSet.put(&1, issue_id))
-       |> start_async({:investigate, issue_id}, fn -> Manager.investigate_issue(issue_id) end)}
-    else
-      false -> {:noreply, put_flash(socket, :error, "The private manager is not enabled.")}
-      _ -> {:noreply, socket}
-    end
-  end
 
   @impl true
   def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
@@ -291,42 +275,6 @@ defmodule PtcManagerWeb.DashboardLive do
      |> load_dashboard()}
   end
 
-  def handle_async({:investigate, issue_id}, {:ok, result}, socket) do
-    socket =
-      socket
-      |> update(:investigating, &MapSet.delete(&1, issue_id))
-      |> load_dashboard()
-
-    case result do
-      {:ok, _proposal} ->
-        {:noreply, put_flash(socket, :info, "Private issue analysis is ready.")}
-
-      {:error, :repository_path_missing} ->
-        {:noreply, put_flash(socket, :error, "Configure the repository's local path first.")}
-
-      {:error, :repository_path_unavailable} ->
-        {:noreply,
-         put_flash(socket, :error, "The configured repository checkout is unavailable.")}
-
-      {:error, :issue_closed} ->
-        {:noreply, put_flash(socket, :error, "This issue has already been closed.")}
-
-      {:error, :manager_busy} ->
-        {:noreply,
-         put_flash(socket, :error, "The private manager is already investigating another issue.")}
-
-      {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "The private analysis could not be completed.")}
-    end
-  end
-
-  def handle_async({:investigate, issue_id}, {:exit, _reason}, socket) do
-    {:noreply,
-     socket
-     |> update(:investigating, &MapSet.delete(&1, issue_id))
-     |> put_flash(:error, "The private analysis stopped unexpectedly.")}
-  end
-
   def handle_async({:reconcile_result, job_id}, {:ok, result}, socket) do
     socket =
       socket
@@ -387,8 +335,6 @@ defmodule PtcManagerWeb.DashboardLive do
           implementation_dependencies_resolved?(item.dependencies)
 
   def approvable?(_item), do: false
-
-  def investigating?(investigating, issue_id), do: MapSet.member?(investigating, issue_id)
 
   def claimed?(%{github_assignees: %{"logins" => [_login | _rest]}}), do: true
   def claimed?(_issue), do: false
@@ -677,7 +623,6 @@ defmodule PtcManagerWeb.DashboardLive do
         |> filter_repository(selected_repository, &agent_run_repository/1),
       recent_agent_runs: recent_agent_runs(repositories, selected_repository),
       workers: Operations.list_workers_with_worktrees(),
-      manager_enabled: Manager.enabled?(),
       agent_actions_enabled: MaintainerActions.enabled?(),
       dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
       agent_pr_enabled:

@@ -335,7 +335,7 @@ agents are working on what and since when.
 ### Slice 2: read-only GitHub and Herdr reconciliation
 
 - GitHub repository configuration and read-only polling;
-- private manager summaries through a read-only Codex adapter;
+- private manager summaries through a light, read-only Herdr action;
 - local Herdr worker that reports real agent state;
 - stale approval detection after GitHub changes;
 - Tailscale and systemd deployment on the Hetzner server.

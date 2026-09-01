@@ -4,7 +4,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.Automations
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog
-  alias PtcManager.MaintainerActions.CodexAdapter
+  alias PtcManager.MaintainerActions.ActionAdapter
   alias PtcManager.MaintainerActions.RetainedHerdrAdapter
   alias PtcManager.MaintainerActions.Sync
   alias PtcManager.DailyDigests
@@ -94,6 +94,31 @@ defmodule PtcManager.MaintainerActionsTest do
          "github_changes" => ["Applied ptc:ready"],
          "evidence" => ["Inspected lib/example.ex"],
          "created_issue_numbers" => []
+       }}
+    end
+  end
+
+  defmodule PrivateAnalysisAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(action) do
+      send(Process.get(:agent_action_test_pid), {:ran_agent_action, action})
+
+      {:ok,
+       %{
+         "outcome" => "needs_breakdown",
+         "private_summary" =>
+           "The issue contains two changes that are easier to deliver separately.",
+         "why_it_matters" => "Smaller changes are easier to validate and review.",
+         "scope" => "medium",
+         "risk" => "medium",
+         "technical_evidence" => "The request crosses the parser and runtime boundaries.",
+         "github_changes" => [],
+         "evidence" => ["Inspected the parser and runtime modules"],
+         "created_issue_numbers" => [],
+         "suggestions" => [],
+         "decision_question" => "",
+         "decision_options" => []
        }}
     end
   end
@@ -381,6 +406,15 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule PassiveSync do
+    def sync_action(action) do
+      send(Process.get(:agent_action_test_pid), {:synced_repository, action.repository_id})
+      {:ok, %{repository: action.repository}}
+    end
+
+    def sync_action(action, _result), do: sync_action(action)
+  end
+
   defmodule DecisionSync do
     def sync_action(action), do: {:ok, %{repository: action.repository}}
 
@@ -649,6 +683,63 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert Repo.aggregate(AgentAction, :count) == 1
     assert Repo.aggregate(AuditEvent, :count) == 1
+  end
+
+  test "runs private issue analysis through the durable planning queue" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{number: 46, workflow_label: nil})
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("private_issue_analysis", issue.id, "andreas")
+
+    queued = Repo.preload(queued, :automation_definition_version)
+    assert queued.action_key == "private_issue_analysis"
+    assert queued.automation_definition_version.queue_lane == "planning"
+    assert queued.automation_definition_version.resource_class == "light"
+    assert queued.prompt =~ ~s(action="private_issue_analysis")
+    assert queued.prompt =~ ~s(github_access="read")
+    assert queued.prompt =~ ~s(workspace="read_only")
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(
+               adapter: PrivateAnalysisAdapter,
+               sync: PassiveSync,
+               lane: :planning
+             )
+
+    assert_receive {:ran_agent_action, executed}
+    assert executed.id == queued.id
+    assert executed.target_snapshot["source_sha"] == String.duplicate("7", 40)
+    assert completed.state == "done"
+
+    proposal = Repo.get_by!(Proposal, issue_id: issue.id)
+    assert proposal.readiness == "needs_breakdown"
+    assert proposal.plain_summary =~ "two changes"
+    assert Repo.get!(Issue, issue.id).workflow_label == nil
+  end
+
+  test "private analysis result contract rejects GitHub writes" do
+    result = %{
+      "outcome" => "outdated",
+      "private_summary" => "The behavior is no longer present.",
+      "why_it_matters" => "No implementation work is needed.",
+      "scope" => "small",
+      "risk" => "low",
+      "technical_evidence" => "The referenced module was removed.",
+      "github_changes" => [],
+      "evidence" => ["Inspected the current source"],
+      "created_issue_numbers" => [],
+      "suggestions" => [],
+      "decision_question" => "",
+      "decision_options" => []
+    }
+
+    assert :ok = ActionAdapter.validate_result(result, "private_issue_analysis")
+
+    assert {:error, :unexpected_github_changes} =
+             result
+             |> Map.put("github_changes", ["Closed the issue"])
+             |> ActionAdapter.validate_result("private_issue_analysis")
   end
 
   test "review issue prompt exposes the configured review limit without provider-specific prose" do
@@ -960,9 +1051,9 @@ defmodule PtcManager.MaintainerActionsTest do
       "suggestions" => []
     }
 
-    assert :ok = CodexAdapter.validate_result(result, "prepare_issue")
-    assert :ok = CodexAdapter.validate_result(result, "review_issue")
-    assert :ok = CodexAdapter.validate_result(result, "resolve_issue_decision")
+    assert :ok = ActionAdapter.validate_result(result, "prepare_issue")
+    assert :ok = ActionAdapter.validate_result(result, "review_issue")
+    assert :ok = ActionAdapter.validate_result(result, "resolve_issue_decision")
 
     decision_result =
       result
@@ -981,24 +1072,24 @@ defmodule PtcManager.MaintainerActionsTest do
         }
       ])
 
-    assert :ok = CodexAdapter.validate_result(decision_result, "prepare_issue")
+    assert :ok = ActionAdapter.validate_result(decision_result, "prepare_issue")
 
     assert {:error, :invalid_issue_decision} =
              result
              |> Map.put("outcome", "needs-decision")
-             |> CodexAdapter.validate_result("prepare_issue")
+             |> ActionAdapter.validate_result("prepare_issue")
 
     assert {:error, :invalid_agent_action_outcome} =
-             CodexAdapter.validate_result(result, "pr_retrospective")
+             ActionAdapter.validate_result(result, "pr_retrospective")
 
     retrospective = Map.put(result, "outcome", "no-followups")
-    assert :ok = CodexAdapter.validate_result(retrospective, "pr_retrospective")
+    assert :ok = ActionAdapter.validate_result(retrospective, "pr_retrospective")
 
     assert {:error, :invalid_agent_action_outcome} =
-             CodexAdapter.validate_result(retrospective, "prepare_issue")
+             ActionAdapter.validate_result(retrospective, "prepare_issue")
 
     assert {:error, :invalid_agent_action_outcome} =
-             CodexAdapter.validate_result(retrospective, "review_issue")
+             ActionAdapter.validate_result(retrospective, "review_issue")
 
     proposed =
       retrospective
@@ -1014,28 +1105,28 @@ defmodule PtcManager.MaintainerActionsTest do
         }
       ])
 
-    assert :ok = CodexAdapter.validate_result(proposed, "pr_retrospective")
+    assert :ok = ActionAdapter.validate_result(proposed, "pr_retrospective")
 
     created =
       retrospective
       |> Map.put("outcome", "followups-created")
       |> Map.put("created_issue_numbers", [23])
 
-    assert :ok = CodexAdapter.validate_result(created, "create_retrospective_issue")
+    assert :ok = ActionAdapter.validate_result(created, "create_retrospective_issue")
 
     merge_result =
       result
       |> Map.put("outcome", "merge-ready")
 
-    assert :ok = CodexAdapter.validate_result(merge_result, "prepare_merge_decision")
+    assert :ok = ActionAdapter.validate_result(merge_result, "prepare_merge_decision")
 
     repair_result = Map.put(result, "outcome", "repaired")
-    assert :ok = CodexAdapter.validate_result(repair_result, "repair_pr")
+    assert :ok = ActionAdapter.validate_result(repair_result, "repair_pr")
 
     assert {:error, :unexpected_github_changes} =
              merge_result
              |> Map.put("github_changes", ["Approved the PR"])
-             |> CodexAdapter.validate_result("prepare_merge_decision")
+             |> ActionAdapter.validate_result("prepare_merge_decision")
   end
 
   test "queues and executes a repair for a failing open pull request" do

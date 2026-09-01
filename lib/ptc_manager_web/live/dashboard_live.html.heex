@@ -101,14 +101,8 @@
     </div>
 
     <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Private manager</p>
-      <p class="mt-1 text-sm text-slate-300">Codex repository investigation</p>
-      <p :if={@manager_enabled} class="mt-4 text-xs text-teal-300">
-        Enabled · read-only sandbox · no GitHub writes
-      </p>
-      <p :if={!@manager_enabled} class="mt-4 text-xs text-amber-300">
-        Disabled until a local checkout and explicit server setting are configured
-      </p>
+      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Private analysis</p>
+      <p class="mt-1 text-sm text-slate-300">Lightweight Herdr repository investigation</p>
       <p :if={@agent_actions_enabled} class="mt-2 text-xs text-teal-300">
         Maintainer actions enabled · durable prompt queue
       </p>
@@ -308,28 +302,6 @@
           </details>
 
           <div class="mt-5 flex flex-wrap items-center gap-3">
-            <button
-              :if={item.issue.state == "open"}
-              id={"investigate-issue-#{item.issue.id}"}
-              phx-click="investigate"
-              phx-value-issue-id={item.issue.id}
-              disabled={!@manager_enabled || investigating?(@investigating, item.issue.id)}
-              class="rounded-xl bg-white/10 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
-            >
-              <%= cond do %>
-                <% investigating?(@investigating, item.issue.id) -> %>
-                  <span class="inline-flex items-center gap-1.5">
-                    <.icon name="hero-arrow-path-mini" class="size-4 motion-safe:animate-spin" />
-                    Investigating…
-                  </span>
-                <% item.proposal && !fresh?(item) -> %>
-                  Investigate again
-                <% item.proposal -> %>
-                  Refresh analysis
-                <% true -> %>
-                  Investigate privately
-              <% end %>
-            </button>
             <button
               :for={action <- ActionCatalog.issue_actions(item.issue)}
               id={"agent-action-#{action.key}-issue-#{item.issue.id}"}

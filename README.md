@@ -46,9 +46,9 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - read-only GitHub check-run, commit-status, draft, and merge-conflict signals
   that import every open repository PR and place it in In progress, Needs
   attention, or Ready to merge;
-- a generic durable agent-action queue with **Prepare issue**, **Review issue**,
-  **Fix**, and **Approve and merge** buttons, all visible alongside queued
-  implementation jobs on **Operations**;
+- a generic durable agent-action queue with **Investigate privately**,
+  **Prepare issue**, **Review issue**, **Fix**, and **Approve and merge**
+  buttons, all visible alongside queued implementation jobs on **Operations**;
 - repository-specific, immutable prompt versions for private issue analysis,
   Approve-and-start implementation, and every active maintainer action. Each
   automation has one completely editable prompt, including any safety guidance
@@ -305,24 +305,13 @@ discovers that PR through its read-only client and accepts it only when the
 repository, base, branch, and exact verified head match. This mode does not
 weaken the explicit maintainer approval required before merge.
 
-Private Codex investigation is off by default. Once Codex is authenticated on
-the machine and the repository's persisted checkout path exists, enable it
-explicitly (the path below seeds a new empty database only):
+Private issue investigation is a light, durable Herdr action. It uses the
+repository's configured agent selector, a read-only planning snapshot, and the
+same file-based structured-result protocol as other generic actions. Its result
+is stored only as a private PtcManager proposal; it cannot update GitHub. Queued,
+running, failed, and completed investigations remain visible in Operations.
 
-```sh
-PTC_CODEX_MANAGER_ENABLED=true \
-PTC_REPOSITORY_PATH=/absolute/path/to/ptc_runner \
-mix phx.server
-```
-
-The adapter invokes `codex exec` ephemerally, ignores user tool configuration,
-uses a read-only sandbox, and requires schema-constrained output. Its result is
-stored only as a private PtcManager proposal. The child process receives a
-small allowlist of environment variables; application passwords, signing keys,
-database settings, and GitHub tokens are removed.
-
-Maintainer actions are separate from private read-only investigation. Pressing
-an action button stores that prompt in the durable queue and authorizes one
+Pressing any maintainer-action button stores that prompt in the durable queue and authorizes one
 agent to use the configured checkout and authenticated `gh` CLI. The initial
 catalog contains:
 
@@ -362,8 +351,8 @@ coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
 commits by their committer timestamp for the exact timezone-aware window. Every
 commit query is pinned to one captured default-branch head. GitHub does not
 expose the arrival time of a direct push, so that distinction is shown in the
-bounded manifest rather than guessed. An isolated, credential-free Codex
-identity receives that manifest and a read-only local snapshot, then writes a plain-language
+bounded manifest rather than guessed. A configured generic Herdr agent receives
+that manifest and a read-only local snapshot, then writes a plain-language
 Markdown briefing with practical examples. PtcManager rejects model-reported
 SHA, included-change count, or PR numbers that differ from the coordinator manifest. It
 stores the structured result and provenance in SQLite. The Updates page renders
@@ -379,14 +368,11 @@ PTC_DAILY_DIGEST_ENABLED=true
 PTC_DAILY_DIGEST_HOUR=2
 PTC_DAILY_DIGEST_TIME_ZONE=Europe/Stockholm
 PTC_DAILY_DIGEST_INTERVAL_MS=60000
-PTC_DAILY_DIGEST_RUN_AS_USER=ptc-manager-codex
 ```
 
 The hour is interpreted in the configured time zone, including daylight-saving
-changes. The daily user is required whenever this feature is enabled and must
-differ from the GitHub-writing action user in every environment. Failed or
-waiting daily jobs remain visible in Operations and on the corresponding
-Updates entry.
+changes. Failed or waiting daily jobs remain visible in Operations and on the
+corresponding Updates entry.
 
 Before an issue-planning agent starts, PtcManager synchronizes the canonical
 GitHub issue, records its content digest, and captures the configured checkout's
@@ -585,10 +571,10 @@ The task reads the actual `DATABASE_PATH` and `PORT` from the running systemd
 service, creates a consistent SQLite backup, and replaces `/opt/ptc_manager`.
 Starting the new release applies all pending Ecto migrations before the web
 endpoint starts. The task requires `/health` to report maintenance mode, then
-runs one explicitly allowlisted read-only manager-adapter canary against an
+runs one explicitly allowlisted credential-free canary against an
 existing open issue. The canary result is persisted and its run appears in
-Operations. The credential-free deployment adapter does not depend on the
-optional interactive Codex manager. The task verifies `/health` in canary mode,
+Operations. The deployment canary does not invoke an external agent. The task
+verifies `/health` in canary mode,
 removes the persistent systemd maintenance override, and makes exact canary
 activation its final transition. Only then do ordinary queues resume.
 
@@ -614,14 +600,12 @@ create the dedicated service account and writable database directory:
 
 ```sh
 sudo groupadd --system ptc-manager
-sudo groupadd --system ptc-manager-codex
 sudo groupadd --system ptc-manager-output
 sudo groupadd --system ptc-manager-worker
 sudo groupadd --system ptc-manager-external
 sudo groupadd --system ptc-manager-repo
 sudo groupadd --system ptc-manager-publish
 sudo useradd --system --home /var/lib/ptc_manager --gid ptc-manager --groups ptc-manager-output,ptc-manager-repo,ptc-manager-publish --shell /usr/sbin/nologin ptc-manager
-sudo useradd --system --home /var/lib/ptc_manager-codex --gid ptc-manager-codex --groups ptc-manager-output,ptc-manager-repo --shell /usr/sbin/nologin ptc-manager-codex
 sudo useradd --system --home /var/lib/ptc_manager-worker --gid ptc-manager-worker --groups ptc-manager-repo,ptc-manager-output,ptc-manager-external --shell /usr/sbin/nologin ptc-manager-worker
 sudo useradd --system --home /var/lib/ptc_manager-external --gid ptc-manager-external --groups ptc-manager-output --shell /usr/sbin/nologin ptc-manager-external
 sudo useradd --system --home /var/lib/ptc_manager-verifier --gid ptc-manager-repo --groups ptc-manager-publish --shell /usr/sbin/nologin ptc-manager-verifier
@@ -629,7 +613,6 @@ sudo useradd --system --home /var/lib/ptc_manager-gate --gid ptc-manager-repo --
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 /var/lib/ptc_manager-output/planning-snapshots
-sudo install -d -o ptc-manager-codex -g ptc-manager-codex -m 0700 /var/lib/ptc_manager-codex
 sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 0700 /var/lib/ptc_manager-external
 sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
@@ -647,13 +630,12 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager.env.example /etc/ptc_man
 # After downloading the GitHub App PEM to a safe temporary location:
 sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_manager/github-app.pem
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
-sudo install -o root -g root -m 0755 deploy/ptc_manager-codex-exec /usr/local/bin/ptc-manager-codex-exec
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-git /usr/local/bin/ptc-manager-external-git
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-push /usr/local/bin/ptc-manager-external-push
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-cleanup /usr/local/bin/ptc-manager-external-cleanup
-sudo install -o root -g root -m 0440 deploy/ptc_manager-codex.sudoers /etc/sudoers.d/ptc_manager-codex
-sudo visudo -cf /etc/sudoers.d/ptc_manager-codex
+sudo install -o root -g root -m 0440 deploy/ptc_manager.sudoers /etc/sudoers.d/ptc_manager
+sudo visudo -cf /etc/sudoers.d/ptc_manager
 ```
 
 Edit `/etc/ptc_manager/ptc_manager.env`, replace every placeholder, verify the
@@ -665,14 +647,14 @@ sudo systemctl enable --now ptc_manager-herdr ptc_manager
 sudo systemctl status ptc_manager
 ```
 
-The coordinator, implementation worker, external-PR repairer, private manager,
-and Git verifier run as separate OS identities. Herdr, implementation agents, and the initial
+The coordinator, implementation worker, external-PR repairer, and Git verifier
+run as separate OS identities. Herdr, implementation agents, and the initial
 maintainer-action runner use `ptc-manager-worker`; that account has the
 authenticated `gh` session needed by explicitly queued maintainer actions and
 the optional agent-publication trial. Outside that explicit mode, the
 implementation prompt instructs coding agents not to use it. A later
-credential broker can enforce that separation technically. Private read-only manager investigations run as
-`ptc-manager-codex`. Bounded branch verification runs as
+credential broker can enforce that separation technically. Private read-only
+investigations use a generic Herdr agent under the worker identity. Bounded branch verification runs as
 `ptc-manager-verifier`; repository-owned pre-publication gates run as
 `ptc-manager-gate`. Both use an empty environment and have no credentials.
 Unlike the Git verifier, the gate identity is not a member of the
@@ -689,10 +671,9 @@ then performs an ordinary fast-forward push from a fresh bare repository through
 a narrow root-owned wrapper running as the authenticated worker; the repair
 agent never receives that credential and its repository configuration is never
 used by the credential-bearing push process.
-Authenticate the three Codex accounts:
+Authenticate the worker's configured Herdr agents and required GitHub identities:
 
 ```sh
-sudo -u ptc-manager-codex -H codex login
 sudo -u ptc-manager-worker -H codex login
 sudo -u ptc-manager-worker -H gh auth login
 sudo -u ptc-manager-external -H codex login
@@ -700,7 +681,7 @@ sudo -u ptc-manager-external -H codex login
 
 Each checkout persisted as a repository's `local_path` is owned and writable
 only by the worker.
-The `ptc-manager-repo` group gives the coordinator, manager, verifier, and gate
+The `ptc-manager-repo` group gives the coordinator, verifier, and gate
 read/execute access without filesystem write access. The worker-owned
 `PTC_WORKTREE_ROOT` contains only job worktrees. It and every ancestor must be
 non-writable by group and other identities; the deployment enforces mode
@@ -714,10 +695,9 @@ the explicit exception: its abandoned checkout is removed with Herdr's force
 option because GitHub has already made the work terminal.
 The separate `ptc-manager-publish` group lets only the coordinator and Git verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
-The coordinator and private manager share only the setgid
-`ptc-manager-output` directory at `PTC_CODEX_OUTPUT_DIR`; the
-coordinator database directory is `0700`, and the coordinator creates each
-`0660` output file before launching Codex.
+The coordinator and generic Herdr agents exchange schema and result files only
+through the setgid `ptc-manager-output` directory at `PTC_AGENT_ACTION_OUTPUT_DIR`;
+the coordinator database directory is `0700`.
 
 The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed
