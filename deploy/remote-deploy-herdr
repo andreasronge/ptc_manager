@@ -491,10 +491,10 @@ install_gate_beam_toolchain() {
 
   sudo -u ptc-manager-gate env -i HOME=/var/lib/ptc_manager-gate \
     MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C \
-    /usr/local/bin/mix --version >/dev/null
+    /bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix --version' >/dev/null
   sudo -u ptc-manager-gate env -i HOME=/var/lib/ptc_manager-gate \
     MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C \
-    /usr/local/bin/mix help hex >/dev/null
+    /bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix help hex' >/dev/null
 }
 
 verify_gate_contract() {

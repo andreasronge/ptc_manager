@@ -140,6 +140,13 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "gate_elixir_dir=\"$gate_mise_data/installs/elixir/${elixir_version}\""
     assert script =~ "gate_mix_home=/opt/ptc-manager-gate-mix"
     assert script =~ "sudo -u ptc-manager-gate env -i"
+
+    assert script =~
+             "/bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix --version'"
+
+    assert script =~
+             "/bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix help hex'"
+
     assert script =~ "local.hex --force --if-missing"
     assert script =~ "local.rebar --force --if-missing"
     assert script =~ "gate toolchain symlink escapes its root-owned prefix"
