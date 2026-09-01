@@ -158,17 +158,18 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   defp prompt_and_wait(name, action, output_path, schema_path) do
     timeout = action.automation_definition_version.timeout_seconds * 1_000
 
-    prompt =
+    complete_prompt =
       action.prompt <>
         result_protocol(output_path, schema_path)
 
-    with {:ok, _started} <-
+    with {:ok, prompt_path} <- write_prompt_file(action, complete_prompt),
+         {:ok, _started} <-
            command().run(
              [
                "agent",
                "prompt",
                name,
-               prompt,
+               prompt_loader(prompt_path),
                "--wait",
                "--until",
                "working",
@@ -196,6 +197,21 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         timeout + @command_grace_ms
       )
     end
+  end
+
+  defp write_prompt_file(action, prompt) do
+    directory = Path.dirname(Process.get({__MODULE__, :output_path}))
+    path = Path.join(directory, "ptc-prompt-action-#{action.id}-#{action.attempt_count}.txt")
+
+    with :ok <- File.write(path, prompt),
+         :ok <- File.chmod(path, 0o440) do
+      Process.put({__MODULE__, :prompt_path}, path)
+      {:ok, path}
+    end
+  end
+
+  defp prompt_loader(path) do
+    "Read and follow the complete task at #{path}. The file includes the required result protocol."
   end
 
   @doc false
@@ -264,6 +280,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
     if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)
     if schema = Process.delete({__MODULE__, :schema_path}), do: File.rm(schema)
+    if prompt = Process.delete({__MODULE__, :prompt_path}), do: File.rm(prompt)
     :ok
   end
 

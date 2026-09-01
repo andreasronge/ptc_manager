@@ -27,10 +27,14 @@ defmodule PtcManager.AutomationsTest do
            })}
 
         Enum.take(args, 2) == ["agent", "prompt"] ->
-          prompt = Enum.at(args, 3)
+          loader = Enum.at(args, 3)
+          [prompt_path] = Regex.run(~r/task at (.+?\.txt)\./, loader, capture: :all_but_first)
+          prompt = File.read!(prompt_path)
           [path] = Regex.run(~r/to (\/\S+?\.json)\b/, prompt, capture: :all_but_first)
           [schema] = Regex.run(~r/read (\/\S+?\.schema\.json)\b/, prompt, capture: :all_but_first)
           assert_schema!(schema)
+          true = byte_size(loader) < 500
+          true = prompt =~ String.duplicate("Long context line.\n", 100)
 
           true = option_values(args, "--until") == ["working", "blocked"]
           Process.put({__MODULE__, :result_path}, path)
@@ -287,6 +291,7 @@ defmodule PtcManager.AutomationsTest do
         :prompt,
         :configuration_snapshot
       ])
+      |> Map.put(:prompt, String.duplicate("Long context line.\n", 1_000))
       |> Map.put(:agent_selector, %{
         "mode" => "require",
         "preferred_kind" => "test-maintainer",
