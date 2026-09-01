@@ -6,6 +6,11 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanaryTest do
   defmodule FakeHerdr do
     def run(args, _timeout \\ nil)
 
+    def run(["status", "server"], _timeout) do
+      Process.put({__MODULE__, :session}, Application.get_env(:ptc_manager, :herdr_session))
+      {:ok, "status: running\nsocket: /tmp/herdr-canary.sock\n"}
+    end
+
     def run(["worktree", "create" | args], _timeout) do
       repository = value!(args, "--cwd")
       branch = value!(args, "--branch")
@@ -95,13 +100,21 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanaryTest do
 
     output =
       capture_io(fn ->
-        Mix.Tasks.Ptc.HerdrWorkspaceCanary.run(["--repository", repository])
+        Mix.Tasks.Ptc.HerdrWorkspaceCanary.run([
+          "--repository",
+          repository,
+          "--session",
+          "test-canary"
+        ])
       end)
 
+    assert output =~ "Herdr session: test-canary"
+    assert output =~ "socket: /tmp/herdr-canary.sock"
     assert output =~ "Local Herdr workspace canary passed."
     assert output =~ "Repository setup:"
     assert output =~ "canary ready"
     refute File.exists?(Process.delete({FakeHerdr, :removed_path}))
+    assert Process.delete({FakeHerdr, :session}) == "test-canary"
 
     {branches, 0} = System.cmd("git", ["-C", repository, "branch", "--list"])
     refute branches =~ "ptc-manager/issue-0-job-"

@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
   removes the worktree and temporary branch. It never starts an AI agent.
 
       mix ptc.herdr_workspace_canary --repository /absolute/path/to/repository
-      PTC_HERDR_SESSION=canary mix ptc.herdr_workspace_canary --repository "$PWD"
+      mix ptc.herdr_workspace_canary --session canary --repository "$PWD"
 
   Use `--base branch-or-sha` to select a source other than the repository's
   currently checked-out branch.
@@ -23,10 +23,14 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
   @impl Mix.Task
   def run(args) do
     {options, positional, invalid} =
-      OptionParser.parse(args, strict: [repository: :string, base: :string])
+      OptionParser.parse(args, strict: [repository: :string, base: :string, session: :string])
 
     if positional != [] or invalid != [], do: usage_error()
 
+    with_session(Keyword.get(options, :session), fn -> run_canary(options) end)
+  end
+
+  defp run_canary(options) do
     repository =
       options
       |> Keyword.get(:repository)
@@ -40,6 +44,8 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
     branch = "ptc-manager/issue-0-job-#{id}"
     worktree = Path.join(System.tmp_dir!(), "ptc-manager-herdr-canary-#{id}")
     command = Application.get_env(:ptc_manager, :workspace_canary_herdr_command, Command)
+
+    preflight!(command)
 
     started = System.monotonic_time(:millisecond)
 
@@ -118,6 +124,45 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
     end
   end
 
+  defp preflight!(command) do
+    session = Application.get_env(:ptc_manager, :herdr_session, "default")
+
+    case command.run(["status", "server"]) do
+      {:ok, output} ->
+        Mix.shell().info("Herdr session: #{session}")
+
+        output
+        |> String.trim()
+        |> String.split("\n")
+        |> Enum.find(&String.starts_with?(&1, "socket:"))
+        |> then(fn
+          nil -> :ok
+          socket -> Mix.shell().info("#{socket}")
+        end)
+
+      {:error, reason} ->
+        Mix.raise("Herdr session #{inspect(session)} is not available: #{inspect(reason)}")
+    end
+  end
+
+  defp with_session(nil, fun), do: fun.()
+
+  defp with_session(session, fun) when is_binary(session) and session != "" do
+    previous = Application.get_env(:ptc_manager, :herdr_session)
+    Application.put_env(:ptc_manager, :herdr_session, session)
+
+    try do
+      fun.()
+    after
+      restore_session(previous)
+    end
+  end
+
+  defp with_session(_session, _fun), do: usage_error()
+
+  defp restore_session(nil), do: Application.delete_env(:ptc_manager, :herdr_session)
+  defp restore_session(session), do: Application.put_env(:ptc_manager, :herdr_session, session)
+
   defp required_repository(nil), do: usage_error()
 
   defp required_repository(path) do
@@ -150,7 +195,8 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
 
   defp usage_error do
     Mix.raise(
-      "usage: mix ptc.herdr_workspace_canary --repository /absolute/repository [--base ref]"
+      "usage: mix ptc.herdr_workspace_canary --repository /absolute/repository " <>
+        "[--base ref] [--session name]"
     )
   end
 

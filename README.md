@@ -215,8 +215,9 @@ Before enabling a repository on a server, exercise the same handoff against a
 local Herdr session:
 
 ```sh
-PTC_HERDR_SESSION=default \
-  mix ptc.herdr_workspace_canary --repository /absolute/path/to/repository
+mix ptc.herdr_workspace_canary \
+  --session canary \
+  --repository /absolute/path/to/repository
 ```
 
 The canary asks real Herdr to create a disposable worktree, runs the real
