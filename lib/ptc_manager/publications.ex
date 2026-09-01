@@ -136,8 +136,9 @@ defmodule PtcManager.Publications do
       PrPublication
       |> where(
         [publication],
-        publication.state == "published" and
-          (is_nil(publication.pr_state) or publication.pr_state == "open")
+        (publication.state == "published" and
+           (is_nil(publication.pr_state) or publication.pr_state == "open")) or
+          (publication.state == "blocked" and publication.pr_state == "open")
       )
 
     query =
@@ -811,7 +812,7 @@ defmodule PtcManager.Publications do
             PrPublication.external?(publication) ->
               record_external_remote_status!(publication, repository, result, now)
 
-            publication.state != "published" or is_nil(job) or job.state != "pr_open" ->
+            not reconcilable_remote_status?(publication, job) ->
               Repo.rollback(:publication_not_open)
 
             not intended_base?(result, repository) ->
@@ -900,6 +901,7 @@ defmodule PtcManager.Publications do
               |> PrPublication.changeset(
                 Map.merge(
                   %{
+                    state: "published",
                     pr_state: result.state,
                     remote_head_sha: result.head_sha,
                     remote_base_sha: result.base_sha,
@@ -1605,6 +1607,16 @@ defmodule PtcManager.Publications do
   defp requested_retry_delay_ms(_reason), do: nil
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
+
+  defp reconcilable_remote_status?(
+         %PrPublication{state: publication_state},
+         %Job{state: job_state}
+       ) do
+    publication_state in ["published", "blocked"] and
+      job_state in ["pr_open", "publish_blocked"]
+  end
+
+  defp reconcilable_remote_status?(_publication, _job), do: false
 
   defp mark_implementation_agent_waiting(job_id, now) do
     AgentRun

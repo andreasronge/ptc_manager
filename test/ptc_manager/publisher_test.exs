@@ -1056,6 +1056,35 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(Job, job.id).state == "publish_blocked"
   end
 
+  test "a head-blocked PR remains observable and leaves attention after GitHub merges it" do
+    {job, publication, _result} = published_publication_fixture()
+    repaired_head = String.duplicate("e", 40)
+
+    remote = %{
+      state: "open",
+      pr_url: publication.pr_url,
+      head_sha: repaired_head,
+      base_sha: String.duplicate("a", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
+
+    Process.put(:publisher_status_result, {:ok, remote})
+    assert {:ok, blocked} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert blocked.state == "blocked"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+
+    Process.put(:publisher_status_result, {:ok, %{remote | state: "merged"}})
+    assert {:ok, merged} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert merged.state == "published"
+    assert merged.pr_state == "merged"
+    assert merged.remote_head_sha == repaired_head
+
+    terminal_job = Repo.get!(Job, job.id)
+    assert terminal_job.state == "done"
+    assert terminal_job.last_error == nil
+  end
+
   test "an explicitly verified repair advances the trusted PR head" do
     {job, publication, _result} = published_publication_fixture()
     repaired_head = String.duplicate("e", 40)
