@@ -745,6 +745,13 @@ shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After
 `PTC_DISPATCH_RECONCILE_AFTER_MS`, a successful Herdr snapshot that confirms a
 managed attempt never appeared can safely release that attempt.
+An implementation agent that returns to an idle prompt without completing gets
+one bounded `PTC_IMPLEMENTATION_IDLE_TIMEOUT_MS` deadline (five minutes by
+default). When it expires, the execution slot is released and the partial
+worktree is kept for inspection instead of blocking queued work indefinitely.
+Queued implementation jobs and generic agent actions can also be cancelled
+from Operations; cancellation is atomic and fails if a worker already claimed
+the item.
 
 PR tracking and worktree allocations live in SQLite and survive process or
 server restarts. GitHub synchronization imports every open PR in each enabled

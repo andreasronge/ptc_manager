@@ -9,7 +9,7 @@ defmodule PtcManagerWeb.OperationsLive do
   alias PtcManagerWeb.TimeFormat
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
     if connected?(socket) do
       Operations.subscribe()
       Process.send_after(self(), :metrics_tick, 1_500)
@@ -18,6 +18,7 @@ defmodule PtcManagerWeb.OperationsLive do
     {:ok,
      socket
      |> assign(:page_title, "Operations")
+     |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:now, DateTime.utc_now())
      |> assign(:metrics, HostMetrics.snapshot())
      |> assign(:selected_run, nil)
@@ -70,6 +71,14 @@ defmodule PtcManagerWeb.OperationsLive do
   def handle_event("close_agent", _params, socket),
     do: {:noreply, push_patch(socket, to: ~p"/operations")}
 
+  def handle_event("cancel_queued_job", %{"id" => id}, socket) do
+    cancel_queued_work(socket, id, &Operations.cancel_queued_job/2, "Implementation job")
+  end
+
+  def handle_event("cancel_queued_action", %{"id" => id}, socket) do
+    cancel_queued_work(socket, id, &Operations.cancel_queued_agent_action/2, "Agent action")
+  end
+
   defp open_agent(socket, id) do
     with {run_id, ""} <- Integer.parse(id),
          %{} = run <- Enum.find(socket.assigns.timeline, &(&1.id == run_id)) do
@@ -86,6 +95,22 @@ defmodule PtcManagerWeb.OperationsLive do
         |> assign(:agent_output, nil)
         |> assign(:agent_output_error, nil)
         |> put_flash(:error, "That agent run is no longer available.")
+    end
+  end
+
+  defp cancel_queued_work(socket, id, cancel, label) do
+    with {work_id, ""} <- Integer.parse(id),
+         {:ok, _work} <- cancel.(work_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "#{label} cancelled.")
+       |> load_operations()}
+    else
+      _failure ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "That work has already started or left the queue.")
+         |> load_operations()}
     end
   end
 

@@ -2,7 +2,18 @@ defmodule PtcManager.OperationsTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Approval, AuditEvent, Issue, IssueDependency, Job}
+
+  alias PtcManager.Operations.{
+    AgentAction,
+    AgentRun,
+    Approval,
+    AuditEvent,
+    Issue,
+    IssueDependency,
+    Job,
+    WorktreeAllocation
+  }
+
   alias PtcManager.Repo
 
   describe "approve_issue/2" do
@@ -304,6 +315,95 @@ defmodule PtcManager.OperationsTest do
 
       assert {:error, :issue_dependencies_unresolved} =
                Operations.approve_issue(issue.id, "andreas")
+    end
+  end
+
+  describe "queued work and stale idle attempts" do
+    test "cancels only work that is still queued" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+      proposal_fixture(issue)
+      {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      action =
+        %AgentAction{}
+        |> AgentAction.changeset(%{
+          repository_id: repository.id,
+          action_key: "review_issue",
+          target_type: "issue",
+          target_id: issue.id,
+          target_label: "example/repo##{issue.number}",
+          prompt_version: 1,
+          prompt: "Review the issue",
+          actor: "andreas",
+          state: "queued",
+          requested_at: now
+        })
+        |> Repo.insert!()
+
+      assert {:ok, cancelled_job} = Operations.cancel_queued_job(job.id, "andreas")
+      assert cancelled_job.state == "cancelled"
+      assert cancelled_job.ended_at
+      assert {:error, :work_no_longer_queued} = Operations.cancel_queued_job(job.id, "andreas")
+
+      assert {:ok, cancelled_action} =
+               Operations.cancel_queued_agent_action(action.id, "andreas")
+
+      assert cancelled_action.state == "cancelled"
+      assert cancelled_action.ended_at
+      assert Repo.aggregate(AuditEvent, :count, :id) == 3
+    end
+
+    test "an expired idle attempt releases capacity and preserves its worktree" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+      proposal_fixture(issue)
+      {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+      worker = worker_fixture(%{worker_key: "herdr:idle-expiry"})
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      job =
+        job
+        |> Job.changeset(%{
+          state: "idle",
+          fencing_token: 1,
+          lease_owner: worker.worker_key,
+          lease_expires_at: DateTime.add(now, -1, :second),
+          started_at: DateTime.add(now, -600, :second),
+          branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+        })
+        |> Repo.update!()
+
+      allocation =
+        %WorktreeAllocation{}
+        |> WorktreeAllocation.changeset(%{
+          worker_id: worker.id,
+          job_id: job.id,
+          state: "active",
+          path: "/tmp/preserved-idle-worktree",
+          last_used_at: now
+        })
+        |> Repo.insert!()
+
+      {:ok, run} =
+        Operations.create_agent_run(%{
+          worker_id: worker.id,
+          job_id: job.id,
+          role: "implementer",
+          state: "idle",
+          started_at: job.started_at,
+          last_heartbeat_at: now,
+          fencing_token: 1
+        })
+
+      assert Operations.expire_job_leases(now) == 1
+      assert Repo.get!(Job, job.id).state == "lost"
+      assert Repo.get!(AgentRun, run.id).state == "lost"
+
+      preserved = Repo.get!(WorktreeAllocation, allocation.id)
+      assert preserved.state == "attention"
+      assert preserved.last_error =~ "partial worktree was preserved"
     end
   end
 

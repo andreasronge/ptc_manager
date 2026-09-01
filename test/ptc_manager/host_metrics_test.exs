@@ -7,6 +7,8 @@ defmodule PtcManager.HostMetricsTest do
     first = HostMetrics.snapshot()
     second = HostMetrics.snapshot(first.cpu_sample)
 
+    assert second.application_memory_bytes > 0
+
     assert %DateTime{} = first.captured_at
     assert is_integer(first.cores) and first.cores > 0
     assert is_integer(first.memory_used_bytes) and first.memory_used_bytes >= 0

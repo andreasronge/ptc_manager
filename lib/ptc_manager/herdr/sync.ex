@@ -859,6 +859,22 @@ defmodule PtcManager.Herdr.Sync do
             absence_observed_at: nil
           }
 
+        state == "idle" ->
+          idle_timeout_ms =
+            Application.get_env(:ptc_manager, :implementation_idle_timeout_ms, 300_000)
+
+          idle_deadline =
+            if job.state == "idle" && job.lease_expires_at,
+              do: job.lease_expires_at,
+              else: DateTime.add(lease_now, idle_timeout_ms, :millisecond)
+
+          %{
+            state: state,
+            lease_expires_at: idle_deadline,
+            reconciling_at: nil,
+            absence_observed_at: nil
+          }
+
         true ->
           lease_ms = Application.get_env(:ptc_manager, :dispatch_lease_ms, 1_800_000)
 

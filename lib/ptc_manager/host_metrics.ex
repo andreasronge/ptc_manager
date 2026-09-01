@@ -7,6 +7,7 @@ defmodule PtcManager.HostMetrics do
     cpu_sample = cpu_sample()
     memory = memory()
     disk = disk()
+    application_memory = application_memory()
 
     %{
       captured_at: DateTime.utc_now() |> DateTime.truncate(:second),
@@ -17,11 +18,19 @@ defmodule PtcManager.HostMetrics do
       memory_used_bytes: memory.used,
       memory_total_bytes: memory.total,
       memory_percent: percent(memory.used, memory.total),
+      application_memory_bytes: application_memory,
+      application_memory_percent: percent(application_memory, memory.total),
       disk_used_bytes: disk.used,
       disk_total_bytes: disk.total,
       disk_percent: percent(disk.used, disk.total),
       disk_path: disk.path
     }
+  end
+
+  defp application_memory do
+    :erlang.memory(:total)
+  rescue
+    _error -> 0
   end
 
   defp cpu_sample do

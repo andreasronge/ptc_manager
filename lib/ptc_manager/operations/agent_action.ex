@@ -2,7 +2,7 @@ defmodule PtcManager.Operations.AgentAction do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @states ~w(queued running sync_pending done failed)
+  @states ~w(queued running sync_pending done failed cancelled)
   @target_types ~w(repository issue pull_request daily_digest)
 
   schema "agent_actions" do

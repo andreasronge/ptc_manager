@@ -1,7 +1,7 @@
 defmodule PtcManagerWeb.AutomationsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
-  alias PtcManager.Automations
+  alias PtcManager.{Automations, Operations}
 
   test "shows definitions, complete configuration, schedules, and run history", %{conn: conn} do
     repository = repository_fixture(%{github_name: "ptc_runner"})
@@ -14,6 +14,15 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
     assert has_element?(view, "nav", "Automations")
     assert has_element?(view, "#automation-#{definition.id}", "Investigate nightly CI")
     assert has_element?(view, "#automation-#{definition.id}", "generic_ephemeral")
+
+    editor = "#automation-editor-#{definition.id}"
+    refute has_element?(view, "#{editor}[open]")
+
+    view |> element("#{editor} summary") |> render_click()
+    assert has_element?(view, "#{editor}[open]")
+
+    send(view.pid, {:operations_changed, Operations})
+    assert has_element?(view, "#{editor}[open]")
 
     assert has_element?(
              view,

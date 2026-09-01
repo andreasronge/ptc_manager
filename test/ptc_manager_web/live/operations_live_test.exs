@@ -204,6 +204,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert html =~ "Capacity and agent history"
     assert has_element?(view, "#metric-cpu")
     assert has_element?(view, "#metric-memory")
+    assert has_element?(view, "#metric-application-memory", "PtcManager memory")
     assert has_element?(view, "#metric-disk")
     assert has_element?(view, "#timeline-run-#{run.id}", "Add bounded result contracts")
     assert html =~ "Herdr build one"
@@ -223,6 +224,8 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#queued-action-#{daily_action.id}", "Light work")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "Implementation")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "3 review passes")
+    assert has_element?(view, "#queued-job-#{queued_job.id}", "Cancel queued job")
+    assert has_element?(view, "#queued-action-#{daily_action.id}", "Cancel queued action")
     assert has_element?(view, "#workspace-setup-history")
 
     assert has_element?(
@@ -254,6 +257,20 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     view |> element("#close-agent-detail") |> render_click()
     assert_patch(view, ~p"/operations")
     refute has_element?(view, "#agent-detail-panel")
+
+    view
+    |> element("#queued-job-#{queued_job.id} button[phx-click=cancel_queued_job]")
+    |> render_click()
+
+    refute has_element?(view, "#queued-job-#{queued_job.id}")
+    assert Repo.get!(Job, queued_job.id).state == "cancelled"
+
+    view
+    |> element("#queued-action-#{daily_action.id} button[phx-click=cancel_queued_action]")
+    |> render_click()
+
+    refute has_element?(view, "#queued-action-#{daily_action.id}")
+    assert Repo.get!(AgentAction, daily_action.id).state == "cancelled"
 
     send(view.pid, :metrics_tick)
     assert render(view) =~ "Light: planning and analysis"

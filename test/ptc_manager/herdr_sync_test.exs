@@ -436,34 +436,7 @@ defmodule PtcManager.HerdrSyncTest do
   end
 
   test "a managed job becomes reconciling during an outage and resumes when observed again" do
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-    proposal_fixture(issue)
-    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
-    worker = worker_fixture(%{worker_key: "herdr:managed-outage"})
-    now = now()
-
-    job
-    |> Job.changeset(%{
-      state: "working",
-      fencing_token: 1,
-      lease_owner: worker.worker_key,
-      lease_expires_at: DateTime.add(now, 60, :second),
-      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
-    })
-    |> Repo.update!()
-
-    {:ok, run} =
-      Operations.create_agent_run(%{
-        worker_id: worker.id,
-        job_id: job.id,
-        role: "implementer",
-        state: "working",
-        started_at: DateTime.add(now, -60, :second),
-        last_heartbeat_at: now,
-        external_key: "managed-outage:agent-history",
-        fencing_token: 1
-      })
+    %{issue: issue, job: job, run: run} = managed_job_fixture("managed-outage")
 
     Process.put(:herdr_result, {:error, :offline})
 
@@ -479,6 +452,30 @@ defmodule PtcManager.HerdrSyncTest do
 
     assert Repo.get!(AgentRun, run.id).state == "working"
     assert Repo.get!(Job, job.id).state == "working"
+  end
+
+  test "an idle managed agent gets one bounded deadline instead of renewing forever" do
+    previous_timeout = Application.get_env(:ptc_manager, :implementation_idle_timeout_ms)
+    Application.put_env(:ptc_manager, :implementation_idle_timeout_ms, 5_000)
+
+    on_exit(fn ->
+      if previous_timeout,
+        do: Application.put_env(:ptc_manager, :implementation_idle_timeout_ms, previous_timeout),
+        else: Application.delete_env(:ptc_manager, :implementation_idle_timeout_ms)
+    end)
+
+    %{job: job, run: run} =
+      managed_job_fixture("idle-deadline", %{agent_name: :deterministic})
+
+    remote = remote_agent("idle") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-deadline")
+    first_deadline = Repo.get!(Job, job.id).lease_expires_at
+    assert Repo.get!(AgentRun, run.id).state == "idle"
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-deadline")
+    assert Repo.get!(Job, job.id).lease_expires_at == first_deadline
   end
 
   test "reconciles a lost agent to its later authoritative terminal state" do
@@ -1141,6 +1138,48 @@ defmodule PtcManager.HerdrSyncTest do
     }
 
     %{action: action, remote: remote, run: run, worker: worker}
+  end
+
+  defp managed_job_fixture(session, run_attrs \\ %{}) do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    worker = worker_fixture(%{worker_key: "herdr:#{session}"})
+    now = now()
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: "working",
+        fencing_token: 1,
+        lease_owner: worker.worker_key,
+        lease_expires_at: DateTime.add(now, 60, :second),
+        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+      })
+      |> Repo.update!()
+
+    run_attrs =
+      Map.merge(
+        %{
+          worker_id: worker.id,
+          job_id: job.id,
+          role: "implementer",
+          state: "working",
+          started_at: DateTime.add(now, -60, :second),
+          last_heartbeat_at: now,
+          external_key: "#{session}:agent-history",
+          fencing_token: 1
+        },
+        run_attrs
+      )
+      |> Map.update(:agent_name, nil, fn
+        :deterministic -> "impl_j#{job.id}_f1"
+        name -> name
+      end)
+
+    {:ok, run} = Operations.create_agent_run(run_attrs)
+    %{issue: issue, job: job, run: run, worker: worker}
   end
 
   defp remote_agent(state) do

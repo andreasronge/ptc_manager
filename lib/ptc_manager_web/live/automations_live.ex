@@ -17,6 +17,7 @@ defmodule PtcManagerWeb.AutomationsLive do
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:selected_repository, nil)
      |> assign(:preview_definition_id, nil)
+     |> assign(:expanded_definition_ids, MapSet.new())
      |> load()}
   end
 
@@ -65,6 +66,18 @@ defmodule PtcManagerWeb.AutomationsLive do
 
   def handle_event("close-prompt-preview", _params, socket),
     do: {:noreply, assign(socket, :preview_definition_id, nil)}
+
+  def handle_event("toggle-definition-editor", %{"id" => id}, socket) do
+    definition = definition!(socket, id)
+    expanded = socket.assigns.expanded_definition_ids
+
+    expanded =
+      if MapSet.member?(expanded, definition.id),
+        do: MapSet.delete(expanded, definition.id),
+        else: MapSet.put(expanded, definition.id)
+
+    {:noreply, assign(socket, :expanded_definition_ids, expanded)}
+  end
 
   def handle_event("restore-suggested-prompt", %{"id" => id}, socket) do
     definition = definition!(socket, id)

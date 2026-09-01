@@ -199,6 +199,8 @@ config :ptc_manager,
   agent_action_output_dir: System.get_env("PTC_AGENT_ACTION_OUTPUT_DIR"),
   dispatch_interval_ms: System.get_env("PTC_DISPATCH_INTERVAL_MS", "5000") |> String.to_integer(),
   dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
+  implementation_idle_timeout_ms:
+    System.get_env("PTC_IMPLEMENTATION_IDLE_TIMEOUT_MS", "300000") |> String.to_integer(),
   dispatch_reconcile_after_ms:
     System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
   worktree_reconcile_interval_ms:

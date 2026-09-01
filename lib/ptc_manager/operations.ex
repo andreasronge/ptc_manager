@@ -248,6 +248,56 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  def cancel_queued_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    cancel_queued(Job, job_id, actor, "job.cancelled")
+  end
+
+  def cancel_queued_agent_action(action_id, actor)
+      when is_integer(action_id) and is_binary(actor) and actor != "" do
+    cancel_queued(AgentAction, action_id, actor, "agent_action.cancelled")
+  end
+
+  def release_idle_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    message = "The idle implementation attempt was released; its partial worktree was preserved."
+    now = utc_now()
+
+    case do_release_idle_job(job_id, nil, actor, message, now) do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp cancel_queued(schema, id, actor, audit_action) do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          schema
+          |> where([record], record.id == ^id and record.state == "queued")
+          |> Repo.update_all(set: [state: "cancelled", ended_at: now, updated_at: now])
+
+        if updated != 1, do: Repo.rollback(:work_no_longer_queued)
+
+        insert_audit!(%{
+          actor: actor,
+          action: audit_action,
+          target_type: if(schema == Job, do: "job", else: "agent_action"),
+          target_id: id,
+          details: %{"cancelled_at" => DateTime.to_iso8601(now)}
+        })
+
+        Repo.get!(schema, id)
+      end)
+
+    case outcome do
+      {:ok, record} -> notify_and_return({:ok, record})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   def repository_merge_locked?(repository_id) when is_integer(repository_id) do
     AgentAction
     |> where(
@@ -3103,6 +3153,22 @@ defmodule PtcManager.Operations do
     end
   end
 
+  defp expire_job_lease(%Job{state: "idle"} = job, lease_now, lifecycle_now) do
+    message =
+      "The implementation agent remained idle past its deadline; its partial worktree was preserved."
+
+    case do_release_idle_job(
+           job.id,
+           {job.fencing_token, lease_now},
+           "coordinator",
+           message,
+           lifecycle_now
+         ) do
+      {:ok, _job} -> true
+      {:error, _reason} -> false
+    end
+  end
+
   defp expire_job_lease(job, lease_now, lifecycle_now) do
     Repo.transaction(fn ->
       {updated, _rows} =
@@ -3148,6 +3214,78 @@ defmodule PtcManager.Operations do
       {:ok, expired?} -> expired?
       {:error, _reason} -> false
     end
+  end
+
+  defp do_release_idle_job(job_id, expiry_guard, actor, message, now) do
+    Repo.transaction(fn ->
+      query =
+        Job
+        |> where([job], job.id == ^job_id and job.state == "idle")
+        |> maybe_guard_idle_expiry(expiry_guard)
+
+      {updated, _rows} =
+        query
+        |> Repo.update_all(
+          set: [
+            state: "lost",
+            lease_expires_at: nil,
+            ended_at: now,
+            last_error: message,
+            updated_at: now
+          ]
+        )
+
+      if updated != 1, do: Repo.rollback(:job_not_releasable)
+
+      job = Repo.get!(Job, job_id)
+
+      AgentRun
+      |> where(
+        [run],
+        run.job_id == ^job_id and run.fencing_token == ^job.fencing_token and
+          run.state in ["queued", "starting", "working", "idle", "blocked", "unknown"]
+      )
+      |> Repo.update_all(
+        set: [
+          state: "lost",
+          status_text: message,
+          last_heartbeat_at: now,
+          ended_at: now,
+          updated_at: now
+        ]
+      )
+
+      mark_allocation!(job_id, %{
+        state: "attention",
+        last_used_at: now,
+        last_error: message
+      })
+
+      insert_audit!(%{
+        actor: actor,
+        action: "job.idle_slot_released",
+        target_type: "job",
+        target_id: job_id,
+        details: %{
+          "fencing_token" => job.fencing_token,
+          "worktree_preserved" => true,
+          "reason" => message
+        }
+      })
+
+      job
+    end)
+  end
+
+  defp maybe_guard_idle_expiry(query, nil), do: query
+
+  defp maybe_guard_idle_expiry(query, {fencing_token, lease_now}) do
+    where(
+      query,
+      [job],
+      job.fencing_token == ^fencing_token and not is_nil(job.lease_expires_at) and
+        job.lease_expires_at <= ^lease_now
+    )
   end
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
