@@ -176,7 +176,19 @@ defmodule PtcManager.Repository.WorkspaceSetup do
     def run(path, script, timeout_ms) do
       absolute_script = Path.join(path, script)
       started = System.monotonic_time(:millisecond)
-      {command, args} = command(absolute_script)
+
+      {command, args} =
+        command(
+          path,
+          script,
+          absolute_script,
+          Application.get_env(:ptc_manager, :herdr_run_as_user),
+          Application.get_env(
+            :ptc_manager,
+            :workspace_bootstrap_wrapper,
+            "/usr/local/bin/ptc-manager-worker-bootstrap"
+          )
+        )
 
       port =
         Port.open(
@@ -228,15 +240,13 @@ defmodule PtcManager.Repository.WorkspaceSetup do
       end
     end
 
-    defp command(script) do
-      case Application.get_env(:ptc_manager, :herdr_run_as_user) do
-        user when is_binary(user) and user != "" ->
-          {"/usr/bin/sudo", ["-n", "-H", "-u", user, "--", script]}
-
-        _user ->
-          {script, []}
-      end
+    @doc false
+    def command(path, script, _absolute_script, user, wrapper)
+        when is_binary(user) and user != "" do
+      {"/usr/bin/sudo", ["-n", "-H", "-u", user, "--", wrapper, path, script]}
     end
+
+    def command(_path, _script, absolute_script, _user, _wrapper), do: {absolute_script, []}
 
     defp append_bounded(output, data, truncated) do
       output = output <> String.replace_invalid(data)

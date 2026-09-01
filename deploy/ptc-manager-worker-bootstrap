@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+worktree_root=/srv/ptc_manager-worktrees
+
+fail() {
+  echo "ptc-manager-worker-bootstrap: $1" >&2
+  exit 2
+}
+
+[ "$#" -eq 2 ] || fail "expected WORKTREE and SCRIPT"
+
+worktree=$1
+script=$2
+
+case "$script" in
+  ""|/*|../*|*/../*|*/..)
+    fail "script must be a contained relative path"
+    ;;
+esac
+
+[ ! -L "$worktree" ] || fail "worktree must not be a symlink"
+[ ! -L "$worktree/$script" ] || fail "script must not be a symlink"
+
+root_real=$(/usr/bin/realpath -e -- "$worktree_root") || fail "worktree root is unavailable"
+worktree_real=$(/usr/bin/realpath -e -- "$worktree") || fail "worktree is unavailable"
+
+case "$worktree_real" in
+  "$root_real"/*) ;;
+  *) fail "worktree is outside the managed root" ;;
+esac
+
+script_real=$(/usr/bin/realpath -e -- "$worktree_real/$script") || fail "script is unavailable"
+
+case "$script_real" in
+  "$worktree_real"/*) ;;
+  *) fail "script is outside the worktree" ;;
+esac
+
+[ -f "$script_real" ] || fail "script is not a regular file"
+[ -x "$script_real" ] || fail "script is not executable"
+
+cd "$worktree_real"
+exec "$script_real" </dev/null

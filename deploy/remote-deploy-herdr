@@ -66,6 +66,7 @@ worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
 environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
+worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 coordinator_environment_files=
 coordinator_session=
@@ -76,7 +77,7 @@ deployment_phase=pre_stop
 
 cleanup_remote() {
   rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$environment_file_parser" \
-    "$worker_git_candidate" "$sudoers_candidate"
+    "$worker_git_candidate" "$worker_bootstrap_candidate" "$sudoers_candidate"
   sudo rm -f -- "$maintenance_override_backup"
 
   case "$build_dir" in
@@ -601,8 +602,10 @@ sudo -n true
 tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 chmod 0755 "$worker_git_candidate"
+chmod 0755 "$worker_bootstrap_candidate"
 chmod 0440 "$sudoers_candidate"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
 
@@ -768,6 +771,8 @@ install_worker_node
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.
 sudo install -o root -g root -m 0755 "$worker_git_candidate" \
   /usr/local/bin/ptc-manager-worker-git
+sudo install -o root -g root -m 0755 "$worker_bootstrap_candidate" \
+  /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
   /etc/sudoers.d/ptc_manager
 sudo rm -f -- /etc/sudoers.d/ptc_manager-codex

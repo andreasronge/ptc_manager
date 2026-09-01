@@ -1,5 +1,6 @@
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-git
+ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-bootstrap
 ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-external-git
 ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-external-cleanup
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-external-push

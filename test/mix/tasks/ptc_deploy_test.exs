@@ -7,6 +7,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @local_script Path.join(@project_root, "deploy/deploy-herdr")
   @remote_script Path.join(@project_root, "deploy/remote-deploy-herdr")
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
+  @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
   @environment_file_parser Path.join(
@@ -15,9 +16,28 @@ defmodule Mix.Tasks.PtcDeployTest do
                            )
 
   test "deployment scripts have valid POSIX shell syntax" do
-    for script <- [@local_script, @remote_script, @worker_git, @failure_policy] do
+    for script <- [
+          @local_script,
+          @remote_script,
+          @worker_git,
+          @worker_bootstrap,
+          @failure_policy
+        ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
+  end
+
+  test "remote deployment installs the bounded worker bootstrap bridge" do
+    script = File.read!(@remote_script)
+    sudoers = File.read!(Path.join(@project_root, "deploy/ptc_manager.sudoers"))
+    wrapper = File.read!(@worker_bootstrap)
+
+    assert script =~ "deploy/ptc-manager-worker-bootstrap"
+    assert script =~ "/usr/local/bin/ptc-manager-worker-bootstrap"
+    assert sudoers =~ "/usr/local/bin/ptc-manager-worker-bootstrap"
+    assert wrapper =~ "worktree_root=/srv/ptc_manager-worktrees"
+    assert wrapper =~ "worktree is outside the managed root"
+    assert wrapper =~ "script is outside the worktree"
   end
 
   test "deployment failure policy classifies the effect boundary" do

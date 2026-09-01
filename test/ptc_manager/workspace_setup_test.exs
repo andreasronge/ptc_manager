@@ -132,6 +132,27 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     assert result.output == "ready\n"
   end
 
+  test "the production runner uses the bounded worker bootstrap bridge across OS identities" do
+    assert {"/usr/bin/sudo",
+            [
+              "-n",
+              "-H",
+              "-u",
+              "ptc-manager-worker",
+              "--",
+              "/usr/local/bin/ptc-manager-worker-bootstrap",
+              "/srv/ptc_manager-worktrees/job-16",
+              "scripts/ptc/bootstrap"
+            ]} =
+             WorkspaceSetup.Runner.command(
+               "/srv/ptc_manager-worktrees/job-16",
+               "scripts/ptc/bootstrap",
+               "/srv/ptc_manager-worktrees/job-16/scripts/ptc/bootstrap",
+               "ptc-manager-worker",
+               "/usr/local/bin/ptc-manager-worker-bootstrap"
+             )
+  end
+
   defp workspace_fixture(script_body) do
     unique = System.unique_integer([:positive, :monotonic])
     root = Path.join(System.tmp_dir!(), "ptc-workspace-setup-#{unique}")
