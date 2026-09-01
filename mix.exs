@@ -94,7 +94,7 @@ defmodule PtcManager.MixProject do
         "compile --warning-as-errors",
         "deps.unlock --unused",
         "format",
-        "test",
+        "cmd scripts/ci/test-suite",
         "cmd scripts/duplication_gate.sh check"
       ]
     ]

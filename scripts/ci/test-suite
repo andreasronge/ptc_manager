@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+budget_seconds=${PTC_TEST_BUDGET_SECONDS:-60}
+partitions=${PTC_TEST_PARTITIONS:-3}
+
+case "$budget_seconds:$partitions" in
+  *[!0-9:]* | *:0 | 0:* | 1:*)
+    echo "PTC test budget must be at least 2 seconds and partitions must be positive integers" >&2
+    exit 2
+    ;;
+esac
+
+timeout_binary=$(command -v timeout || command -v gtimeout || true)
+if [ -z "$timeout_binary" ]; then
+  echo "PTC test budget requires GNU timeout (timeout or gtimeout)" >&2
+  exit 2
+fi
+
+temporary_parent=${TMPDIR:-/tmp}
+output_root=$(mktemp -d "$temporary_parent/ptc-manager-test-suite.XXXXXX")
+
+cleanup() {
+  case "$output_root" in
+    "$temporary_parent"/ptc-manager-test-suite.*)
+      rm -rf -- "$output_root"
+      ;;
+  esac
+}
+trap cleanup EXIT HUP INT TERM
+
+partition_budget=$((budget_seconds - 1))
+started_at=$(date +%s)
+pids=""
+partition=1
+
+while [ "$partition" -le "$partitions" ]; do
+  log_path="$output_root/partition-$partition.log"
+  "$timeout_binary" --signal=TERM --kill-after=2s "${partition_budget}s" \
+    env MIX_TEST_PARTITION="$partition" mix test --partitions "$partitions" \
+    >"$log_path" 2>&1 &
+  pids="$pids $!"
+  partition=$((partition + 1))
+done
+
+failed=false
+for pid in $pids; do
+  if ! wait "$pid"; then
+    failed=true
+  fi
+done
+
+partition=1
+while [ "$partition" -le "$partitions" ]; do
+  echo "Test partition $partition/$partitions"
+  sed -n '1,$p' "$output_root/partition-$partition.log"
+  partition=$((partition + 1))
+done
+
+finished_at=$(date +%s)
+elapsed_seconds=$((finished_at - started_at))
+
+if [ "$failed" = true ]; then
+  echo "Test suite failed or exceeded its ${budget_seconds}s budget" >&2
+  exit 1
+fi
+
+if [ "$elapsed_seconds" -ge "$budget_seconds" ]; then
+  echo "Test suite took ${elapsed_seconds}s; budget is less than ${budget_seconds}s" >&2
+  exit 1
+fi
+
+echo "Test suite passed in ${elapsed_seconds}s (budget: <${budget_seconds}s)"

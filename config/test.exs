@@ -32,8 +32,10 @@ config :ptc_manager,
 # The MIX_TEST_PARTITION environment variable can be used
 # to provide built-in test partitioning in CI environment.
 # Run `mix help test` for more information.
+test_partition = System.get_env("MIX_TEST_PARTITION", "")
+
 config :ptc_manager, PtcManager.Repo,
-  database: Path.expand("../ptc_manager_test.db", __DIR__),
+  database: Path.expand("../ptc_manager_test#{test_partition}.db", __DIR__),
   pool_size: 5,
   pool: Ecto.Adapters.SQL.Sandbox
 
