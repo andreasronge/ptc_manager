@@ -139,7 +139,16 @@ if Repo.aggregate(Repository, :count) == 0 do
     path: Path.join(System.tmp_dir!(), "ptc-manager-demo-worktree"),
     herdr_workspace: "ptc-runner-1320",
     agent_kind: "demo",
-    last_used_at: now
+    last_used_at: now,
+    worktree_created_duration_ms: 1_420,
+    workspace_setup_state: "passed",
+    workspace_setup_script: "scripts/ptc/setup-worktree",
+    workspace_setup_source_sha: String.duplicate("a", 40),
+    workspace_setup_started_at: DateTime.add(now, -5, :minute),
+    workspace_setup_ended_at: DateTime.add(now, -81, :second),
+    workspace_setup_duration_ms: 218_000,
+    workspace_setup_exit_status: 0,
+    workspace_setup_output: "Dependencies and build tools are ready.\n"
   })
   |> Repo.insert!()
 

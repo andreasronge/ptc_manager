@@ -1014,6 +1014,71 @@ defmodule PtcManager.Operations do
     end
   end
 
+  def record_workspace_setup(
+        job_id,
+        fencing_token,
+        worker_key,
+        report,
+        lease_now,
+        lifecycle_now \\ utc_now()
+      )
+      when is_integer(job_id) and is_integer(fencing_token) and is_binary(worker_key) and
+             is_map(report) do
+    result =
+      Repo.transaction(fn ->
+        job = Repo.get!(Job, job_id)
+
+        with :ok <- valid_lease(job, fencing_token, worker_key, lease_now) do
+          attrs = %{
+            herdr_workspace: Map.get(report, :workspace_id),
+            worktree_created_duration_ms: Map.get(report, :worktree_created_duration_ms),
+            workspace_setup_state: Map.fetch!(report, :state),
+            workspace_setup_script: Map.get(report, :script),
+            workspace_setup_source_sha: Map.get(report, :source_sha),
+            workspace_setup_started_at: Map.fetch!(report, :started_at),
+            workspace_setup_ended_at: Map.fetch!(report, :ended_at),
+            workspace_setup_duration_ms: Map.fetch!(report, :duration_ms),
+            workspace_setup_exit_status: Map.get(report, :exit_status),
+            workspace_setup_output: Map.get(report, :output, ""),
+            workspace_setup_output_truncated: Map.get(report, :output_truncated, false),
+            last_used_at: lifecycle_now,
+            last_error: setup_error(report)
+          }
+
+          allocation =
+            WorktreeAllocation
+            |> Repo.get_by!(job_id: job.id)
+            |> WorktreeAllocation.changeset(attrs)
+            |> Repo.update!()
+
+          insert_audit!(%{
+            actor: "worker:#{worker_key}",
+            action: "worktree.setup_#{report.state}",
+            target_type: "worktree_allocation",
+            target_id: allocation.id,
+            details: %{
+              "fencing_token" => fencing_token,
+              "script" => report.script,
+              "source_sha" => report.source_sha,
+              "duration_ms" => report.duration_ms,
+              "exit_status" => report.exit_status,
+              "output_truncated" => report.output_truncated,
+              "worktree_created_duration_ms" => report.worktree_created_duration_ms
+            }
+          })
+
+          allocation
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+
+    case result do
+      {:ok, allocation} -> notify_and_return({:ok, allocation})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   def attach_agent_action_herdr_run(action_id, attempt_count, dispatch)
       when is_integer(action_id) and is_integer(attempt_count) and is_map(dispatch) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -1546,7 +1611,11 @@ defmodule PtcManager.Operations do
     |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(queued starting working blocked unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
-    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> preload([
+      :worker,
+      agent_action: :repository,
+      job: [:issue, :repository, :worktree_allocation]
+    ])
     |> Repo.all()
   end
 
@@ -1555,7 +1624,11 @@ defmodule PtcManager.Operations do
     |> without_orphaned_action_duplicates()
     |> where([run], run.state == "waiting")
     |> order_by([run], asc: run.last_heartbeat_at, asc: run.id)
-    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> preload([
+      :worker,
+      agent_action: :repository,
+      job: [:issue, :repository, :worktree_allocation]
+    ])
     |> Repo.all()
   end
 
@@ -1564,14 +1637,22 @@ defmodule PtcManager.Operations do
     |> without_orphaned_action_duplicates()
     |> where([run], run.state in ~w(queued starting working idle blocked waiting unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
-    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> preload([
+      :worker,
+      agent_action: :repository,
+      job: [:issue, :repository, :worktree_allocation]
+    ])
     |> Repo.all()
   end
 
   def list_recent_agent_runs(limit \\ 5) when is_integer(limit) and limit > 0 do
     recent_agent_runs_query()
     |> limit(^limit)
-    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> preload([
+      :worker,
+      agent_action: :repository,
+      job: [:issue, :repository, :worktree_allocation]
+    ])
     |> Repo.all()
   end
 
@@ -1585,7 +1666,11 @@ defmodule PtcManager.Operations do
       job.repository_id == ^repository_id or action.repository_id == ^repository_id
     )
     |> limit(^limit)
-    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> preload([
+      :worker,
+      agent_action: :repository,
+      job: [:issue, :repository, :worktree_allocation]
+    ])
     |> Repo.all()
   end
 
@@ -1603,7 +1688,11 @@ defmodule PtcManager.Operations do
     |> where([run], is_nil(run.status_text) or run.status_text != ^@superseded_herdr_status)
     |> order_by([run], desc: run.started_at, desc: run.id)
     |> limit(^limit)
-    |> preload([:worker, agent_action: :repository, job: [:issue, :repository]])
+    |> preload([
+      :worker,
+      agent_action: :repository,
+      job: [:issue, :repository, :worktree_allocation]
+    ])
     |> Repo.all()
   end
 
@@ -1626,6 +1715,15 @@ defmodule PtcManager.Operations do
     Worker
     |> order_by([worker], asc: worker.id)
     |> preload(worktree_allocations: [job: [:issue, :repository, :pr_publication, :agent_runs]])
+    |> Repo.all()
+  end
+
+  def list_recent_workspace_setups(limit \\ 10) when is_integer(limit) and limit > 0 do
+    WorktreeAllocation
+    |> where([allocation], not is_nil(allocation.workspace_setup_state))
+    |> order_by([allocation], desc: allocation.workspace_setup_ended_at, desc: allocation.id)
+    |> limit(^limit)
+    |> preload(job: [:issue, :repository])
     |> Repo.all()
   end
 
@@ -3020,6 +3118,10 @@ defmodule PtcManager.Operations do
   defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
   defp rejection_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp rejection_error(reason), do: bounded_error(reason)
+  defp setup_error(%{state: "passed"}), do: nil
+  defp setup_error(%{error: reason}), do: bounded_error(reason)
+  defp setup_error(_report), do: "workspace_setup_failed"
+
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)
 
   defp configured_agent_capacity,

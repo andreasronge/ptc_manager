@@ -253,9 +253,7 @@ defmodule PtcManagerWeb.OperationsLive do
 
         %{
           label: label,
-          detail:
-            "Before session #{format_duration(queue_seconds)} · session #{format_duration(session_seconds)}. " <>
-              "Session time includes coding, tests, reviews, and waits for CI."
+          detail: phase_detail(run, queue_seconds, session_seconds)
         }
 
       _missing ->
@@ -268,12 +266,25 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def phase_timing(_run), do: nil
 
+  def workspace_setup_duration(%{workspace_setup_duration_ms: milliseconds})
+      when is_integer(milliseconds),
+      do: format_milliseconds(milliseconds)
+
+  def workspace_setup_duration(_allocation), do: "—"
+
+  def worktree_creation_duration(%{worktree_created_duration_ms: milliseconds})
+      when is_integer(milliseconds),
+      do: format_milliseconds(milliseconds)
+
+  def worktree_creation_duration(_allocation), do: "—"
+
   defp load_operations(socket) do
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()
     waiting_runs = Operations.list_waiting_agent_runs()
     queued_jobs = Operations.list_queued_jobs()
     queued_actions = Operations.list_queued_agent_actions()
+    workspace_setups = Operations.list_recent_workspace_setups()
     timeline = Operations.list_agent_timeline(40)
 
     selected_run =
@@ -296,6 +307,7 @@ defmodule PtcManagerWeb.OperationsLive do
       waiting_runs: waiting_runs,
       queued_jobs: queued_jobs,
       queued_actions: queued_actions,
+      workspace_setups: workspace_setups,
       active_slot_count: active_slot_count,
       timeline: timeline,
       selected_run: selected_run,
@@ -361,4 +373,31 @@ defmodule PtcManagerWeb.OperationsLive do
   defp elapsed_seconds(from, to), do: DateTime.diff(to, from, :second) |> max(0)
 
   defp format_duration(seconds), do: TimeFormat.seconds(seconds)
+
+  defp phase_detail(run, queue_seconds, session_seconds) do
+    setup = get_in(run, [Access.key(:job), Access.key(:worktree_allocation)])
+
+    "Before session #{format_duration(queue_seconds)}#{setup_breakdown(setup)} · " <>
+      "session #{format_duration(session_seconds)}" <>
+      ". Session time includes coding, tests, reviews, and waits for CI."
+  end
+
+  defp setup_breakdown(%{workspace_setup_state: state} = allocation)
+       when state in ["passed", "failed"] do
+    " (including worktree #{worktree_creation_duration(allocation)} and " <>
+      "repository setup #{workspace_setup_duration(allocation)})"
+  end
+
+  defp setup_breakdown(_allocation), do: ""
+
+  defp format_milliseconds(milliseconds) when milliseconds < 1_000,
+    do: "#{milliseconds}ms"
+
+  defp format_milliseconds(milliseconds) do
+    seconds = milliseconds / 1_000
+
+    if seconds < 60,
+      do: :erlang.float_to_binary(seconds, decimals: 1) <> "s",
+      else: TimeFormat.seconds(round(seconds))
+  end
 end

@@ -18,6 +18,16 @@ defmodule PtcManager.Operations.WorktreeAllocation do
     field :cleanup_token, :string
     field :cleanup_expires_at, :utc_datetime_usec
     field :last_error, :string
+    field :worktree_created_duration_ms, :integer
+    field :workspace_setup_state, :string
+    field :workspace_setup_script, :string
+    field :workspace_setup_source_sha, :string
+    field :workspace_setup_started_at, :utc_datetime_usec
+    field :workspace_setup_ended_at, :utc_datetime_usec
+    field :workspace_setup_duration_ms, :integer
+    field :workspace_setup_exit_status, :integer
+    field :workspace_setup_output, :string
+    field :workspace_setup_output_truncated, :boolean, default: false
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
@@ -41,7 +51,17 @@ defmodule PtcManager.Operations.WorktreeAllocation do
       :removed_at,
       :cleanup_token,
       :cleanup_expires_at,
-      :last_error
+      :last_error,
+      :worktree_created_duration_ms,
+      :workspace_setup_state,
+      :workspace_setup_script,
+      :workspace_setup_source_sha,
+      :workspace_setup_started_at,
+      :workspace_setup_ended_at,
+      :workspace_setup_duration_ms,
+      :workspace_setup_exit_status,
+      :workspace_setup_output,
+      :workspace_setup_output_truncated
     ])
     |> validate_required([:worker_id, :job_id, :state, :last_used_at])
     |> validate_inclusion(:state, @states)
@@ -52,6 +72,13 @@ defmodule PtcManager.Operations.WorktreeAllocation do
     |> validate_length(:agent_kind, max: 80)
     |> validate_length(:pr_url, max: 1_024)
     |> validate_length(:last_error, max: 500)
+    |> validate_inclusion(:workspace_setup_state, ["passed", "failed"])
+    |> validate_number(:worktree_created_duration_ms, greater_than_or_equal_to: 0)
+    |> validate_number(:workspace_setup_duration_ms, greater_than_or_equal_to: 0)
+    |> validate_number(:workspace_setup_exit_status, greater_than_or_equal_to: 0)
+    |> validate_length(:workspace_setup_script, max: 2_000)
+    |> validate_length(:workspace_setup_output, max: 65_536)
+    |> validate_format(:workspace_setup_source_sha, @sha)
     |> unique_constraint(:job_id)
   end
 end

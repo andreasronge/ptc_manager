@@ -122,8 +122,27 @@ defmodule PtcManager.TestGitWorkspace do
     run!(git!(), ["-C", repository, "config", "user.email", "ptc-manager@example.invalid"])
     run!(git!(), ["-C", repository, "config", "commit.gpgSign", "false"])
     run!(git!(), ["-C", repository, "config", "core.hooksPath", "/dev/null"])
+    File.mkdir_p!(Path.join(repository, "scripts/ptc"))
     File.write!(Path.join(repository, "README.md"), "# Test repository\n")
-    run!(git!(), ["-C", repository, "add", "README.md"])
+    File.write!(Path.join(repository, ".gitignore"), ".ptc-setup-cache/\n")
+
+    File.write!(
+      Path.join(repository, ".ptc-manager.yml"),
+      """
+      version: 1
+      bootstrap:
+        command: ./scripts/ptc/setup-worktree
+        timeout_minutes: 1
+      verification:
+        before_publish: ./scripts/ptc/setup-worktree
+        timeout_minutes: 1
+      """
+    )
+
+    setup_script = Path.join(repository, "scripts/ptc/setup-worktree")
+    File.write!(setup_script, "#!/bin/sh\nset -eu\nmkdir -p .ptc-setup-cache\n")
+    File.chmod!(setup_script, 0o755)
+    run!(git!(), ["-C", repository, "add", "."])
     run!(git!(), ["-C", repository, "commit", "-m", "Initial commit"])
     source_sha = run!(git!(), ["-C", repository, "rev-parse", "HEAD"]) |> String.trim()
 

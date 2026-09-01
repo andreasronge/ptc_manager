@@ -8,6 +8,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Manager.CodexAdapter, as: PrivateCodexAdapter
   alias PtcManager.PromptConfiguration
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.WorkspaceSetup
   alias PtcManager.ReviewPolicy
   alias PtcManager.WorktreeSecurity
 
@@ -166,10 +167,51 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   end
 
   defp dispatch_external(path, repository, job, issue, command) do
+    started = System.monotonic_time(:millisecond)
+
     with {:ok, created} <- create_worktree(command, path, repository, job),
-         {:ok, workspace_id, pane_id} <- decode_worktree(created),
-         agent_name = agent_name(job),
-         {:ok, agent_key} <- start_agent(command, agent_name, pane_id),
+         {:ok, workspace_id, pane_id} <- decode_worktree(created) do
+      worktree_duration_ms = max(System.monotonic_time(:millisecond) - started, 0)
+      setup = Application.get_env(:ptc_manager, :workspace_setup, WorkspaceSetup)
+
+      case Gateway.call(setup, :run, [job.worktree_allocation.path, job]) do
+        {:ok, report} ->
+          report =
+            report
+            |> Map.put(:worktree_created_duration_ms, worktree_duration_ms)
+            |> Map.put(:workspace_id, workspace_id)
+
+          start_implementation_agent(command, workspace_id, pane_id, job, issue, report)
+
+        {:error, report} when is_map(report) ->
+          report =
+            report
+            |> Map.put(:worktree_created_duration_ms, worktree_duration_ms)
+            |> Map.put(:workspace_id, workspace_id)
+
+          case remove_action_workspace_with(command, workspace_id) do
+            :ok ->
+              {:error, {:safe, {:workspace_setup_failed, report}}}
+
+            {:error, reason} ->
+              {:error, {:uncertain, {:workspace_setup_cleanup_failed, reason, report}}}
+          end
+
+        {:error, reason} ->
+          {:error, {:uncertain, reason}}
+
+        other ->
+          {:error, {:uncertain, {:unexpected_workspace_setup_result, other}}}
+      end
+    else
+      {:error, reason} -> {:error, {:uncertain, reason}}
+    end
+  end
+
+  defp start_implementation_agent(command, workspace_id, pane_id, job, issue, setup_report) do
+    agent_name = agent_name(job)
+
+    with {:ok, agent_key} <- start_agent(command, agent_name, pane_id),
          :ok <- prompt_agent(command, agent_name, issue, job) do
       session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
@@ -181,10 +223,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          external_key: "#{session}:#{agent_key}",
          agent_name: agent_name,
          worktree_path: job.worktree_allocation.path,
-         agent_kind: job.worktree_allocation.agent_kind
+         agent_kind: job.worktree_allocation.agent_kind,
+         workspace_setup: setup_report
        }}
     else
-      {:error, reason} -> {:error, {:uncertain, reason}}
+      {:error, reason} ->
+        {:error, {:uncertain, {:agent_launch_after_workspace_setup, reason, setup_report}}}
     end
   end
 
@@ -556,5 +600,13 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   defp run(args, timeout \\ nil), do: Command.run(args, timeout)
   defp run_with(command, args, timeout \\ nil), do: Gateway.call(command, :run, [args, timeout])
+
+  defp remove_action_workspace_with(command, workspace) do
+    case run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp bounded(output), do: output |> String.trim() |> String.slice(-1_000, 1_000)
 end

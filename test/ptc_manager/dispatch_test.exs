@@ -24,6 +24,30 @@ defmodule PtcManager.DispatchTest do
     def remove_worktree(_allocation), do: :ok
   end
 
+  defmodule FakeWorkspaceSetup do
+    def run(_path, _job), do: Process.get(:workspace_setup_result) || {:ok, report()}
+
+    def report(attrs \\ %{}) do
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      Map.merge(
+        %{
+          state: "passed",
+          script: "scripts/ptc/setup-worktree",
+          source_sha: String.duplicate("a", 40),
+          started_at: now,
+          ended_at: now,
+          duration_ms: 42,
+          exit_status: 0,
+          output: "ready\n",
+          output_truncated: false,
+          error: nil
+        },
+        attrs
+      )
+    end
+  end
+
   setup do
     Process.put(:dispatch_test_pid, self())
 
@@ -127,6 +151,68 @@ defmodule PtcManager.DispatchTest do
     actions = Repo.all(from audit in AuditEvent, select: audit.action)
     assert "job.leased" in actions
     assert "job.started" in actions
+  end
+
+  test "persists workspace setup evidence before marking the agent working" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, remote})
+    report = FakeWorkspaceSetup.report(%{duration_ms: 3_742})
+
+    Process.put(
+      :dispatch_adapter_result,
+      {:ok,
+       %{
+         workspace_id: "w-job",
+         pane_id: "w-job:p1",
+         session: "default",
+         external_key: "default:w-job:p1",
+         agent_name: "impl_j1_f1",
+         workspace_setup: Map.put(report, :worktree_created_duration_ms, 123)
+       }}
+    )
+
+    assert {:ok, %{job: %{state: "working"}}} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    allocation = Repo.get_by!(Operations.WorktreeAllocation, job_id: job.id)
+    assert allocation.workspace_setup_state == "passed"
+    assert allocation.workspace_setup_script == "scripts/ptc/setup-worktree"
+    assert allocation.workspace_setup_source_sha == String.duplicate("a", 40)
+    assert allocation.worktree_created_duration_ms == 123
+    assert allocation.workspace_setup_duration_ms == 3_742
+    assert allocation.workspace_setup_exit_status == 0
+    assert allocation.workspace_setup_output == "ready\n"
+  end
+
+  test "a recorded setup failure ends the job without creating an agent run" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    report =
+      FakeWorkspaceSetup.report(%{
+        state: "failed",
+        exit_status: 17,
+        output: "missing tool\n",
+        error: :workspace_setup_failed,
+        worktree_created_duration_ms: 91
+      })
+
+    Process.put(
+      :dispatch_adapter_result,
+      {:error, {:safe, {:workspace_setup_failed, report}}}
+    )
+
+    assert {:error, :workspace_setup_failed} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    failed = Repo.get!(Job, job.id)
+    allocation = Repo.get_by!(Operations.WorktreeAllocation, job_id: job.id)
+    assert failed.state == "failed"
+    assert allocation.state == "removed"
+    assert allocation.workspace_setup_state == "failed"
+    assert allocation.workspace_setup_exit_status == 17
+    assert allocation.workspace_setup_output == "missing tool\n"
+    assert Repo.aggregate(AgentRun, :count) == 0
   end
 
   test "a changed GitHub issue cancels the stale approval before dispatch" do
@@ -427,7 +513,8 @@ defmodule PtcManager.DispatchTest do
       :herdr_binary,
       :herdr_run_as_user,
       :herdr_timeout_ms,
-      :implementation_agent_start_timeout_ms
+      :implementation_agent_start_timeout_ms,
+      :workspace_setup
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
@@ -446,6 +533,7 @@ defmodule PtcManager.DispatchTest do
     Application.delete_env(:ptc_manager, :herdr_run_as_user)
     Application.put_env(:ptc_manager, :herdr_timeout_ms, 1_000)
     Application.put_env(:ptc_manager, :implementation_agent_start_timeout_ms, 3_000)
+    Application.put_env(:ptc_manager, :workspace_setup, FakeWorkspaceSetup)
 
     repository = repository_fixture(%{local_path: repository_path})
     remote = remote_issue(unique)
@@ -471,6 +559,87 @@ defmodule PtcManager.DispatchTest do
     assert dispatch.workspace_id == "w-slow"
     assert dispatch.pane_id == "w-slow:p1"
     assert dispatch.external_key == "default:impl-slow"
+    assert dispatch.workspace_setup.duration_ms == 42
+  end
+
+  test "a known setup failure removes the Herdr worktree and never starts an agent" do
+    unique = System.unique_integer([:positive])
+    test_root = Path.join(System.tmp_dir!(), "ptc-manager-setup-failure-#{unique}")
+    repository_path = Path.join(test_root, "repository")
+    fake_herdr = Path.join(test_root, "herdr")
+    log = Path.join(test_root, "commands.log")
+    File.mkdir_p!(repository_path)
+
+    File.write!(
+      fake_herdr,
+      """
+      #!/bin/sh
+      printf '%s\\n' "$*" >> "#{log}"
+      case "$*" in
+        *"worktree create"*)
+          printf '%s' '{"result":{"workspace":{"workspace_id":"w-failed"},"root_pane":{"pane_id":"w-failed:p1"}}}'
+          ;;
+        *"worktree remove"*)
+          printf '%s' '{"result":{}}'
+          ;;
+        *)
+          exit 2
+          ;;
+      esac
+      """
+    )
+
+    File.chmod!(fake_herdr, 0o700)
+
+    keys = [:dispatch_enabled, :herdr_binary, :herdr_run_as_user, :workspace_setup]
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn {key, value} -> restore_env(key, value) end)
+      File.rm_rf!(test_root)
+    end)
+
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :herdr_binary, fake_herdr)
+    Application.delete_env(:ptc_manager, :herdr_run_as_user)
+    Application.put_env(:ptc_manager, :workspace_setup, FakeWorkspaceSetup)
+
+    Process.put(
+      :workspace_setup_result,
+      {:error,
+       FakeWorkspaceSetup.report(%{
+         state: "failed",
+         exit_status: 17,
+         error: :workspace_setup_failed
+       })}
+    )
+
+    repository = repository_fixture(%{local_path: repository_path})
+    remote = remote_issue(unique)
+    issue = issue_fixture(repository, IssueSnapshot.normalize!(remote, repository.id))
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    assert {:ok, leased} =
+             Operations.lease_job(
+               job.id,
+               "herdr:default",
+               IssueSnapshot.normalize!(remote, repository.id),
+               60_000
+             )
+
+    assert {:error, {:safe, {:workspace_setup_failed, report}}} =
+             PtcManager.Dispatch.HerdrAdapter.dispatch(%{
+               job: leased,
+               issue: leased.issue,
+               repository: leased.repository
+             })
+
+    assert report.exit_status == 17
+    commands = File.read!(log)
+    assert commands =~ "worktree create"
+    assert commands =~ "worktree remove --workspace w-failed --force"
+    refute commands =~ "agent start"
   end
 
   test "Codex implementation agents use the currently supported unattended flag" do

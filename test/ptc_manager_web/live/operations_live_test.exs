@@ -80,15 +80,25 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     proposal_fixture(queued_issue)
     {:ok, queued_job} = Operations.approve_issue(queued_issue.id, "maintainer", 3)
 
-    %WorktreeAllocation{}
-    |> WorktreeAllocation.changeset(%{
-      worker_id: worker.id,
-      job_id: job.id,
-      state: "attention",
-      path: "/tmp/uncertain-operations-slot",
-      last_used_at: DateTime.utc_now()
-    })
-    |> Repo.insert!()
+    setup_allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "attention",
+        path: "/tmp/uncertain-operations-slot",
+        last_used_at: DateTime.utc_now(),
+        worktree_created_duration_ms: 1_400,
+        workspace_setup_state: "passed",
+        workspace_setup_script: "scripts/ptc/setup-worktree",
+        workspace_setup_source_sha: String.duplicate("a", 40),
+        workspace_setup_started_at: DateTime.add(DateTime.utc_now(), -224, :second),
+        workspace_setup_ended_at: DateTime.utc_now(),
+        workspace_setup_duration_ms: 223_000,
+        workspace_setup_exit_status: 0,
+        workspace_setup_output: "Dependencies ready\n"
+      })
+      |> Repo.insert!()
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -180,6 +190,22 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#queued-action-#{daily_action.id}", "Planning lane")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "Implementation")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "3 review passes")
+    assert has_element?(view, "#workspace-setup-history")
+
+    assert has_element?(
+             view,
+             "#workspace-setup-#{setup_allocation.id}",
+             "scripts/ptc/setup-worktree"
+           )
+
+    assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Worktree 1.4s")
+    assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Setup 3m 43s")
+    assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Dependencies ready")
+
+    assert has_element?(
+             view,
+             "#workspace-setup-output-#{setup_allocation.id}[phx-update=ignore]"
+           )
 
     view
     |> element("#timeline-run-#{run.id} a")

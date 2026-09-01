@@ -29,6 +29,30 @@ defmodule PtcManager.Repository.GitProbe do
 
   def repository_contract(_path, _sha), do: {:error, :invalid_repository_contract_context}
 
+  @doc "Verifies that a relative setup entrypoint is a tracked executable regular file."
+  def tracked_executable(path, sha, relative_path)
+      when is_binary(path) and is_binary(sha) and is_binary(relative_path) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         true <- Regex.match?(@sha, sha),
+         :ok <- contained_relative_path(relative_path),
+         {:ok, entry} <-
+           run_git(
+             path,
+             ["ls-tree", "-z", sha, "--", relative_path],
+             {:collect, @small_output_limit}
+           ),
+         :ok <- executable_blob(entry, relative_path),
+         :ok <- regular_file_without_symlink(path, relative_path) do
+      :ok
+    else
+      false -> {:error, :invalid_workspace_setup_context}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def tracked_executable(_path, _sha, _relative_path),
+    do: {:error, :invalid_workspace_setup_context}
+
   @doc "Resolves a local branch commit without consulting the working tree."
   def branch_sha(path, branch)
       when is_binary(path) and is_binary(branch) and branch != "" and byte_size(branch) <= 240,
@@ -179,6 +203,65 @@ defmodule PtcManager.Repository.GitProbe do
 
   defp repository_path(repository) do
     Checkout.available_path(repository)
+  end
+
+  defp contained_relative_path(relative_path) do
+    parts = Path.split(relative_path)
+
+    if Path.type(relative_path) == :relative and parts != [] and
+         Enum.all?(parts, &(&1 not in ["", ".", ".."])),
+       do: :ok,
+       else: {:error, :workspace_setup_script_escapes_worktree}
+  end
+
+  defp executable_blob(entry, relative_path) do
+    expected_suffix = "\t#{relative_path}" <> <<0>>
+
+    if String.starts_with?(entry, "100755 blob ") and String.ends_with?(entry, expected_suffix),
+      do: :ok,
+      else: {:error, :workspace_setup_script_not_tracked_executable}
+  end
+
+  defp regular_file_without_symlink(path, relative_path) do
+    full_path = Path.join(path, relative_path)
+
+    with {:ok, %{type: :regular, mode: mode}} <- File.lstat(full_path),
+         true <- Bitwise.band(mode, 0o111) != 0,
+         :ok <- no_symlink_parent(path, Path.dirname(relative_path)) do
+      :ok
+    else
+      false ->
+        {:error, :workspace_setup_script_not_executable}
+
+      {:ok, _other} ->
+        {:error, :workspace_setup_script_not_regular}
+
+      {:error, reason} when is_atom(reason) ->
+        {:error, {:workspace_setup_script_unavailable, reason}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp no_symlink_parent(_path, "."), do: :ok
+
+  defp no_symlink_parent(path, relative_parent) do
+    relative_parent
+    |> Path.split()
+    |> Enum.reduce_while(path, fn segment, parent ->
+      current = Path.join(parent, segment)
+
+      case File.lstat(current) do
+        {:ok, %{type: :directory}} -> {:cont, current}
+        {:ok, _other} -> {:halt, {:error, :workspace_setup_parent_not_directory}}
+        {:error, reason} -> {:halt, {:error, {:workspace_setup_script_unavailable, reason}}}
+      end
+    end)
+    |> case do
+      {:error, reason} -> {:error, reason}
+      _final_path -> :ok
+    end
   end
 
   defp canonical_checkout_path(repository_path, path) do

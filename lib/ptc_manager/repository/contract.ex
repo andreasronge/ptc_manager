@@ -45,6 +45,37 @@ defmodule PtcManager.Repository.Contract do
 
   def for_result(%Job{}, _result), do: {:error, :worktree_allocation_missing}
 
+  @doc "Reads the repository contract from the exact commit used to create a worktree."
+  @spec for_workspace(binary(), binary()) :: {:ok, t()} | {:error, term()}
+  def for_workspace(path, source_sha) when is_binary(path) and is_binary(source_sha) do
+    with {:ok, content} <- GitProbe.repository_contract(path, source_sha),
+         {:ok, contract} <- parse(content) do
+      {:ok, contract}
+    end
+  end
+
+  @doc "Returns the bootstrap entrypoint as one contained relative executable path."
+  @spec bootstrap_script(t()) :: {:ok, binary()} | {:error, term()}
+  def bootstrap_script(%__MODULE__{bootstrap_command: command}) when is_binary(command) do
+    normalized = String.trim_leading(command, "./")
+
+    cond do
+      command == "" or String.contains?(command, [" ", "\t", "\n", "\r", <<0>>]) ->
+        {:error, :workspace_setup_must_be_one_script}
+
+      Path.type(command) == :absolute or Path.type(normalized) == :absolute ->
+        {:error, :workspace_setup_script_must_be_relative}
+
+      normalized in ["", "."] or Enum.any?(Path.split(normalized), &(&1 in ["", ".", ".."])) ->
+        {:error, :workspace_setup_script_escapes_worktree}
+
+      true ->
+        {:ok, normalized}
+    end
+  end
+
+  def bootstrap_script(_contract), do: {:error, :workspace_setup_script_missing}
+
   @doc "Stable digest for the publication-relevant contract values."
   @spec publication_digest(t()) :: binary()
   def publication_digest(%__MODULE__{} = contract) do

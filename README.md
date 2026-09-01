@@ -191,6 +191,38 @@ verification:
   timeout_minutes: 45
 ```
 
+`bootstrap.command` is one repository-relative, checked-in executable script.
+Herdr remains responsible for creating the Git worktree. After creation,
+PtcManager runs this script with the worktree as its current directory, records
+the worktree-creation and setup durations, verifies that HEAD, branch, and
+tracked files did not change, and only then starts the selected Herdr agent.
+Repository-specific setup belongs behind this entrypoint. For example,
+`ptc_runner` can commit a small wrapper which calls its existing setup logic:
+
+```sh
+#!/bin/sh
+set -eu
+./scripts/worktree.sh seed .
+./scripts/worktree.sh init .
+```
+
+The setup script must be executable in Git. It may create ignored dependency
+and build artifacts, but changing tracked files, HEAD, or the job branch fails
+closed before any agent starts. Setup status, bounded output, and timings are
+shown on the Operations page.
+
+Before enabling a repository on a server, exercise the same handoff against a
+local Herdr session:
+
+```sh
+PTC_HERDR_SESSION=default \
+  mix ptc.herdr_workspace_canary --repository /absolute/path/to/repository
+```
+
+The canary asks real Herdr to create a disposable worktree, runs the real
+checked-in setup script, reports phase timings, and removes its workspace and
+temporary branch. It does not start an AI agent and does not access GitHub.
+
 Before publication, PtcManager reads the contract from the verified candidate
 commit—not from a possibly dirty filesystem copy—and freezes its bootstrap
 command, pre-publication command, timeouts, and digest on the job. It then

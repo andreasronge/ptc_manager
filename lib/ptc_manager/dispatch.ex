@@ -32,13 +32,16 @@ defmodule PtcManager.Dispatch do
   end
 
   defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity, clock) do
+    lease_now = Clock.utc_now(clock)
+    lifecycle_now = Clock.utc_now(PtcManager.Clock.System)
+
     with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
          {:ok, canonical} <- normalize_remote(remote, job.repository),
          {:ok, leased} <-
            Operations.lease_job(job.id, worker_key, canonical, lease_ms,
              capacity: capacity,
-             now: Clock.utc_now(clock),
-             lifecycle_now: Clock.utc_now(PtcManager.Clock.System)
+             now: lease_now,
+             lifecycle_now: lifecycle_now
            ) do
       context = %{
         job: leased,
@@ -46,75 +49,179 @@ defmodule PtcManager.Dispatch do
         repository: leased.repository
       }
 
-      case Gateway.call(adapter, :dispatch, [context]) do
-        {:ok, dispatch} ->
-          dispatch = Map.put(dispatch, :lease_expires_at, leased.lease_expires_at)
+      adapter_result = Gateway.call(adapter, :dispatch, [context])
+      acknowledgement_lease_now = Clock.utc_now(clock)
+      acknowledgement_lifecycle_now = Clock.utc_now(PtcManager.Clock.System)
 
-          Operations.mark_job_working(
-            leased.id,
-            leased.fencing_token,
-            worker_key,
-            dispatch,
-            Clock.utc_now(clock),
-            Clock.utc_now(PtcManager.Clock.System)
-          )
-
-        {:error, {:safe, reason}} ->
-          _ =
-            Operations.mark_dispatch_failed(
-              leased.id,
-              leased.fencing_token,
-              worker_key,
-              reason,
-              Clock.utc_now(clock),
-              Clock.utc_now(PtcManager.Clock.System)
-            )
-
-          {:error, reason}
-
-        {:error, {:uncertain, reason}} ->
-          _ =
-            Operations.mark_dispatch_uncertain(
-              leased.id,
-              leased.fencing_token,
-              worker_key,
-              reason,
-              Clock.utc_now(clock),
-              Clock.utc_now(PtcManager.Clock.System)
-            )
-
-          {:error, reason}
-
+      with :ok <-
+             record_workspace_setup(
+               leased,
+               worker_key,
+               adapter_result,
+               acknowledgement_lease_now,
+               acknowledgement_lifecycle_now
+             ) do
+        handle_dispatch_result(
+          adapter_result,
+          leased,
+          worker_key,
+          acknowledgement_lease_now,
+          acknowledgement_lifecycle_now
+        )
+      else
         {:error, reason} ->
           _ =
             Operations.mark_dispatch_uncertain(
               leased.id,
               leased.fencing_token,
               worker_key,
-              reason,
-              Clock.utc_now(clock),
-              Clock.utc_now(PtcManager.Clock.System)
-            )
-
-          {:error, reason}
-
-        other ->
-          reason = {:unexpected_dispatch_result, other}
-
-          _ =
-            Operations.mark_dispatch_uncertain(
-              leased.id,
-              leased.fencing_token,
-              worker_key,
-              reason,
-              Clock.utc_now(clock),
-              Clock.utc_now(PtcManager.Clock.System)
+              {:workspace_setup_evidence_failed, reason},
+              acknowledgement_lease_now,
+              acknowledgement_lifecycle_now
             )
 
           {:error, reason}
       end
     end
   end
+
+  defp handle_dispatch_result(
+         adapter_result,
+         leased,
+         worker_key,
+         lease_now,
+         lifecycle_now
+       ) do
+    case adapter_result do
+      {:ok, dispatch} ->
+        dispatch = Map.put(dispatch, :lease_expires_at, leased.lease_expires_at)
+
+        Operations.mark_job_working(
+          leased.id,
+          leased.fencing_token,
+          worker_key,
+          dispatch,
+          lease_now,
+          lifecycle_now
+        )
+
+      {:error, {:safe, {:workspace_setup_failed, report}}} ->
+        reason = Map.get(report, :error) || :workspace_setup_failed
+
+        _ =
+          Operations.mark_dispatch_failed(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            reason,
+            lease_now,
+            lifecycle_now
+          )
+
+        {:error, reason}
+
+      {:error, {:safe, reason}} ->
+        _ =
+          Operations.mark_dispatch_failed(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            reason,
+            lease_now,
+            lifecycle_now
+          )
+
+        {:error, reason}
+
+      {:error, {:uncertain, reason}} ->
+        _ =
+          Operations.mark_dispatch_uncertain(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            reason,
+            lease_now,
+            lifecycle_now
+          )
+
+        {:error, reason}
+
+      {:error, reason} ->
+        _ =
+          Operations.mark_dispatch_uncertain(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            reason,
+            lease_now,
+            lifecycle_now
+          )
+
+        {:error, reason}
+
+      other ->
+        reason = {:unexpected_dispatch_result, other}
+
+        _ =
+          Operations.mark_dispatch_uncertain(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            reason,
+            lease_now,
+            lifecycle_now
+          )
+
+        {:error, reason}
+    end
+  end
+
+  defp record_workspace_setup(
+         leased,
+         worker_key,
+         adapter_result,
+         lease_now,
+         lifecycle_now
+       ) do
+    case workspace_setup_report(adapter_result) do
+      nil ->
+        :ok
+
+      report ->
+        case Operations.record_workspace_setup(
+               leased.id,
+               leased.fencing_token,
+               worker_key,
+               report,
+               lease_now,
+               lifecycle_now
+             ) do
+          {:ok, _allocation} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp workspace_setup_report({:ok, %{workspace_setup: report}}) when is_map(report),
+    do: report
+
+  defp workspace_setup_report({:error, {:safe, {:workspace_setup_failed, report}}})
+       when is_map(report),
+       do: report
+
+  defp workspace_setup_report(
+         {:error, {:uncertain, {:agent_launch_after_workspace_setup, _reason, report}}}
+       )
+       when is_map(report),
+       do: report
+
+  defp workspace_setup_report(
+         {:error, {:uncertain, {:workspace_setup_cleanup_failed, _reason, report}}}
+       )
+       when is_map(report),
+       do: report
+
+  defp workspace_setup_report(_result), do: nil
 
   defp normalize_remote(remote, repository) do
     {:ok, IssueSnapshot.normalize!(remote, repository)}
