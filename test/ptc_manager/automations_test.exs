@@ -32,6 +32,13 @@ defmodule PtcManager.AutomationsTest do
           [schema] = Regex.run(~r/read (\/\S+?\.schema\.json)\b/, prompt, capture: :all_but_first)
           assert_schema!(schema)
 
+          true = option_values(args, "--until") == ["working", "blocked"]
+          Process.put({__MODULE__, :result_path}, path)
+          {:ok, ~s({"result":{"state":"working"}})}
+
+        Enum.take(args, 2) == ["agent", "wait"] ->
+          true = option_values(args, "--until") == ["idle", "done", "blocked"]
+          path = Process.delete({__MODULE__, :result_path})
           File.write!(path, Jason.encode!(result()))
           {:ok, ~s({"result":{"state":"idle"}})}
 
@@ -64,6 +71,15 @@ defmodule PtcManager.AutomationsTest do
       body = File.read!(path)
       true = body =~ ~s("private_summary")
       :ok
+    end
+
+    defp option_values(args, option) do
+      args
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.flat_map(fn
+        [^option, value] -> [value]
+        _pair -> []
+      end)
     end
   end
 

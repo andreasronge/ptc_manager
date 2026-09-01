@@ -162,24 +162,40 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       action.prompt <>
         result_protocol(output_path, schema_path)
 
-    command().run(
-      [
-        "agent",
-        "prompt",
-        name,
-        prompt,
-        "--wait",
-        "--until",
-        "idle",
-        "--until",
-        "done",
-        "--until",
-        "blocked",
-        "--timeout",
-        Integer.to_string(timeout)
-      ],
-      timeout + @command_grace_ms
-    )
+    with {:ok, _started} <-
+           command().run(
+             [
+               "agent",
+               "prompt",
+               name,
+               prompt,
+               "--wait",
+               "--until",
+               "working",
+               "--until",
+               "blocked",
+               "--timeout",
+               Integer.to_string(timeout)
+             ],
+             timeout + @command_grace_ms
+           ) do
+      command().run(
+        [
+          "agent",
+          "wait",
+          name,
+          "--until",
+          "idle",
+          "--until",
+          "done",
+          "--until",
+          "blocked",
+          "--timeout",
+          Integer.to_string(timeout)
+        ],
+        timeout + @command_grace_ms
+      )
+    end
   end
 
   @doc false
@@ -193,6 +209,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp read_result(path, action_key) do
     with {:ok, body} <- File.read(path),
+         :ok <- require_result(body),
          {:ok, result} when is_map(result) <- Jason.decode(body),
          :ok <- ResultValidator.validate_result(result, action_key) do
       {:ok, result}
@@ -201,6 +218,10 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       {:error, reason} -> {:error, reason}
       _invalid -> {:error, :invalid_agent_result}
     end
+  end
+
+  defp require_result(body) when is_binary(body) do
+    if String.trim(body) == "", do: {:error, :agent_result_missing}, else: :ok
   end
 
   defp dispatch(action, kind, name, workspace, pane, agent_key, path) do
