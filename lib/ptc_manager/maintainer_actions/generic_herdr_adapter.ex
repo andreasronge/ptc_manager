@@ -9,6 +9,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentAction
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.WorkerRepositoryTrust
 
   @command_grace_ms 5_000
 
@@ -19,6 +20,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       with {:ok, path} <- action_path(action),
            {:ok, profile} <- select_profile(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
+           :ok <- trust_workspace(path),
            {:ok, workspace, pane} <- open_workspace(action, path),
            name = agent_name(action),
            {:ok, agent_key} <- start_agent(name, pane, profile),
@@ -113,6 +115,20 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp trust_workspace(path) do
+    case WorkerRepositoryTrust.allow(path) do
+      {:ok, :trusted} ->
+        Process.put({__MODULE__, :trusted_path}, path)
+        :ok
+
+      {:ok, :not_required} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -219,6 +235,10 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   defp cleanup do
     if workspace = Process.delete({__MODULE__, :workspace}) do
       _ = command().run(["worktree", "remove", "--workspace", workspace, "--force"])
+    end
+
+    if path = Process.delete({__MODULE__, :trusted_path}) do
+      _ = WorkerRepositoryTrust.revoke(path)
     end
 
     if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)
