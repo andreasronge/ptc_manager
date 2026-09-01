@@ -18,7 +18,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert has_element?(view, "#lane-queued #board-job-#{queued.id}", "Queue this change")
     assert has_element?(view, "#lane-working #board-job-#{working.id}", "Implement this change")
     assert has_element?(view, "#lane-stuck #board-job-#{blocked.id}", "Repair this change")
-    assert has_element?(view, "#lane-review")
+    refute has_element?(view, "#lane-review")
     assert has_element?(view, "#lane-ready")
   end
 
@@ -70,7 +70,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert older_position < newer_position
   end
 
-  test "moves open pull requests between review, attention, and ready-to-merge", %{conn: conn} do
+  test "moves open pull requests between progress, attention, and ready-to-merge", %{conn: conn} do
     review_job = approved_job("Wait for CI") |> set_job_state("pr_open")
     _review_publication = publication_fixture(review_job, "pending", "mergeable")
 
@@ -83,47 +83,28 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     stuck_job = approved_job("Resolve conflicts") |> set_job_state("pr_open")
     _stuck_publication = publication_fixture(stuck_job, "success", "conflicting")
 
-    needs_review_job = approved_job("Review the clean pull request") |> set_job_state("pr_open")
-    needs_review_publication = publication_fixture(needs_review_job, "success", "mergeable")
-
     ready_job = approved_job("Merge the finished change") |> set_job_state("pr_open")
     ready_publication = publication_fixture(ready_job, "success", "mergeable")
-    analysis_fixture(ready_publication)
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
-    assert has_element?(view, "#lane-review #board-job-#{review_job.id}", "CI is still running")
+    assert has_element?(view, "#lane-working #board-job-#{review_job.id}", "CI is still running")
 
     assert has_element?(
              view,
-             "#lane-review #board-job-#{blocked_while_running_job.id}",
+             "#lane-working #board-job-#{blocked_while_running_job.id}",
              "CI is still running"
            )
 
     assert has_element?(view, "#lane-stuck #board-job-#{stuck_job.id}", "Merge conflicts")
-
-    assert has_element?(view, "#lane-review #board-job-#{needs_review_job.id}")
-
-    assert has_element?(
-             view,
-             "#review-for-merge-#{needs_review_publication.id}",
-             "Review for merge"
-           )
-
-    view
-    |> element("#review-for-merge-#{needs_review_publication.id}")
-    |> render_click()
-
-    assert Repo.get_by!(AgentAction,
-             action_key: "prepare_merge_decision",
-             target_id: needs_review_publication.id
-           ).state == "queued"
 
     assert has_element?(
              view,
              "#lane-ready #board-job-#{ready_job.id}",
              "All observed gates are clean"
            )
+
+    assert has_element?(view, "#approve-merge-board-#{ready_publication.id}", "Approve and merge")
   end
 
   test "queues a repair from Needs attention and shows queued work consistently", %{conn: conn} do
@@ -170,8 +151,9 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
       )
 
     assert action.state == "queued"
-    assert action.prompt =~ "same Herdr session"
-    assert action.prompt =~ "Merge with the authenticated `gh` CLI"
+    assert action.prompt =~ "merge this PR when it is green and mergeable"
+    assert action.prompt =~ ~s(merge_authorized="true")
+    assert action.prompt =~ ~s(retained_workspace="true")
 
     assert has_element?(
              view,
@@ -256,7 +238,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert has_element?(view, "#lane-ready #board-job-#{job.id}")
     refute has_element?(view, "#retro-pr-#{publication.id}")
-    assert has_element?(view, "#approve-merge-board-#{publication.id}", "Approve merge")
+    assert has_element?(view, "#approve-merge-board-#{publication.id}", "Approve and merge")
 
     assert has_element?(
              view,
@@ -310,13 +292,13 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert has_element?(
              view,
-             "#lane-review #board-pr-#{clean.id}",
-             "Review and merge this imported PR directly on GitHub"
+             "#lane-ready #board-pr-#{clean.id}",
+             "Approve an agent to merge this pull request"
            )
 
     refute has_element?(view, "#retro-pr-#{clean.id}")
     refute has_element?(view, "#review-for-merge-#{clean.id}")
-    refute has_element?(view, "#approve-merge-board-#{clean.id}")
+    assert has_element?(view, "#approve-merge-board-#{clean.id}", "Approve and merge")
 
     view |> element("#repair-and-merge-pr-#{failing.id}") |> render_click()
 

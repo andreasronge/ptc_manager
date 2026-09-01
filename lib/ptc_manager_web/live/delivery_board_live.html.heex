@@ -12,7 +12,7 @@
       <div>
         <h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">From approval to merge</h1>
         <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
-          Planning decides what should be built. This board follows approved work through agents, CI, review, and your final merge decision.
+          Planning decides what should be built. This board follows approved work through implementation, attention, and merge.
         </p>
       </div>
       <div class="flex items-center gap-3">
@@ -35,7 +35,7 @@
 
   <div
     id="delivery-board"
-    class="grid snap-x snap-mandatory auto-cols-[minmax(280px,86vw)] grid-flow-col gap-4 overflow-x-auto pb-5 xl:auto-cols-auto xl:grid-flow-row xl:grid-cols-5 xl:overflow-visible"
+    class="grid snap-x snap-mandatory auto-cols-[minmax(280px,86vw)] grid-flow-col gap-4 overflow-x-auto pb-5 xl:auto-cols-auto xl:grid-flow-row xl:grid-cols-4 xl:overflow-visible"
   >
     <section
       :for={lane <- @lane_definitions}
@@ -185,34 +185,16 @@
               {retrospective_action(item).label}
             </button>
             <button
-              :if={lane.key == :ready && !item.merge_approval}
+              :if={lane.key == :ready && repair_and_merge_action(item)}
               id={"approve-merge-board-#{item.publication.id}"}
-              phx-click="approve-merge"
-              phx-value-publication-id={item.publication.id}
-              class="inline-flex items-center gap-1.5 rounded-lg bg-teal-400 px-3 py-2 font-semibold text-slate-950 hover:bg-teal-300"
-            >
-              <.icon name="hero-check-mini" class="size-3.5" /> Approve merge
-            </button>
-            <span
-              :if={lane.key == :ready && item.merge_approval}
-              class="inline-flex items-center gap-1.5 rounded-lg bg-teal-400/10 px-3 py-2 font-semibold text-teal-300 ring-1 ring-teal-400/20"
-            >
-              <.icon name="hero-check-circle-mini" class="size-3.5" /> Merge approved
-            </span>
-            <button
-              :if={
-                lane.key == :review && merge_decision_needed?(item) &&
-                  merge_decision_action(item)
-              }
-              id={"review-for-merge-#{item.publication.id}"}
               phx-click="run-agent-action"
-              phx-value-action-key="prepare_merge_decision"
+              phx-value-action-key="repair_and_merge_pr"
               phx-value-target-id={item.publication.id}
               disabled={active_agent_action?(item.pr_agent_action)}
-              title={merge_decision_action(item).description}
-              class="inline-flex items-center gap-1.5 rounded-lg bg-violet-400 px-3 py-2 font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              title="Queue the priority agent that verifies and merges this pull request"
+              class="inline-flex items-center gap-1.5 rounded-lg bg-teal-400 px-3 py-2 font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
             >
-              <.icon name="hero-magnifying-glass-mini" class="size-3.5" /> Review for merge
+              <.icon name="hero-check-mini" class="size-3.5" /> Approve and merge
             </button>
             <a
               :if={item.publication && item.publication.pr_url}

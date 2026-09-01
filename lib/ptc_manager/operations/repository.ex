@@ -12,7 +12,6 @@ defmodule PtcManager.Operations.Repository do
     field :last_synced_at, :utc_datetime_usec
     field :last_sync_error, :string
     field :required_pre_pr_reviews, :integer, default: 2
-    field :implementation_test_command, :string
 
     has_many :issues, PtcManager.Operations.Issue
     has_many :jobs, PtcManager.Operations.Job
@@ -34,8 +33,7 @@ defmodule PtcManager.Operations.Repository do
       :sync_status,
       :last_synced_at,
       :last_sync_error,
-      :required_pre_pr_reviews,
-      :implementation_test_command
+      :required_pre_pr_reviews
     ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
@@ -43,7 +41,6 @@ defmodule PtcManager.Operations.Repository do
       greater_than_or_equal_to: 0,
       less_than_or_equal_to: 3
     )
-    |> validate_length(:implementation_test_command, max: 2_000)
     |> validate_change(:local_path, fn :local_path, path ->
       if Path.type(path) == :absolute,
         do: [],

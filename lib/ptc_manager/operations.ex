@@ -211,7 +211,12 @@ defmodule PtcManager.Operations do
         [action],
         action.repository_id not in subquery(active_merge_repository_ids())
       )
-      |> order_by([action], asc: action.requested_at, asc: action.id)
+      |> order_by(
+        [action],
+        asc: fragment("CASE WHEN ? = 'repair_pr' THEN 0 ELSE 1 END", action.action_key),
+        asc: action.requested_at,
+        asc: action.id
+      )
       |> limit(1)
       |> preload(:repository)
       |> Repo.one()
@@ -222,7 +227,12 @@ defmodule PtcManager.Operations do
     |> where([action], action.state == "queued")
     |> order_by(
       [action],
-      asc: fragment("CASE WHEN ? = 'repair_and_merge_pr' THEN 0 ELSE 1 END", action.action_key),
+      asc:
+        fragment(
+          "CASE WHEN ? = 'repair_and_merge_pr' THEN 0 WHEN ? = 'repair_pr' THEN 1 ELSE 2 END",
+          action.action_key,
+          action.action_key
+        ),
       asc: action.requested_at,
       asc: action.id
     )
@@ -753,12 +763,16 @@ defmodule PtcManager.Operations do
   end
 
   def next_queued_job do
-    Job
-    |> where([job], job.state == "queued")
-    |> order_by([job], asc: job.inserted_at, asc: job.id)
-    |> limit(1)
-    |> preload([:approval, :issue, :repository])
-    |> Repo.one()
+    if heavy_delivery_action_active?() do
+      nil
+    else
+      Job
+      |> where([job], job.state == "queued")
+      |> order_by([job], asc: job.inserted_at, asc: job.id)
+      |> limit(1)
+      |> preload([:approval, :issue, :repository])
+      |> Repo.one()
+    end
   end
 
   def claim_next_result_job do
@@ -835,6 +849,7 @@ defmodule PtcManager.Operations do
         job = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             :ok <- heavy_delivery_priority_unlocked(),
              :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
              :ok <- issue_dependencies_resolved(Repo, job.issue),
@@ -918,6 +933,9 @@ defmodule PtcManager.Operations do
 
           {:error, :merge_priority} ->
             Repo.rollback(:merge_priority)
+
+          {:error, :delivery_priority} ->
+            Repo.rollback(:delivery_priority)
 
           {:error, reason} ->
             if WorktreeSecurity.infrastructure_error?(reason) do
@@ -1617,7 +1635,7 @@ defmodule PtcManager.Operations do
     |> order_by([run], asc: run.started_at, asc: run.id)
     |> preload([
       :worker,
-      agent_action: :repository,
+      agent_action: [:repository, :automation_definition_version],
       job: [:issue, :repository, :worktree_allocation]
     ])
     |> Repo.all()
@@ -1969,7 +1987,7 @@ defmodule PtcManager.Operations do
          {version,
           PtcManager.Automations.resolved_instructions(
             version,
-            PtcManager.PromptConfiguration.instructions("implement_issue")
+            nil
           )}}
       end
     end)
@@ -2785,8 +2803,8 @@ defmodule PtcManager.Operations do
 
     capacity =
       if action.automation_definition_version.resource_class == "heavy",
-        do: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1),
-        else: Application.get_env(:ptc_manager, :planning_agent_capacity, 2)
+        do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1),
+        else: Application.get_env(:ptc_manager, :light_agent_capacity, 2)
 
     active_count =
       AgentRun
@@ -2911,6 +2929,20 @@ defmodule PtcManager.Operations do
 
   defp repository_dispatch_unlocked(repository_id) do
     if repository_merge_locked?(repository_id), do: {:error, :merge_priority}, else: :ok
+  end
+
+  defp heavy_delivery_priority_unlocked do
+    if heavy_delivery_action_active?(), do: {:error, :delivery_priority}, else: :ok
+  end
+
+  defp heavy_delivery_action_active? do
+    AgentAction
+    |> where(
+      [action],
+      action.action_key in ^@repair_action_keys and
+        action.state in ["queued", "running", "sync_pending"]
+    )
+    |> Repo.exists?()
   end
 
   defp repository_merge_locked_except?(repository_id, action_id) do
@@ -3129,7 +3161,7 @@ defmodule PtcManager.Operations do
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)
 
   defp configured_agent_capacity,
-    do: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+    do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1)
 
   defp configured_agent_kind,
     do: Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")

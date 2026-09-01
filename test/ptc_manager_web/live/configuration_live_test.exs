@@ -4,72 +4,49 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
   import Plug.Conn
 
   alias PtcManager.Operations.Repository
-  alias PtcManager.{Operations, PromptConfiguration, Repo}
+  alias PtcManager.{CapacitySettings, Operations, Repo}
 
-  test "lists every button prompt and saves and resets instructions", %{conn: conn} do
-    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+  test "edits the independent light and heavy agent limits", %{conn: conn} do
+    original = CapacitySettings.current()
 
-    assert html =~ "Agent prompt instructions"
-    assert has_element?(view, "nav", "Configuration")
-    assert has_element?(view, "#prompt-private_issue_analysis", "Investigate privately")
-    assert has_element?(view, "#prompt-implement_issue", "Approve and start")
-    assert has_element?(view, "#prompt-prepare_issue", "Button: Prepare issue")
-    assert has_element?(view, "#prompt-review_issue", "Button: Review issue")
-    assert has_element?(view, "#prompt-daily_digest", "Button: Generate daily update")
-    assert has_element?(view, "#prompt-resolve_issue_decision", "Button: Apply decision")
-    assert has_element?(view, "#prompt-repair_pr", "Button: Fix")
-    assert has_element?(view, "#prompt-repair_and_merge_pr", "Button: Fix and merge")
-    assert has_element?(view, "#prompt-implement_issue", "Agent retrospective")
+    on_exit(fn ->
+      CapacitySettings.update(%{
+        light_agent_capacity: original.light_agent_capacity,
+        heavy_agent_capacity: original.heavy_agent_capacity
+      })
+    end)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(view, "#agent-capacity", "Light agents")
+    assert has_element?(view, "#agent-capacity", "merge → repair → new implementation")
 
     view
-    |> form("#prompt-repair_and_merge_pr form", %{
-      "action-key" => "repair_and_merge_pr",
-      "customization" => %{
-        "instructions" => "Mention the merge commit SHA in the final evidence."
-      }
+    |> form("#agent-capacity form", %{
+      "capacity" => %{"light_agent_capacity" => "3", "heavy_agent_capacity" => "2"}
     })
     |> render_submit()
 
-    assert PromptConfiguration.instructions("repair_and_merge_pr") ==
-             "Mention the merge commit SHA in the final evidence."
+    assert CapacitySettings.current().light_agent_capacity == 3
+    assert CapacitySettings.current().heavy_agent_capacity == 2
+    assert Application.get_env(:ptc_manager, :light_agent_capacity) == 3
+    assert Application.get_env(:ptc_manager, :heavy_agent_capacity) == 2
+    assert render(view) =~ "Agent capacity updated"
+  end
 
-    assert has_element?(view, "#prompt-repair_and_merge_pr", "Customized")
+  test "routes repository-specific prompt editing to versioned automations", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreasronge", github_name: "ptc_runner"})
+    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
 
-    view
-    |> element("#prompt-repair_and_merge_pr button[phx-click=show-prompt-preview]")
-    |> render_click()
-
-    assert has_element?(view, "#prompt-preview", "Example composed prompt")
-    assert has_element?(view, "#prompt-preview", "Protected instructions")
-    assert has_element?(view, "#prompt-preview", "andreasronge/example_repository")
-
-    assert has_element?(
-             view,
-             "#full-prompt-preview-repair_and_merge_pr",
-             "Mention the merge commit SHA in the final evidence."
-           )
+    assert html =~ "Repository configuration"
+    assert has_element?(view, "nav", "Configuration")
+    assert has_element?(view, "aside", "Prompts are repository-specific and fully editable")
 
     assert has_element?(
              view,
-             "#full-prompt-preview-repair_and_merge_pr",
-             "explicit maintainer authorization to merge only pull request #456"
+             "#repository-health-#{repository.id} a[href*='/automations?repo=']",
+             "Edit prompts and automations"
            )
-
-    send(view.pid, {:operations_changed, Repository})
-    assert has_element?(view, "#prompt-preview", "Example composed prompt")
-
-    view
-    |> element("#prompt-preview button[phx-click=close-prompt-preview]")
-    |> render_click()
-
-    refute has_element?(view, "#prompt-preview")
-
-    view
-    |> element("#prompt-repair_and_merge_pr button[phx-click=reset-prompt]")
-    |> render_click()
-
-    assert is_nil(PromptConfiguration.instructions("repair_and_merge_pr"))
-    assert has_element?(view, "#prompt-repair_and_merge_pr", "Default")
   end
 
   test "registers another repository disabled with its own automation defaults", %{conn: conn} do
@@ -91,7 +68,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
       Repo.get_by!(Repository, github_owner: "andreasronge", github_name: "ptc_manager")
 
     refute repository.enabled
-    assert length(PtcManager.Automations.list_definitions(repository)) == 12
+    assert length(PtcManager.Automations.list_definitions(repository)) == 11
     assert has_element?(view, "#repository-health-#{repository.id}", "Disabled")
   end
 

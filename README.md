@@ -34,29 +34,30 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - bounded, credential-free verification of a non-empty committed branch diff;
 - fenced reconciliation claims that are safe to retry after interruption;
 - verified base, head, commit count, and diff digest visible before PR acceptance;
-- a configurable test command and a review-skill pass count frozen per task;
+- repository-owned validation instructions and a provider-neutral review-pass count frozen per task;
 - exact-SHA branch push and draft-PR creation through a GitHub App broker;
 - a strict checked-in `.ptc-manager.yml` setup contract with optional broker
   verification frozen from the exact candidate commit;
 - a credential-free, disposable verifier checkout that must pass the frozen
   gate cleanly before the GitHub App broker can push that SHA;
-- worker-advertised implementation capacity instead of a hard-coded worktree count;
+- persistent light/heavy agent limits instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
 - canonical PR status and GitHub link in the dashboard;
 - read-only GitHub check-run, commit-status, draft, and merge-conflict signals
-  that import every open repository PR and place it in Review & CI, Needs
+  that import every open repository PR and place it in In progress, Needs
   attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
-  **Fix and merge**, and **Prepare merge decision**
-  buttons, all visible alongside queued implementation jobs on **Operations**;
-- durable per-button prompt customizations, including private issue analysis,
-  Approve-and-start implementation, and every active maintainer action. PtcManager appends the saved
-  maintainer instructions while continuing to inject and protect the exact
-  repository, target, branch, SHA, and authorization boundary. Queued and
-  running actions keep their frozen prompt when configuration changes;
-- a Delivery-board **Review for merge** action once CI and mergeability are
-  clean. New implementation agents include a configurable retrospective in the
-  PR description rather than starting a separate retrospective agent;
+  **Fix**, and **Approve and merge** buttons, all visible alongside queued
+  implementation jobs on **Operations**;
+- repository-specific, immutable prompt versions for private issue analysis,
+  Approve-and-start implementation, and every active maintainer action. Each
+  automation has one completely editable prompt, including any safety guidance
+  the maintainer wants. PtcManager supplies a project-specific suggestion and
+  adds only concise runtime facts and the machine result protocol. Queued and
+  running actions keep their frozen version;
+- a direct Delivery-board **Approve and merge** action once CI and mergeability
+  are clean. New implementation agents include a configurable retrospective in
+  the PR description rather than starting a separate retrospective agent;
 - one shared clock/spinner status language for queued and actively running work
   across Planning, Delivery, and Operations;
 - canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
@@ -66,7 +67,6 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - approval and dispatch checks that prevent unresolved dependencies from
   starting implementation;
 - agent-action attempts, results, and elapsed time in the shared activity view.
-- private, phone-friendly PR summaries fenced by GitHub head and base SHAs;
 - an **Approve for merge** decision bound to the exact analyzed PR version;
 - explicit stale-approval display when the observed head, base, or diff changes.
 
@@ -121,12 +121,11 @@ The authenticated routes are:
   the latest 40 agent runs and their tasks. Select an agent to open a bounded,
   read-only terminal panel; active panels refresh every five seconds and expose
   no prompt or input controls;
-- `/automations` — repository-scoped, immutable action versions; complete agent
-  and protected operational prompts; Herdr-kind selectors; manual and scheduled
+- `/automations` — repository-scoped, immutable action versions; one complete
+  editable prompt with a runtime preview; Herdr-kind selectors; manual and scheduled
   triggers; Run now; cross-repository copying; and durable result history;
-- `/configuration` — additional instructions for every button-triggered agent
-  prompt, with clear customized/default state and one-click reset, plus safe
-  registration of another dedicated repository checkout.
+- `/configuration` — safe registration and health checks for dedicated repository
+  checkouts, with direct links to each repository's prompt and automation settings.
 
 To choose a different local password:
 
@@ -329,19 +328,14 @@ catalog contains:
 
 - **Prepare issue**, which rewrites or closes the issue and leaves exactly one
   of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
-- **Review issue**, which uses up to three fresh independent `codex-review`
-  consultations to challenge and improve the issue, stopping early after a
-  clean pass and applying the same canonical label rules as **Prepare issue**;
+- **Review issue**, which asks a configured Herdr agent to challenge and improve
+  issue readiness and apply the same canonical label rules as **Prepare issue**;
 - **Apply decision**, shown after an issue action returns a schema-validated
   question with two to four plain-language choices. A maintainer can choose an
   option or enter a custom answer; a queued agent then records that decision on
   GitHub and normally moves the issue to `ptc:ready`. Choices are tied to the
   exact synchronized issue version, so an edit requires a fresh analysis;
-- **Prepare merge decision**, shown for an open PR, which returns a private
-  simplified summary and readiness outcome. The maintainer can approve only a
-  merge-ready analysis whose head SHA, reviewed base SHA, base target, and
-  verified diff still match. This increment records approval but does not merge.
-- **Fix and merge**, which gives the same repository the highest queue priority.
+- **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr
   agent—not PtcManager—repairs and pushes the branch, watches required CI,
@@ -351,17 +345,14 @@ catalog contains:
   be reviewed and repaired, but do not receive a generated implementation
   retrospective because PtcManager did not start their agent.
 
-Maintainer actions use two deliberately separate execution lanes. Repository
-writers—implementation, repair, and fix-and-merge—remain serialized whenever a
-merge action owns the repository, so two agents cannot race to rewrite or merge
-branches. Issue preparation, issue review, and issue-decision resolution use a
-separate planning worker and can continue while that writer lock is held. Merge
-decisions, retrospectives, and unknown future action types remain in the safer
-serialized writer lane until they receive equivalent snapshot isolation. The
-The light planning and heavy writing capacities are configured separately
-(`planning_agent_capacity` and `writing_agent_capacity`); additional actions
-remain visible in the durable Operations queue. A merge action still serializes
-repository writers, while source-pinned planning work may continue in parallel.
+Maintainer actions use two deliberately separate resource pools. Heavy work is
+ordered **merge → repair → new implementation**, with oldest work first inside
+each priority. A merge action still serializes repository writers, so agents do
+not race to rewrite or merge branches. Light issue preparation, review,
+decision, investigation, and summary work can continue independently. The two
+limits are persisted and editable under **Configuration → Concurrent agents**;
+`PTC_LIGHT_AGENT_CAPACITY` and `PTC_HEAVY_AGENT_CAPACITY` only provide the
+initial values for a new database.
 
 Daily updates reuse the planning lane. Oban Lite persists scheduled occurrences
 in the same SQLite database. After 02:00 in `Europe/Stockholm`, it idempotently
@@ -435,12 +426,6 @@ the periodic issue sync therefore does not need to fetch every comment. Rows
 that predate this projection remain approval-ineligible until their first
 successful GitHub synchronization confirms the assignment state.
 
-Prepare merge decision is instructed to be read-only, but it currently shares
-the unrestricted authenticated maintainer-action runner. The result is fenced
-before and after execution, which prevents a changed PR from being approved,
-but it does not technically prevent other repository or GitHub mutations. A
-GET-only credential and filesystem-read-only runner remain explicitly deferred.
-
 Enable the runner only after Codex and `gh` are authenticated for its OS user:
 
 ```sh
@@ -463,8 +448,12 @@ mix ecto.reset
 
 PtcManager stores every automation as a repository identity plus immutable
 versions. A version freezes its target type, execution profile, Herdr selector,
-GitHub access, light/heavy queue, lock policy, timeout, result contract,
-protected operational policy, and task prompt. A trigger points at the current
+GitHub access, light/heavy queue, lock policy, timeout, result contract, and one
+maintainer-editable task prompt. New repositories receive
+a PtcManager suggestion that names the project and delegates coding conventions
+and validation to its checked-in instructions and scripts. The Automations page
+previews that editable prompt together with example runtime context.
+A trigger points at the current
 version only when it materializes a run, so later edits cannot alter queued or
 running work.
 
@@ -487,8 +476,8 @@ To onboard another private repository:
 
 1. create a dedicated clone on the worker and authenticate the existing `gh`
    CLI identity for it;
-2. commit a `.ptc-manager.yml` contract whose bootstrap and verification
-   commands exercise that repository's real gates;
+2. commit a `.ptc-manager.yml` contract whose bootstrap command prepares that
+   repository; add broker verification only if PtcManager will publish for the agent;
 3. use **Configuration → Add another GitHub repository** to register the exact
    absolute checkout path; it starts disabled;
 4. verify checkout, GitHub, and gate health, then review or copy the desired

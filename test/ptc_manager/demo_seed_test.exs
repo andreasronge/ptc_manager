@@ -29,7 +29,6 @@ defmodule PtcManager.DemoSeedTest do
     allocation = Repo.one!(WorktreeAllocation)
 
     assert is_nil(repository.local_path)
-    assert is_nil(repository.implementation_test_command)
     assert repository.required_pre_pr_reviews == 2
 
     assert job.state == "working"

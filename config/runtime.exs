@@ -164,10 +164,8 @@ config :ptc_manager,
   agent_actions_enabled: agent_actions_enabled,
   agent_action_interval_ms:
     System.get_env("PTC_AGENT_ACTION_INTERVAL_MS", "5000") |> String.to_integer(),
-  planning_agent_capacity:
-    System.get_env("PTC_PLANNING_AGENT_CAPACITY", "2") |> String.to_integer(),
-  writing_agent_capacity:
-    System.get_env("PTC_WRITING_AGENT_CAPACITY", "1") |> String.to_integer(),
+  light_agent_capacity: System.get_env("PTC_LIGHT_AGENT_CAPACITY", "2") |> String.to_integer(),
+  heavy_agent_capacity: System.get_env("PTC_HEAVY_AGENT_CAPACITY", "1") |> String.to_integer(),
   agent_action_timeout_ms:
     System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "7200000") |> String.to_integer(),
   agent_action_sync_retry_base_ms:
@@ -213,8 +211,6 @@ config :ptc_manager,
   dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
   dispatch_reconcile_after_ms:
     System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
-  implementation_agent_capacity:
-    System.get_env("PTC_IMPLEMENTATION_AGENT_CAPACITY", "1") |> String.to_integer(),
   worktree_reconcile_interval_ms:
     System.get_env("PTC_WORKTREE_RECONCILE_INTERVAL_MS", "30000") |> String.to_integer(),
   result_reconcile_interval_ms:
@@ -288,7 +284,6 @@ config :ptc_manager,
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),
   implementation_agent_publishes_pr: implementation_agent_publishes_pr,
-  implementation_test_command: System.get_env("PTC_IMPLEMENTATION_TEST_COMMAND"),
   manager_enabled: not demo_mode and System.get_env("PTC_CODEX_MANAGER_ENABLED") == "true",
   manager_concurrency:
     System.get_env("PTC_CODEX_MANAGER_CONCURRENCY", "1") |> String.to_integer(),

@@ -229,8 +229,8 @@ defmodule PtcManager.ExternalPullRequestsTest do
              })
 
     assert "repair_and_merge_pr" in keys
-    assert prompt =~ "fresh isolated worktree"
-    assert prompt =~ "Push its final HEAD explicitly"
+    assert prompt =~ ~s(retained_workspace="false")
+    assert prompt =~ ~s(merge_authorized="false")
     assert prompt =~ "Related issue: none recorded"
 
     assert {:ok, %{prompt: merge_prompt}} =
@@ -240,11 +240,9 @@ defmodule PtcManager.ExternalPullRequestsTest do
                publication: publication
              })
 
-    assert merge_prompt =~ "explicit maintainer authorization to merge only pull request #92"
-    assert merge_prompt =~ "same Herdr session"
-    assert merge_prompt =~ "wait for every required GitHub check"
-    assert merge_prompt =~ "Merge with the authenticated `gh` CLI"
-    assert merge_prompt =~ "do not finish the run until GitHub confirms the PR is merged"
+    assert merge_prompt =~ ~s(merge_authorized="true")
+    assert merge_prompt =~ ~s(retained_workspace="false")
+    assert merge_prompt =~ "PR: #92"
   end
 
   test "a previously queued external merge review is rejected before execution" do
@@ -339,7 +337,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
     assert publication_id == publication.id
     assert_receive {:herdr_prompted, agent_name, prompt}
     assert agent_name =~ "repair_pr94"
-    assert prompt =~ "pull request #94"
+    assert prompt =~ "PR: #94"
 
     run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
     assert run.agent_name == agent_name
@@ -368,9 +366,9 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
     assert completed.id == action.id
     assert_receive {:executed_prompt, prompt}
-    assert prompt =~ "same Herdr session"
-    assert prompt =~ "Merge with the authenticated `gh` CLI"
-    refute prompt =~ "Do not use network access"
+    assert prompt =~ "merge this PR when it is green and mergeable"
+    assert prompt =~ ~s(merge_authorized="true")
+    assert prompt =~ ~s(retained_workspace="false")
   end
 
   test "external repair stays queued when the private worktree root is unavailable" do

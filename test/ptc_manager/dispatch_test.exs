@@ -91,7 +91,7 @@ defmodule PtcManager.DispatchTest do
     refute_receive {:dispatch_context, _context}
   end
 
-  test "a queued fix-and-merge action prevents new implementation work in its repository" do
+  test "queued merge work prevents lower-priority implementation from starting" do
     {repository, _issue, _proposal, job, remote} = approved_job_fixture()
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -115,9 +115,37 @@ defmodule PtcManager.DispatchTest do
 
     Process.put(:dispatch_github_result, {:ok, remote})
 
-    assert {:error, :merge_priority} =
-             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    assert {:ok, :empty} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
 
+    assert Repo.get!(Job, job.id).state == "queued"
+    refute_receive {:dispatch_context, _context}
+  end
+
+  test "queued repair work prevents lower-priority implementation from starting" do
+    {repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "repair_pr",
+      target_type: "pull_request",
+      target_id: 9_004,
+      target_label: "example/repo#9004",
+      prompt_version: 1,
+      prompt: "Repair the exact pull request",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "andreas",
+      state: "queued",
+      attempt_count: 0,
+      requested_at: now
+    })
+    |> Repo.insert!()
+
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:ok, :empty} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
     assert Repo.get!(Job, job.id).state == "queued"
     refute_receive {:dispatch_context, _context}
   end
@@ -658,12 +686,9 @@ defmodule PtcManager.DispatchTest do
            ]
   end
 
-  test "builds the configurable test, prompt-only review, and broker contract" do
+  test "builds repository-owned validation, provider-neutral review, and broker contract" do
     repository =
-      repository_fixture(%{
-        required_pre_pr_reviews: 2,
-        implementation_test_command: "mix precommit"
-      })
+      repository_fixture(%{required_pre_pr_reviews: 2})
 
     issue = issue_fixture(repository, %{number: 42, title: "Fix the queue"})
     proposal_fixture(issue)
@@ -676,13 +701,13 @@ defmodule PtcManager.DispatchTest do
 
     prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, issue, job)
 
-    assert prompt =~ "Fix GitHub issue #42"
-    assert prompt =~ "Run this configured test command exactly: mix precommit"
-    assert prompt =~ "invoke the `codex-review` skill 2 time(s)"
-    assert prompt =~ "PtcManager does not run or verify these reviews"
-    assert prompt =~ "Do not use GitHub credentials"
-    assert prompt =~ "credential-isolated broker"
-    assert prompt =~ "PTC-AGENT-RETROSPECTIVE-BEGIN"
+    assert prompt =~ "Fix the issue completely"
+    assert prompt =~ "Follow the repository instructions"
+    assert prompt =~ "Reviews: 2"
+    refute prompt =~ "Run this configured test command exactly"
+    refute prompt =~ "codex-review"
+    assert prompt =~ "PtcManager will publish it"
+    assert prompt =~ "Do not push, create a pull request, or merge."
   end
 
   test "uses the review count frozen on the individual implementation job" do
@@ -701,8 +726,9 @@ defmodule PtcManager.DispatchTest do
     tricky_prompt =
       PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, tricky_issue, tricky_job)
 
-    assert easy_prompt =~ "No independent Codex review-skill pass is required for this task"
-    assert tricky_prompt =~ "invoke the `codex-review` skill 3 time(s)"
+    assert easy_prompt =~ "Reviews: 0"
+    assert tricky_prompt =~ "Reviews: 3"
+    refute tricky_prompt =~ "codex-review"
   end
 
   test "can assign fenced branch push and PR creation to the coding agent" do
@@ -732,14 +758,13 @@ defmodule PtcManager.DispatchTest do
 
     prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, issue, job)
 
-    assert prompt =~ "push the existing job branch and create one pull request"
-    assert prompt =~ "Use GitHub credentials only to push `#{job.branch_name}`"
-    assert prompt =~ "include `Closes #1627`"
-    assert prompt =~ "## Agent retrospective"
-    assert prompt =~ "No follow-up suggested"
-    assert prompt =~ "do not merge anything"
-    assert prompt =~ "pull-request URL"
-    refute prompt =~ "Do not use GitHub credentials"
+    assert prompt =~ "publish a pull request that closes the issue"
+    assert prompt =~ "Branch: #{job.branch_name} → main"
+    assert prompt =~ "Reviews: 2"
+    assert prompt =~ "Read the issue, its comments, linked issues"
+    assert prompt =~ "Push this branch and create a pull request. Do not merge."
+    refute prompt =~ "fencing_token"
+    refute prompt =~ "result="
   end
 
   defp approved_job_fixture do

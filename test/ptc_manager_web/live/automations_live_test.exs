@@ -14,7 +14,35 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
     assert has_element?(view, "nav", "Automations")
     assert has_element?(view, "#automation-#{definition.id}", "Investigate nightly CI")
     assert has_element?(view, "#automation-#{definition.id}", "generic_ephemeral")
-    assert has_element?(view, "#automation-#{definition.id}", "Protected operational policy")
+
+    assert has_element?(
+             view,
+             "#automation-#{definition.id}",
+             "complete user-owned instruction"
+           )
+
+    view
+    |> element("#automation-#{definition.id} button[phx-click=show-prompt-preview]")
+    |> render_click()
+
+    assert has_element?(view, "#automation-prompt-preview", "Your complete prompt")
+
+    assert has_element?(
+             view,
+             "#automation-full-prompt-preview-#{definition.id}",
+             "Inspect the latest completed nightly GitHub Actions workflow"
+           )
+
+    assert has_element?(
+             view,
+             "#automation-full-prompt-preview-#{definition.id}",
+             "Result protocol: read <generated-result-path>.schema.json"
+           )
+
+    view
+    |> element("#automation-prompt-preview button[phx-click=close-prompt-preview]")
+    |> render_click()
+
     assert has_element?(view, "#automation-#{definition.id}", "Nightly CI check")
 
     view
@@ -41,8 +69,7 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
         "queue_lane" => "planning",
         "resource_class" => "light",
         "timeout_seconds" => "1800",
-        "operational_policy" => "Do not mutate GitHub.",
-        "prompt" => "Inspect dependencies and return a concise report."
+        "prompt" => "Inspect dependencies read-only and return a concise report."
       }
     })
     |> render_submit()
@@ -52,6 +79,69 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
     assert created.current_version.execution_profile == "generic_ephemeral"
     assert Enum.any?(created.triggers, &(&1.trigger_type == "manual" and not &1.enabled))
     assert has_element?(view, "#automation-#{created.id}", "Inspect dependencies")
+  end
+
+  test "saves the complete editable prompt as a new version", %{conn: conn} do
+    repository = repository_fixture(%{github_name: "ptc_runner"})
+    definition = Automations.get_definition(repository, "implement_issue")
+    current = definition.current_version
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/automations")
+
+    view
+    |> form("#automation-#{definition.id} form[phx-submit=save-definition]", %{
+      "definition_id" => to_string(definition.id),
+      "automation" => %{
+        "name" => definition.name,
+        "description" => definition.description,
+        "enabled" => "true",
+        "execution_profile" => current.execution_profile,
+        "agent_mode" => "any",
+        "agent_kind" => "",
+        "github_access" => current.github_access,
+        "queue_lane" => current.queue_lane,
+        "resource_class" => current.resource_class,
+        "timeout_seconds" => to_string(current.timeout_seconds),
+        "prompt" =>
+          "Use the ptc_runner repository instructions and normal hooks. Implement the selected issue and explain skipped checks."
+      }
+    })
+    |> render_submit()
+
+    updated = Automations.get_definition(repository, "implement_issue")
+    assert updated.current_version.version == 2
+    assert updated.current_version.prompt =~ "ptc_runner repository instructions"
+    assert updated.current_version.prompt =~ "explain skipped checks"
+
+    view
+    |> element("#automation-#{definition.id} button[phx-click=show-prompt-preview]")
+    |> render_click()
+
+    assert has_element?(
+             view,
+             "#automation-full-prompt-preview-#{definition.id}",
+             "Use the ptc_runner repository instructions and normal hooks."
+           )
+
+    assert has_element?(
+             view,
+             "#automation-full-prompt-preview-#{definition.id}",
+             "Implement the selected issue and explain skipped checks."
+           )
+
+    refute has_element?(
+             view,
+             "#automation-full-prompt-preview-#{definition.id}",
+             "Result protocol:"
+           )
+
+    view
+    |> element("#automation-#{definition.id} button[phx-click=restore-suggested-prompt]")
+    |> render_click()
+
+    restored = Automations.get_definition(repository, "implement_issue")
+    assert restored.current_version.version == 3
+    assert restored.current_version.prompt =~ "For #{repository.github_owner}/ptc_runner"
+    assert restored.current_version.prompt =~ "Fix the issue completely"
   end
 
   defp authenticated_conn(conn) do

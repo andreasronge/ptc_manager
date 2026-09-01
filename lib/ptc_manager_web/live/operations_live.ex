@@ -1,6 +1,7 @@
 defmodule PtcManagerWeb.OperationsLive do
   use PtcManagerWeb, :live_view
 
+  alias PtcManager.CapacitySettings
   alias PtcManager.HostMetrics
   alias PtcManager.Herdr.Transcript
   alias PtcManager.Operations
@@ -218,19 +219,25 @@ defmodule PtcManagerWeb.OperationsLive do
   def slot_markers(total) when is_integer(total) and total > 0, do: 1..total
   def slot_markers(_total), do: []
 
+  def agent_slot_detail(active, capacity, true) do
+    "#{max(capacity - active, 0)} available"
+  end
+
+  def agent_slot_detail(_active, _capacity, false), do: "Herdr worker offline · work will queue"
+
   def terminal_refresh_label(%{state: "waiting"}),
     do: "Retained session · refreshes every 5 seconds"
 
   def terminal_refresh_label(%{ended_at: nil}), do: "Auto-refreshes every 5 seconds"
   def terminal_refresh_label(_run), do: "Final retained terminal snapshot"
 
-  def queued_action_label(%{action_key: "repair_and_merge_pr"}), do: "Fix and merge"
+  def queued_action_label(%{action_key: "repair_and_merge_pr"}), do: "Approve and merge"
   def queued_action_label(%{action_key: "repair_pr"}), do: "Fix PR"
   def queued_action_label(%{action_key: "daily_digest"}), do: "Daily update"
   def queued_action_label(action), do: String.replace(action.action_key, "_", " ")
 
   def queued_action_lane_label(action) do
-    if Operations.planning_agent_action?(action), do: "Planning lane", else: "Writer lane"
+    if Operations.planning_agent_action?(action), do: "Light work", else: "Heavy work"
   end
 
   def queue_age(now, requested_at), do: duration(now, requested_at, nil)
@@ -322,13 +329,24 @@ defmodule PtcManagerWeb.OperationsLive do
         selected -> Enum.find(timeline, &(&1.id == selected.id)) || selected
       end
 
-    active_slot_count =
-      workers
-      |> Enum.filter(&(&1.status == "online"))
-      |> Enum.flat_map(& &1.worktree_allocations)
-      |> Enum.count(&Operations.worktree_consumes_execution_slot?/1)
+    capacity_setting = CapacitySettings.current()
 
-    total_slots = Enum.sum(Enum.map(workers, &worker_capacity/1))
+    online_herdr_worker_ids =
+      workers
+      |> Enum.filter(&online_herdr_worker?(&1, socket.assigns.now))
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    {active_light_slots, active_heavy_slots} =
+      active_agent_slots(active_runs, online_herdr_worker_ids)
+
+    herdr_online? = MapSet.size(online_herdr_worker_ids) > 0
+
+    available_light_slots =
+      max(capacity_setting.light_agent_capacity - active_light_slots, 0)
+
+    available_heavy_slots =
+      max(capacity_setting.heavy_agent_capacity - active_heavy_slots, 0)
 
     assign(socket,
       workers: workers,
@@ -337,22 +355,42 @@ defmodule PtcManagerWeb.OperationsLive do
       queued_jobs: queued_jobs,
       queued_actions: queued_actions,
       workspace_setups: workspace_setups,
-      active_slot_count: active_slot_count,
+      active_light_slots: active_light_slots,
+      active_heavy_slots: active_heavy_slots,
+      light_agent_capacity: capacity_setting.light_agent_capacity,
+      heavy_agent_capacity: capacity_setting.heavy_agent_capacity,
+      available_light_slots: available_light_slots,
+      available_heavy_slots: available_heavy_slots,
+      herdr_online?: herdr_online?,
       timeline: timeline,
       selected_run: selected_run,
-      total_slots: total_slots,
-      available_slots: max(total_slots - active_slot_count, 0)
+      available_slots: available_light_slots + available_heavy_slots
     )
   end
 
-  defp worker_capacity(%{status: "online"} = worker) do
-    case worker.capabilities["implementation_slots"] do
-      value when is_integer(value) and value > 0 -> value
-      _value -> 0
-    end
+  defp active_agent_slots(runs, online_worker_ids) do
+    runs
+    |> Enum.filter(fn run ->
+      run.state in ~w(queued starting working idle unknown) and
+        MapSet.member?(online_worker_ids, run.worker_id)
+    end)
+    |> Enum.reduce({0, 0}, fn run, {light, heavy} ->
+      if light_agent_run?(run), do: {light + 1, heavy}, else: {light, heavy + 1}
+    end)
   end
 
-  defp worker_capacity(_worker), do: 0
+  defp online_herdr_worker?(worker, now) do
+    stale_after_ms = Application.get_env(:ptc_manager, :herdr_stale_after_ms, 60_000)
+
+    worker.status == "online" && worker.capabilities["herdr"] == true &&
+      match?(%DateTime{}, worker.last_heartbeat_at) &&
+      DateTime.diff(now, worker.last_heartbeat_at, :millisecond) < stale_after_ms
+  end
+
+  defp light_agent_run?(%{agent_action: %{} = action}),
+    do: Operations.planning_agent_action?(action)
+
+  defp light_agent_run?(_run), do: false
 
   defp load_agent_output(%{assigns: %{selected_run: run}} = socket) do
     reader = Application.get_env(:ptc_manager, :herdr_transcript_reader, Transcript)

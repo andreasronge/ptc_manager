@@ -16,11 +16,6 @@ if Repo.aggregate(Repository, :count) == 0 do
         if(demo_mode,
           do: 2,
           else: Application.get_env(:ptc_manager, :required_pre_pr_reviews_default, 2)
-        ),
-      implementation_test_command:
-        if(demo_mode,
-          do: nil,
-          else: Application.get_env(:ptc_manager, :implementation_test_command)
         )
     })
 

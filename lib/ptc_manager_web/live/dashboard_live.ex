@@ -5,7 +5,6 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.IssueDecision
   alias PtcManager.Manager
-  alias PtcManager.MergeDecisions
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
@@ -188,35 +187,6 @@ defmodule PtcManagerWeb.DashboardLive do
     else
       _ ->
         {:noreply, put_flash(socket, :error, "Publication could not be retried safely.")}
-    end
-  end
-
-  def handle_event("approve-merge", %{"publication-id" => publication_id}, socket) do
-    with {publication_id, ""} <- Integer.parse(publication_id),
-         {:ok, _approval} <-
-           MergeDecisions.approve(publication_id, socket.assigns.actor) do
-      {:noreply,
-       socket
-       |> put_flash(:info, "Approved for merge at this exact PR version.")
-       |> load_dashboard()}
-    else
-      {:error, :merge_analysis_missing} ->
-        {:noreply, put_flash(socket, :error, "Prepare a private merge decision first.")}
-
-      {:error, :merge_not_ready} ->
-        {:noreply, put_flash(socket, :error, "The current analysis does not recommend merging.")}
-
-      {:error, :merge_analysis_stale} ->
-        {:noreply,
-         put_flash(socket, :error, "The PR changed. Prepare a new merge decision first.")}
-
-      {:error, :pull_request_is_draft} ->
-        {:noreply,
-         put_flash(socket, :error, "A draft pull request cannot be approved for merge.")}
-
-      _error ->
-        {:noreply,
-         put_flash(socket, :error, "The exact PR version could not be approved safely.")}
     end
   end
 
@@ -520,29 +490,6 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def agent_action_failure(_action), do: nil
 
-  def merge_approvable?(%{
-        publication: publication,
-        pr_analysis: analysis,
-        merge_approval: nil
-      })
-      when not is_nil(publication) and not is_nil(analysis) do
-    publication.state == "published" and publication.pr_state == "open" and
-      analysis.outcome == "merge-ready" and analysis.head_sha == publication.remote_head_sha and
-      analysis.reviewed_base_sha == publication.remote_base_sha and
-      analysis.diff_digest == publication.diff_digest
-  end
-
-  def merge_approvable?(_item), do: false
-
-  def merge_approval_fresh?(%{publication: publication, merge_approval: approval})
-      when not is_nil(publication) and not is_nil(approval) do
-    approval.head_sha == publication.remote_head_sha and
-      approval.reviewed_base_sha == publication.remote_base_sha and
-      approval.diff_digest == publication.diff_digest
-  end
-
-  def merge_approval_fresh?(_item), do: false
-
   def reconciling_result?(jobs, job_id), do: MapSet.member?(jobs, job_id)
   def job_label("ready_for_pr"), do: "waiting for PR publication"
   def job_label("pr_open"), do: "PR open"
@@ -588,7 +535,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
       _value ->
         if worker.capabilities["herdr"],
-          do: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1),
+          do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1),
           else: 0
     end
   end

@@ -29,6 +29,8 @@ defmodule PtcManager.AutomationsTest do
         Enum.take(args, 2) == ["agent", "prompt"] ->
           prompt = Enum.at(args, 3)
           [path] = Regex.run(~r/to (\/\S+?\.json)\b/, prompt, capture: :all_but_first)
+          [schema] = Regex.run(~r/read (\/\S+?\.schema\.json)\b/, prompt, capture: :all_but_first)
+          assert_schema!(schema)
 
           File.write!(path, Jason.encode!(result()))
           {:ok, ~s({"result":{"state":"idle"}})}
@@ -57,17 +59,28 @@ defmodule PtcManager.AutomationsTest do
         "suggestions" => []
       }
     end
+
+    defp assert_schema!(path) do
+      body = File.read!(path)
+      true = body =~ ~s("private_summary")
+      :ok
+    end
   end
 
   test "new repositories receive versioned built-in definitions idempotently" do
     repository = repository_fixture()
 
     definitions = Automations.list_definitions(repository)
-    assert length(definitions) == 12
+    assert length(definitions) == 11
     assert Enum.all?(definitions, &match?(%DefinitionVersion{version: 1}, &1.current_version))
 
+    assert Enum.all?(definitions, fn definition ->
+             definition.current_version.prompt =~
+               "#{repository.github_owner}/#{repository.github_name}"
+           end)
+
     assert :ok = Automations.ensure_defaults(repository)
-    assert length(Automations.list_definitions(repository)) == 12
+    assert length(Automations.list_definitions(repository)) == 11
   end
 
   test "editing an action creates an immutable version used only by future actions" do
@@ -92,7 +105,6 @@ defmodule PtcManager.AutomationsTest do
         :timeout_seconds,
         :result_type,
         :result_protocol_version,
-        :operational_policy,
         :prompt,
         :configuration_snapshot
       ])
@@ -115,31 +127,54 @@ defmodule PtcManager.AutomationsTest do
     refute first.prompt =~ "Use a shorter maintainer explanation for future runs."
   end
 
-  test "implementation approval freezes its version and configured instructions" do
+  test "implementation approval freezes its user-owned prompt" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
     proposal_fixture(issue)
 
-    assert {:ok, _customization} =
-             PtcManager.PromptConfiguration.save(
-               "implement_issue",
-               "Keep the implementation change tightly scoped.",
-               "maintainer"
-             )
+    definition = Automations.get_definition(repository, "implement_issue")
+    current = definition.current_version
+
+    attrs =
+      current
+      |> version_attrs()
+      |> Map.put(
+        :prompt,
+        "Use this repository's normal pull-request policy. Keep the implementation change tightly scoped."
+      )
+
+    assert {:ok, configured} = Automations.create_version(definition, attrs, "maintainer")
 
     assert {:ok, job} = PtcManager.Operations.approve_issue(issue.id, "maintainer")
-    assert job.automation_definition_version_id
-    assert job.prompt_instructions == "Keep the implementation change tightly scoped."
+    assert job.automation_definition_version_id == configured.id
+    assert job.prompt_instructions =~ "Use this repository's normal pull-request policy."
+    assert job.prompt_instructions =~ "Keep the implementation change tightly scoped."
 
-    assert {:ok, _customization} =
-             PtcManager.PromptConfiguration.save(
-               "implement_issue",
-               "This later edit must not alter approved work.",
-               "maintainer"
-             )
+    later_attrs = Map.put(attrs, :prompt, "This later edit must not alter approved work.")
+    assert {:ok, _later} = Automations.create_version(definition, later_attrs, "maintainer")
 
-    assert Repo.get!(PtcManager.Operations.Job, job.id).prompt_instructions ==
-             "Keep the implementation change tightly scoped."
+    frozen = Repo.get!(PtcManager.Operations.Job, job.id).prompt_instructions
+    assert frozen =~ "Keep the implementation change tightly scoped."
+    refute frozen =~ "This later edit must not alter approved work."
+  end
+
+  defp version_attrs(version) do
+    version
+    |> Map.from_struct()
+    |> Map.take([
+      :target_type,
+      :execution_profile,
+      :agent_selector,
+      :github_access,
+      :queue_lane,
+      :resource_class,
+      :lock_policy,
+      :timeout_seconds,
+      :result_type,
+      :result_protocol_version,
+      :prompt,
+      :configuration_snapshot
+    ])
   end
 
   test "repository defaults include disabled schedules where updates are not relevant" do
@@ -233,7 +268,6 @@ defmodule PtcManager.AutomationsTest do
         :timeout_seconds,
         :result_type,
         :result_protocol_version,
-        :operational_policy,
         :prompt,
         :configuration_snapshot
       ])

@@ -307,7 +307,7 @@ Prepare/Review code paths:
 | Open issue | Make implementation-ready | Assuming the issue should be done, investigate feasibility and rewrite it until implementation is safe |
 | Ready issue | Approve and start | Implement and create a PR |
 | PR needing attention | Fix and merge | Repair, verify, and merge the PR |
-| PR ready to merge | Prepare merge decision | Produce the private merge brief |
+| PR ready to merge | Approve and merge | Queue the highest-priority heavy agent to verify and merge the PR |
 
 Button labels and prompts are editable. `Triage issue` may retain the current
 user-facing label `Prepare issue`; `Make implementation-ready` may retain
@@ -645,7 +645,7 @@ enforcement lives here, not only the prompt:
 | `lock_policy` | Typed concurrency/serialization behavior |
 | `timeout_seconds` | Bounded execution time |
 | `result_type`, `result_protocol_version` | Common or typed specialized validator/presenter and its immutable envelope version |
-| `operational_policy`, `prompt` | Maintainer-editable instructions |
+| `prompt` | Complete maintainer-editable instruction, including optional safety guidance |
 | `configuration_snapshot` | Any remaining profile-specific immutable settings |
 | `created_by`, `inserted_at` | Audit provenance |
 
@@ -1305,18 +1305,17 @@ dependency, or source of truth.
 
 There is no repository-wide prompt. The resolved prompt is assembled from:
 
-1. generated coordinator context;
-2. the selected definition version's editable operational policy;
-3. the selected definition version's editable action prompt;
-4. generated result instructions.
+1. the selected definition version's complete editable prompt;
+2. concise generated coordinator facts;
+3. generated result-transport instructions.
 
 The resolved prompt and its digest are stored on the run before it can be
 claimed. Editing a definition creates a new version; it never mutates queued or
 running prompts.
 
-The complete default and resolved prompt are visible in Configuration. The UI
-may allow editing operational policy text, but it cannot disable enforcement
-implemented outside the prompt.
+The complete default and resolved prompt are visible in Configuration. Prompt
+text is user-owned; authorization, locks, worktrees, and queue fencing are
+enforced outside it.
 
 ## GitHub access
 
@@ -1709,7 +1708,7 @@ Acceptance:
   authoritative blocker is satisfied.
 - Introduce durable lock claims and fencing tokens, migrate current merge and
   writer serialization, then remove the old unconditional target index.
-- Migrate current prompt customizations into immutable definition versions.
+- Migrate old prompt customizations into the single immutable prompt field.
 
 Acceptance:
 
@@ -2246,10 +2245,9 @@ A slice is deployable only when:
 ## Rollout and compatibility
 
 Migrations seed current catalog actions and preserve existing `agent_actions`,
-implementation jobs, daily digests, and prompt customizations. Initially, old
-catalog builders may delegate to seeded definitions while UI queries move to
-triggers. Existing prompt customizations become immutable definition versions,
-not a second editable prompt source. Feature flags allow generated buttons,
+implementation jobs, and daily digests. Old prompt customizations are folded
+into immutable definition prompts and the obsolete second prompt source is
+removed. Feature flags allow generated buttons,
 profile dispatch, durable locks, and Oban schedules to be enabled separately.
 
 The migration includes an explicit parity matrix:
@@ -2456,8 +2454,9 @@ therefore be based on local health and measured PtcManager outcomes.
    and retained worktrees? The recommendation for the current Hetzner pilot is
    to measure two light and two heavy slots separately, with host-pressure
    admission still able to pause starts.
-5. Should `Prepare merge decision` remain a default button or become an
-   optional disabled action?
+5. Resolved: there is no separate merge-review lane or default merge-decision
+   agent. Clean PRs go directly to Ready to merge, where maintainer approval
+   queues the configured fix-and-merge workflow.
 6. Should definition editing be allowed while runs of an older version are
    active? The recommendation is yes because runs are immutable and versioned.
 7. Should a scheduled trusted-direct GitHub action require a one-time

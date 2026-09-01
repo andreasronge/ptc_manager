@@ -48,8 +48,8 @@ defmodule PtcManager.DailyDigestsTest do
     assert digest.agent_action.target_type == "daily_digest"
     assert digest.agent_action.state == "queued"
     assert digest.agent_action.actor == "scheduler"
-    assert digest.agent_action.prompt =~ "complete calendar day 2026-08-30"
-    assert digest.agent_action.prompt =~ "GET-only GitHub manifest"
+    assert digest.agent_action.prompt =~ ~s(date="2026-08-30")
+    assert digest.agent_action.prompt =~ ~s(github_access="none")
 
     assert {:ok, [same_digest]} = DailyDigests.enqueue_due(now)
     assert same_digest.id == digest.id

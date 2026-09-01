@@ -25,8 +25,7 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   def wake do
     Enum.each([:planning, :writing], fn lane ->
-      capacity = Application.get_env(:ptc_manager, capacity_key(lane), 1)
-      Enum.each(1..max(capacity, 1), &wake(name(lane, &1)))
+      Enum.each(1..8, &wake(name(lane, &1)))
     end)
 
     :ok
@@ -39,7 +38,7 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   @impl true
   def handle_info(:run, %{task_ref: nil} = state) do
-    if enabled?() do
+    if enabled?() and admitted?(state) do
       task =
         Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
           MaintainerActions.run_once(lane: state.lane)
@@ -89,8 +88,12 @@ defmodule PtcManager.MaintainerActions.Poller do
         "#{Macro.camelize(to_string(lane))}Poller#{index}"
       )
 
-  defp capacity_key(:planning), do: :planning_agent_capacity
-  defp capacity_key(:writing), do: :writing_agent_capacity
+  defp capacity_key(:planning), do: :light_agent_capacity
+  defp capacity_key(:writing), do: :heavy_agent_capacity
+
+  defp admitted?(state) do
+    state.index <= Application.get_env(:ptc_manager, capacity_key(state.lane), 1)
+  end
 
   defp wake(name) do
     if Process.whereis(name), do: GenServer.cast(name, :wake)

@@ -4,7 +4,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
-  alias PtcManager.MergeDecisions
   alias PtcManager.Operations
 
   @lane_definitions [
@@ -21,12 +20,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       color: "bg-teal-400"
     },
     %{
-      key: :review,
-      title: "Review & CI",
-      subtitle: "Waiting for checks or merge review",
-      color: "bg-violet-400"
-    },
-    %{
       key: :stuck,
       title: "Needs attention",
       subtitle: "Failure, conflict, or decision",
@@ -35,7 +28,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     %{
       key: :ready,
       title: "Ready to merge",
-      subtitle: "Clean checks and reviewed version",
+      subtitle: "Clean checks and no conflicts",
       color: "bg-emerald-400"
     }
   ]
@@ -146,29 +139,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  def handle_event("approve-merge", %{"publication-id" => publication_id}, socket) do
-    with {publication_id, ""} <- Integer.parse(publication_id),
-         {:ok, _approval} <- MergeDecisions.approve(publication_id, socket.assigns.actor) do
-      {:noreply,
-       socket
-       |> put_flash(:info, "Approved for merge at this exact PR version.")
-       |> load_board()}
-    else
-      {:error, :merge_analysis_missing} ->
-        {:noreply, put_flash(socket, :error, "Review the PR for merge first.")}
-
-      {:error, :merge_not_ready} ->
-        {:noreply, put_flash(socket, :error, "The current review does not recommend merging.")}
-
-      {:error, :merge_analysis_stale} ->
-        {:noreply, put_flash(socket, :error, "The PR changed. Review it again first.")}
-
-      _error ->
-        {:noreply,
-         put_flash(socket, :error, "The exact PR version could not be approved safely.")}
-    end
-  end
-
   def lane_items(lanes, key) do
     lanes
     |> Map.get(key, [])
@@ -252,22 +222,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "pr_retrospective"))
   end
 
-  def merge_decision_action(%{publication: nil}), do: nil
-
-  def merge_decision_action(%{publication: publication}) do
-    Enum.find(
-      ActionCatalog.pull_request_actions(publication),
-      &(&1.key == "prepare_merge_decision")
-    )
-  end
-
-  def merge_decision_needed?(item) do
-    item.managed? and (item.publication && not item.publication.draft) and
-      item.publication.checks_state in ["success", "none"] and
-      item.publication.mergeability == "mergeable" and
-      (is_nil(item.pr_analysis) or not analysis_fresh?(item))
-  end
-
   def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
     do: true
 
@@ -302,21 +256,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
         pr_agent_action: %{action_key: "repair_and_merge_pr", state: "sync_pending"}
       }),
       do: "Waiting for confirmed merge"
-
-  def work_label(%{
-        pr_agent_action: %{action_key: "prepare_merge_decision", state: "queued"}
-      }),
-      do: "Merge review queued"
-
-  def work_label(%{
-        pr_agent_action: %{action_key: "prepare_merge_decision", state: "running"}
-      }),
-      do: "Agent reviewing"
-
-  def work_label(%{
-        pr_agent_action: %{action_key: "prepare_merge_decision", state: "sync_pending"}
-      }),
-      do: "Checking reviewed PR"
 
   def work_label(%{pr_agent_action: %{action_key: "pr_retrospective", state: "queued"}}),
     do: "Retro queued"
@@ -457,20 +396,9 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def next_step(_item, :queued), do: "PtcManager will assign this when a worker slot is free."
 
   def next_step(item, :working) do
-    case item.active_job.state do
-      "idle" -> "The agent is idle; check whether it is waiting for input."
-      "awaiting_reconciliation" -> "The agent finished; PtcManager is checking its branch."
-      "verifying_result" -> "The committed branch is being verified."
-      "ready_for_pr" -> "Waiting for the agent-created pull request to appear."
-      "publishing_pr" -> "The verified commit is being published."
-      _state -> "The assigned agent is implementing and reviewing the change."
-    end
-  end
-
-  def next_step(item, :review) do
     cond do
       match?(%{publication: %{draft: true}}, item) ->
-        "Mark the PR ready when implementation is complete."
+        "The pull request is still a draft."
 
       match?(%{publication: %{checks_state: "pending"}}, item) ->
         "CI is still running."
@@ -478,20 +406,18 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       match?(%{publication: %{checks_state: "unknown"}}, item) ->
         "Waiting for GitHub check status."
 
-      item.managed? == false ->
-        "Checks are clean. Review and merge this imported PR directly on GitHub."
-
-      is_nil(item.pr_analysis) ->
-        "Prepare a private merge decision from Planning."
-
-      not analysis_fresh?(item) ->
-        "The PR changed; prepare a fresh merge decision."
-
       match?(%{publication: %{mergeability: "unknown"}}, item) ->
         "GitHub is still calculating mergeability."
 
       true ->
-        "Review the remaining PR signals before approval."
+        case item.active_job.state do
+          "idle" -> "The agent is idle; check whether it is waiting for input."
+          "awaiting_reconciliation" -> "The agent finished; PtcManager is checking its branch."
+          "verifying_result" -> "The committed branch is being verified."
+          "ready_for_pr" -> "Waiting for the agent-created pull request to appear."
+          "publishing_pr" -> "The verified commit is being published."
+          _state -> "The assigned agent is implementing and reviewing the change."
+        end
     end
   end
 
@@ -517,12 +443,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       match?(%{publication: %{checks_state: "failure"}}, item) ->
         "One or more CI checks are failing."
 
-      item.pr_analysis && item.pr_analysis.outcome == "merge-blocked" ->
-        "The private merge review found blockers."
-
-      item.pr_analysis && item.pr_analysis.outcome == "merge-needs-decision" ->
-        "A maintainer decision is required."
-
       job_state(item) in ["failed", "lost"] ->
         "The agent stopped before completing the task."
 
@@ -534,13 +454,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  def next_step(item, :ready) do
-    if item.merge_approval do
-      "Approved at this exact PR version; automatic merge is not enabled yet."
-    else
-      "All observed gates are clean. Review the summary and approve the exact PR version."
-    end
-  end
+  def next_step(_item, :ready),
+    do: "All observed gates are clean. Approve an agent to merge this pull request."
 
   defp load_board(socket) do
     current_runs = Operations.list_current_agent_runs()
@@ -626,7 +541,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       job_state(item) == "queued" -> :queued
       stuck?(item) -> :stuck
       ready?(item) -> :ready
-      open_pull_request?(item) -> :review
       true -> :working
     end
   end
@@ -639,19 +553,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
         %{draft: false, checks_state: checks_state, mergeability: "blocked"}
         when checks_state in ["success", "none"],
         item.publication
-      ) or
-      match?(
-        %{outcome: outcome} when outcome in ["merge-blocked", "merge-needs-decision"],
-        item.pr_analysis
       )
   end
 
   defp ready?(item) do
-    item.managed? and open_pull_request?(item) and
+    open_pull_request?(item) and
       match?(%{state: "published", pr_state: "open", draft: false}, item.publication) and
       item.publication.checks_state in ["success", "none"] and
-      item.publication.mergeability == "mergeable" and
-      match?(%{outcome: "merge-ready"}, item.pr_analysis) and analysis_fresh?(item)
+      item.publication.mergeability == "mergeable"
   end
 
   defp open_pull_request?(%{publication: %{state: "published", pr_state: "open"}}), do: true
@@ -677,15 +586,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     do: "PR ##{number} · issue ##{issue.number}"
 
   def pull_request_label(%{publication: nil, issue: issue}), do: "issue ##{issue.number}"
-
-  defp analysis_fresh?(%{publication: publication, pr_analysis: analysis})
-       when not is_nil(publication) and not is_nil(analysis) do
-    analysis.head_sha == publication.remote_head_sha and
-      analysis.reviewed_base_sha == publication.remote_base_sha and
-      analysis.diff_digest == publication.diff_digest
-  end
-
-  defp analysis_fresh?(_item), do: false
 
   defp checks_badge("success"), do: {"CI passing", :good}
   defp checks_badge("failure"), do: {"CI failing", :bad}

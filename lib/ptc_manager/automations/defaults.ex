@@ -4,9 +4,6 @@ defmodule PtcManager.Automations.Defaults do
   @common %{
     agent_selector: %{"mode" => "any", "required_capabilities" => []},
     result_protocol_version: 1,
-    operational_policy:
-      "Follow the coordinator-supplied target, authorization, and safety boundaries.",
-    prompt: "Use the code-owned target prompt builder for this compatibility definition.",
     configuration_snapshot: %{}
   }
 
@@ -22,7 +19,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 120,
-      result_type: "private_issue_analysis"
+      result_type: "private_issue_analysis",
+      prompt:
+        "Explain this issue in simple language for the maintainer. Inspect the repository read-only and report readiness, scope, risk, and concrete technical evidence."
     },
     %{
       key: "implement_issue",
@@ -35,7 +34,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "heavy",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 7_200,
-      result_type: "implementation"
+      result_type: "implementation",
+      prompt:
+        "Fix the issue completely. Follow the repository instructions, validate the change, perform the configured reviews, commit it, and publish a pull request that closes the issue and includes a short retrospective. Do not merge it."
     },
     %{
       key: "prepare_issue",
@@ -48,7 +49,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 1_800,
-      result_type: "issue_maintenance"
+      result_type: "issue_maintenance",
+      prompt:
+        "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Do not implement it, and explain the result simply."
     },
     %{
       key: "review_issue",
@@ -61,7 +64,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 1_800,
-      result_type: "issue_maintenance"
+      result_type: "issue_maintenance",
+      prompt:
+        "Review whether the issue is genuinely ready to implement. Improve it and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Do not implement it, and explain the result simply."
     },
     %{
       key: "resolve_issue_decision",
@@ -74,7 +79,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 1_200,
-      result_type: "issue_maintenance"
+      result_type: "issue_maintenance",
+      prompt:
+        "Apply the maintainer's decision to the issue, rewrite it so the decision is clear, and leave it ready, blocked, still needing a decision, or closed as appropriate. Do not implement it."
     },
     %{
       key: "daily_digest",
@@ -87,20 +94,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "definition"},
       timeout_seconds: 1_800,
-      result_type: "daily_digest"
-    },
-    %{
-      key: "prepare_merge_decision",
-      name: "Prepare merge decision",
-      description: "Produce a private summary for an exact pull-request version.",
-      target_type: "pull_request",
-      execution_profile: "generic_ephemeral",
-      github_access: "read",
-      queue_lane: "planning",
-      resource_class: "light",
-      lock_policy: %{"type" => "target"},
-      timeout_seconds: 1_800,
-      result_type: "merge_decision"
+      result_type: "daily_digest",
+      prompt:
+        "Write a concise, easy-to-read daily update from the supplied change manifest. Explain what was added, fixed, changed, or removed and include practical examples when the evidence supports them."
     },
     %{
       key: "repair_pr",
@@ -113,7 +109,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "heavy",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 7_200,
-      result_type: "pull_request_repair"
+      result_type: "pull_request_repair",
+      prompt:
+        "Fix the pull request's failing CI or merge conflicts, validate and review the repair, then push the existing PR branch. Do not create another PR, merge, or force-push."
     },
     %{
       key: "repair_and_merge_pr",
@@ -126,7 +124,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "heavy",
       lock_policy: %{"type" => "repository_merge"},
       timeout_seconds: 10_800,
-      result_type: "pull_request_repair"
+      result_type: "pull_request_repair",
+      prompt:
+        "Fix the pull request's failing CI or merge conflicts, validate and review the repair, push the existing branch, wait for required CI, and merge this PR when it is green and mergeable. Do not force-push or work on another PR."
     },
     %{
       key: "pr_retrospective",
@@ -139,7 +139,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 1_800,
-      result_type: "retrospective"
+      result_type: "retrospective",
+      prompt:
+        "Review the completed pull request read-only and propose only concrete, untracked follow-up work such as potential bugs, refactoring, flaky tests, or missing tests. Returning no suggestions is valid."
     },
     %{
       key: "create_retrospective_issue",
@@ -152,7 +154,9 @@ defmodule PtcManager.Automations.Defaults do
       resource_class: "light",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 1_200,
-      result_type: "github_issue_change"
+      result_type: "github_issue_change",
+      prompt:
+        "Create at most one GitHub issue for the maintainer-approved retrospective suggestion, unless the work is already tracked. Do not modify code or unrelated GitHub items."
     },
     %{
       key: "nightly_ci_investigation",
@@ -173,8 +177,17 @@ defmodule PtcManager.Automations.Defaults do
     }
   ]
 
-  def all, do: Enum.map(@definitions, &Map.merge(@common, &1))
-  def get(key), do: Enum.find(all(), &(&1.key == key))
+  def all(repository) do
+    repo = "#{repository.github_owner}/#{repository.github_name}"
+
+    Enum.map(@definitions, fn definition ->
+      definition
+      |> Map.merge(@common)
+      |> Map.update!(:prompt, &"For #{repo}: #{&1}")
+    end)
+  end
+
+  def get(repository, key), do: Enum.find(all(repository), &(&1.key == key))
 
   def triggers("daily_digest", repository) do
     enabled = repository.github_name == "ptc_runner"
@@ -240,18 +253,6 @@ defmodule PtcManager.Automations.Defaults do
         trigger_type: "contextual",
         surface: "delivery_pr",
         label: "Fix and merge",
-        enabled: true,
-        configuration: %{}
-      }
-    ]
-  end
-
-  def triggers("prepare_merge_decision", _repository) do
-    [
-      %{
-        trigger_type: "contextual",
-        surface: "delivery_pr",
-        label: "Prepare merge decision",
         enabled: true,
         configuration: %{}
       }

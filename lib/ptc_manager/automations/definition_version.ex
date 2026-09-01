@@ -20,7 +20,6 @@ defmodule PtcManager.Automations.DefinitionVersion do
     field :timeout_seconds, :integer
     field :result_type, :string
     field :result_protocol_version, :integer, default: 1
-    field :operational_policy, :string, default: ""
     field :prompt, :string, default: ""
     field :configuration_snapshot, :map, default: %{}
     field :created_by, :string
@@ -45,7 +44,6 @@ defmodule PtcManager.Automations.DefinitionVersion do
       :timeout_seconds,
       :result_type,
       :result_protocol_version,
-      :operational_policy,
       :prompt,
       :configuration_snapshot,
       :created_by
@@ -63,7 +61,6 @@ defmodule PtcManager.Automations.DefinitionVersion do
       :timeout_seconds,
       :result_type,
       :result_protocol_version,
-      :operational_policy,
       :prompt,
       :configuration_snapshot,
       :created_by

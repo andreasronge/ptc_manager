@@ -1,7 +1,7 @@
 defmodule PtcManagerWeb.OperationsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
-  alias PtcManager.Operations
+  alias PtcManager.{CapacitySettings, Operations}
   alias PtcManager.Operations.{AgentAction, Job, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManagerWeb.OperationsLive
@@ -38,6 +38,18 @@ defmodule PtcManagerWeb.OperationsLiveTest do
 
     on_exit(fn ->
       Application.put_env(:ptc_manager, :herdr_transcript_reader, previous_reader)
+    end)
+
+    original_capacity = CapacitySettings.current()
+
+    {:ok, _setting} =
+      CapacitySettings.update(%{light_agent_capacity: 2, heavy_agent_capacity: 1})
+
+    on_exit(fn ->
+      CapacitySettings.update(%{
+        light_agent_capacity: original_capacity.light_agent_capacity,
+        heavy_agent_capacity: original_capacity.heavy_agent_capacity
+      })
     end)
 
     repository = repository_fixture()
@@ -157,6 +169,17 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       })
       |> Repo.insert!()
 
+    {:ok, _planning_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: planning_action.id,
+        role: "manager",
+        state: "working",
+        agent_name: "review_issue_9005",
+        started_at: DateTime.add(now, -60, :second),
+        last_heartbeat_at: now
+      })
+
     daily_action =
       %AgentAction{}
       |> AgentAction.changeset(%{
@@ -187,13 +210,17 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#worker-recovery-#{recovering_worker.id}", "Recovery check 1 of 2")
     assert has_element?(view, "#worker-recovery-#{recovering_worker.id}", "host restart")
     assert has_element?(view, "#worker-recovery-#{recovering_worker.id}", "New work is paused")
-    assert has_element?(view, "#metric-agents", "1 / 2")
+    assert has_element?(view, "#metric-agents", "Herdr online")
+    assert has_element?(view, "#light-agent-slots", "1/2")
+    assert has_element?(view, "#heavy-agent-slots", "1/1")
+    assert has_element?(view, "#light-agent-slots", "1 available")
+    assert has_element?(view, "#heavy-agent-slots", "0 available")
     assert has_element?(view, "#work-queue")
     assert has_element?(view, "#queued-action-#{priority_action.id}", "Merge priority")
-    assert has_element?(view, "#queued-action-#{priority_action.id}", "Writer lane")
-    assert has_element?(view, "#queued-action-#{planning_action.id}", "Planning lane")
+    assert has_element?(view, "#queued-action-#{priority_action.id}", "Heavy work")
+    assert has_element?(view, "#queued-action-#{planning_action.id}", "Light work")
     assert has_element?(view, "#queued-action-#{daily_action.id}", "Daily update")
-    assert has_element?(view, "#queued-action-#{daily_action.id}", "Planning lane")
+    assert has_element?(view, "#queued-action-#{daily_action.id}", "Light work")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "Implementation")
     assert has_element?(view, "#queued-job-#{queued_job.id}", "3 review passes")
     assert has_element?(view, "#workspace-setup-history")
@@ -229,7 +256,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     refute has_element?(view, "#agent-detail-panel")
 
     send(view.pid, :metrics_tick)
-    assert render(view) =~ "configured slot(s) currently available"
+    assert render(view) =~ "Light: planning and analysis"
   end
 
   defp authenticated_conn(conn),

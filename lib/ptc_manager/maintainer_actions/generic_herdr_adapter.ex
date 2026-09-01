@@ -18,7 +18,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     try do
       with {:ok, path} <- action_path(action),
            {:ok, profile} <- select_profile(version.agent_selector),
-           {:ok, output_path} <- prepare_output(action),
+           {:ok, output_path, schema_path} <- prepare_output(action),
            {:ok, workspace, pane} <- open_workspace(action, path),
            name = agent_name(action),
            {:ok, agent_key} <- start_agent(name, pane, profile),
@@ -26,7 +26,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
            :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
-           {:ok, _output} <- prompt_and_wait(name, action, output_path),
+           {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
            {:ok, result} <- read_result(output_path, action.action_key) do
         {:ok, result}
       end
@@ -76,10 +76,14 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
     with :ok <- File.mkdir_p(directory) do
       path = Path.join(directory, "ptc-result-action-#{action.id}-#{action.attempt_count}.json")
+      schema_path = Path.rootname(path) <> ".schema.json"
       :ok = File.write(path, "")
       :ok = File.chmod(path, 0o660)
+      :ok = File.cp(result_schema(action.action_key), schema_path)
+      :ok = File.chmod(schema_path, 0o440)
       Process.put({__MODULE__, :output_path}, path)
-      {:ok, path}
+      Process.put({__MODULE__, :schema_path}, schema_path)
+      {:ok, path, schema_path}
     end
   end
 
@@ -136,16 +140,12 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
   end
 
-  defp prompt_and_wait(name, action, output_path) do
+  defp prompt_and_wait(name, action, output_path, schema_path) do
     timeout = action.automation_definition_version.timeout_seconds * 1_000
-    temp_path = output_path <> ".tmp"
 
     prompt =
       action.prompt <>
-        """
-
-        Result contract (required): write exactly one JSON object matching the action result contract to #{output_path}. Write it atomically by first writing #{temp_path}, then renaming it to #{output_path}. This file is the only machine-readable result channel; do not access PtcManager's database. Terminal prose is for humans and will not be parsed. Before finishing, confirm the final file exists and is valid JSON.
-        """
+        result_protocol(output_path, schema_path)
 
     command().run(
       [
@@ -165,6 +165,15 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       ],
       timeout + @command_grace_ms
     )
+  end
+
+  @doc false
+  def result_protocol(output_path, schema_path)
+      when is_binary(output_path) and is_binary(schema_path) do
+    """
+
+    Result protocol: read #{schema_path}, then atomically write one matching JSON object via #{output_path}.tmp to #{output_path}. Terminal output is not parsed.
+    """
   end
 
   defp read_result(path, action_key) do
@@ -214,8 +223,15 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
 
     if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)
+    if schema = Process.delete({__MODULE__, :schema_path}), do: File.rm(schema)
     :ok
   end
+
+  defp result_schema("daily_digest"),
+    do: Application.app_dir(:ptc_manager, "priv/codex/daily_digest_output.schema.json")
+
+  defp result_schema(_action_key),
+    do: Application.app_dir(:ptc_manager, "priv/codex/agent_action_output.schema.json")
 
   defp command,
     do: Application.get_env(:ptc_manager, :generic_herdr_command, PtcManager.Herdr.Command)

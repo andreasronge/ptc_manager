@@ -2,7 +2,9 @@ defmodule PtcManagerWeb.AutomationsLive do
   use PtcManagerWeb, :live_view
 
   alias PtcManager.Automations
-  alias PtcManager.Automations.{DefinitionVersion, Trigger}
+  alias PtcManager.Automations.{Defaults, DefinitionVersion, Trigger}
+  alias PtcManager.MaintainerActions.Catalog
+  alias PtcManager.MaintainerActions.GenericHerdrAdapter
   alias PtcManager.Operations
 
   @impl true
@@ -14,6 +16,7 @@ defmodule PtcManagerWeb.AutomationsLive do
      |> assign(:page_title, "Automations")
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:selected_repository, nil)
+     |> assign(:preview_definition_id, nil)
      |> load()}
   end
 
@@ -52,6 +55,39 @@ defmodule PtcManagerWeb.AutomationsLive do
     case Automations.update_identity(definition, %{enabled: enabled == "true"}) do
       {:ok, _definition} -> {:noreply, load(socket)}
       {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
+    end
+  end
+
+  def handle_event("show-prompt-preview", %{"id" => id}, socket) do
+    definition = definition!(socket, id)
+    {:noreply, assign(socket, :preview_definition_id, definition.id)}
+  end
+
+  def handle_event("close-prompt-preview", _params, socket),
+    do: {:noreply, assign(socket, :preview_definition_id, nil)}
+
+  def handle_event("restore-suggested-prompt", %{"id" => id}, socket) do
+    definition = definition!(socket, id)
+    suggestion = Defaults.get(definition.repository, definition.key)
+
+    case suggestion &&
+           Automations.create_version(
+             definition,
+             definition.current_version
+             |> version_attrs_from_current()
+             |> Map.put(:prompt, suggestion.prompt),
+             socket.assigns.actor
+           ) do
+      {:ok, _version} ->
+        {:noreply,
+         socket |> put_flash(:info, "PtcManager's suggested prompt was restored.") |> load()}
+
+      nil ->
+        {:noreply,
+         put_flash(socket, :error, "This custom automation has no built-in suggestion.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
     end
   end
 
@@ -171,7 +207,6 @@ defmodule PtcManagerWeb.AutomationsLive do
       timeout_seconds: integer(params["timeout_seconds"], 1_800),
       result_type: "repository_report",
       result_protocol_version: 1,
-      operational_policy: params["operational_policy"],
       prompt: params["prompt"],
       configuration_snapshot: %{}
     }
@@ -218,6 +253,24 @@ defmodule PtcManagerWeb.AutomationsLive do
   def timestamp(value), do: Calendar.strftime(value, "%d %b · %H:%M UTC")
   def repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
   def short_prompt(value), do: value |> String.trim() |> String.slice(0, 180)
+
+  def selected_definition(definitions, id) when is_integer(id),
+    do: Enum.find(definitions, &(&1.id == id))
+
+  def selected_definition(_definitions, _id), do: nil
+
+  def prompt_preview(definition) do
+    version = definition.current_version
+
+    prompt =
+      if Catalog.configurable_action?(definition.key) do
+        Catalog.preview(definition.key, version.prompt, definition.repository)
+      else
+        generic_prompt_preview(definition, version.prompt)
+      end
+
+    maybe_add_result_protocol(prompt, version.execution_profile)
+  end
 
   def state_classes(state) when state in ["succeeded", "no_changes"],
     do: "bg-teal-400/15 text-teal-200"
@@ -287,10 +340,28 @@ defmodule PtcManagerWeb.AutomationsLive do
       timeout_seconds: integer(params["timeout_seconds"], current.timeout_seconds),
       result_type: current.result_type,
       result_protocol_version: current.result_protocol_version,
-      operational_policy: params["operational_policy"],
       prompt: params["prompt"],
       configuration_snapshot: current.configuration_snapshot
     }
+  end
+
+  defp version_attrs_from_current(%DefinitionVersion{} = current) do
+    current
+    |> Map.from_struct()
+    |> Map.take([
+      :target_type,
+      :execution_profile,
+      :agent_selector,
+      :github_access,
+      :queue_lane,
+      :resource_class,
+      :lock_policy,
+      :timeout_seconds,
+      :result_type,
+      :result_protocol_version,
+      :prompt,
+      :configuration_snapshot
+    ])
   end
 
   defp integer(value, default) do
@@ -302,6 +373,26 @@ defmodule PtcManagerWeb.AutomationsLive do
 
   defp blank_nil(value) when value in [nil, ""], do: nil
   defp blank_nil(value), do: value
+
+  defp generic_prompt_preview(definition, user_prompt) do
+    repository = definition.repository
+
+    runtime =
+      ~s(<runtime_context action="#{definition.key}" repository="#{repository.github_owner}/#{repository.github_name}" default_branch="#{repository.default_branch}" invocation_marker="ptc-manager-invocation:<generated>" trigger_context="<generated>" allowed_outcomes="completed,no-changes" />)
+
+    Automations.compose_prompt(user_prompt, runtime)
+  end
+
+  defp maybe_add_result_protocol(prompt, "generic_ephemeral") do
+    prompt <>
+      GenericHerdrAdapter.result_protocol(
+        "<generated-result-path>.json",
+        "<generated-result-path>.schema.json"
+      )
+  end
+
+  defp maybe_add_result_protocol(prompt, _execution_profile), do: prompt
+
   defp error_message(%Ecto.Changeset{}), do: "The automation configuration is invalid."
   defp error_message(reason), do: "Could not complete that action: #{inspect(reason)}"
 end

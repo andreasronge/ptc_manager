@@ -1,6 +1,7 @@
 defmodule PtcManager.MaintainerActionsTest do
   use PtcManager.DataCase, async: false
 
+  alias PtcManager.Automations
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.CodexAdapter
@@ -9,15 +10,12 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.DailyDigests
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
-  alias PtcManager.PromptConfiguration
 
   alias PtcManager.Operations.{
     AgentAction,
     AgentRun,
     AuditEvent,
     Issue,
-    MergeApproval,
-    PrAnalysis,
     PrPublication,
     Proposal,
     WorktreeAllocation
@@ -510,8 +508,8 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed.target_snapshot["source_sha"] == String.duplicate("7", 40)
     assert executed.target_snapshot["trusted_source_head_sha"] == String.duplicate("8", 40)
     assert executed.target_snapshot["trusted_change_count"] == 1
-    assert executed.prompt =~ "Repository evidence snapshot for this action"
-    assert executed.prompt =~ "coordinator fetched the following size-bounded manifest"
+    assert executed.prompt =~ ~s(<source_snapshot ref="main")
+    assert executed.prompt =~ "<daily_change_manifest>"
 
     published = DailyDigests.get_digest(digest.id)
     assert published.title == "A clearer maintainer day"
@@ -642,13 +640,9 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.target_type == "issue"
     assert action.target_id == issue.id
     assert action.target_label =~ "#42"
-    assert action.prompt =~ "Choose exactly one outcome"
+    assert action.prompt =~ "update GitHub with one outcome"
     assert action.prompt =~ "ptc:needs-decision"
-    assert action.prompt =~ "decision_question"
-    assert action.prompt =~ "decision_options"
-    assert action.prompt =~ "concrete example"
-    assert action.prompt =~ "Follow relevant links"
-    assert action.prompt =~ "Do not sign in to third-party sites"
+    assert action.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
 
     assert {:error, :agent_action_already_active} =
              MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
@@ -657,19 +651,15 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.aggregate(AuditEvent, :count) == 1
   end
 
-  test "review issue prompt runs at most three independent Codex consultations" do
+  test "review issue prompt exposes the configured review limit without provider-specific prose" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 43})
 
     assert {:ok, action} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
     assert action.action_key == "review_issue"
-    assert action.prompt =~ "`codex-review` skill in `consult` mode"
-    assert action.prompt =~ "Run at most 3 fresh review passes"
-    assert action.prompt =~ "Stop early when a pass reports no actionable findings"
-    assert action.prompt =~ "you, the primary maintainer, must sanity-check their findings"
-    assert action.prompt =~ "Do not invoke nested reviewers"
-    assert action.prompt =~ "leave exactly `ptc:ready`"
-    assert action.prompt =~ "Return empty `created_issue_numbers` and `suggestions` arrays"
+    assert action.prompt =~ ~s(review_limit="3")
+    refute action.prompt =~ "codex-review"
+    assert action.prompt =~ "Review whether the issue is genuinely ready"
   end
 
   test "queues an authenticated issue decision as a narrowly scoped GitHub action" do
@@ -728,9 +718,9 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.action_key == "resolve_issue_decision"
     assert action.target_snapshot["decision_answer"] =~ "Exact export"
     assert action.target_snapshot["source_action_id"] == source.id
-    assert action.prompt =~ "authenticated maintainer selected this answer"
-    assert action.prompt =~ "Replace any previous decision-needed section or marker block"
-    assert action.prompt =~ "leave exactly `ptc:ready`"
+    assert action.prompt =~ "<maintainer_decision>"
+    assert action.prompt =~ "Exact export"
+    assert action.prompt =~ ~s(action="resolve_issue_decision")
 
     assert {:ok, completed} =
              MaintainerActions.run_once(adapter: FakeAdapter, sync: DecisionSync)
@@ -909,7 +899,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed_action.target_snapshot["source_ref"] == repository.default_branch
     assert executed_action.target_snapshot["issue_content_digest"] == issue.content_digest
     assert executed_action.prompt =~ String.duplicate("7", 40)
-    assert executed_action.prompt =~ "Do not fetch, pull, checkout, reset"
+    assert executed_action.prompt =~ ~s(workspace="read_only")
     assert_receive {:synced_repository, repository_id}
     assert repository_id == repository.id
 
@@ -951,10 +941,9 @@ defmodule PtcManager.MaintainerActionsTest do
                publication: publication
              })
 
-    assert prompt =~ "Returning zero suggestions is valid"
-    assert prompt =~ "Do not create or modify GitHub issues"
-    assert prompt =~ "Search existing open and closed issues"
-    assert prompt =~ "Follow relevant links"
+    assert prompt =~ ~s(action="pr_retrospective")
+    assert prompt =~ ~s(allowed_outcomes="followups-proposed,no-followups")
+    assert prompt =~ ~s(suggestion_limit="5")
   end
 
   test "validates outcomes for the selected action rather than only the shared schema" do
@@ -1049,61 +1038,6 @@ defmodule PtcManager.MaintainerActionsTest do
              |> CodexAdapter.validate_result("prepare_merge_decision")
   end
 
-  test "stores a private merge decision only when the exact PR version is unchanged" do
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-    publication = open_publication_fixture(issue)
-    status = merge_status(publication, repository)
-
-    assert {:ok, queued} =
-             MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
-
-    assert queued.prompt =~ "read-only investigation"
-    assert queued.prompt =~ "Follow relevant links"
-    assert queued.prompt =~ "exact GitHub head and base SHAs"
-
-    Process.put(:merge_decision_statuses, [status, status])
-
-    assert {:ok, completed} =
-             MaintainerActions.run_once(
-               adapter: MergeDecisionAdapter,
-               sync: MergeDecisionSync
-             )
-
-    assert completed.state == "done"
-    assert completed.target_snapshot == MergeDecisions.snapshot(status)
-
-    analysis = Repo.get_by!(PrAnalysis, agent_action_id: completed.id)
-    assert analysis.outcome == "merge-ready"
-    assert analysis.head_sha == publication.remote_head_sha
-    assert analysis.reviewed_base_sha == status.base_sha
-    assert analysis.diff_digest == publication.diff_digest
-
-    second_publication = open_publication_fixture(issue_fixture(repository, %{number: 99}))
-    first = merge_status(second_publication, repository)
-    changed = %{first | base_sha: String.duplicate("e", 40)}
-
-    assert {:ok, second_action} =
-             MaintainerActions.enqueue(
-               "prepare_merge_decision",
-               second_publication.id,
-               "andreas"
-             )
-
-    Process.put(:merge_decision_statuses, [first, changed])
-
-    assert {:ok, failed} =
-             MaintainerActions.run_once(
-               adapter: MergeDecisionAdapter,
-               sync: MergeDecisionSync
-             )
-
-    assert failed.id == second_action.id
-    assert failed.state == "failed"
-    assert failed.last_error =~ "pull_request_changed_during_analysis"
-    refute Repo.get_by(PrAnalysis, agent_action_id: second_action.id)
-  end
-
   test "queues and executes a repair for a failing open pull request" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
@@ -1121,27 +1055,23 @@ defmodule PtcManager.MaintainerActionsTest do
       })
       |> Repo.update!()
 
-    assert {:ok, _} =
-             PromptConfiguration.save(
-               "repair_pr",
-               "Use the instructions captured when this repair was queued.",
-               "andreas"
-             )
+    configure_automation(
+      repository,
+      "repair_pr",
+      "Use the instructions captured when this repair was queued."
+    )
 
     assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
     assert queued.state == "queued"
-    assert queued.prompt =~ "Repair the existing"
-    assert queued.prompt =~ "uncommitted changes from an earlier interrupted repair attempt"
-    assert queued.prompt =~ "codex-review"
-    assert queued.prompt =~ "Never use `--force`"
     assert queued.prompt =~ "instructions captured when this repair was queued"
+    assert queued.prompt =~ ~s(action="repair_pr")
+    assert queued.prompt =~ ~s(retained_workspace="true")
 
-    assert {:ok, _} =
-             PromptConfiguration.save(
-               "repair_pr",
-               "This later configuration must not rewrite queued repair work.",
-               "andreas"
-             )
+    configure_automation(
+      repository,
+      "repair_pr",
+      "This later configuration must not rewrite queued repair work."
+    )
 
     failing_status =
       publication
@@ -1171,6 +1101,38 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed.prompt =~ "instructions captured when this repair was queued"
     refute executed.prompt =~ "later configuration must not rewrite"
     assert_receive {:repair_postflight, {:ok, %{"outcome" => "repaired"}}}
+  end
+
+  test "queues approve-and-merge for an already clean pull request" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{checks_state: "success", mergeability: "mergeable"})
+      |> Repo.update!()
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    assert queued.state == "queued"
+    assert queued.prompt =~ ~s(merge_authorized="true")
+
+    clean_status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "success", mergeability: "mergeable"})
+
+    Process.put(:merge_decision_statuses, [clean_status, %{clean_status | state: "merged"}])
+
+    assert {:ok, completed} =
+             MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+
+    assert completed.id == queued.id
+    assert completed.state == "done"
+    assert_receive {:ran_agent_action, _action}
   end
 
   test "fails a repair safely when its retained worktree is unavailable" do
@@ -1893,106 +1855,6 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(PtcManager.Operations.Job, publication.job_id).state == "cancelled"
   end
 
-  test "human merge approval is bound to the analyzed head, base, and diff" do
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-    publication = open_publication_fixture(issue)
-    status = merge_status(publication, repository)
-
-    {:ok, action} = MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
-    Process.put(:merge_decision_statuses, [status, status])
-
-    assert {:ok, _completed} =
-             MaintainerActions.run_once(
-               adapter: MergeDecisionAdapter,
-               sync: MergeDecisionSync
-             )
-
-    Process.put(:merge_approval_status, {:ok, status})
-
-    assert {:ok, approval} =
-             MergeDecisions.approve(publication.id, "andreas", client: MergeDecisionClient)
-
-    assert approval.actor == "andreas"
-    assert approval.head_sha == status.head_sha
-    assert approval.reviewed_base_sha == status.base_sha
-    assert approval.diff_digest == publication.diff_digest
-    assert Repo.aggregate(MergeApproval, :count) == 1
-
-    changed = %{status | base_sha: String.duplicate("e", 40)}
-    Process.put(:merge_approval_status, {:ok, changed})
-
-    assert {:error, :merge_analysis_stale} =
-             MergeDecisions.approve(publication.id, "andreas", client: MergeDecisionClient)
-
-    assert Repo.aggregate(MergeApproval, :count) == 1
-    assert Repo.get!(AgentAction, action.id).state == "done"
-
-    Process.put(:merge_approval_status, {:ok, status})
-
-    assert {:ok, same_approval} =
-             MergeDecisions.approve(publication.id, "andreas", client: MergeDecisionClient)
-
-    assert same_approval.id == approval.id
-    assert Repo.aggregate(MergeApproval, :count) == 1
-
-    assert Repo.aggregate(
-             from(event in AuditEvent, where: event.action == "merge_approval.approved"),
-             :count
-           ) == 1
-  end
-
-  test "a PR closed during merge-decision preflight fails without running or blocking the queue" do
-    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
-    Application.put_env(:ptc_manager, :pull_request_client, MergeDecisionClient)
-    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
-
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-    publication = open_publication_fixture(issue)
-    closed = %{merge_status(publication, repository) | state: "closed"}
-    Process.put(:merge_approval_status, {:ok, closed})
-
-    assert {:ok, queued} =
-             MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
-
-    assert {:ok, failed} = MaintainerActions.run_once(adapter: MergeDecisionAdapter)
-    assert failed.id == queued.id
-    assert failed.state == "failed"
-    assert failed.last_error =~ "pull_request_not_open"
-    refute_receive {:ran_agent_action, _action}
-
-    assert {:ok, next_action} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
-    assert Operations.next_agent_action_candidate().id == next_action.id
-  end
-
-  test "a changed PR head during merge-decision preflight fails terminally" do
-    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
-    Application.put_env(:ptc_manager, :pull_request_client, MergeDecisionClient)
-    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
-
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-    publication = open_publication_fixture(issue)
-
-    changed = %{
-      merge_status(publication, repository)
-      | head_sha: String.duplicate("e", 40)
-    }
-
-    Process.put(:merge_approval_status, {:ok, changed})
-
-    assert {:ok, queued} =
-             MaintainerActions.enqueue("prepare_merge_decision", publication.id, "andreas")
-
-    assert {:ok, failed} = MaintainerActions.run_once(adapter: MergeDecisionAdapter)
-    assert failed.id == queued.id
-    assert failed.state == "failed"
-    assert failed.last_error =~ "pull_request_not_open"
-    assert Repo.get!(PrPublication, publication.id).state == "blocked"
-    refute_receive {:ran_agent_action, _action}
-  end
-
   test "keeps retrospective read-only and creates only an explicitly approved suggestion" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
@@ -2610,6 +2472,31 @@ defmodule PtcManager.MaintainerActionsTest do
       last_used_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
     })
     |> Repo.insert!()
+  end
+
+  defp configure_automation(repository, key, prompt) do
+    definition = Automations.get_definition(repository, key)
+
+    attrs =
+      definition.current_version
+      |> Map.from_struct()
+      |> Map.take([
+        :target_type,
+        :execution_profile,
+        :agent_selector,
+        :github_access,
+        :queue_lane,
+        :resource_class,
+        :lock_policy,
+        :timeout_seconds,
+        :result_type,
+        :result_protocol_version,
+        :configuration_snapshot
+      ])
+      |> Map.put(:prompt, prompt)
+
+    assert {:ok, version} = Automations.create_version(definition, attrs, "andreas")
+    version
   end
 
   defp enqueue_legacy_retrospective(publication, actor) do

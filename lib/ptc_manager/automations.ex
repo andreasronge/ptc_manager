@@ -8,8 +8,6 @@ defmodule PtcManager.Automations do
   alias PtcManager.Operations.{AgentAction, Repository}
   alias PtcManager.Repo
 
-  @compatibility_prompt "Use the code-owned target prompt builder for this compatibility definition."
-
   def list_definitions(%Repository{id: repository_id}) do
     Definition
     |> where([definition], definition.repository_id == ^repository_id)
@@ -49,13 +47,13 @@ defmodule PtcManager.Automations do
        Map.merge(attrs, %{
          automation_definition_version_id: version.id,
          prompt_version: version.version,
-         prompt: append_version_prompt(attrs[:prompt], version.prompt)
+         prompt: compose_prompt(version.prompt, attrs[:prompt])
        })}
     end
   end
 
   def resolved_instructions(%DefinitionVersion{} = version, legacy) do
-    [legacy, custom_version_prompt(version.prompt)]
+    [trimmed(version.prompt), trimmed(legacy)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
     |> case do
@@ -65,7 +63,7 @@ defmodule PtcManager.Automations do
   end
 
   def ensure_defaults(%Repository{} = repository) do
-    Enum.reduce_while(Defaults.all(), :ok, fn spec, :ok ->
+    Enum.reduce_while(Defaults.all(repository), :ok, fn spec, :ok ->
       case ensure_default(repository, spec) do
         {:ok, _definition} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
@@ -219,11 +217,6 @@ defmodule PtcManager.Automations do
         key: "repair_and_merge_pr",
         label: "Fix and merge",
         description: "Repair and merge the pull request"
-      },
-      %{
-        key: "prepare_merge_decision",
-        label: "Prepare merge decision",
-        description: "Create a private merge summary"
       }
     ]
   end
@@ -436,7 +429,6 @@ defmodule PtcManager.Automations do
         :timeout_seconds,
         :result_type,
         :result_protocol_version,
-        :operational_policy,
         :prompt,
         :configuration_snapshot
       ])
@@ -637,20 +629,12 @@ defmodule PtcManager.Automations do
   defp repository_prompt(repository, definition, version, invocation, context) do
     marker = "ptc-manager-invocation:#{invocation.id}"
 
-    """
-    You are running the configured PtcManager automation #{definition.name}.
+    runtime =
+      """
+      <runtime_context action="#{definition.key}" repository="#{repository.github_owner}/#{repository.github_name}" default_branch="#{repository.default_branch}" invocation_marker="#{marker}" trigger_context='#{Jason.encode!(context)}' allowed_outcomes="completed,no-changes" />
+      """
 
-    Repository: #{repository.github_owner}/#{repository.github_name}
-    Default branch: #{repository.default_branch}
-    Stable invocation marker: #{marker}
-    Trigger context: #{Jason.encode!(context)}
-
-    #{version.operational_policy}
-
-    #{version.prompt}
-
-    Include the stable invocation marker in any GitHub issue you create or update. Return the required structured result with a plain-language private_summary, technical_evidence, evidence, github_changes, and created_issue_numbers. Use outcome "completed" when work was performed or "no-changes" when no GitHub change was needed.
-    """
+    compose_prompt(version.prompt, runtime)
   end
 
   defp maybe_put_next_run(attrs) do
@@ -687,22 +671,20 @@ defmodule PtcManager.Automations do
 
   defp decode_result(_body), do: %{}
 
-  defp append_version_prompt(base, prompt) when is_binary(base) do
-    case custom_version_prompt(prompt) do
-      nil -> base
-      instructions -> base <> "\n\nRepository-specific automation instructions:\n" <> instructions
-    end
+  def compose_prompt(user_prompt, runtime_context) do
+    [trimmed(user_prompt), trimmed(runtime_context)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n\n")
   end
 
-  defp custom_version_prompt(prompt)
-       when is_binary(prompt) and prompt != @compatibility_prompt do
-    case String.trim(prompt) do
+  defp trimmed(value) when is_binary(value) do
+    case String.trim(value) do
       "" -> nil
       value -> value
     end
   end
 
-  defp custom_version_prompt(_prompt), do: nil
+  defp trimmed(_value), do: nil
 
   defp available_key(repository_id, source_key, suffix \\ 1) do
     candidate = if suffix == 1, do: source_key, else: "#{source_key}_#{suffix}"
@@ -728,7 +710,6 @@ defmodule PtcManager.Automations do
       :timeout_seconds,
       :result_type,
       :result_protocol_version,
-      :operational_policy,
       :prompt,
       :configuration_snapshot
     ])

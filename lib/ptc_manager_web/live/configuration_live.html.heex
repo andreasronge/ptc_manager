@@ -6,20 +6,85 @@
           Configuration
         </p>
         <h1 class="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">
-          Agent prompt instructions
+          Repository configuration
         </h1>
         <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-400">
-          Add instructions to every prompt launched by a button. Saved changes affect prompts that start afterward; a prompt already running keeps the exact instructions it started with.
+          Register repositories and verify that each checkout is ready. Prompts, buttons, schedules, and agent selection are configured per repository on the Automations page.
         </p>
       </div>
     </section>
 
-    <aside class="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-5 text-sm leading-6 text-amber-100">
-      <p class="font-semibold">What stays protected</p>
-      <p class="mt-1 text-amber-100/80">
-        PtcManager still injects the exact repository, issue or PR number, branch, and verified SHA. Target limits and core authorization remain protected. In particular, conflict repair merges the latest main branch and uses a normal fast-forward push; it does not need force-push.
+    <aside class="rounded-2xl border border-teal-400/20 bg-teal-400/[0.07] p-5 text-sm leading-6 text-teal-100">
+      <p class="font-semibold">Prompts are repository-specific and fully editable</p>
+      <p class="mt-1 text-teal-100/80">
+        PtcManager provides one project-specific suggested prompt for each automation. You can replace it completely—including its safety guidance—and preview the generated runtime facts. Saving creates a new immutable version for future work; queued and running agents keep their original version.
       </p>
+      <.link
+        navigate={~p"/automations"}
+        class="mt-3 inline-flex rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300"
+      >
+        Configure repository automations
+      </.link>
     </aside>
+
+    <section
+      id="agent-capacity"
+      class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+      aria-labelledby="agent-capacity-title"
+    >
+      <div class="max-w-3xl">
+        <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Machine</p>
+        <h2 id="agent-capacity-title" class="mt-1 text-2xl font-semibold">Concurrent agents</h2>
+        <p class="mt-2 text-sm leading-6 text-slate-400">
+          Light agents investigate issues and write summaries. Heavy agents build, test, repair, and merge code. A full heavy pool does not stop light planning work.
+        </p>
+      </div>
+
+      <.form
+        for={%{}}
+        as={:capacity}
+        phx-submit="save-capacity"
+        class="mt-5 grid max-w-2xl gap-4 sm:grid-cols-2"
+      >
+        <label class="rounded-xl bg-white/[0.035] p-4 text-sm text-slate-300">
+          <span class="font-semibold text-white">Light agents</span>
+          <span class="mt-1 block text-xs leading-5 text-slate-500">
+            Issue preparation, reviews, investigations, and updates.
+          </span>
+          <input
+            type="number"
+            min="1"
+            max="8"
+            required
+            name="capacity[light_agent_capacity]"
+            value={@capacity_setting.light_agent_capacity}
+            class="mt-3 w-24 rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+          />
+        </label>
+        <label class="rounded-xl bg-white/[0.035] p-4 text-sm text-slate-300">
+          <span class="font-semibold text-white">Heavy agents</span>
+          <span class="mt-1 block text-xs leading-5 text-slate-500">
+            Implementation, CI repair, conflict resolution, and merging.
+          </span>
+          <input
+            type="number"
+            min="1"
+            max="8"
+            required
+            name="capacity[heavy_agent_capacity]"
+            value={@capacity_setting.heavy_agent_capacity}
+            class="mt-3 w-24 rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+          />
+        </label>
+        <button class="w-fit rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 sm:col-span-2">
+          Save agent limits
+        </button>
+      </.form>
+
+      <div class="mt-4 rounded-xl border border-teal-400/15 bg-teal-400/[0.05] px-4 py-3 text-xs leading-5 text-slate-400">
+        Heavy queue priority: <span class="font-semibold text-teal-200">merge → repair → new implementation</span>. Old work is kept in order within each priority.
+      </div>
+    </section>
 
     <section id="repository-health" aria-labelledby="repository-health-title">
       <div class="mb-4">
@@ -129,6 +194,12 @@
               </dd>
             </div>
           </dl>
+          <.link
+            navigate={"/automations?repo=" <> URI.encode_www_form("#{health.repository.github_owner}/#{health.repository.github_name}")}
+            class="mt-4 inline-flex rounded-lg border border-teal-400/25 px-3 py-2 text-xs font-semibold text-teal-200 hover:border-teal-400/40"
+          >
+            Edit prompts and automations
+          </.link>
         </article>
 
         <div
@@ -139,149 +210,5 @@
         </div>
       </div>
     </section>
-
-    <section id="prompt-configuration" class="grid gap-5 xl:grid-cols-2">
-      <article
-        :for={prompt <- @prompts}
-        id={"prompt-#{prompt.key}"}
-        class="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl shadow-black/10"
-      >
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <h2 class="text-lg font-semibold text-white">{prompt.label}</h2>
-            <p class="mt-1 text-xs font-medium uppercase tracking-wide text-teal-300">
-              Button: {prompt.button}
-            </p>
-          </div>
-          <span class={[
-            "rounded-full px-2.5 py-1 text-xs font-semibold",
-            if(prompt.customization,
-              do: "bg-teal-400/15 text-teal-200",
-              else: "bg-white/5 text-slate-400"
-            )
-          ]}>
-            {if(prompt.customization, do: "Customized", else: "Default")}
-          </span>
-        </div>
-
-        <p class="mt-3 text-sm leading-6 text-slate-400">{prompt.description}</p>
-
-        <.form
-          for={%{}}
-          as={:customization}
-          phx-submit="save-prompt"
-          class="mt-5 space-y-3"
-        >
-          <input type="hidden" name="action-key" value={prompt.key} />
-          <label
-            for={"instructions-#{prompt.key}"}
-            class="block text-sm font-medium text-slate-200"
-          >
-            Additional instructions
-          </label>
-          <textarea
-            id={"instructions-#{prompt.key}"}
-            name="customization[instructions]"
-            rows="7"
-            maxlength="20000"
-            placeholder="Example: Prefer the smallest documentation-only repair and mention any skipped environment-specific test in the final evidence."
-            class="block w-full rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 font-mono text-sm leading-6 text-slate-100 outline-none transition focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20"
-          >{prompt.customization && prompt.customization.instructions}</textarea>
-          <div class="flex flex-wrap items-center gap-3">
-            <button
-              type="submit"
-              class="rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-teal-300"
-            >
-              Save instructions
-            </button>
-            <button
-              type="button"
-              phx-click="show-prompt-preview"
-              phx-value-action-key={prompt.key}
-              class="rounded-xl border border-teal-400/25 bg-teal-400/[0.06] px-4 py-2 text-sm font-semibold text-teal-200 transition hover:border-teal-400/40 hover:bg-teal-400/10"
-            >
-              Preview full prompt
-            </button>
-            <button
-              :if={prompt.customization}
-              type="button"
-              phx-click="reset-prompt"
-              phx-value-action-key={prompt.key}
-              data-confirm="Reset this prompt to its built-in default instructions?"
-              class="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/20 hover:text-white"
-            >
-              Reset to default
-            </button>
-            <span :if={prompt.customization} class="text-xs text-slate-500">
-              Last saved by {prompt.customization.updated_by}
-            </span>
-          </div>
-        </.form>
-      </article>
-    </section>
-
-    <div
-      :if={@preview_action_key}
-      id="prompt-preview-overlay"
-      class="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 p-0 backdrop-blur-sm sm:items-center sm:p-6"
-      phx-window-keydown="close-prompt-preview"
-      phx-key="escape"
-    >
-      <%= if preview_prompt = selected_prompt(@prompts, @preview_action_key) do %>
-        <section
-          id="prompt-preview"
-          aria-modal="true"
-          role="dialog"
-          aria-labelledby="prompt-preview-title"
-          phx-click-away="close-prompt-preview"
-          class="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-t-3xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/50 sm:rounded-3xl"
-        >
-          <header class="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-4 sm:px-6">
-            <div>
-              <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">
-                Example composed prompt
-              </p>
-              <h2 id="prompt-preview-title" class="mt-1 text-xl font-semibold text-white">
-                {preview_prompt.label}
-              </h2>
-            </div>
-            <button
-              type="button"
-              phx-click="close-prompt-preview"
-              aria-label="Close prompt preview"
-              class="rounded-xl border border-white/10 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/20 hover:text-white"
-            >
-              Close
-            </button>
-          </header>
-
-          <div class="overflow-y-auto p-5 sm:p-6">
-            <div class="mb-4 grid gap-3 text-sm leading-6 sm:grid-cols-2">
-              <div class="rounded-xl border border-amber-400/20 bg-amber-400/[0.08] p-4 text-amber-100/80">
-                <p class="font-semibold text-amber-100">Protected instructions</p>
-                <p class="mt-1">
-                  The repository, target, authorization, and safety boundaries are generated by PtcManager and cannot be edited here.
-                </p>
-              </div>
-              <div class="rounded-xl border border-teal-400/20 bg-teal-400/[0.06] p-4 text-teal-100/80">
-                <p class="font-semibold text-teal-100">Your saved instructions</p>
-                <p class="mt-1">
-                  Customized text appears in a tagged maintainer block and remains subordinate to the protected boundaries.
-                </p>
-              </div>
-            </div>
-
-            <p class="mb-3 text-xs leading-5 text-slate-500">
-              This safe example uses placeholder repository, issue, PR, branch, and SHA values. At execution time PtcManager substitutes the exact target and may append a source-snapshot record and structured-result file path.
-            </p>
-
-            <pre
-              id={"full-prompt-preview-#{preview_prompt.key}"}
-              class="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-slate-950/80 p-4 font-mono text-xs leading-6 text-slate-200 sm:p-5"
-            >{preview_prompt.preview}</pre>
-          </div>
-        </section>
-      <% end %>
-    </div>
   </div>
 </Layouts.app>

@@ -14,6 +14,7 @@ defmodule PtcManager.Application do
       PtcManager.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
+      PtcManager.CapacitySettings,
       PtcManager.Automations.Bootstrap,
       {Oban, Application.fetch_env!(:ptc_manager, Oban)},
       PtcManager.Repository.StartupPreflight,
@@ -42,12 +43,8 @@ defmodule PtcManager.Application do
   end
 
   defp maintainer_action_supervisor do
-    planning = Application.get_env(:ptc_manager, :planning_agent_capacity, 2)
-    writing = Application.get_env(:ptc_manager, :writing_agent_capacity, 1)
-
     children =
-      for {lane, capacity} <- [planning: planning, writing: writing],
-          index <- 1..max(capacity, 1) do
+      for lane <- [:planning, :writing], index <- 1..8 do
         {PtcManager.MaintainerActions.Poller, lane: lane, index: index}
       end
 

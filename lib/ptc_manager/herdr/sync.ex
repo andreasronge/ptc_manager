@@ -721,8 +721,7 @@ defmodule PtcManager.Herdr.Sync do
             |> Enum.filter(fn {_kind, profile} -> profile["enabled"] == true end)
             |> Enum.map(&elem(&1, 0))
             |> Enum.sort(),
-          "implementation_slots" =>
-            Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
+          "implementation_slots" => Application.get_env(:ptc_manager, :heavy_agent_capacity, 1)
         }
       }
       |> Map.merge(extra_attrs)

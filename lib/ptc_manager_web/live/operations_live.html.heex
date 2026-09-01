@@ -45,24 +45,61 @@
       color="bg-violet-400"
     />
     <article id="metric-agents" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Agent slots</p>
-      <p class="mt-3 text-3xl font-semibold">
-        {@active_slot_count} <span class="text-base text-slate-500">/ {@total_slots}</span>
-      </p>
-      <p class="mt-2 text-xs text-slate-400">
-        {@available_slots} configured slot(s) currently available · {length(@waiting_runs)} retained
-      </p>
-      <div class="mt-4 flex gap-1.5">
-        <span
-          :for={slot <- slot_markers(@total_slots)}
-          class={[
-            "h-2 flex-1 rounded-full",
-            slot <= @active_slot_count && "bg-teal-400",
-            slot > @active_slot_count && "bg-white/10"
-          ]}
-        >
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Agent slots</p>
+        <span class={[
+          "rounded-full px-2 py-0.5 text-[11px] ring-1",
+          @herdr_online? && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
+          !@herdr_online? && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+        ]}>
+          {if @herdr_online?, do: "Herdr online", else: "Herdr offline"}
         </span>
       </div>
+      <div class="mt-3 grid grid-cols-2 gap-4">
+        <div id="light-agent-slots">
+          <p class="text-xs text-slate-400">Light</p>
+          <p class="mt-1 text-2xl font-semibold">
+            {@active_light_slots}<span class="text-sm text-slate-500">/{@light_agent_capacity}</span>
+          </p>
+          <div class="mt-2 flex gap-1">
+            <span
+              :for={slot <- slot_markers(@light_agent_capacity)}
+              class={[
+                "h-1.5 flex-1 rounded-full",
+                slot <= @active_light_slots && "bg-sky-400",
+                slot > @active_light_slots && "bg-white/10"
+              ]}
+            >
+            </span>
+          </div>
+          <p class="mt-2 text-[11px] leading-4 text-slate-500">
+            {agent_slot_detail(@active_light_slots, @light_agent_capacity, @herdr_online?)}
+          </p>
+        </div>
+        <div id="heavy-agent-slots">
+          <p class="text-xs text-slate-400">Heavy</p>
+          <p class="mt-1 text-2xl font-semibold">
+            {@active_heavy_slots}<span class="text-sm text-slate-500">/{@heavy_agent_capacity}</span>
+          </p>
+          <div class="mt-2 flex gap-1">
+            <span
+              :for={slot <- slot_markers(@heavy_agent_capacity)}
+              class={[
+                "h-1.5 flex-1 rounded-full",
+                slot <= @active_heavy_slots && "bg-teal-400",
+                slot > @active_heavy_slots && "bg-white/10"
+              ]}
+            >
+            </span>
+          </div>
+          <p class="mt-2 text-[11px] leading-4 text-slate-500">
+            {agent_slot_detail(@active_heavy_slots, @heavy_agent_capacity, @herdr_online?)}
+          </p>
+        </div>
+      </div>
+      <p class="mt-3 border-t border-white/10 pt-3 text-[11px] text-slate-500">
+        Light: planning and analysis · Heavy: build, repair, and merge · {length(@waiting_runs)} retained
+      </p>
     </article>
   </section>
 
@@ -96,10 +133,19 @@
             "rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",
             action.action_key == "repair_and_merge_pr" &&
               "bg-teal-400/15 text-teal-300 ring-teal-400/20",
-            action.action_key != "repair_and_merge_pr" &&
+            action.action_key == "repair_pr" &&
+              "bg-amber-400/15 text-amber-300 ring-amber-400/20",
+            action.action_key not in ["repair_and_merge_pr", "repair_pr"] &&
               "bg-sky-400/15 text-sky-300 ring-sky-400/20"
           ]}>
-            {if action.action_key == "repair_and_merge_pr", do: "Merge priority", else: "Queued"}
+            <%= case action.action_key do %>
+              <% "repair_and_merge_pr" -> %>
+                Merge priority
+              <% "repair_pr" -> %>
+                Repair priority
+              <% _other -> %>
+                Queued
+            <% end %>
           </span>
         </div>
         <p class="mt-3 text-xs text-slate-500">
@@ -335,9 +381,9 @@
           </div>
           <dl class="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 text-xs">
             <div>
-              <dt class="text-slate-600">Slots</dt>
+              <dt class="text-slate-600">Herdr runtime</dt>
               <dd class="mt-1 text-slate-300">
-                {worker.capabilities["implementation_slots"] || 0}
+                {if worker.capabilities["herdr"], do: "available", else: "not reported"}
               </dd>
             </div>
             <div>
