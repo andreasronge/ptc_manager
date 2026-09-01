@@ -201,9 +201,10 @@ defmodule Mix.Tasks.PtcDeployTest do
              ~s(sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 "$agent_result_dir")
 
     assert script =~
-             "Environment=PTC_AGENT_ACTION_OUTPUT_DIR=$agent_result_dir"
+             "PTC_AGENT_ACTION_OUTPUT_DIR=$agent_result_dir"
 
-    assert script =~ "99-ptc-manager-agent-results.conf"
+    assert script =~ "EnvironmentFile=$agent_result_env"
+    assert script =~ "zz-ptc-manager-agent-results.conf"
 
     assert File.read!(@project_root <> "/deploy/ptc_manager.env.example") =~
              "PTC_AGENT_ACTION_OUTPUT_DIR=/var/lib/ptc_manager-worker/agent-results"
