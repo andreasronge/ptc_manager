@@ -153,6 +153,7 @@ defmodule PtcManager.BootstrapCacheTest do
           {"HOME", fixture.root},
           {"PATH", fixture.bin <> ":" <> System.fetch_env!("PATH")},
           {"PTC_WORKSPACE_CACHE_ROOT", fixture.cache_root},
+          {"PTC_WORKSPACE_CACHE_DISABLED", "false"},
           {"BOOTSTRAP_TEST_LOG", fixture.log},
           {"MIX_ENV", "test"}
         ],
