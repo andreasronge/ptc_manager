@@ -15,7 +15,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - four focused maintainer views: **Planning** for backlog decisions,
   **Delivery** for the approval-to-merge Kanban, **Updates** for daily change
   briefings, **Operations** for machine capacity plus the agent/task timeline,
-  and **Configuration** for agent-prompt instructions;
+  **Automations** for repository actions, schedules, prompts, and history, and
+  **Configuration** for repository onboarding and compatibility prompt instructions;
 - an **Approve and start** workflow backed by SQLite transactions, with a
   per-task choice of zero to three independent Codex review passes;
 - one active implementation job per issue, enforced by the database;
@@ -46,7 +47,7 @@ the approved execution, publication, worktree, and maintainer-action workflows:
   that import every open repository PR and place it in Review & CI, Needs
   attention, or Ready to merge;
 - a generic durable agent-action queue with **Prepare issue**, **Review issue**,
-  **Fix**, **Fix and merge**, and **Prepare merge decision**
+  **Fix and merge**, and **Prepare merge decision**
   buttons, all visible alongside queued implementation jobs on **Operations**;
 - durable per-button prompt customizations, including private issue analysis,
   Approve-and-start implementation, and every active maintainer action. PtcManager appends the saved
@@ -120,8 +121,12 @@ The authenticated routes are:
   the latest 40 agent runs and their tasks. Select an agent to open a bounded,
   read-only terminal panel; active panels refresh every five seconds and expose
   no prompt or input controls;
+- `/automations` — repository-scoped, immutable action versions; complete agent
+  and protected operational prompts; Herdr-kind selectors; manual and scheduled
+  triggers; Run now; cross-repository copying; and durable result history;
 - `/configuration` — additional instructions for every button-triggered agent
-  prompt, with clear customized/default state and one-click reset.
+  prompt, with clear customized/default state and one-click reset, plus safe
+  registration of another dedicated repository checkout.
 
 To choose a different local password:
 
@@ -271,12 +276,6 @@ catalog contains:
   simplified summary and readiness outcome. The maintainer can approve only a
   merge-ready analysis whose head SHA, reviewed base SHA, base target, and
   verified diff still match. This increment records approval but does not merge.
-- **Fix**, shown when any open PR has failing checks or merge conflicts. A
-  PtcManager-created PR resumes its original named Herdr agent and retained
-  worktree. A PR imported from GitHub gets a fresh isolated Herdr worktree and
-  named repair agent. The agent repairs, reviews, commits, and pushes only to the
-  existing PR branch without force. Its session remains available while the PR
-  is open and is removed after GitHub reports the PR merged or closed.
 - **Fix and merge**, which gives the same repository the highest queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr
@@ -294,12 +293,13 @@ branches. Issue preparation, issue review, and issue-decision resolution use a
 separate planning worker and can continue while that writer lock is held. Merge
 decisions, retrospectives, and unknown future action types remain in the safer
 serialized writer lane until they receive equivalent snapshot isolation. The
-first version runs at most one planning action and one writing action at a time
-per PtcManager service; additional actions remain visible in the durable
-Operations queue.
+The light planning and heavy writing capacities are configured separately
+(`planning_agent_capacity` and `writing_agent_capacity`); additional actions
+remain visible in the durable Operations queue. A merge action still serializes
+repository writers, while source-pinned planning work may continue in parallel.
 
-Daily updates reuse the planning lane instead of introducing a second job
-system. After 02:00 in `Europe/Stockholm`, a supervised scheduler idempotently
+Daily updates reuse the planning lane. Oban Lite persists scheduled occurrences
+in the same SQLite database. After 02:00 in `Europe/Stockholm`, it idempotently
 queues one read-only update per enabled repository for the immediately preceding
 local calendar day. It deliberately does not scan or backfill older dates. The
 coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
@@ -313,9 +313,10 @@ SHA, included-change count, or PR numbers that differ from the coordinator manif
 stores the structured result and provenance in SQLite. The Updates page renders
 the Markdown through an HTML sanitizer before displaying it.
 
-The generation prompt is editable on **Configuration**. Scheduling is enabled
-by default whenever `PTC_AGENT_ACTIONS_ENABLED=true`; it can be disabled
-independently. It cannot be enabled without the action worker. Configure it with:
+The complete generation prompt and schedule are editable per repository on
+**Automations**. `ptc_runner` receives the daily trigger enabled by default;
+`ptc_manager` receives it disabled. Pausing a definition or trigger prevents
+future materialization without changing an already queued invocation.
 
 ```sh
 PTC_DAILY_DIGEST_ENABLED=true
@@ -392,6 +393,49 @@ trying approvals:
 ```sh
 mix ecto.reset
 ```
+
+### Generic automations and additional repositories
+
+PtcManager stores every automation as a repository identity plus immutable
+versions. A version freezes its target type, execution profile, Herdr selector,
+GitHub access, light/heavy queue, lock policy, timeout, result contract,
+protected operational policy, and task prompt. A trigger points at the current
+version only when it materializes a run, so later edits cannot alter queued or
+running work.
+
+`generic_ephemeral` actions run through Herdr with an explicit opaque kind. The
+configured selector may accept any healthy profile, prefer one kind with
+fallback, or require an exact kind. The coordinator opens the prepared snapshot,
+starts the chosen kind, records its Herdr name/session, and accepts only a
+versioned JSON result file outside the repository. It never parses terminal
+prose and does not give the agent database credentials. Adding a healthy
+`claude`, `cursor`, or future kind is a worker profile/configuration change, not
+a new action executor.
+
+The built-in **Investigate nightly CI** action demonstrates the generic path.
+Its manual trigger is enabled for `ptc_runner`; its schedule starts paused. The
+agent uses a stable invocation marker when searching for or creating a failure
+issue, which makes a retry deduplicate against GitHub rather than trusting local
+memory.
+
+To onboard another private repository:
+
+1. create a dedicated clone on the worker and authenticate the existing `gh`
+   CLI identity for it;
+2. commit a `.ptc-manager.yml` contract whose bootstrap and verification
+   commands exercise that repository's real gates;
+3. use **Configuration → Add another GitHub repository** to register the exact
+   absolute checkout path; it starts disabled;
+4. verify checkout, GitHub, and gate health, then review or copy the desired
+   definitions on **Automations**;
+5. enable only the definitions and schedules that repository needs, then test a
+   read-only action before approving implementation work.
+
+`ptc_manager` intentionally receives daily updates and scheduled nightly checks
+disabled. Its checked-in pre-publication contract runs the same ExDNA
+duplication ratchet policy used by `ptc_runner`: known clones live in
+`.duplication-baseline.json`, while `scripts/duplication_gate.sh check` rejects
+new duplication.
 
 ## Verify
 

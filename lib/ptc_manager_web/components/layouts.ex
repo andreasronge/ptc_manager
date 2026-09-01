@@ -80,6 +80,13 @@ defmodule PtcManagerWeb.Layouts do
               Operations
             </.nav_link>
             <.nav_link
+              href={~p"/automations"}
+              active={@current_path == "/automations"}
+              icon="hero-bolt-mini"
+            >
+              Automations
+            </.nav_link>
+            <.nav_link
               href={~p"/configuration"}
               active={@current_path == "/configuration"}
               icon="hero-cog-6-tooth-mini"

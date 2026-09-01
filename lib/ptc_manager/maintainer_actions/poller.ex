@@ -4,14 +4,12 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   alias PtcManager.MaintainerActions
 
-  @planning_name PtcManager.MaintainerActions.PlanningPoller
-  @writing_name PtcManager.MaintainerActions.WritingPoller
-
   def child_spec(opts) do
     lane = Keyword.fetch!(opts, :lane)
+    index = Keyword.get(opts, :index, 1)
 
     %{
-      id: {__MODULE__, lane},
+      id: {__MODULE__, lane, index},
       start: {__MODULE__, :start_link, [opts]},
       type: :worker,
       restart: :permanent,
@@ -21,18 +19,22 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   def start_link(opts) do
     lane = Keyword.fetch!(opts, :lane)
-    GenServer.start_link(__MODULE__, lane, name: name(lane))
+    index = Keyword.get(opts, :index, 1)
+    GenServer.start_link(__MODULE__, {lane, index}, name: name(lane, index))
   end
 
   def wake do
-    wake(@planning_name)
-    wake(@writing_name)
+    Enum.each([:planning, :writing], fn lane ->
+      capacity = Application.get_env(:ptc_manager, capacity_key(lane), 1)
+      Enum.each(1..max(capacity, 1), &wake(name(lane, &1)))
+    end)
+
     :ok
   end
 
   @impl true
-  def init(lane) when lane in [:planning, :writing] do
-    {:ok, schedule(%{lane: lane, task_ref: nil, timer_ref: nil}, 0)}
+  def init({lane, index}) when lane in [:planning, :writing] do
+    {:ok, schedule(%{lane: lane, index: index, task_ref: nil, timer_ref: nil}, 0)}
   end
 
   @impl true
@@ -80,8 +82,15 @@ defmodule PtcManager.MaintainerActions.Poller do
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(reference), do: Process.cancel_timer(reference, async: true, info: false)
 
-  defp name(:planning), do: @planning_name
-  defp name(:writing), do: @writing_name
+  defp name(lane, index),
+    do:
+      Module.concat(
+        PtcManager.MaintainerActions,
+        "#{Macro.camelize(to_string(lane))}Poller#{index}"
+      )
+
+  defp capacity_key(:planning), do: :planning_agent_capacity
+  defp capacity_key(:writing), do: :writing_agent_capacity
 
   defp wake(name) do
     if Process.whereis(name), do: GenServer.cast(name, :wake)

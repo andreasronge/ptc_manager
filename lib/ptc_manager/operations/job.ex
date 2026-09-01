@@ -38,10 +38,12 @@ defmodule PtcManager.Operations.Job do
     field :pre_publication_output, :string
     field :pre_publication_duration_ms, :integer
     field :pre_publication_verified_at, :utc_datetime_usec
+    field :prompt_instructions, :string
 
     belongs_to :repository, PtcManager.Operations.Repository
     belongs_to :issue, PtcManager.Operations.Issue
     belongs_to :approval, PtcManager.Operations.Approval
+    belongs_to :automation_definition_version, PtcManager.Automations.DefinitionVersion
     has_many :agent_runs, PtcManager.Operations.AgentRun
     has_one :pr_publication, PtcManager.Operations.PrPublication
     has_one :worktree_allocation, PtcManager.Operations.WorktreeAllocation
@@ -54,6 +56,7 @@ defmodule PtcManager.Operations.Job do
       :repository_id,
       :issue_id,
       :approval_id,
+      :automation_definition_version_id,
       :kind,
       :state,
       :fencing_token,
@@ -85,7 +88,8 @@ defmodule PtcManager.Operations.Job do
       :pre_publication_exit_status,
       :pre_publication_output,
       :pre_publication_duration_ms,
-      :pre_publication_verified_at
+      :pre_publication_verified_at,
+      :prompt_instructions
     ])
     |> validate_required([
       :repository_id,
@@ -110,6 +114,7 @@ defmodule PtcManager.Operations.Job do
     |> validate_length(:pre_publication_bootstrap_command, max: 2_000)
     |> validate_length(:pre_publication_command, max: 2_000)
     |> validate_length(:pre_publication_output, max: 65_536)
+    |> validate_length(:prompt_instructions, max: 20_000)
     |> validate_inclusion(:pre_publication_status, ["pending", "running", "passed", "failed"])
     |> validate_number(:pre_publication_timeout_ms,
       greater_than: 0,

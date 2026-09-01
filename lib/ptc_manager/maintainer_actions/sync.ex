@@ -61,6 +61,9 @@ defmodule PtcManager.MaintainerActions.Sync do
     GitHubSync.sync_repository(repository)
   end
 
+  def sync_action(%{target_type: "repository", repository: repository}),
+    do: GitHubSync.sync_repository(repository)
+
   def sync_action(%{action_key: action_key} = action, result)
       when action_key in ["repair_pr", "repair_and_merge_pr"],
       do: sync_repair(action, {:postflight, result})

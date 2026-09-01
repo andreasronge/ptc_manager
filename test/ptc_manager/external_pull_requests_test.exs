@@ -198,7 +198,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
     refute Repo.get_by(PrPublication, repository_id: repository.id, pr_number: 99)
   end
 
-  test "external pull requests have isolated repair but no retained-context actions" do
+  test "external pull requests have fix-and-merge but no retained-context actions" do
     repository = repository_fixture()
 
     {:ok, _summary} =
@@ -209,7 +209,8 @@ defmodule PtcManager.ExternalPullRequestsTest do
     publication = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 92)
     keys = Catalog.pull_request_actions(publication) |> Enum.map(& &1.key)
 
-    assert "repair_pr" in keys
+    assert "repair_and_merge_pr" in keys
+    refute "repair_pr" in keys
     refute "prepare_merge_decision" in keys
     refute "pr_retrospective" in keys
 

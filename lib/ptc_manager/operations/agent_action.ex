@@ -3,7 +3,7 @@ defmodule PtcManager.Operations.AgentAction do
   import Ecto.Changeset
 
   @states ~w(queued running sync_pending done failed)
-  @target_types ~w(issue pull_request daily_digest)
+  @target_types ~w(repository issue pull_request daily_digest)
 
   schema "agent_actions" do
     field :action_key, :string
@@ -28,6 +28,7 @@ defmodule PtcManager.Operations.AgentAction do
     field :last_error, :string
 
     belongs_to :repository, PtcManager.Operations.Repository
+    belongs_to :automation_definition_version, PtcManager.Automations.DefinitionVersion
     has_many :agent_runs, PtcManager.Operations.AgentRun
 
     timestamps(type: :utc_datetime_usec)
@@ -37,6 +38,7 @@ defmodule PtcManager.Operations.AgentAction do
     action
     |> cast(attrs, [
       :repository_id,
+      :automation_definition_version_id,
       :action_key,
       :target_type,
       :target_id,
@@ -86,5 +88,11 @@ defmodule PtcManager.Operations.AgentAction do
     |> validate_length(:last_error, max: 1_000)
     |> unique_constraint(:action_key, name: :agent_actions_one_active_per_target)
     |> unique_constraint(:action_key, name: :agent_actions_target_type_target_id_index)
+    |> unique_constraint(:action_key,
+      name: :agent_actions_one_active_repository_action
+    )
+    |> unique_constraint(:action_key,
+      name: :agent_actions_action_key_target_type_target_id_index
+    )
   end
 end

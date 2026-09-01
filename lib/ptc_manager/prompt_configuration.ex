@@ -43,11 +43,14 @@ defmodule PtcManager.PromptConfiguration do
   end
 
   def append(action_key, prompt) when is_binary(action_key) and is_binary(prompt) do
-    case instructions(action_key) do
-      nil -> prompt
-      instructions -> prompt <> configured_block(instructions)
-    end
+    append_instructions(prompt, instructions(action_key))
   end
+
+  def append_instructions(prompt, nil) when is_binary(prompt), do: prompt
+
+  def append_instructions(prompt, instructions)
+      when is_binary(prompt) and is_binary(instructions),
+      do: prompt <> configured_block(instructions)
 
   defp upsert(action_key, instructions, actor) do
     %Customization{}

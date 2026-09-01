@@ -538,7 +538,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       </issue_data>
       """
 
-    PromptConfiguration.append("implement_issue", prompt)
+    PromptConfiguration.append_instructions(prompt, job.prompt_instructions)
   end
 
   defp agent_name(job), do: "impl_j#{job.id}_f#{job.fencing_token}"

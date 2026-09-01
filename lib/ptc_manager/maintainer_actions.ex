@@ -18,6 +18,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Repo
   alias PtcManager.Repository.SourceSnapshot
   alias PtcManager.WorktreeSecurity
+  alias PtcManager.Automations
 
   @max_daily_digest_prompt_bytes 100_000
   @terminal_daily_digest_evidence_errors ~w(
@@ -38,7 +39,7 @@ defmodule PtcManager.MaintainerActions do
     with %Issue{} = issue <- Issue |> Repo.get(issue_id) |> Repo.preload(:repository),
          :ok <- ensure_open(issue),
          {:ok, attrs} <- Catalog.build(action_key, %{issue: issue, repository: issue.repository}) do
-      Operations.enqueue_agent_action(Map.merge(attrs, %{action_key: action_key, actor: actor}))
+      enqueue_versioned(issue.repository, action_key, attrs, actor)
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -68,12 +69,7 @@ defmodule PtcManager.MaintainerActions do
                  issue: publication.job && publication.job.issue,
                  repository: repository
                }) do
-          Operations.enqueue_agent_action(
-            Map.merge(attrs, %{
-              action_key: action_key,
-              actor: actor
-            })
-          )
+          enqueue_versioned(repository, action_key, attrs, actor)
         else
           nil -> {:error, :not_found}
           {:error, reason} -> {:error, reason}
@@ -124,9 +120,7 @@ defmodule PtcManager.MaintainerActions do
              decision_answer: answer.value,
              source_action_id: source_action_id
            }) do
-      Operations.enqueue_agent_action(
-        Map.merge(attrs, %{action_key: "resolve_issue_decision", actor: actor})
-      )
+      enqueue_versioned(issue.repository, "resolve_issue_decision", attrs, actor)
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -159,11 +153,11 @@ defmodule PtcManager.MaintainerActions do
              source_action_id: source.id,
              suggestion_index: suggestion_index
            }) do
-      Operations.enqueue_agent_action(
-        Map.merge(attrs, %{
-          action_key: "create_retrospective_issue",
-          actor: actor
-        })
+      enqueue_versioned(
+        publication.job.repository,
+        "create_retrospective_issue",
+        attrs,
+        actor
       )
     else
       nil -> {:error, :not_found}
@@ -176,6 +170,18 @@ defmodule PtcManager.MaintainerActions do
 
   def enqueue_retrospective_issue(_source_action_id, _suggestion_index, _actor),
     do: {:error, :invalid_suggestion}
+
+  defp enqueue_versioned(repository, action_key, attrs, actor) do
+    with {:ok, versioned_attrs} <- Automations.snapshot_attrs(repository, action_key, attrs),
+         {:ok, action} <-
+           Operations.enqueue_agent_action(
+             Map.merge(versioned_attrs, %{action_key: action_key, actor: actor})
+           ),
+         {:ok, _invocation} <-
+           Automations.link_agent_action_invocation(repository, action_key, action, actor) do
+      {:ok, action}
+    end
+  end
 
   def run_once(opts \\ []) do
     adapter =
@@ -326,6 +332,20 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  defp prepare_for_execution(
+         %{
+           target_type: "repository",
+           automation_definition_version: %{execution_profile: "generic_ephemeral"}
+         } = action,
+         sync
+       ) do
+    case call_sync(sync, action) do
+      {:ok, _summary} -> prepare_repository_source_snapshot(action)
+      {:terminal_error, reason} -> fail_preflight(action.id, reason)
+      {:error, reason} -> defer_preflight(action.id, reason, action.sync_attempt_count)
+    end
+  end
+
   defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, sync) do
     publication = Repo.get!(PrPublication, action.target_id)
 
@@ -400,6 +420,34 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(action, _sync), do: {:ok, action}
+
+  defp prepare_repository_source_snapshot(action) do
+    source_snapshot =
+      Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
+
+    with {:ok, source} <-
+           capture_planning_snapshot(source_snapshot, action.repository, action),
+         captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond),
+         snapshot =
+           Map.merge(action.target_snapshot || %{}, %{
+             "source_sha" => source.sha,
+             "source_ref" => source.ref,
+             "source_default_branch" => action.repository.default_branch,
+             "source_captured_at" => DateTime.to_iso8601(captured_at)
+           })
+           |> maybe_put_source_path(source),
+         prompt =
+           action.prompt <>
+             """
+
+             Source snapshot: this run examines exact commit #{source.sha} from #{source.ref}. The working directory is a coordinator-owned, read-only snapshot. Do not edit, commit, reset, or move it. GitHub mutations are allowed only to the degree configured in the action prompt. Mention this exact SHA in the private report so later readers know which source was reviewed.
+             """ do
+      Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt)
+    else
+      {:error, reason} ->
+        defer_preflight(action.id, reason, action.sync_attempt_count)
+    end
+  end
 
   defp prepare_issue_source_snapshot(action, issue) do
     repository = action.repository || Repo.get!(Repository, action.repository_id)
@@ -572,7 +620,7 @@ defmodule PtcManager.MaintainerActions do
               "prepare_issue",
               "review_issue",
               "resolve_issue_decision"
-            ] do
+            ] or action.target_type == "repository" do
     source_snapshot =
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
@@ -609,12 +657,13 @@ defmodule PtcManager.MaintainerActions do
     AgentAction
     |> where(
       [action],
-      action.action_key in [
-        "daily_digest",
-        "prepare_issue",
-        "review_issue",
-        "resolve_issue_decision"
-      ] and
+      (action.target_type == "repository" or
+         action.action_key in [
+           "daily_digest",
+           "prepare_issue",
+           "review_issue",
+           "resolve_issue_decision"
+         ]) and
         action.state in ["sync_pending", "done", "failed"]
     )
     |> where(

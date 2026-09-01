@@ -305,7 +305,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
              "#899 · Linked external issue"
            )
 
-    assert has_element?(view, "#repair-pr-#{failing.id}", "Fix")
+    refute has_element?(view, "#repair-pr-#{failing.id}", "Fix")
     assert has_element?(view, "#repair-and-merge-pr-#{failing.id}", "Fix and merge")
 
     assert has_element?(
@@ -318,9 +318,9 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#review-for-merge-#{clean.id}")
     refute has_element?(view, "#approve-merge-board-#{clean.id}")
 
-    view |> element("#repair-pr-#{failing.id}") |> render_click()
+    view |> element("#repair-and-merge-pr-#{failing.id}") |> render_click()
 
-    assert Repo.get_by!(AgentAction, action_key: "repair_pr", target_id: failing.id).state ==
+    assert Repo.get_by!(AgentAction, action_key: "repair_and_merge_pr", target_id: failing.id).state ==
              "queued"
   end
 

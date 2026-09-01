@@ -2,6 +2,13 @@ import Config
 
 config :ptc_manager, :admin_password, "test-password"
 
+config :ptc_manager, Oban,
+  engine: Oban.Engines.Lite,
+  repo: PtcManager.Repo,
+  testing: :manual,
+  queues: false,
+  plugins: false
+
 config :ptc_manager,
   github_sync_interval_ms: 0,
   herdr_sync_interval_ms: 0,

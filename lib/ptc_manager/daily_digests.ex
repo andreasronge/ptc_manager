@@ -36,7 +36,7 @@ defmodule PtcManager.DailyDigests do
          true <- is_integer(hour) and hour in 0..23,
          {:ok, local_now} <- DateTime.shift_zone(now, time_zone, Tz.TimeZoneDatabase),
          true <- local_now.hour >= hour,
-         {:ok, window} <- previous_day_window(local_now, time_zone) do
+         {:ok, window} <- previous_local_day_window(local_now, time_zone) do
       Repository
       |> where([repository], repository.enabled == true)
       |> order_by([repository], asc: repository.id)
@@ -58,7 +58,9 @@ defmodule PtcManager.DailyDigests do
     end
   end
 
-  def enqueue(%Repository{} = repository, window) when is_map(window) do
+  def enqueue(%Repository{} = repository, window, opts \\ []) when is_map(window) do
+    actor = Keyword.get(opts, :actor, "scheduler")
+
     result =
       Repo.transaction(
         fn ->
@@ -84,6 +86,9 @@ defmodule PtcManager.DailyDigests do
               {:ok, action_attrs} =
                 Catalog.build("daily_digest", %{repository: repository, digest: digest})
 
+              {:ok, action_attrs} =
+                PtcManager.Automations.snapshot_attrs(repository, "daily_digest", action_attrs)
+
               now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
               action =
@@ -91,7 +96,7 @@ defmodule PtcManager.DailyDigests do
                 |> AgentAction.changeset(
                   Map.merge(action_attrs, %{
                     action_key: "daily_digest",
-                    actor: "scheduler",
+                    actor: actor,
                     state: "queued",
                     attempt_count: 0,
                     requested_at: now
@@ -101,7 +106,7 @@ defmodule PtcManager.DailyDigests do
 
               %AuditEvent{}
               |> AuditEvent.changeset(%{
-                actor: "scheduler",
+                actor: actor,
                 action: "agent_action.queued",
                 target_type: "agent_action",
                 target_id: action.id,
@@ -134,6 +139,12 @@ defmodule PtcManager.DailyDigests do
     end
   rescue
     error in [Ecto.InvalidChangesetError, Exqlite.Error] -> {:error, error}
+  end
+
+  def previous_day_window(now, time_zone) when is_binary(time_zone) do
+    with {:ok, local_now} <- DateTime.shift_zone(now, time_zone, Tz.TimeZoneDatabase) do
+      previous_local_day_window(local_now, time_zone)
+    end
   end
 
   def publish(%AgentAction{action_key: "daily_digest", target_id: digest_id} = action, result)
@@ -195,7 +206,7 @@ defmodule PtcManager.DailyDigests do
     end
   end
 
-  defp previous_day_window(local_now, time_zone) do
+  defp previous_local_day_window(local_now, time_zone) do
     date = local_now |> DateTime.to_date() |> Date.add(-1)
 
     with {:ok, local_start} <- local_day_boundary(date, time_zone),

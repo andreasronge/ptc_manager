@@ -1,0 +1,222 @@
+defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
+  @moduledoc "Runs any configured ephemeral action through an explicitly selected Herdr kind."
+
+  @behaviour PtcManager.MaintainerActions.Adapter
+
+  alias PtcManager.Automations
+  alias PtcManager.Dispatch.HerdrAdapter
+  alias PtcManager.MaintainerActions.CodexAdapter, as: ResultValidator
+  alias PtcManager.Operations
+  alias PtcManager.Operations.AgentAction
+  alias PtcManager.Repository.Checkout
+
+  @command_grace_ms 5_000
+
+  @impl true
+  def run(%AgentAction{automation_definition_version: version} = action)
+      when not is_nil(version) do
+    try do
+      with {:ok, path} <- action_path(action),
+           {:ok, profile} <- select_profile(version.agent_selector),
+           {:ok, output_path} <- prepare_output(action),
+           {:ok, workspace, pane} <- open_workspace(action, path),
+           name = agent_name(action),
+           {:ok, agent_key} <- start_agent(name, pane, profile),
+           dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
+           {:ok, _run} <-
+             Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
+           :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
+           {:ok, _output} <- prompt_and_wait(name, action, output_path),
+           {:ok, result} <- read_result(output_path, action.action_key) do
+        {:ok, result}
+      end
+    after
+      cleanup()
+    end
+  rescue
+    error -> {:error, {:generic_herdr_failed, error.__struct__}}
+  end
+
+  def run(%AgentAction{}), do: {:error, :automation_version_missing}
+
+  defp action_path(%AgentAction{target_snapshot: %{"source_path" => path}})
+       when is_binary(path),
+       do: {:ok, Path.expand(path)}
+
+  defp action_path(%AgentAction{repository: repository}), do: Checkout.available_path(repository)
+
+  defp select_profile(selector) do
+    profiles = Application.get_env(:ptc_manager, :agent_profiles, %{})
+    preferred = selector["preferred_kind"]
+    mode = selector["mode"] || "any"
+    fallback = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
+
+    candidates =
+      case {mode, preferred} do
+        {"require", value} when is_binary(value) ->
+          [value]
+
+        {"prefer", value} when is_binary(value) ->
+          Enum.uniq([value, fallback] ++ Map.keys(profiles))
+
+        _other ->
+          Enum.uniq([fallback] ++ Map.keys(profiles))
+      end
+
+    case Enum.find(candidates, &(get_in(profiles, [&1, "enabled"]) == true)) do
+      nil -> {:error, :no_healthy_agent_profile}
+      kind -> {:ok, %{kind: kind, args: get_in(profiles, [kind, "args"]) || []}}
+    end
+  end
+
+  defp prepare_output(action) do
+    directory =
+      Application.get_env(:ptc_manager, :agent_action_output_dir) ||
+        Application.get_env(:ptc_manager, :manager_output_dir) || System.tmp_dir!()
+
+    with :ok <- File.mkdir_p(directory) do
+      path = Path.join(directory, "ptc-result-action-#{action.id}-#{action.attempt_count}.json")
+      :ok = File.write(path, "")
+      :ok = File.chmod(path, 0o660)
+      Process.put({__MODULE__, :output_path}, path)
+      {:ok, path}
+    end
+  end
+
+  defp open_workspace(action, path) do
+    result =
+      command().run([
+        "worktree",
+        "open",
+        "--cwd",
+        path,
+        "--path",
+        path,
+        "--label",
+        "automation-#{action.id}",
+        "--no-focus"
+      ])
+
+    case result do
+      {:ok, output} ->
+        case HerdrAdapter.decode_worktree(output) do
+          {:ok, workspace, _pane} = opened ->
+            Process.put({__MODULE__, :workspace}, workspace)
+            opened
+
+          error ->
+            error
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp start_agent(name, pane, profile) do
+    timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
+
+    args =
+      [
+        "agent",
+        "start",
+        name,
+        "--kind",
+        profile.kind,
+        "--pane",
+        pane,
+        "--timeout",
+        Integer.to_string(timeout),
+        "--"
+      ] ++ profile.args
+
+    case command().run(args, timeout + @command_grace_ms) do
+      {:ok, output} -> {:ok, decode_agent_key(output, pane)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp prompt_and_wait(name, action, output_path) do
+    timeout = action.automation_definition_version.timeout_seconds * 1_000
+    temp_path = output_path <> ".tmp"
+
+    prompt =
+      action.prompt <>
+        """
+
+        Result contract (required): write exactly one JSON object matching the action result contract to #{output_path}. Write it atomically by first writing #{temp_path}, then renaming it to #{output_path}. This file is the only machine-readable result channel; do not access PtcManager's database. Terminal prose is for humans and will not be parsed. Before finishing, confirm the final file exists and is valid JSON.
+        """
+
+    command().run(
+      [
+        "agent",
+        "prompt",
+        name,
+        prompt,
+        "--wait",
+        "--until",
+        "idle",
+        "--until",
+        "done",
+        "--until",
+        "blocked",
+        "--timeout",
+        Integer.to_string(timeout)
+      ],
+      timeout + @command_grace_ms
+    )
+  end
+
+  defp read_result(path, action_key) do
+    with {:ok, body} <- File.read(path),
+         {:ok, result} when is_map(result) <- Jason.decode(body),
+         :ok <- ResultValidator.validate_result(result, action_key) do
+      {:ok, result}
+    else
+      {:error, %Jason.DecodeError{}} -> {:error, :invalid_agent_result_json}
+      {:error, reason} -> {:error, reason}
+      _invalid -> {:error, :invalid_agent_result}
+    end
+  end
+
+  defp dispatch(action, kind, name, workspace, pane, agent_key, path) do
+    session = Application.get_env(:ptc_manager, :herdr_session, "default")
+
+    %{
+      workspace_id: workspace,
+      pane_id: pane,
+      session: session,
+      external_key: "#{session}:#{agent_key}",
+      agent_name: name,
+      agent_kind: kind,
+      worktree_path: path,
+      worker_key: "herdr:#{session}",
+      role: "manager",
+      status_text: "Running #{String.replace(action.action_key, "_", " ")} through Herdr."
+    }
+  end
+
+  defp decode_agent_key(output, fallback) do
+    with {:ok, decoded} <- Jason.decode(output),
+         value when is_binary(value) <-
+           get_in(decoded, ["result", "agent", "agent_session", "value"]) do
+      value
+    else
+      _invalid -> fallback
+    end
+  end
+
+  defp agent_name(action), do: "automation_a#{action.id}_f#{action.attempt_count}"
+
+  defp cleanup do
+    if workspace = Process.delete({__MODULE__, :workspace}) do
+      _ = command().run(["worktree", "remove", "--workspace", workspace, "--force"])
+    end
+
+    if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)
+    :ok
+  end
+
+  defp command,
+    do: Application.get_env(:ptc_manager, :generic_herdr_command, PtcManager.Herdr.Command)
+end

@@ -56,12 +56,29 @@ defmodule PtcManager.Operations do
   def list_repositories,
     do: Repository |> order_by([repository], asc: repository.id) |> Repo.all()
 
+  def list_workers,
+    do: Worker |> order_by([worker], asc: worker.id) |> Repo.all()
+
   def get_repository!(id), do: Repo.get!(Repository, id)
 
   def get_issue!(id), do: Issue |> preload(:repository) |> Repo.get!(id)
 
-  def create_repository(attrs),
-    do: %Repository{} |> Repository.changeset(attrs) |> Repo.insert() |> broadcast_change()
+  def create_repository(attrs) do
+    Multi.new()
+    |> Multi.insert(:repository, Repository.changeset(%Repository{}, attrs))
+    |> Multi.run(:automations, fn _repo, %{repository: repository} ->
+      case PtcManager.Automations.ensure_defaults(repository) do
+        :ok -> {:ok, :seeded}
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{repository: repository}} -> notify_and_return({:ok, repository})
+      {:error, :repository, changeset, _changes} -> {:error, changeset}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
 
   def create_issue(attrs),
     do: %Issue{} |> Issue.changeset(attrs) |> Repo.insert() |> broadcast_change()
@@ -93,6 +110,7 @@ defmodule PtcManager.Operations do
         details: %{
           "action_key" => action.action_key,
           "prompt_version" => action.prompt_version,
+          "automation_definition_version_id" => action.automation_definition_version_id,
           "target_type" => action.target_type,
           "target_id" => action.target_id,
           "target_label" => action.target_label
@@ -156,12 +174,15 @@ defmodule PtcManager.Operations do
       base
       |> order_by([action], asc: action.requested_at, asc: action.id)
       |> limit(1)
-      |> preload(:repository)
+      |> preload([:repository, :automation_definition_version])
       |> Repo.one()
     else
       next_writing_action(base)
     end
   end
+
+  def planning_agent_action?(%AgentAction{automation_definition_version: %{queue_lane: lane}}),
+    do: lane == "planning"
 
   def planning_agent_action?(%AgentAction{action_key: action_key}),
     do: planning_agent_action?(action_key)
@@ -181,7 +202,7 @@ defmodule PtcManager.Operations do
       )
       |> order_by([action], asc: action.requested_at, asc: action.id)
       |> limit(1)
-      |> preload(:repository)
+      |> preload([:repository, :automation_definition_version])
       |> Repo.one()
 
     merge_candidate ||
@@ -205,7 +226,7 @@ defmodule PtcManager.Operations do
       asc: action.requested_at,
       asc: action.id
     )
-    |> preload(:repository)
+    |> preload([:repository, :automation_definition_version])
     |> Repo.all()
   end
 
@@ -230,7 +251,11 @@ defmodule PtcManager.Operations do
   def claim_agent_action(action_id, now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond))
       when is_integer(action_id) do
     action_id
-    |> then(&Repo.get(AgentAction, &1))
+    |> then(fn id ->
+      AgentAction
+      |> preload([:repository, :automation_definition_version])
+      |> Repo.get(id)
+    end)
     |> case do
       nil -> {:error, :agent_action_not_found}
       candidate -> do_claim_agent_action(candidate, now)
@@ -311,8 +336,11 @@ defmodule PtcManager.Operations do
       end)
 
     case outcome do
-      {:ok, action} -> notify_and_return({:ok, action})
-      {:error, reason} -> {:error, reason}
+      {:ok, action} ->
+        notify_and_return({:ok, action})
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -436,8 +464,12 @@ defmodule PtcManager.Operations do
       end)
 
     case outcome do
-      {:ok, action} -> notify_and_return({:ok, action})
-      {:error, reason} -> {:error, reason}
+      {:ok, action} ->
+        _ = PtcManager.Automations.reconcile_invocation(action)
+        notify_and_return({:ok, action})
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -644,8 +676,12 @@ defmodule PtcManager.Operations do
       end)
 
     case outcome do
-      {:ok, action} -> notify_and_return({:ok, action})
-      {:error, reason} -> {:error, reason}
+      {:ok, action} ->
+        _ = PtcManager.Automations.reconcile_invocation(action)
+        notify_and_return({:ok, action})
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -937,7 +973,7 @@ defmodule PtcManager.Operations do
             |> AgentRun.changeset(%{
               worker_id: worker.id,
               job_id: job.id,
-              role: "implementer",
+              role: Map.get(dispatch, :role, "implementer"),
               state: "working",
               agent_name: Map.get(dispatch, :agent_name),
               status_text: "Implementing the approved issue in an isolated worktree.",
@@ -1002,7 +1038,8 @@ defmodule PtcManager.Operations do
               worker_id: worker.id,
               role: "implementer",
               state: "working",
-              status_text: "Repairing the existing pull request in Herdr.",
+              status_text:
+                Map.get(dispatch, :status_text, "Repairing the existing pull request in Herdr."),
               last_heartbeat_at: now,
               agent_name: dispatch.agent_name,
               herdr_workspace: dispatch.workspace_id,
@@ -1823,6 +1860,17 @@ defmodule PtcManager.Operations do
 
     Multi.new()
     |> Multi.run(:snapshot, fn repo, _changes -> current_approvable_snapshot(repo, issue_id) end)
+    |> Multi.run(:automation, fn _repo, %{snapshot: {_issue, _proposal, repository}} ->
+      with :ok <- PtcManager.Automations.ensure_defaults(repository),
+           {:ok, version} <- PtcManager.Automations.current_version(repository, "implement_issue") do
+        {:ok,
+         {version,
+          PtcManager.Automations.resolved_instructions(
+            version,
+            PtcManager.PromptConfiguration.instructions("implement_issue")
+          )}}
+      end
+    end)
     |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}} ->
       Approval.changeset(%Approval{}, %{
         proposal_id: proposal.id,
@@ -1836,12 +1884,15 @@ defmodule PtcManager.Operations do
     end)
     |> Multi.insert(:job, fn %{
                                snapshot: {issue, _proposal, repository},
-                               approval: approval
+                               approval: approval,
+                               automation: {version, prompt_instructions}
                              } ->
       Job.changeset(%Job{}, %{
         repository_id: issue.repository_id,
         issue_id: issue.id,
         approval_id: approval.id,
+        automation_definition_version_id: version.id,
+        prompt_instructions: prompt_instructions,
         kind: "implementation",
         state: "queued",
         fencing_token: 0,
@@ -1869,6 +1920,10 @@ defmodule PtcManager.Operations do
     end)
     |> Repo.transaction()
     |> normalize_approval_result()
+    |> tap(fn
+      {:ok, job} -> PtcManager.Automations.link_job_invocation(job, actor)
+      _result -> :ok
+    end)
     |> broadcast_change()
   end
 
@@ -2388,7 +2443,9 @@ defmodule PtcManager.Operations do
           }
         })
 
-        AgentAction |> preload(:repository) |> Repo.get!(candidate.id)
+        AgentAction
+        |> preload([:repository, :automation_definition_version])
+        |> Repo.get!(candidate.id)
       end)
 
     case outcome do
@@ -2517,8 +2574,12 @@ defmodule PtcManager.Operations do
       end)
 
     case outcome do
-      {:ok, action} -> notify_and_return({:ok, action})
-      {:error, reason} -> {:error, reason}
+      {:ok, action} ->
+        _ = PtcManager.Automations.reconcile_invocation(action)
+        notify_and_return({:ok, action})
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -2598,7 +2659,50 @@ defmodule PtcManager.Operations do
     end
   end
 
+  defp agent_action_worker!(
+         %AgentAction{
+           automation_definition_version: %{execution_profile: "generic_ephemeral"}
+         } = action,
+         now
+       ) do
+    if Application.get_env(:ptc_manager, :dispatch_enabled, false),
+      do: generic_herdr_action_worker!(action, now),
+      else: get_or_create_agent_action_worker!(now)
+  end
+
   defp agent_action_worker!(%AgentAction{}, now), do: get_or_create_agent_action_worker!(now)
+
+  defp generic_herdr_action_worker!(action, _now) do
+    session = Application.get_env(:ptc_manager, :herdr_session, "default")
+
+    worker =
+      case Repo.get_by(Worker, worker_key: "herdr:#{session}") do
+        %Worker{status: "online"} = worker -> worker
+        _worker -> Repo.rollback(:worker_unavailable)
+      end
+
+    capacity =
+      if action.automation_definition_version.resource_class == "heavy",
+        do: Application.get_env(:ptc_manager, :implementation_agent_capacity, 1),
+        else: Application.get_env(:ptc_manager, :planning_agent_capacity, 2)
+
+    active_count =
+      AgentRun
+      |> join(:inner, [run], candidate in AgentAction, on: candidate.id == run.agent_action_id)
+      |> join(
+        :left,
+        [run, candidate],
+        version in assoc(candidate, :automation_definition_version)
+      )
+      |> where(
+        [run, _candidate, version],
+        run.worker_id == ^worker.id and run.state in ^@capacity_run_states and
+          version.resource_class == ^action.automation_definition_version.resource_class
+      )
+      |> Repo.aggregate(:count)
+
+    if active_count < capacity, do: worker, else: Repo.rollback(:dispatch_capacity)
+  end
 
   defp herdr_agent_action_worker!(%AgentAction{action_key: action_key} = action, now) do
     session = Application.get_env(:ptc_manager, :herdr_session, "default")
@@ -2677,11 +2781,29 @@ defmodule PtcManager.Operations do
     |> select([job], job.repository_id)
   end
 
-  defp agent_action_lane(query, :planning),
-    do: where(query, [action], action.action_key in ^@planning_action_keys)
+  defp agent_action_lane(query, :planning) do
+    query
+    |> join(:left, [action], version in assoc(action, :automation_definition_version),
+      as: :automation_version
+    )
+    |> where(
+      [action, automation_version: version],
+      version.queue_lane == "planning" or
+        (is_nil(version.id) and action.action_key in ^@planning_action_keys)
+    )
+  end
 
-  defp agent_action_lane(query, :writing),
-    do: where(query, [action], action.action_key not in ^@planning_action_keys)
+  defp agent_action_lane(query, :writing) do
+    query
+    |> join(:left, [action], version in assoc(action, :automation_definition_version),
+      as: :automation_version
+    )
+    |> where(
+      [action, automation_version: version],
+      version.queue_lane == "writing" or
+        (is_nil(version.id) and action.action_key not in ^@planning_action_keys)
+    )
+  end
 
   defp agent_action_lane(query, :any), do: query
 

@@ -14,14 +14,14 @@ defmodule PtcManager.Application do
       PtcManager.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
+      PtcManager.Automations.Bootstrap,
+      {Oban, Application.fetch_env!(:ptc_manager, Oban)},
       PtcManager.Repository.StartupPreflight,
       {DNSCluster, query: Application.get_env(:ptc_manager, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: PtcManager.PubSub},
       {Task.Supervisor, name: PtcManager.TaskSupervisor},
       PtcManager.Manager.Gate,
-      {PtcManager.MaintainerActions.Poller, lane: :planning},
-      {PtcManager.MaintainerActions.Poller, lane: :writing},
-      PtcManager.DailyDigests.Scheduler,
+      maintainer_action_supervisor(),
       PtcManager.GitHub.Poller,
       PtcManager.Herdr.Poller,
       PtcManager.Dispatch.Poller,
@@ -39,6 +39,25 @@ defmodule PtcManager.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: PtcManager.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp maintainer_action_supervisor do
+    planning = Application.get_env(:ptc_manager, :planning_agent_capacity, 2)
+    writing = Application.get_env(:ptc_manager, :writing_agent_capacity, 1)
+
+    children =
+      for {lane, capacity} <- [planning: planning, writing: writing],
+          index <- 1..max(capacity, 1) do
+        {PtcManager.MaintainerActions.Poller, lane: lane, index: index}
+      end
+
+    %{
+      id: PtcManager.MaintainerActions.Supervisor,
+      type: :supervisor,
+      start:
+        {Supervisor, :start_link,
+         [children, [strategy: :one_for_one, name: PtcManager.MaintainerActions.Supervisor]]}
+    }
   end
 
   # Tell Phoenix to update the endpoint configuration

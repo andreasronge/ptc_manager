@@ -3,6 +3,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   alias PtcManager.Operations.{Issue, PrPublication}
   alias PtcManager.PromptConfiguration
+  alias PtcManager.Automations
 
   @prompt_version 1
   @issue_review_limit 3
@@ -73,20 +74,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def configurable_action?(action_key) when is_binary(action_key),
     do: Enum.any?(@configurable_actions, &(&1.key == action_key))
 
-  def issue_actions(%Issue{state: "open"}) do
-    [
-      %{
-        key: "prepare_issue",
-        label: "Prepare issue",
-        description: "Investigate and update GitHub"
-      },
-      %{
-        key: "review_issue",
-        label: "Review issue",
-        description: "Run up to #{@issue_review_limit} independent readiness reviews"
-      }
-    ]
-  end
+  def issue_actions(%Issue{state: "open", repository_id: repository_id}),
+    do: Automations.contextual_actions(repository_id, "planning_issue")
 
   def issue_actions(%Issue{}), do: []
 
@@ -94,40 +83,25 @@ defmodule PtcManager.MaintainerActions.Catalog do
     do: []
 
   def pull_request_actions(%PrPublication{state: "published", pr_state: "open"} = publication) do
-    publication_actions =
-      if PrPublication.managed?(publication) do
-        [
-          %{
-            key: "prepare_merge_decision",
-            label: "Prepare merge decision",
-            description: "Create a private summary for this exact PR version"
-          }
-        ]
-      else
-        []
+    Automations.contextual_actions(publication_repository_id(publication), "delivery_pr")
+    |> Enum.filter(fn action ->
+      case action.key do
+        "repair_and_merge_pr" -> repair_needed?(publication)
+        "repair_pr" -> repair_needed?(publication)
+        "prepare_merge_decision" -> PrPublication.managed?(publication)
+        _other -> true
       end
-
-    if repair_needed?(publication) do
-      [
-        %{
-          key: "repair_pr",
-          label: "Fix",
-          description: "Queue an agent to repair the existing pull request"
-        },
-        %{
-          key: "repair_and_merge_pr",
-          label: "Fix and merge",
-          description:
-            "Give this repair merge priority, keep the repository locked, and merge after green CI"
-        }
-        | publication_actions
-      ]
-    else
-      publication_actions
-    end
+    end)
   end
 
   def pull_request_actions(%PrPublication{}), do: []
+
+  defp publication_repository_id(%PrPublication{repository_id: id}) when is_integer(id), do: id
+
+  defp publication_repository_id(%PrPublication{job: %{repository_id: id}}) when is_integer(id),
+    do: id
+
+  defp publication_repository_id(_publication), do: nil
 
   def build("prepare_issue", %{issue: issue, repository: repository}) do
     {:ok,

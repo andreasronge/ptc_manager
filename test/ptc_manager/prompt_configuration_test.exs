@@ -67,7 +67,7 @@ defmodule PtcManager.PromptConfigurationTest do
     assert action.prompt =~ "<maintainer_configured_instructions>"
   end
 
-  test "private analysis and implementation button prompts use their customizations" do
+  test "private analysis uses current instructions while implementation freezes approval-time instructions" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 1705})
     proposal_fixture(issue)
@@ -98,7 +98,23 @@ defmodule PtcManager.PromptConfigurationTest do
 
     assert CodexAdapter.build_prompt(issue) =~ "Call out the smallest product decision."
 
-    assert HerdrAdapter.build_prompt(repository, issue, job) =~
+    refute HerdrAdapter.build_prompt(repository, issue, job) =~
+             "Include the focused test command in the PR body."
+
+    later_issue = issue_fixture(repository, %{number: 1706})
+    proposal_fixture(later_issue)
+    {:ok, later_job} = PtcManager.Operations.approve_issue(later_issue.id, "maintainer")
+
+    later_job =
+      later_job
+      |> Job.changeset(%{
+        branch_name: "ptc-manager/issue-1706-job-#{later_job.id}",
+        fencing_token: 1,
+        publication_source: "agent"
+      })
+      |> Repo.update!()
+
+    assert HerdrAdapter.build_prompt(repository, later_issue, later_job) =~
              "Include the focused test command in the PR body."
   end
 end

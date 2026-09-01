@@ -26,6 +26,36 @@ defmodule PtcManagerWeb.ConfigurationLive do
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_event("add-repository", %{"repository" => params}, socket) do
+    attrs = %{
+      github_owner: params["github_owner"],
+      github_name: params["github_name"],
+      default_branch: params["default_branch"],
+      local_path: params["local_path"],
+      enabled: false
+    }
+
+    case Operations.create_repository(attrs) do
+      {:ok, repository} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "#{repository.github_owner}/#{repository.github_name} added disabled. Verify its checkout, GitHub access, gate, and automations before enabling it."
+         )
+         |> load_configuration()}
+
+      {:error, _reason} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The repository configuration is invalid or already exists."
+         )}
+    end
+  end
+
+  @impl true
   def handle_event(
         "save-prompt",
         %{"action-key" => action_key, "customization" => %{"instructions" => instructions}},

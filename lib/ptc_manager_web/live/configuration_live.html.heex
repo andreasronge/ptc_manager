@@ -32,6 +32,58 @@
         </p>
       </div>
 
+      <details
+        id="add-repository"
+        class="mb-5 rounded-2xl border border-dashed border-teal-400/30 bg-teal-400/[0.04] p-5"
+      >
+        <summary class="cursor-pointer font-semibold text-teal-200">
+          Add another GitHub repository
+        </summary>
+        <p class="mt-2 text-sm leading-6 text-slate-400">
+          Register an existing dedicated checkout. The repository starts disabled and receives its own editable automation definitions. PtcManager never copies credentials or enables schedules automatically.
+        </p>
+        <.form
+          for={%{}}
+          as={:repository}
+          phx-submit="add-repository"
+          class="mt-4 grid gap-3 md:grid-cols-2"
+        >
+          <label class="text-xs text-slate-400">
+            GitHub owner<input
+              required
+              name="repository[github_owner]"
+              class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+            />
+          </label>
+          <label class="text-xs text-slate-400">
+            Repository name<input
+              required
+              name="repository[github_name]"
+              class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+            />
+          </label>
+          <label class="text-xs text-slate-400">
+            Default branch<input
+              required
+              name="repository[default_branch]"
+              value="main"
+              class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+            />
+          </label>
+          <label class="text-xs text-slate-400">
+            Dedicated checkout path<input
+              required
+              name="repository[local_path]"
+              placeholder="/srv/ptc-manager/repos/project"
+              class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 font-mono text-sm"
+            />
+          </label>
+          <button class="w-fit rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950">
+            Add disabled repository
+          </button>
+        </.form>
+      </details>
+
       <div class="grid gap-5 xl:grid-cols-2">
         <article
           :for={health <- @repository_health}

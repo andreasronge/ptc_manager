@@ -716,6 +716,11 @@ defmodule PtcManager.Herdr.Sync do
         status: status,
         capabilities: %{
           "herdr" => true,
+          "agent_kinds" =>
+            Application.get_env(:ptc_manager, :agent_profiles, %{})
+            |> Enum.filter(fn {_kind, profile} -> profile["enabled"] == true end)
+            |> Enum.map(&elem(&1, 0))
+            |> Enum.sort(),
           "implementation_slots" =>
             Application.get_env(:ptc_manager, :implementation_agent_capacity, 1)
         }
@@ -931,7 +936,7 @@ defmodule PtcManager.Herdr.Sync do
        when is_binary(name) do
     with [action_id, fencing_token] <-
            Regex.run(
-             ~r/^(?:merge|repair)_pr\d+_a(\d+)_f(\d+)$/,
+             ~r/^(?:(?:merge|repair)_pr\d+|automation)_a(\d+)_f(\d+)$/,
              name,
              capture: :all_but_first
            ),

@@ -43,6 +43,29 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "#prompt-repair_and_merge_pr", "Default")
   end
 
+  test "registers another repository disabled with its own automation defaults", %{conn: conn} do
+    path = Path.join(System.tmp_dir!(), "ptc-manager-onboarding-checkout")
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> form("#add-repository form", %{
+      "repository" => %{
+        "github_owner" => "andreasronge",
+        "github_name" => "ptc_manager",
+        "default_branch" => "main",
+        "local_path" => path
+      }
+    })
+    |> render_submit()
+
+    repository =
+      Repo.get_by!(Repository, github_owner: "andreasronge", github_name: "ptc_manager")
+
+    refute repository.enabled
+    assert length(PtcManager.Automations.list_definitions(repository)) == 12
+    assert has_element?(view, "#repository-health-#{repository.id}", "Disabled")
+  end
+
   test "shows repository checkout, GitHub, and publication-gate health", %{conn: conn} do
     root =
       Path.join(

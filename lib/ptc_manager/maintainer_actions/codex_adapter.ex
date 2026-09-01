@@ -10,15 +10,20 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   alias PtcManager.Repo
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.SourceSnapshot
+  alias PtcManager.MaintainerActions.GenericHerdrAdapter
 
   @impl true
   def run(%AgentAction{action_key: "daily_digest", repository: repository} = action) do
-    run_as_user =
-      Application.get_env(:ptc_manager, :daily_digest_run_as_user) ||
-        Application.get_env(:ptc_manager, :codex_run_as_user)
+    if Application.get_env(:ptc_manager, :dispatch_enabled, false) do
+      GenericHerdrAdapter.run(action)
+    else
+      run_as_user =
+        Application.get_env(:ptc_manager, :daily_digest_run_as_user) ||
+          Application.get_env(:ptc_manager, :codex_run_as_user)
 
-    with {:ok, path} <- repository_path(action, repository) do
-      run_codex(action, path, sandbox: "read-only", run_as_user: run_as_user)
+      with {:ok, path} <- repository_path(action, repository) do
+        run_codex(action, path, sandbox: "read-only", run_as_user: run_as_user)
+      end
     end
   end
 
@@ -35,7 +40,23 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
     adapter.run(action)
   end
 
+  def run(
+        %AgentAction{
+          automation_definition_version: %{execution_profile: "generic_ephemeral"}
+        } = action
+      ) do
+    if Application.get_env(:ptc_manager, :dispatch_enabled, false),
+      do: GenericHerdrAdapter.run(action),
+      else: run_direct(action)
+  end
+
   def run(%AgentAction{repository: repository} = action) do
+    with {:ok, path} <- repository_path(action, repository) do
+      run_codex(action, path, [])
+    end
+  end
+
+  defp run_direct(%AgentAction{repository: repository} = action) do
     with {:ok, path} <- repository_path(action, repository) do
       run_codex(action, path, [])
     end
@@ -287,7 +308,9 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
               "merge-blocked",
               "merge-needs-decision",
               "repaired",
-              "repair-blocked"
+              "repair-blocked",
+              "completed",
+              "no-changes"
             ] and is_binary(summary) and is_binary(why_it_matters) and
               scope in ["small", "medium", "large"] and risk in ["low", "medium", "high"] and
               is_binary(technical_evidence) and is_list(changes) and is_list(evidence) and
@@ -334,6 +357,9 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
        when action_key in ["repair_pr", "repair_and_merge_pr"] and
               outcome in ["repaired", "repair-blocked"],
        do: :ok
+
+  defp validate_outcome(_action_key, outcome) when outcome in ["completed", "no-changes"],
+    do: :ok
 
   defp validate_outcome(_action_key, _outcome), do: {:error, :invalid_agent_action_outcome}
 
@@ -392,6 +418,14 @@ defmodule PtcManager.MaintainerActions.CodexAdapter do
   defp validate_created_issue_numbers("pr_retrospective", "followups-proposed", []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "no-followups", []), do: :ok
   defp validate_created_issue_numbers("create_retrospective_issue", "no-followups", []), do: :ok
+
+  defp validate_created_issue_numbers(_action_key, outcome, issue_numbers)
+       when outcome in ["completed", "no-changes"] and is_list(issue_numbers) do
+    if Enum.all?(issue_numbers, &(is_integer(&1) and &1 > 0)) and
+         Enum.uniq(issue_numbers) == issue_numbers,
+       do: :ok,
+       else: {:error, :invalid_created_issue_numbers}
+  end
 
   defp validate_created_issue_numbers(
          "create_retrospective_issue",

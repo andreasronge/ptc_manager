@@ -305,7 +305,9 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       [timestamp, timestamp]
     )
 
-    _target = DisposableDeploymentTarget.rollback!(target, step: 2)
+    # Roll back every migration applied after the tagged boundary so this
+    # specifically exercises the native dependency migration's down path.
+    _target = DisposableDeploymentTarget.rollback!(target, step: 6)
 
     assert Repo.query!("SELECT count(*) FROM issue_dependencies").rows == [[0]]
     assert Repo.query!("SELECT dependencies_projected FROM issues WHERE id = 1").rows == [[0]]

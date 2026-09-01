@@ -125,6 +125,27 @@ pr_reconcile_enabled =
 
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
+implementation_agent_kind = System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex")
+
+implementation_agent_args =
+  System.get_env(
+    "PTC_IMPLEMENTATION_AGENT_ARGS",
+    "--dangerously-bypass-approvals-and-sandbox"
+  )
+  |> OptionParser.split()
+
+agent_profiles =
+  case System.get_env("PTC_AGENT_PROFILES_JSON") do
+    value when value in [nil, ""] ->
+      %{implementation_agent_kind => %{"enabled" => true, "args" => implementation_agent_args}}
+
+    value ->
+      case Jason.decode(value) do
+        {:ok, profiles} when is_map(profiles) -> profiles
+        _invalid -> raise "PTC_AGENT_PROFILES_JSON must be a JSON object keyed by Herdr kind"
+      end
+  end
+
 config :ptc_manager,
   operational_mode: operational_mode,
   demo_mode: demo_mode,
@@ -143,6 +164,10 @@ config :ptc_manager,
   agent_actions_enabled: agent_actions_enabled,
   agent_action_interval_ms:
     System.get_env("PTC_AGENT_ACTION_INTERVAL_MS", "5000") |> String.to_integer(),
+  planning_agent_capacity:
+    System.get_env("PTC_PLANNING_AGENT_CAPACITY", "2") |> String.to_integer(),
+  writing_agent_capacity:
+    System.get_env("PTC_WRITING_AGENT_CAPACITY", "1") |> String.to_integer(),
   agent_action_timeout_ms:
     System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "7200000") |> String.to_integer(),
   agent_action_sync_retry_base_ms:
@@ -256,13 +281,9 @@ config :ptc_manager,
   git_memory_limit_binary: System.get_env("PTC_GIT_MEMORY_LIMIT_BINARY"),
   git_memory_limit_bytes:
     System.get_env("PTC_GIT_MEMORY_LIMIT_BYTES", "268435456") |> String.to_integer(),
-  implementation_agent_kind: System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex"),
-  implementation_agent_args:
-    System.get_env(
-      "PTC_IMPLEMENTATION_AGENT_ARGS",
-      "--dangerously-bypass-approvals-and-sandbox"
-    )
-    |> OptionParser.split(),
+  implementation_agent_kind: implementation_agent_kind,
+  implementation_agent_args: implementation_agent_args,
+  agent_profiles: agent_profiles,
   implementation_agent_start_timeout_ms:
     System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
     |> String.to_integer(),

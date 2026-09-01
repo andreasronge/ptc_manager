@@ -9,6 +9,14 @@ import Config
 
 config :elixir, :time_zone_database, Tz.TimeZoneDatabase
 
+config :ptc_manager, Oban,
+  engine: Oban.Engines.Lite,
+  repo: PtcManager.Repo,
+  queues: [automations: 4],
+  plugins: [
+    {Oban.Plugins.Cron, crontab: [{"* * * * *", PtcManager.Automations.ScheduleTickWorker}]}
+  ]
+
 config :ptc_manager,
   operational_mode: :active,
   ecto_repos: [PtcManager.Repo],
@@ -26,6 +34,8 @@ config :ptc_manager,
   agent_action_adapter: PtcManager.MaintainerActions.CodexAdapter,
   agent_actions_enabled: false,
   agent_action_interval_ms: 5_000,
+  planning_agent_capacity: 2,
+  writing_agent_capacity: 1,
   agent_action_timeout_ms: 1_800_000,
   agent_action_sync_retry_base_ms: 5_000,
   agent_action_sync_retry_max_ms: 300_000,
@@ -93,6 +103,9 @@ config :ptc_manager,
   git_memory_limit_bytes: 268_435_456,
   implementation_agent_kind: "codex",
   implementation_agent_args: ["--dangerously-bypass-approvals-and-sandbox"],
+  agent_profiles: %{
+    "codex" => %{"enabled" => true, "args" => ["--dangerously-bypass-approvals-and-sandbox"]}
+  },
   implementation_agent_start_timeout_ms: 60_000,
   implementation_agent_publishes_pr: false,
   required_pre_pr_reviews_default: 2,
