@@ -1644,8 +1644,15 @@ issue details and up to 100 native blockers per issue, avoiding one REST call
 per open issue. The checkpoint is browser-testable with mocked same-repository,
 cross-repository, completed, inaccessible, not-planned, and cyclic blockers.
 
-The complete two-repository dispatch/publication journey remains the final
-Slice 2 checkpoint.
+Checkpoint D completes Slice 2 with a deterministic two-repository golden
+journey. Two repositories deliberately use the same issue number and the same
+published pull-request number while production coordinator stages perform
+dispatch, Herdr completion, result verification, gated publication, merge
+reconciliation, and terminal worktree cleanup. The scenario asserts that local
+issues, branch names, worktree paths, publication repository identities, GitHub
+URLs, and cleanup targets remain isolated throughout. It uses the shared
+stateful external-service boundary and no network, model, credentials, sleeps,
+or maintainer checkout.
 
 Acceptance:
 

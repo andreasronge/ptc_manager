@@ -16,9 +16,72 @@ defmodule PtcManager.TestScenarioTest do
   }
 
   alias PtcManager.Publications
+  alias PtcManager.PublicationStatusReconciler
+  alias PtcManager.Publisher
   alias PtcManager.Repo
+  alias PtcManager.ResultReconciler
   alias PtcManager.TestScenario
   alias PtcManager.Worktrees
+
+  defmodule MultiRepositoryProbe do
+    @behaviour PtcManager.Repository.ResultProbe
+
+    def verify(_repository, job) do
+      {:ok,
+       %{
+         base_sha: sha(job.id, "a"),
+         head_sha: sha(job.id, "b"),
+         diff_digest: sha(job.id, "c", 64),
+         commit_count: 1
+       }}
+    end
+
+    defp sha(id, character, length \\ 40) do
+      id
+      |> Integer.to_string(16)
+      |> String.pad_leading(length, character)
+      |> String.slice(-length, length)
+    end
+  end
+
+  defmodule MultiRepositoryContract do
+    def for_result(_job, _result),
+      do: {:ok, PtcManager.RepositoryContractFixture.contract()}
+  end
+
+  defmodule MultiRepositoryGate do
+    def verify(publication) do
+      {:ok,
+       %{
+         status: "passed",
+         verified_sha: publication.head_sha,
+         config_digest: publication.job.pre_publication_config_digest,
+         exit_status: 0,
+         output: "scenario gate passed",
+         output_truncated: false,
+         duration_ms: 1
+       }}
+    end
+  end
+
+  defmodule MultiRepositoryBroker do
+    @behaviour PtcManager.GitHub.PublishBroker
+
+    def publish(publication) do
+      repository = publication.repository || publication.job.repository
+
+      {:ok,
+       %{
+         pr_number: 73,
+         pr_url:
+           "https://github.com/#{repository.github_owner}/#{repository.github_name}/pull/73",
+         head_sha: publication.head_sha
+       }}
+    end
+
+    def status(_publication), do: {:error, :not_supported}
+    def discover(_publication), do: {:error, :not_supported}
+  end
 
   test "advances lease expiry with the scenario clock and no wall-clock sleep" do
     now = ~U[2026-08-31 12:00:00.000000Z]
@@ -387,6 +450,130 @@ defmodule PtcManager.TestScenarioTest do
     assert Enum.map(Operations.list_queued_jobs(), & &1.issue.number) == [101, 102]
   end
 
+  test "same issue and PR numbers stay isolated across the complete two-repository journey" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+
+    first =
+      TestScenario.approved_implementation!(scenario,
+        number: 501,
+        local_path: "/tmp/ptc-manager-golden-alpha",
+        repository_attrs: %{github_owner: "golden", github_name: "alpha"}
+      )
+
+    second =
+      TestScenario.approved_implementation!(scenario,
+        number: 501,
+        local_path: "/tmp/ptc-manager-golden-beta",
+        repository_attrs: %{github_owner: "golden", github_name: "beta"}
+      )
+
+    assert first.repository.id != second.repository.id
+    assert first.issue.number == second.issue.number
+
+    first_publication = complete_and_publish!(scenario, first.job)
+    second_publication = complete_and_publish!(scenario, second.job)
+
+    assert first_publication.pr_number == second_publication.pr_number
+    assert first_publication.repository_id == first.repository.id
+    assert second_publication.repository_id == second.repository.id
+    assert first_publication.head_repository == "golden/alpha"
+    assert second_publication.head_repository == "golden/beta"
+    assert first_publication.pr_url == "https://github.com/golden/alpha/pull/73"
+    assert second_publication.pr_url == "https://github.com/golden/beta/pull/73"
+
+    first_job = Repo.get!(Job, first.job.id)
+    second_job = Repo.get!(Job, second.job.id)
+    refute first_job.branch_name == second_job.branch_name
+
+    first_allocation = Repo.get_by!(WorktreeAllocation, job_id: first_job.id)
+    second_allocation = Repo.get_by!(WorktreeAllocation, job_id: second_job.id)
+    worktree_root = Application.fetch_env!(:ptc_manager, :worktree_root) |> Path.expand()
+
+    assert first_allocation.path ==
+             Path.join(
+               worktree_root,
+               "golden-alpha-job-#{first_job.id}-f#{first_job.fencing_token}"
+             )
+
+    assert second_allocation.path ==
+             Path.join(
+               worktree_root,
+               "golden-beta-job-#{second_job.id}-f#{second_job.fencing_token}"
+             )
+
+    put_merged_status!(scenario, first_publication, first.repository)
+    put_merged_status!(scenario, second_publication, second.repository)
+
+    assert {:ok, %{id: first_publication_id, pr_state: "merged"}} =
+             PublicationStatusReconciler.run_once(client: scenario, external: false)
+
+    assert first_publication_id == first_publication.id
+
+    assert {:ok, %{id: second_publication_id, pr_state: "merged"}} =
+             PublicationStatusReconciler.run_once(client: scenario, external: false)
+
+    assert second_publication_id == second_publication.id
+
+    status_targets =
+      scenario
+      |> TestScenario.trace()
+      |> Enum.filter(&(&1.operation == :pull_request_status))
+      |> Enum.map(& &1.target)
+
+    assert status_targets == [
+             {first.repository.id, first_publication.pr_number},
+             {second.repository.id, second_publication.pr_number}
+           ]
+
+    assert :ok = Worktrees.cleanup_terminal_once(scenario, MultiRepositoryProbe, scenario)
+    assert :ok = Worktrees.cleanup_terminal_once(scenario, MultiRepositoryProbe, scenario)
+
+    assert Repo.get!(WorktreeAllocation, first_allocation.id).state == "removed"
+    assert Repo.get!(WorktreeAllocation, second_allocation.id).state == "removed"
+    assert Repo.get!(Job, first_job.id).state == "done"
+    assert Repo.get!(Job, second_job.id).state == "done"
+
+    assert Repo.get_by!(Issue, repository_id: first.repository.id, number: 501).id ==
+             first.issue.id
+
+    assert Repo.get_by!(Issue, repository_id: second.repository.id, number: 501).id ==
+             second.issue.id
+
+    cleanup_targets =
+      scenario
+      |> TestScenario.trace()
+      |> Enum.filter(&(&1.operation == :remove_worktree))
+      |> Enum.map(& &1.target)
+
+    assert cleanup_targets == [
+             %{
+               allocation_id: first_allocation.id,
+               workspace: first_allocation.herdr_workspace,
+               path: first_allocation.path
+             },
+             %{
+               allocation_id: second_allocation.id,
+               workspace: second_allocation.herdr_workspace,
+               path: second_allocation.path
+             }
+           ]
+
+    assert TestScenario.agents(scenario) == []
+  end
+
+  test "scenario cleanup rejects a workspace that Herdr never created" do
+    scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
+
+    assert {:error, :scenario_workspace_not_found} =
+             TestScenario.remove_worktree(scenario, %{
+               id: -1,
+               herdr_workspace: "scenario-never-created",
+               path: "/tmp/scenario-never-created"
+             })
+
+    assert TestScenario.agents(scenario) == []
+  end
+
   test "GitHub synchronization uses the same stateful scenario boundary" do
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
     fixture = TestScenario.approved_implementation!(scenario, number: 103)
@@ -616,6 +803,58 @@ defmodule PtcManager.TestScenarioTest do
     :ok = TestScenario.operation_outcome(scenario, :get_issue, :ok)
     assert {:ok, %{job: working}} = TestScenario.advance(scenario, :dispatch)
     assert working.id == job.id
+  end
+
+  defp complete_and_publish!(scenario, job) do
+    assert {:ok, %{job: working}} = TestScenario.advance(scenario, :dispatch)
+    assert working.id == job.id
+
+    agent_name = "impl_j#{job.id}_f#{working.fencing_token}"
+    :ok = TestScenario.set_agent_state(scenario, agent_name, "done")
+    assert {:ok, %{agent_count: agent_count}} = TestScenario.advance(scenario, :herdr_sync)
+    assert agent_count >= 1
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+
+    assert {:ok, %{state: "ready_for_pr"}} =
+             ResultReconciler.run_job(job.id,
+               probe: MultiRepositoryProbe,
+               contract_provider: MultiRepositoryContract
+             )
+
+    publication = Repo.get_by!(PrPublication, job_id: job.id)
+
+    assert {:ok, published} =
+             Publisher.run_publication(publication.id,
+               probe: MultiRepositoryProbe,
+               broker: MultiRepositoryBroker,
+               gate: MultiRepositoryGate
+             )
+
+    assert published.state == "published"
+    published
+  end
+
+  defp put_merged_status!(scenario, publication, repository) do
+    status = %{
+      state: "merged",
+      pr_url: publication.pr_url,
+      draft: false,
+      body: "Closes ##{publication.job.issue.number}",
+      head_sha: publication.remote_head_sha,
+      head_ref: publication.branch_name,
+      head_repository: "#{repository.github_owner}/#{repository.github_name}",
+      base_sha: publication.base_sha,
+      base_ref: repository.default_branch,
+      base_repository: "#{repository.github_owner}/#{repository.github_name}"
+    }
+
+    :ok =
+      TestScenario.put_pull_request_status(
+        scenario,
+        repository,
+        publication.pr_number,
+        status
+      )
   end
 
   defp configure_herdr_actions(session) do

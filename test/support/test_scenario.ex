@@ -40,7 +40,11 @@ defmodule PtcManager.TestScenario do
 
     repository =
       Repo.get_by(Repository, local_path: local_path) ||
-        OperationsFixtures.repository_fixture(%{local_path: local_path})
+        OperationsFixtures.repository_fixture(
+          opts
+          |> Keyword.get(:repository_attrs, %{})
+          |> Map.put(:local_path, local_path)
+        )
 
     remote_issue = %{
       "number" => number,
@@ -85,6 +89,19 @@ defmodule PtcManager.TestScenario do
     GenServer.call(scenario.pid, {:put_issue, repository.id, issue})
   end
 
+  def put_pull_request_status(
+        %__MODULE__{} = scenario,
+        repository,
+        pr_number,
+        status
+      )
+      when is_integer(pr_number) and is_map(status) do
+    GenServer.call(
+      scenario.pid,
+      {:put_pull_request_status, repository.id, pr_number, status}
+    )
+  end
+
   def dispatch_outcome(%__MODULE__{} = scenario, outcome)
       when outcome in [:ok, :fail_before, :effect_then_error, :pause_after_effect] do
     GenServer.call(scenario.pid, {:dispatch_outcome, outcome})
@@ -99,6 +116,7 @@ defmodule PtcManager.TestScenario do
       when operation in [
              :list_open_issues,
              :get_issue,
+             :pull_request_status,
              :start_pull_request_action,
              :prompt_pull_request_action,
              :pull_request_action_head,
@@ -112,6 +130,7 @@ defmodule PtcManager.TestScenario do
       when operation in [
              :list_open_issues,
              :get_issue,
+             :pull_request_status,
              :start_pull_request_action,
              :prompt_pull_request_action,
              :pull_request_action_head,
@@ -201,6 +220,13 @@ defmodule PtcManager.TestScenario do
     GenServer.call(scenario.pid, {:get_issue, repository.id, number})
   end
 
+  def status(%__MODULE__{} = scenario, publication) do
+    GenServer.call(
+      scenario.pid,
+      {:pull_request_status, publication.repository_id, publication.pr_number}
+    )
+  end
+
   # Stateful dispatch and Herdr gateway callbacks.
 
   def dispatch(%__MODULE__{} = scenario, context) do
@@ -253,6 +279,8 @@ defmodule PtcManager.TestScenario do
      %{
        issues: %{},
        agents: [],
+       workspaces: MapSet.new(),
+       pull_request_statuses: %{},
        dispatch_outcome:
          outcome_setting(Keyword.get(opts, :dispatch_outcome, :ok), opts[:pause_owner]),
        cleanup_outcome:
@@ -281,6 +309,15 @@ defmodule PtcManager.TestScenario do
   def handle_call({:put_issue, repository_id, issue}, _from, state) do
     key = {repository_id, issue["number"]}
     {:reply, :ok, put_in(state, [:issues, key], issue)}
+  end
+
+  def handle_call(
+        {:put_pull_request_status, repository_id, pr_number, status},
+        _from,
+        state
+      ) do
+    key = {repository_id, pr_number}
+    {:reply, :ok, put_in(state, [:pull_request_statuses, key], status)}
   end
 
   def handle_call(:utc_now, _from, state), do: {:reply, state.now, state}
@@ -394,6 +431,18 @@ defmodule PtcManager.TestScenario do
     external_operation_reply(state, state, from, :get_issue, {repository_id, number}, result)
   end
 
+  def handle_call({:pull_request_status, repository_id, pr_number}, from, state) do
+    key = {repository_id, pr_number}
+
+    result =
+      case Map.fetch(state.pull_request_statuses, key) do
+        {:ok, status} -> {:ok, status}
+        :error -> {:blocked, :scenario_pull_request_not_found}
+      end
+
+    external_operation_reply(state, state, from, :pull_request_status, key, result)
+  end
+
   def handle_call({:dispatch, context}, from, state) do
     dispatch = dispatch_metadata(context)
 
@@ -401,8 +450,15 @@ defmodule PtcManager.TestScenario do
 
     state =
       case mode do
-        :fail_before -> state
-        _applied -> %{state | agents: upsert_agent(state.agents, remote_agent(context, dispatch))}
+        :fail_before ->
+          state
+
+        _applied ->
+          %{
+            state
+            | agents: upsert_agent(state.agents, remote_agent(context, dispatch)),
+              workspaces: MapSet.put(state.workspaces, dispatch.workspace_id)
+          }
       end
 
     result =
@@ -466,7 +522,14 @@ defmodule PtcManager.TestScenario do
 
   def handle_call({:remove_worktree, allocation}, from, state) do
     {mode, pause_owner, result, state} = remove_workspace(state, allocation.herdr_workspace)
-    state = record(state, :herdr, :remove_worktree, allocation.id, summarize(result))
+
+    target = %{
+      allocation_id: allocation.id,
+      workspace: allocation.herdr_workspace,
+      path: allocation.path
+    }
+
+    state = record(state, :herdr, :remove_worktree, target, summarize(result))
 
     maybe_pause_reply(
       mode,
@@ -474,7 +537,7 @@ defmodule PtcManager.TestScenario do
       from,
       pause_owner,
       :remove_worktree,
-      allocation.id,
+      target,
       result
     )
   end
@@ -517,7 +580,11 @@ defmodule PtcManager.TestScenario do
       "agent_session" => %{"value" => "agent-#{attempt}"}
     }
 
-    applied = %{state | agents: upsert_agent(state.agents, agent)}
+    applied = %{
+      state
+      | agents: upsert_agent(state.agents, agent),
+        workspaces: MapSet.put(state.workspaces, dispatch.workspace_id)
+    }
 
     external_operation_reply(
       state,
@@ -603,21 +670,26 @@ defmodule PtcManager.TestScenario do
   end
 
   defp remove_workspace(state, workspace) do
+    known_workspace? = is_binary(workspace) and MapSet.member?(state.workspaces, workspace)
+
     applied = %{state | agents: Enum.reject(state.agents, &(&1["workspace_id"] == workspace))}
 
     {mode, pause_owner} = state.cleanup_outcome
 
-    case mode do
-      :ok ->
+    case {known_workspace?, mode} do
+      {false, _mode} ->
+        {:fail_before, pause_owner, {:error, :scenario_workspace_not_found}, state}
+
+      {true, :ok} ->
         {:ok, pause_owner, :ok, applied}
 
-      :fail_before ->
+      {true, :fail_before} ->
         {:fail_before, pause_owner, {:error, :scenario_cleanup_failed}, state}
 
-      :effect_then_error ->
+      {true, :effect_then_error} ->
         {:effect_then_error, pause_owner, {:error, :scenario_cleanup_ack_lost}, applied}
 
-      :pause_after_effect ->
+      {true, :pause_after_effect} ->
         {:pause_after_effect, pause_owner, :ok, applied}
     end
   end
@@ -704,7 +776,10 @@ defmodule PtcManager.TestScenario do
     end
   end
 
-  defp operation_source(operation) when operation in [:list_open_issues, :get_issue], do: :github
+  defp operation_source(operation)
+       when operation in [:list_open_issues, :get_issue, :pull_request_status],
+       do: :github
+
   defp operation_source(:pull_request_action_head), do: :git
   defp operation_source(:run_command), do: :git
   defp operation_source(:sync_action_postflight), do: :github

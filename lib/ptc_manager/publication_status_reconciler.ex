@@ -1,6 +1,7 @@
 defmodule PtcManager.PublicationStatusReconciler do
   @moduledoc "Discovers agent-created PRs and reconciles canonical status through completion."
 
+  alias PtcManager.Gateway
   alias PtcManager.Publications
 
   def run_once(opts \\ []) do
@@ -34,11 +35,11 @@ defmodule PtcManager.PublicationStatusReconciler do
   end
 
   defp reconcile_external(client) do
-    if Code.ensure_loaded?(client) and function_exported?(client, :list_open, 1) do
+    if supports?(client, :list_open, 1) do
       PtcManager.Operations.list_repositories()
       |> Enum.filter(& &1.enabled)
       |> Enum.reduce_while({:ok, :empty}, fn repository, _acc ->
-        case client.list_open(repository) do
+        case Gateway.call(client, :list_open, [repository]) do
           {:ok, pulls} ->
             with {:ok, confirmed_pulls} <- confirm_missing_external(client, repository, pulls),
                  {:ok, summary} <-
@@ -70,7 +71,7 @@ defmodule PtcManager.PublicationStatusReconciler do
   defp confirm_missing_external(client, repository, pulls) do
     Publications.external_missing_candidates(repository, pulls)
     |> Enum.reduce_while({:ok, pulls}, fn publication, {:ok, confirmed_pulls} ->
-      case client.status(publication) do
+      case Gateway.call(client, :status, [publication]) do
         {:ok, %{state: "open"} = status} ->
           {:cont, {:ok, [status | confirmed_pulls]}}
 
@@ -96,8 +97,8 @@ defmodule PtcManager.PublicationStatusReconciler do
   end
 
   defp discover_agent_publication(client, publication) do
-    if Code.ensure_loaded?(client) and function_exported?(client, :discover, 1) do
-      case client.discover(publication) do
+    if supports?(client, :discover, 1) do
+      case Gateway.call(client, :discover, [publication]) do
         {:ok, result} ->
           Publications.record_agent_publication(publication.id, result)
 
@@ -145,7 +146,7 @@ defmodule PtcManager.PublicationStatusReconciler do
         {:ok, :empty}
 
       publication ->
-        case client.status(publication) do
+        case Gateway.call(client, :status, [publication]) do
           {:ok, result} ->
             outcome = Publications.record_remote_status(publication.id, result)
             if result.state in ["merged", "closed"], do: PtcManager.WorktreePoller.wake()
@@ -178,4 +179,12 @@ defmodule PtcManager.PublicationStatusReconciler do
 
   defp interval,
     do: Application.get_env(:ptc_manager, :publication_status_interval_ms, 60_000)
+
+  defp supports?(module, function, arity) when is_atom(module) do
+    Code.ensure_loaded?(module) and function_exported?(module, function, arity)
+  end
+
+  defp supports?(%module{}, function, arity) do
+    Code.ensure_loaded?(module) and function_exported?(module, function, arity + 1)
+  end
 end
