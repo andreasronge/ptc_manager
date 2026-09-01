@@ -278,6 +278,35 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def worktree_creation_duration(_allocation), do: "—"
 
+  def workspace_cache_label(%{workspace_setup_cache_state: "hit"}), do: "Warm cache"
+  def workspace_cache_label(%{workspace_setup_cache_state: "miss"}), do: "Cold cache"
+
+  def workspace_cache_label(%{workspace_setup_cache_state: "disabled"}),
+    do: "Cache unavailable"
+
+  def workspace_cache_label(_allocation), do: nil
+
+  def workspace_setup_phases(%{workspace_setup_phase_durations: durations})
+      when is_map(durations) do
+    [
+      {"cache_restore_ms", "Restore"},
+      {"dependencies_ms", "Dependencies"},
+      {"asset_tools_ms", "Asset tools"},
+      {"cache_publish_ms", "Save cache"}
+    ]
+    |> Enum.flat_map(fn {key, label} ->
+      case durations[key] do
+        milliseconds when is_integer(milliseconds) ->
+          [{label, format_milliseconds(milliseconds)}]
+
+        _missing ->
+          []
+      end
+    end)
+  end
+
+  def workspace_setup_phases(_allocation), do: []
+
   defp load_operations(socket) do
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()

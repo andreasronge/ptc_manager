@@ -148,7 +148,13 @@ if Repo.aggregate(Repository, :count) == 0 do
     workspace_setup_ended_at: DateTime.add(now, -81, :second),
     workspace_setup_duration_ms: 218_000,
     workspace_setup_exit_status: 0,
-    workspace_setup_output: "Dependencies and build tools are ready.\n"
+    workspace_setup_output: "Dependencies and build tools are ready.\n",
+    workspace_setup_cache_state: "hit",
+    workspace_setup_phase_durations: %{
+      "cache_restore_ms" => 2_100,
+      "dependencies_ms" => 4_800,
+      "asset_tools_ms" => 1_700
+    }
   })
   |> Repo.insert!()
 

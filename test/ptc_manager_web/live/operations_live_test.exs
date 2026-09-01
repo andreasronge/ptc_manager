@@ -96,7 +96,13 @@ defmodule PtcManagerWeb.OperationsLiveTest do
         workspace_setup_ended_at: DateTime.utc_now(),
         workspace_setup_duration_ms: 223_000,
         workspace_setup_exit_status: 0,
-        workspace_setup_output: "Dependencies ready\n"
+        workspace_setup_output: "Dependencies ready\n",
+        workspace_setup_cache_state: "hit",
+        workspace_setup_phase_durations: %{
+          "cache_restore_ms" => 1_200,
+          "dependencies_ms" => 4_500,
+          "asset_tools_ms" => 800
+        }
       })
       |> Repo.insert!()
 
@@ -200,6 +206,8 @@ defmodule PtcManagerWeb.OperationsLiveTest do
 
     assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Worktree 1.4s")
     assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Setup 3m 43s")
+    assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Warm cache")
+    assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Dependencies 4.5s")
     assert has_element?(view, "#workspace-setup-#{setup_allocation.id}", "Dependencies ready")
 
     assert has_element?(

@@ -1041,6 +1041,8 @@ defmodule PtcManager.Operations do
             workspace_setup_exit_status: Map.get(report, :exit_status),
             workspace_setup_output: Map.get(report, :output, ""),
             workspace_setup_output_truncated: Map.get(report, :output_truncated, false),
+            workspace_setup_cache_state: Map.get(report, :cache_state),
+            workspace_setup_phase_durations: Map.get(report, :phase_durations, %{}),
             last_used_at: lifecycle_now,
             last_error: setup_error(report)
           }
@@ -1063,6 +1065,8 @@ defmodule PtcManager.Operations do
               "duration_ms" => report.duration_ms,
               "exit_status" => report.exit_status,
               "output_truncated" => report.output_truncated,
+              "cache_state" => Map.get(report, :cache_state),
+              "phase_durations" => Map.get(report, :phase_durations, %{}),
               "worktree_created_duration_ms" => report.worktree_created_duration_ms
             }
           })

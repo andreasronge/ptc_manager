@@ -41,6 +41,8 @@ defmodule PtcManager.DispatchTest do
           exit_status: 0,
           output: "ready\n",
           output_truncated: false,
+          cache_state: nil,
+          phase_durations: %{},
           error: nil
         },
         attrs
@@ -156,7 +158,13 @@ defmodule PtcManager.DispatchTest do
   test "persists workspace setup evidence before marking the agent working" do
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
     Process.put(:dispatch_github_result, {:ok, remote})
-    report = FakeWorkspaceSetup.report(%{duration_ms: 3_742})
+
+    report =
+      FakeWorkspaceSetup.report(%{
+        duration_ms: 3_742,
+        cache_state: "hit",
+        phase_durations: %{"dependencies_ms" => 900}
+      })
 
     Process.put(
       :dispatch_adapter_result,
@@ -182,6 +190,8 @@ defmodule PtcManager.DispatchTest do
     assert allocation.workspace_setup_duration_ms == 3_742
     assert allocation.workspace_setup_exit_status == 0
     assert allocation.workspace_setup_output == "ready\n"
+    assert allocation.workspace_setup_cache_state == "hit"
+    assert allocation.workspace_setup_phase_durations == %{"dependencies_ms" => 900}
   end
 
   test "a recorded setup failure ends the job without creating an agent run" do

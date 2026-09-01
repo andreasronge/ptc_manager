@@ -501,6 +501,7 @@ verify_gate_contract() {
     HEX_HOME="$gate_contract_probe/home/.hex" \
     REBAR_CACHE_DIR="$gate_contract_probe/home/.cache/rebar3" \
     MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C MIX_ENV=test \
+    PTC_WORKSPACE_CACHE_DISABLED=true \
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
     /bin/sh -c 'cd "$1" && ./scripts/ptc/bootstrap && ./scripts/ci/pre-publication' \
     ptc-manager-gate-contract "$gate_contract_probe/repository"

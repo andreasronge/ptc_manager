@@ -211,6 +211,21 @@ and build artifacts, but changing tracked files, HEAD, or the job branch fails
 closed before any agent starts. Setup status, bounded output, and timings are
 shown on the Operations page.
 
+Issue planning, daily updates, and repository investigation automations use
+`generic_ephemeral` read-only source snapshots. Other `generic_ephemeral`
+actions also skip the writable build bootstrap. Writable implementation jobs
+run the full repository setup. This repository's bootstrap maintains an
+optional cache
+beneath `${XDG_CACHE_HOME:-$HOME/.cache}/ptc-manager/workspaces`, keyed by the
+dependency lock, repository setup files, Mix environment, Elixir/OTP, OS, and
+architecture. A warm cache copies dependency sources, compiled dependency
+artifacts, and pinned asset executables into the new worktree; agents never
+share writable `deps` or `_build` directories. Set `PTC_WORKSPACE_CACHE_ROOT`
+inside the repository setup environment to select another cache root. Cache
+miss/hit state and restore, dependency, asset-tool, and publish timings are
+recorded on Operations. Cache failure is non-fatal and falls back to the normal
+clean bootstrap.
+
 Before enabling a repository on a server, exercise the same handoff against a
 local Herdr session:
 

@@ -364,6 +364,7 @@ defmodule PtcManager.Repository.PrePublicationGate do
           "PATH=#{path}",
           "LC_ALL=C",
           "MIX_ENV=test",
+          "PTC_WORKSPACE_CACHE_DISABLED=true",
           "GIT_CONFIG_NOSYSTEM=1",
           "GIT_CONFIG_GLOBAL=/dev/null",
           "GIT_NO_REPLACE_OBJECTS=1",

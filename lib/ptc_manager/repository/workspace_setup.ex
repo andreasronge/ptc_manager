@@ -15,6 +15,8 @@ defmodule PtcManager.Repository.WorkspaceSetup do
           exit_status: non_neg_integer() | nil,
           output: binary(),
           output_truncated: boolean(),
+          cache_state: binary() | nil,
+          phase_durations: %{optional(binary()) => non_neg_integer()},
           error: term() | nil
         }
 
@@ -119,6 +121,8 @@ defmodule PtcManager.Repository.WorkspaceSetup do
          truncated,
          error
        ) do
+    metrics = setup_metrics(output)
+
     %{
       state: state,
       script: script,
@@ -129,8 +133,39 @@ defmodule PtcManager.Repository.WorkspaceSetup do
       exit_status: exit_status,
       output: output,
       output_truncated: truncated,
+      cache_state: metrics.cache_state,
+      phase_durations: metrics.phase_durations,
       error: error
     }
+  end
+
+  defp setup_metrics(output) when is_binary(output) do
+    Enum.reduce(String.split(output, "\n"), %{cache_state: nil, phase_durations: %{}}, fn
+      "PTC_SETUP_METRIC cache_state=" <> state, metrics
+      when state in ["hit", "miss", "disabled"] ->
+        %{metrics | cache_state: state}
+
+      "PTC_SETUP_METRIC " <> metric, metrics ->
+        case String.split(metric, "=", parts: 2) do
+          [name, value] -> put_phase_duration(metrics, name, value)
+          _invalid -> metrics
+        end
+
+      _line, metrics ->
+        metrics
+    end)
+  end
+
+  defp put_phase_duration(metrics, name, value) do
+    allowed = ~w(cache_restore_ms dependencies_ms asset_tools_ms cache_publish_ms)
+
+    with true <- name in allowed,
+         {duration, ""} <- Integer.parse(value),
+         true <- duration >= 0 and duration <= 3_600_000 do
+      put_in(metrics, [:phase_durations, name], duration)
+    else
+      _invalid -> metrics
+    end
   end
 
   defmodule Runner do

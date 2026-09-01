@@ -1,0 +1,142 @@
+#!/bin/sh
+set -eu
+
+# This cache is an optimization only. Every restored directory is copied into
+# the worktree before Mix can mutate it, so concurrent agents never share a
+# writable deps or _build directory.
+
+command=${1:-}
+case "$command" in
+  restore|publish) ;;
+  *)
+    echo "usage: scripts/ptc/bootstrap-cache <restore|publish>" >&2
+    exit 2
+    ;;
+esac
+
+cache_root=${PTC_WORKSPACE_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/ptc-manager/workspaces}
+mix_environment=${MIX_ENV:-dev}
+
+hash_file() {
+  if [ -f "$1" ]; then
+    git hash-object -- "$1"
+  else
+    printf '%s' missing
+  fi
+}
+
+cache_key=$(
+  {
+    printf 'schema=1\n'
+    printf 'system=%s\n' "$(uname -s)-$(uname -m)"
+    printf 'mix_env=%s\n' "$mix_environment"
+    printf 'elixir=%s\n' "$(elixir --version 2>/dev/null | tr '\n' ' ')"
+    printf 'mix_lock=%s\n' "$(hash_file mix.lock)"
+    printf 'mix_exs=%s\n' "$(hash_file mix.exs)"
+    printf 'config=%s\n' "$(hash_file config/config.exs)"
+    printf 'bootstrap=%s\n' "$(hash_file scripts/ptc/bootstrap)"
+    printf 'cache_helper=%s\n' "$(hash_file scripts/ptc/bootstrap-cache)"
+  } | git hash-object --stdin
+)
+
+cache_directory=$cache_root/ptc_manager/$cache_key
+ready_marker=$cache_directory/READY
+
+copy_tree() {
+  source_directory=$1
+  destination_directory=$2
+
+  if [ -d "$source_directory" ]; then
+    mkdir -p "$destination_directory"
+    cp -R "$source_directory"/. "$destination_directory"/
+  fi
+}
+
+restore_cache() {
+  started=$(date +%s)
+
+  if [ -f "$ready_marker" ]; then
+    copy_tree "$cache_directory/deps" deps
+    copy_tree "$cache_directory/build" _build
+    state=hit
+  else
+    state=miss
+  fi
+
+  ended=$(date +%s)
+  printf 'PTC_SETUP_METRIC cache_state=%s\n' "$state"
+  printf 'PTC_SETUP_METRIC cache_restore_ms=%s\n' "$(((ended - started) * 1000))"
+}
+
+copy_build_cache() {
+  destination=$1
+  build_lib=_build/$mix_environment/lib
+
+  mkdir -p "$destination/$mix_environment/lib"
+
+  if [ -d "$build_lib" ]; then
+    for dependency in "$build_lib"/*; do
+      [ -d "$dependency" ] || continue
+      [ "$(basename "$dependency")" = ptc_manager ] && continue
+      copy_tree "$dependency" "$destination/$mix_environment/lib/$(basename "$dependency")"
+    done
+  fi
+
+  for executable in _build/esbuild-* _build/tailwind-*; do
+    [ -f "$executable" ] || continue
+    cp "$executable" "$destination/$(basename "$executable")"
+    chmod 755 "$destination/$(basename "$executable")"
+  done
+}
+
+publish_cache() {
+  started=$(date +%s)
+
+  if [ -f "$ready_marker" ]; then
+    ended=$(date +%s)
+    printf 'PTC_SETUP_METRIC cache_publish_ms=%s\n' "$(((ended - started) * 1000))"
+    return
+  fi
+
+  parent=$cache_root/ptc_manager
+  temporary=$parent/.${cache_key}.tmp.$$
+  lock=$parent/.${cache_key}.lock
+
+  if ! mkdir -p "$parent" 2>/dev/null; then
+    printf '%s\n' 'Workspace cache unavailable; continuing without publishing it.' >&2
+    printf 'PTC_SETUP_METRIC cache_state=disabled\n'
+    return
+  fi
+
+  if ! mkdir "$lock" 2>/dev/null; then
+    # Another cold worktree is publishing the identical cache. Its atomic READY
+    # marker will make the next setup warm; this worktree is already prepared.
+    ended=$(date +%s)
+    printf 'PTC_SETUP_METRIC cache_publish_ms=%s\n' "$(((ended - started) * 1000))"
+    return
+  fi
+
+  trap 'rm -rf -- "$temporary"; rmdir "$lock" 2>/dev/null || true' 0 HUP INT TERM
+  rm -rf -- "$temporary"
+  mkdir -p "$temporary"
+  copy_tree deps "$temporary/deps"
+  copy_build_cache "$temporary/build"
+  printf '%s\n' "$cache_key" > "$temporary/READY"
+
+  if [ ! -f "$ready_marker" ]; then
+    rm -rf -- "$cache_directory"
+    mv "$temporary" "$cache_directory"
+  fi
+
+  rm -rf -- "$temporary"
+  rmdir "$lock" 2>/dev/null || true
+  trap - 0 HUP INT TERM
+
+  ended=$(date +%s)
+  printf 'PTC_SETUP_METRIC cache_publish_ms=%s\n' "$(((ended - started) * 1000))"
+}
+
+case "$command" in
+  restore) restore_cache ;;
+  publish) publish_cache ;;
+esac

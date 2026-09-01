@@ -28,6 +28,8 @@ defmodule PtcManager.Operations.WorktreeAllocation do
     field :workspace_setup_exit_status, :integer
     field :workspace_setup_output, :string
     field :workspace_setup_output_truncated, :boolean, default: false
+    field :workspace_setup_cache_state, :string
+    field :workspace_setup_phase_durations, :map, default: %{}
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
@@ -61,7 +63,9 @@ defmodule PtcManager.Operations.WorktreeAllocation do
       :workspace_setup_duration_ms,
       :workspace_setup_exit_status,
       :workspace_setup_output,
-      :workspace_setup_output_truncated
+      :workspace_setup_output_truncated,
+      :workspace_setup_cache_state,
+      :workspace_setup_phase_durations
     ])
     |> validate_required([:worker_id, :job_id, :state, :last_used_at])
     |> validate_inclusion(:state, @states)
@@ -73,6 +77,7 @@ defmodule PtcManager.Operations.WorktreeAllocation do
     |> validate_length(:pr_url, max: 1_024)
     |> validate_length(:last_error, max: 500)
     |> validate_inclusion(:workspace_setup_state, ["passed", "failed"])
+    |> validate_inclusion(:workspace_setup_cache_state, ["hit", "miss", "disabled"])
     |> validate_number(:worktree_created_duration_ms, greater_than_or_equal_to: 0)
     |> validate_number(:workspace_setup_duration_ms, greater_than_or_equal_to: 0)
     |> validate_number(:workspace_setup_exit_status, greater_than_or_equal_to: 0)

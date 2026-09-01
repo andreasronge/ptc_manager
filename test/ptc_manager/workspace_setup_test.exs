@@ -5,7 +5,15 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
   alias PtcManager.Repository.{Contract, WorkspaceSetup}
 
   test "runs the exact checked-in setup script and records bounded evidence" do
-    fixture = workspace_fixture("mkdir -p .cache\nprintf 'dependencies ready\\n'\n")
+    fixture =
+      workspace_fixture(
+        "mkdir -p .cache\n" <>
+          "printf 'dependencies ready\\n'\n" <>
+          "printf 'PTC_SETUP_METRIC cache_state=hit\\n'\n" <>
+          "printf 'PTC_SETUP_METRIC cache_restore_ms=125\\n'\n" <>
+          "printf 'PTC_SETUP_METRIC dependencies_ms=875\\n'\n"
+      )
+
     on_exit(fn -> File.rm_rf!(fixture.root) end)
 
     assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job)
@@ -13,10 +21,32 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     assert report.script == "scripts/ptc/setup-worktree"
     assert report.source_sha == fixture.sha
     assert report.exit_status == 0
-    assert report.output == "dependencies ready\n"
+    assert report.output =~ "dependencies ready\n"
+    assert report.cache_state == "hit"
+
+    assert report.phase_durations == %{
+             "cache_restore_ms" => 125,
+             "dependencies_ms" => 875
+           }
+
     assert report.duration_ms >= 0
     assert DateTime.compare(report.started_at, report.ended_at) in [:lt, :eq]
     refute report.output_truncated
+  end
+
+  test "ignores malformed or unknown setup metrics" do
+    fixture =
+      workspace_fixture(
+        "printf 'PTC_SETUP_METRIC cache_state=surprise\\n'\n" <>
+          "printf 'PTC_SETUP_METRIC dependencies_ms=-1\\n'\n" <>
+          "printf 'PTC_SETUP_METRIC unknown_ms=42\\n'\n"
+      )
+
+    on_exit(fn -> File.rm_rf!(fixture.root) end)
+
+    assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job)
+    assert report.cache_state == nil
+    assert report.phase_durations == %{}
   end
 
   test "a non-zero setup fails before an agent can be launched" do

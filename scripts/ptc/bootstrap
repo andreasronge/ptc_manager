@@ -1,5 +1,47 @@
 #!/bin/sh
 set -eu
 
+cache_helper=./scripts/ptc/bootstrap-cache
+cache_restore_output=
+cache_publish_output=
+cache_disabled=${PTC_WORKSPACE_CACHE_DISABLED:-false}
+
+if [ "$cache_disabled" = true ]; then
+  cache_restore_output='PTC_SETUP_METRIC cache_state=disabled'
+  printf '%s\n' "$cache_restore_output"
+elif [ -x "$cache_helper" ]; then
+  if cache_restore_output=$("$cache_helper" restore); then
+    printf '%s\n' "$cache_restore_output"
+  else
+    rm -rf -- deps _build
+    cache_restore_output='PTC_SETUP_METRIC cache_state=disabled'
+    printf '%s\n' 'Workspace cache restore failed; continuing with a clean bootstrap.' >&2
+    printf '%s\n' "$cache_restore_output"
+  fi
+fi
+
+phase_start=$(date +%s)
 mix deps.get
+phase_end=$(date +%s)
+printf 'PTC_SETUP_METRIC dependencies_ms=%s\n' "$(((phase_end - phase_start) * 1000))"
+
+phase_start=$(date +%s)
 mix assets.setup
+phase_end=$(date +%s)
+printf 'PTC_SETUP_METRIC asset_tools_ms=%s\n' "$(((phase_end - phase_start) * 1000))"
+
+if [ "$cache_disabled" != true ] && [ -x "$cache_helper" ]; then
+  if cache_publish_output=$("$cache_helper" publish); then
+    printf '%s\n' "$cache_publish_output"
+  else
+    cache_publish_output='PTC_SETUP_METRIC cache_state=disabled'
+    printf '%s\n' 'Workspace cache publish failed; the prepared worktree remains usable.' >&2
+    printf '%s\n' "$cache_publish_output"
+  fi
+fi
+
+# Repeat the small machine-readable summary at the end so it remains available
+# even when verbose compiler output causes the retained terminal tail to be
+# truncated. Human-readable compiler output is still preserved separately.
+[ -z "$cache_restore_output" ] || printf '%s\n' "$cache_restore_output"
+[ -z "$cache_publish_output" ] || printf '%s\n' "$cache_publish_output"

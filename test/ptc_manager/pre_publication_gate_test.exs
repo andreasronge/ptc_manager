@@ -103,6 +103,7 @@ defmodule PtcManager.Repository.PrePublicationGateTest do
     assert "HOME=/var/lib/ptc-manager-verifier" in args
     assert "MIX_HOME=/opt/ptc-manager-gate-mix" in args
     assert "MIX_ENV=test" in args
+    assert "PTC_WORKSPACE_CACHE_DISABLED=true" in args
     assert "GIT_CONFIG_GLOBAL=/dev/null" in args
     assert "GIT_NO_REPLACE_OBJECTS=1" in args
     assert "/usr/bin/timeout" in args
