@@ -41,6 +41,14 @@ cache_key=$(
 
 cache_directory=$cache_root/ptc_manager/$cache_key
 ready_marker=$cache_directory/READY
+workspace_marker=_build/.ptc-workspace-cache-key
+
+mark_workspace_prepared() {
+  mkdir -p _build
+  marker_temporary=${workspace_marker}.tmp.$$
+  printf '%s\n' "$cache_key" > "$marker_temporary"
+  mv "$marker_temporary" "$workspace_marker"
+}
 
 copy_tree() {
   source_directory=$1
@@ -48,16 +56,73 @@ copy_tree() {
 
   if [ -d "$source_directory" ]; then
     mkdir -p "$destination_directory"
-    cp -R "$source_directory"/. "$destination_directory"/
+
+    case "$(uname -s)" in
+      Darwin)
+        source_device=$(stat -f '%d' "$source_directory")
+        destination_device=$(stat -f '%d' "$destination_directory")
+
+        if [ "$source_device" = "$destination_device" ]; then
+          # APFS clone copies create independent copy-on-write files in a few
+          # seconds without sharing writable inodes between agent worktrees.
+          cp -cR "$source_directory"/. "$destination_directory"/
+        else
+          cp -R "$source_directory"/. "$destination_directory"/
+        fi
+        ;;
+
+      Linux)
+        if cp --help 2>&1 | grep -q -- '--reflink'; then
+          # GNU cp falls back to a physical copy when the filesystem does not
+          # support reflinks, preserving portability on ordinary ext4 hosts.
+          cp -a --reflink=auto "$source_directory"/. "$destination_directory"/
+        else
+          cp -R "$source_directory"/. "$destination_directory"/
+        fi
+        ;;
+
+      *)
+        cp -R "$source_directory"/. "$destination_directory"/
+        ;;
+    esac
   fi
 }
 
 restore_cache() {
   started=$(date +%s)
 
-  if [ -f "$ready_marker" ]; then
-    copy_tree "$cache_directory/deps" deps
-    copy_tree "$cache_directory/build" _build
+  if [ -f "$ready_marker" ] && [ -d deps ] && [ -d _build ] &&
+    [ -f "$workspace_marker" ] && [ "$(cat "$workspace_marker")" = "$cache_key" ]; then
+    # Persistent checkouts are already private and prepared. Avoid deleting
+    # and cloning the same dependency trees again on every deployment.
+    state=hit
+  elif [ -f "$ready_marker" ]; then
+    # Never merge a cache into an existing dependency tree. Git dependencies
+    # can contain read-only pack files, and cp cannot overwrite those files on
+    # a later restore. Build the complete replacement beside the destination,
+    # make the private copies owner-writable, then install both trees only
+    # after staging succeeded.
+    restore_staging=$(mktemp -d .ptc-cache-restore.XXXXXX)
+
+    cleanup_restore() {
+      case "$restore_staging" in
+        .ptc-cache-restore.*) rm -rf -- "$restore_staging" ;;
+      esac
+    }
+
+    trap cleanup_restore 0 HUP INT TERM
+    mkdir -p "$restore_staging/deps" "$restore_staging/build"
+    copy_tree "$cache_directory/deps" "$restore_staging/deps"
+    copy_tree "$cache_directory/build" "$restore_staging/build"
+    chmod -R u+w "$restore_staging"
+
+    rm -rf -- deps _build
+    mv "$restore_staging/deps" deps
+    mv "$restore_staging/build" _build
+    mark_workspace_prepared
+
+    cleanup_restore
+    trap - 0 HUP INT TERM
     state=hit
   else
     state=miss
@@ -93,6 +158,7 @@ publish_cache() {
   started=$(date +%s)
 
   if [ -f "$ready_marker" ]; then
+    mark_workspace_prepared
     ended=$(date +%s)
     printf 'PTC_SETUP_METRIC cache_publish_ms=%s\n' "$(((ended - started) * 1000))"
     return
@@ -111,6 +177,7 @@ publish_cache() {
   if ! mkdir "$lock" 2>/dev/null; then
     # Another cold worktree is publishing the identical cache. Its atomic READY
     # marker will make the next setup warm; this worktree is already prepared.
+    mark_workspace_prepared
     ended=$(date +%s)
     printf 'PTC_SETUP_METRIC cache_publish_ms=%s\n' "$(((ended - started) * 1000))"
     return
@@ -131,6 +198,7 @@ publish_cache() {
   rm -rf -- "$temporary"
   rmdir "$lock" 2>/dev/null || true
   trap - 0 HUP INT TERM
+  mark_workspace_prepared
 
   ended=$(date +%s)
   printf 'PTC_SETUP_METRIC cache_publish_ms=%s\n' "$(((ended - started) * 1000))"

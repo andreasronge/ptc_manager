@@ -55,6 +55,49 @@ defmodule PtcManager.BootstrapCacheTest do
     assert File.read!(Path.join(second.repository, "deps/example/source.txt")) == "first"
   end
 
+  test "reuses an already prepared persistent checkout without replacing its trees" do
+    fixture = cache_fixture()
+    on_exit(fn -> File.rm_rf!(fixture.root) end)
+
+    seed_build(fixture.repository, "prepared")
+    assert run_cache(fixture, "publish") =~ "cache_publish_ms="
+    File.write!(Path.join(fixture.repository, "deps/local-only.txt"), "keep me")
+
+    assert run_cache(fixture, "restore") =~ "cache_state=hit"
+    assert File.read!(Path.join(fixture.repository, "deps/local-only.txt")) == "keep me"
+  end
+
+  test "replaces existing dependency trees containing read-only Git pack files" do
+    fixture = cache_fixture()
+    on_exit(fn -> File.rm_rf!(fixture.root) end)
+
+    pack = "deps/heroicons/.git/objects/pack/pack-cache.pack"
+    cached_pack = Path.join(fixture.repository, pack)
+    File.mkdir_p!(Path.dirname(cached_pack))
+    File.write!(cached_pack, "cached pack")
+    File.chmod!(cached_pack, 0o444)
+    seed_build(fixture.repository, "cached")
+
+    assert run_cache(fixture, "publish") =~ "cache_publish_ms="
+
+    File.rm_rf!(Path.join(fixture.repository, "deps"))
+    File.rm_rf!(Path.join(fixture.repository, "_build"))
+
+    existing_pack = Path.join(fixture.repository, pack)
+    File.mkdir_p!(Path.dirname(existing_pack))
+    File.write!(existing_pack, "stale pack")
+    File.chmod!(existing_pack, 0o444)
+    File.write!(Path.join(fixture.repository, "deps/stale-only.txt"), "remove me")
+    File.mkdir_p!(Path.join(fixture.repository, "_build/stale"))
+    File.write!(Path.join(fixture.repository, "_build/stale/remove.txt"), "remove me")
+
+    assert run_cache(fixture, "restore") =~ "cache_state=hit"
+    assert File.read!(existing_pack) == "cached pack"
+    assert Bitwise.band(File.stat!(existing_pack).mode, 0o200) == 0o200
+    refute File.exists?(Path.join(fixture.repository, "deps/stale-only.txt"))
+    refute File.exists?(Path.join(fixture.repository, "_build/stale/remove.txt"))
+  end
+
   test "invalidates the cache when mix.lock changes" do
     fixture = cache_fixture()
     on_exit(fn -> File.rm_rf!(fixture.root) end)
