@@ -117,6 +117,21 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     assert byte_size(result.output) == 65_536
   end
 
+  test "the production runner relies on the caller's verified source instead of probing Git" do
+    root =
+      Path.join(System.tmp_dir!(), "ptc-workspace-runner-#{System.unique_integer([:positive])}")
+
+    script = Path.join(root, "setup")
+    File.mkdir_p!(root)
+    File.write!(script, "#!/bin/sh\nprintf 'ready\\n'\n")
+    File.chmod!(script, 0o755)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, result} = WorkspaceSetup.Runner.run(root, "setup", 5_000)
+    assert result.exit_status == 0
+    assert result.output == "ready\n"
+  end
+
   defp workspace_fixture(script_body) do
     unique = System.unique_integer([:positive, :monotonic])
     root = Path.join(System.tmp_dir!(), "ptc-workspace-setup-#{unique}")

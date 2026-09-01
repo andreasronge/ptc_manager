@@ -174,7 +174,6 @@ defmodule PtcManager.Repository.WorkspaceSetup do
     @output_limit 65_536
 
     def run(path, script, timeout_ms) do
-      source_sha = git!(path, ["rev-parse", "HEAD"])
       absolute_script = Path.join(path, script)
       started = System.monotonic_time(:millisecond)
       {command, args} = command(absolute_script)
@@ -199,20 +198,19 @@ defmodule PtcManager.Repository.WorkspaceSetup do
         false,
         started,
         started + timeout_ms,
-        script,
-        source_sha
+        script
       )
     rescue
       error -> {:error, {:workspace_setup_unavailable, error.__struct__}}
     end
 
-    defp receive_result(port, output, truncated, started, deadline, script, source_sha) do
+    defp receive_result(port, output, truncated, started, deadline, script) do
       remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
       receive do
         {^port, {:data, data}} ->
           {output, truncated} = append_bounded(output, data, truncated)
-          receive_result(port, output, truncated, started, deadline, script, source_sha)
+          receive_result(port, output, truncated, started, deadline, script)
 
         {^port, {:exit_status, status}} ->
           {:ok,
@@ -221,8 +219,7 @@ defmodule PtcManager.Repository.WorkspaceSetup do
              output: output,
              output_truncated: truncated,
              duration_ms: max(System.monotonic_time(:millisecond) - started, 0),
-             script: script,
-             source_sha: source_sha
+             script: script
            }}
       after
         remaining ->
@@ -239,11 +236,6 @@ defmodule PtcManager.Repository.WorkspaceSetup do
         _user ->
           {script, []}
       end
-    end
-
-    defp git!(path, args) do
-      {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
-      String.trim(output)
     end
 
     defp append_bounded(output, data, truncated) do
