@@ -1,6 +1,8 @@
 defmodule PtcManager.Repository.WorkspaceSetupTest do
   use ExUnit.Case, async: true
 
+  @moduletag :nightly
+
   alias PtcManager.Operations.Job
   alias PtcManager.Repository.{Contract, WorkspaceSetup}
 
@@ -72,6 +74,7 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     assert File.read!(Path.join(fixture.worktree, "README.md")) == "changed\n"
   end
 
+  @tag nightly: false
   test "the contract accepts only one contained script path" do
     contract = %Contract{
       version: 1,
@@ -132,6 +135,7 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     assert result.output == "ready\n"
   end
 
+  @tag nightly: false
   test "the production runner uses the bounded worker bootstrap bridge across OS identities" do
     assert {"/usr/bin/sudo",
             [

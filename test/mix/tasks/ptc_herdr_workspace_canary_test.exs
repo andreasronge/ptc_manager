@@ -1,6 +1,8 @@
 defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanaryTest do
   use ExUnit.Case, async: false
 
+  @moduletag :nightly
+
   import ExUnit.CaptureIO
 
   defmodule FakeHerdr do

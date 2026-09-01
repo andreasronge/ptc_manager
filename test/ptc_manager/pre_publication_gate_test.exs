@@ -1,6 +1,8 @@
 defmodule PtcManager.Repository.PrePublicationGateTest do
   use ExUnit.Case, async: false
 
+  @moduletag :nightly
+
   alias PtcManager.Operations.{Job, PrPublication, WorktreeAllocation}
   alias PtcManager.Repository.{Contract, PrePublicationGate}
   alias PtcManager.Repository.PrePublicationGate.Runner
@@ -71,6 +73,7 @@ defmodule PtcManager.Repository.PrePublicationGateTest do
     refute_receive {:gate_run, _, _, _, _, _, _}
   end
 
+  @tag nightly: false
   test "constructs an empty credential environment under an OS timeout" do
     previous = gate_settings()
     on_exit(fn -> restore_gate_settings(previous) end)

@@ -37,7 +37,7 @@ partition=1
 while [ "$partition" -le "$partitions" ]; do
   log_path="$output_root/partition-$partition.log"
   "$timeout_binary" --signal=TERM --kill-after=2s "${partition_budget}s" \
-    env MIX_TEST_PARTITION="$partition" mix test --partitions "$partitions" \
+    env MIX_TEST_PARTITION="$partition" mix test --partitions "$partitions" --exclude nightly \
     >"$log_path" 2>&1 &
   pids="$pids $!"
   partition=$((partition + 1))

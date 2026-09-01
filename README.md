@@ -484,11 +484,15 @@ mix precommit
 ```
 
 This formats the project, compiles with warnings treated as errors, and runs
-the complete test suite across three isolated SQLite partitions. The test
-phase has a hard wall-clock budget of less than 60 seconds; a failed, hung, or
-slower run fails the gate. Set `PTC_TEST_BUDGET_SECONDS` or
-`PTC_TEST_PARTITIONS` only for local diagnosis—the checked-in defaults are the
-publication and deployment contract.
+the deployment-critical suite across three isolated SQLite partitions. The
+test phase has a hard wall-clock budget of less than 60 seconds; a failed,
+hung, or slower run fails the gate. Real filesystem, Git-worktree, cache,
+process-timeout, and disposable-migration lifecycle tests carry the `nightly`
+tag. They remain part of a normal unfiltered `mix test` and run every night in
+GitHub Actions through `.github/workflows/nightly.yml`; the workflow can also
+be started manually. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
+only for local diagnosis—the checked-in defaults are the publication and
+deployment contract.
 
 ## Production configuration
 

@@ -1,6 +1,8 @@
 defmodule PtcManager.DisposableDeploymentTargetTest do
   use ExUnit.Case, async: false
 
+  @moduletag :nightly
+
   import PtcManager.OperationsFixtures
 
   alias PtcManager.DeploymentCanary

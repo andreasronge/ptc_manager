@@ -17,12 +17,16 @@ defmodule PtcManager.Scripts.TestSuiteTest do
   end
 
   test "runs isolated partitions and reports the wall-clock budget", %{bin: bin} do
-    fake_mix!(bin, "printf 'partition=%s\\n' \"$MIX_TEST_PARTITION\"\n")
+    fake_mix!(
+      bin,
+      "printf 'partition=%s args=%s\\n' \"$MIX_TEST_PARTITION\" \"$*\"\n"
+    )
 
     assert {output, 0} = run_suite(bin, "10")
     assert output =~ "partition=1"
     assert output =~ "partition=2"
     assert output =~ "partition=3"
+    assert output =~ "--exclude nightly"
     assert output =~ "Test suite passed"
   end
 

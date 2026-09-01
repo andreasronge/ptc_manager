@@ -1,6 +1,8 @@
 defmodule PtcManager.RepositoryGitProbeTest do
   use ExUnit.Case, async: false
 
+  @moduletag :nightly
+
   alias PtcManager.Operations.{Job, Repository}
   alias PtcManager.Repository.GitProbe
 
@@ -111,6 +113,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
              )
   end
 
+  @tag nightly: false
   test "constructs a scrubbed cross-UID verifier command with an OS timeout" do
     settings =
       for key <- [

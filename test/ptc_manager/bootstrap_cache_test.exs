@@ -1,6 +1,8 @@
 defmodule PtcManager.BootstrapCacheTest do
   use ExUnit.Case, async: true
 
+  @moduletag :nightly
+
   @project_root Path.expand("../..", __DIR__)
   @cache_script Path.join(@project_root, "scripts/ptc/bootstrap-cache")
   @bootstrap_script Path.join(@project_root, "scripts/ptc/bootstrap")

@@ -1,6 +1,8 @@
 defmodule PtcManager.TestGitWorkspaceTest do
   use PtcManager.DataCase, async: false
 
+  @moduletag :nightly
+
   alias PtcManager.Dispatch
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.GitHub.IssueSnapshot

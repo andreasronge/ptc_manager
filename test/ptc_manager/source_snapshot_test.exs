@@ -1,6 +1,8 @@
 defmodule PtcManager.Repository.SourceSnapshotTest do
   use ExUnit.Case, async: false
 
+  @moduletag :nightly
+
   alias PtcManager.Operations.Repository
   alias PtcManager.Repository.SourceSnapshot
 
@@ -64,11 +66,13 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
     assert snapshot.ref == "main"
   end
 
+  @tag nightly: false
   test "rejects an unavailable checkout" do
     repository = %Repository{local_path: "/missing/ptc-source-snapshot", default_branch: "main"}
     assert {:error, :repository_path_unavailable} = SourceSnapshot.capture(repository)
   end
 
+  @tag nightly: false
   test "marks every source Git command as safe for the coordinator identity" do
     assert SourceSnapshot.git_args("/srv/ptc_runner", ["rev-parse", "HEAD"]) == [
              "-c",
