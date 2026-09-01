@@ -27,23 +27,13 @@ defmodule PtcManager.AutomationsTest do
            })}
 
         Enum.take(args, 2) == ["agent", "prompt"] ->
-          loader = Enum.at(args, 3)
-          [prompt_path] = Regex.run(~r/task at (.+?\.txt)\./, loader, capture: :all_but_first)
-          prompt = File.read!(prompt_path)
-          [path] = Regex.run(~r/to (\/\S+?\.json)\b/, prompt, capture: :all_but_first)
-          [schema] = Regex.run(~r/read (\/\S+?\.schema\.json)\b/, prompt, capture: :all_but_first)
-          assert_schema!(schema)
-          true = byte_size(loader) < 500
-          true = prompt =~ String.duplicate("Long context line.\n", 100)
-
           true = option_values(args, "--until") == ["working", "blocked"]
-          Process.put({__MODULE__, :result_path}, path)
+          prepare_prompt_result(Enum.at(args, 3))
           {:ok, ~s({"result":{"state":"working"}})}
 
         Enum.take(args, 2) == ["agent", "wait"] ->
           true = option_values(args, "--until") == ["idle", "done", "blocked"]
-          path = Process.delete({__MODULE__, :result_path})
-          File.write!(path, Jason.encode!(result()))
+          complete_prompt_result()
           {:ok, ~s({"result":{"state":"idle"}})}
 
         Enum.take(args, 2) == ["worktree", "remove"] ->
@@ -84,6 +74,38 @@ defmodule PtcManager.AutomationsTest do
         [^option, value] -> [value]
         _pair -> []
       end)
+    end
+
+    defp prepare_prompt_result("Initialization check only." <> _rest = prompt) do
+      attempt = Process.get({__MODULE__, :ready_attempt}, 0) + 1
+      Process.put({__MODULE__, :ready_attempt}, attempt)
+
+      if attempt == 1 do
+        Process.put({__MODULE__, :pending_prompt_result}, :swallowed)
+      else
+        [token] = Regex.run(~r/exactly (ready-\d+-\d+)/, prompt, capture: :all_but_first)
+        [path] = Regex.run(~r/rename it to (\/\S+?\.ready)\./, prompt, capture: :all_but_first)
+        Process.put({__MODULE__, :pending_prompt_result}, {:ready, path, token})
+      end
+    end
+
+    defp prepare_prompt_result(loader) do
+      [prompt_path] = Regex.run(~r/task at (.+?\.txt)\./, loader, capture: :all_but_first)
+      prompt = File.read!(prompt_path)
+      [path] = Regex.run(~r/to (\/\S+?\.json)\b/, prompt, capture: :all_but_first)
+      [schema] = Regex.run(~r/read (\/\S+?\.schema\.json)\b/, prompt, capture: :all_but_first)
+      assert_schema!(schema)
+      true = byte_size(loader) < 500
+      true = prompt =~ String.duplicate("Long context line.\n", 100)
+      Process.put({__MODULE__, :pending_prompt_result}, {:result, path})
+    end
+
+    defp complete_prompt_result do
+      case Process.delete({__MODULE__, :pending_prompt_result}) do
+        :swallowed -> :ok
+        {:ready, path, token} -> File.write!(path, token <> "\n")
+        {:result, path} -> File.write!(path, Jason.encode!(result()))
+      end
     end
   end
 

@@ -28,6 +28,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
            :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
+           :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
            {:ok, result} <- read_result(output_path, action.action_key) do
         {:ok, result}
@@ -162,14 +163,56 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       action.prompt <>
         result_protocol(output_path, schema_path)
 
-    with {:ok, prompt_path} <- write_prompt_file(action, complete_prompt),
-         {:ok, _started} <-
+    with {:ok, prompt_path} <- write_prompt_file(action, complete_prompt) do
+      submit_and_wait(name, prompt_loader(prompt_path), timeout)
+    end
+  end
+
+  defp ensure_prompt_delivery(name, action, output_path) do
+    marker_path = Path.rootname(output_path) <> ".ready"
+    token = "ready-#{action.id}-#{action.attempt_count}"
+    Process.put({__MODULE__, :ready_path}, marker_path)
+    do_ensure_prompt_delivery(name, marker_path, token, 2)
+  end
+
+  defp do_ensure_prompt_delivery(_name, _marker_path, _token, 0),
+    do: {:error, :agent_prompt_delivery_failed}
+
+  defp do_ensure_prompt_delivery(name, marker_path, token, attempts_left) do
+    prompt =
+      "Initialization check only. Use the shell to write exactly #{token} followed by a newline to #{marker_path}.tmp, then rename it to #{marker_path}. Do not inspect the repository or access external services."
+
+    result = submit_and_wait(name, prompt, 60_000)
+
+    if ready_marker?(marker_path, token) do
+      :ok
+    else
+      if attempts_left > 1 do
+        do_ensure_prompt_delivery(name, marker_path, token, attempts_left - 1)
+      else
+        case result do
+          {:error, _reason} = error -> error
+          {:ok, _output} -> {:error, :agent_prompt_delivery_failed}
+        end
+      end
+    end
+  end
+
+  defp ready_marker?(path, token) do
+    case File.read(path) do
+      {:ok, body} -> String.trim(body) == token
+      {:error, _reason} -> false
+    end
+  end
+
+  defp submit_and_wait(name, prompt, timeout) do
+    with {:ok, _started} <-
            command().run(
              [
                "agent",
                "prompt",
                name,
-               prompt_loader(prompt_path),
+               prompt,
                "--wait",
                "--until",
                "working",
@@ -281,6 +324,12 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)
     if schema = Process.delete({__MODULE__, :schema_path}), do: File.rm(schema)
     if prompt = Process.delete({__MODULE__, :prompt_path}), do: File.rm(prompt)
+
+    if ready = Process.delete({__MODULE__, :ready_path}) do
+      File.rm(ready)
+      File.rm(ready <> ".tmp")
+    end
+
     :ok
   end
 
