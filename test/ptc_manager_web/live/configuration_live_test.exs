@@ -36,6 +36,35 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "#prompt-repair_and_merge_pr", "Customized")
 
     view
+    |> element("#prompt-repair_and_merge_pr button[phx-click=show-prompt-preview]")
+    |> render_click()
+
+    assert has_element?(view, "#prompt-preview", "Example composed prompt")
+    assert has_element?(view, "#prompt-preview", "Protected instructions")
+    assert has_element?(view, "#prompt-preview", "andreasronge/example_repository")
+
+    assert has_element?(
+             view,
+             "#full-prompt-preview-repair_and_merge_pr",
+             "Mention the merge commit SHA in the final evidence."
+           )
+
+    assert has_element?(
+             view,
+             "#full-prompt-preview-repair_and_merge_pr",
+             "explicit maintainer authorization to merge only pull request #456"
+           )
+
+    send(view.pid, {:operations_changed, Repository})
+    assert has_element?(view, "#prompt-preview", "Example composed prompt")
+
+    view
+    |> element("#prompt-preview button[phx-click=close-prompt-preview]")
+    |> render_click()
+
+    refute has_element?(view, "#prompt-preview")
+
+    view
     |> element("#prompt-repair_and_merge_pr button[phx-click=reset-prompt]")
     |> render_click()
 

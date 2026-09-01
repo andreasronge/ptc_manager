@@ -39,6 +39,20 @@ defmodule PtcManager.PromptConfigurationTest do
              PromptConfiguration.save("invented_button", "Do something", "maintainer")
   end
 
+  test "builds a protected example preview for every configurable action" do
+    for definition <- Catalog.configurable_actions() do
+      preview = Catalog.preview(definition.key, "Show the exact validation command in evidence.")
+
+      assert is_binary(preview)
+      assert byte_size(preview) > 200
+      assert preview =~ "<maintainer_configured_instructions>"
+      assert preview =~ "Show the exact validation command in evidence."
+      assert preview =~ "<protected_coordinator_boundaries>"
+    end
+
+    assert Catalog.preview("unknown-action") == nil
+  end
+
   test "bounds multibyte instructions by bytes before they can enter a CLI prompt" do
     assert {:error, changeset} =
              PromptConfiguration.save(

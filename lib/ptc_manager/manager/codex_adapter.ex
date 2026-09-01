@@ -95,6 +95,11 @@ defmodule PtcManager.Manager.CodexAdapter do
 
   @doc false
   def build_prompt(issue) do
+    build_prompt(issue, PromptConfiguration.instructions("private_issue_analysis"))
+  end
+
+  @doc false
+  def build_prompt(issue, instructions) do
     prompt =
       """
       You are a maintainer preparing a private issue analysis. Inspect this local repository read-only.
@@ -114,7 +119,7 @@ defmodule PtcManager.Manager.CodexAdapter do
       </issue_data>
       """
 
-    PromptConfiguration.append("private_issue_analysis", prompt)
+    PromptConfiguration.append_instructions(prompt, instructions)
   end
 
   defp decode_output(path) do

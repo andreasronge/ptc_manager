@@ -15,6 +15,7 @@ defmodule PtcManagerWeb.ConfigurationLive do
      socket
      |> assign(:page_title, "Configuration")
      |> assign(:actor, session["actor"] || "maintainer")
+     |> assign(:preview_action_key, nil)
      |> load_configuration()}
   end
 
@@ -99,12 +100,26 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
+  def handle_event("show-prompt-preview", %{"action-key" => action_key}, socket) do
+    if Catalog.configurable_action?(action_key),
+      do: {:noreply, assign(socket, :preview_action_key, action_key)},
+      else: {:noreply, put_flash(socket, :error, "That prompt is not configurable.")}
+  end
+
+  def handle_event("close-prompt-preview", _params, socket),
+    do: {:noreply, assign(socket, :preview_action_key, nil)}
+
   defp load_configuration(socket) do
     customizations = Map.new(PromptConfiguration.list(), &{&1.action_key, &1})
 
     prompts =
       Enum.map(Catalog.configurable_actions(), fn definition ->
-        Map.put(definition, :customization, Map.get(customizations, definition.key))
+        customization = Map.get(customizations, definition.key)
+        instructions = customization && customization.instructions
+
+        definition
+        |> Map.put(:customization, customization)
+        |> Map.put(:preview, Catalog.preview(definition.key, instructions))
       end)
 
     repositories = Operations.list_repositories()
@@ -125,6 +140,11 @@ defmodule PtcManagerWeb.ConfigurationLive do
   def health_detail(%{detail: %DateTime{} = value}), do: Calendar.strftime(value, "%d %b · %H:%M")
   def health_detail(%{detail: nil}), do: "No detail recorded."
   def health_detail(%{detail: detail}), do: detail
+
+  def selected_prompt(prompts, action_key) when is_binary(action_key),
+    do: Enum.find(prompts, &(&1.key == action_key))
+
+  def selected_prompt(_prompts, _action_key), do: nil
 
   defp validation_message(%Ecto.Changeset{} = changeset) do
     case changeset.errors do

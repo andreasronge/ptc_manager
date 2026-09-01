@@ -1,9 +1,12 @@
 defmodule PtcManager.MaintainerActions.Catalog do
   @moduledoc "Button action catalog and protected prompt builders for the durable action queue."
 
-  alias PtcManager.Operations.{Issue, PrPublication}
+  alias PtcManager.DailyDigests.DailyDigest
+  alias PtcManager.Manager.CodexAdapter, as: PrivateAnalysisAdapter
+  alias PtcManager.Operations.{Issue, Job, PrPublication, Repository}
   alias PtcManager.PromptConfiguration
   alias PtcManager.Automations
+  alias PtcManager.Dispatch.HerdrAdapter, as: ImplementationAdapter
 
   @prompt_version 1
   @issue_review_limit 3
@@ -73,6 +76,65 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   def configurable_action?(action_key) when is_binary(action_key),
     do: Enum.any?(@configurable_actions, &(&1.key == action_key))
+
+  @doc "Returns a safe, realistic example of the complete configured action prompt."
+  def preview(action_key, instructions \\ nil) when is_binary(action_key) do
+    repository = preview_repository()
+    issue = preview_issue(repository)
+    publication = preview_publication(repository)
+
+    prompt =
+      case action_key do
+        "private_issue_analysis" ->
+          PrivateAnalysisAdapter.build_prompt(issue, instructions)
+
+        "implement_issue" ->
+          ImplementationAdapter.build_prompt(
+            repository,
+            issue,
+            preview_job(repository, issue, instructions)
+          )
+
+        "prepare_issue" ->
+          configured_preview(prepare_issue_prompt(repository, issue), instructions)
+
+        "review_issue" ->
+          configured_preview(review_issue_prompt(repository, issue), instructions)
+
+        "daily_digest" ->
+          configured_preview(
+            daily_digest_prompt(repository, preview_digest(repository)),
+            instructions
+          )
+
+        "resolve_issue_decision" ->
+          configured_preview(
+            resolve_issue_decision_prompt(
+              repository,
+              issue,
+              "Choose the smallest compatible change and document the compatibility behavior."
+            ),
+            instructions
+          )
+
+        "prepare_merge_decision" ->
+          configured_preview(merge_decision_prompt(repository, issue, publication), instructions)
+
+        "repair_pr" ->
+          configured_preview(repair_prompt(repository, issue, publication), instructions)
+
+        "repair_and_merge_pr" ->
+          configured_preview(
+            repair_and_merge_prompt(repository, issue, publication),
+            instructions
+          )
+
+        _unknown ->
+          nil
+      end
+
+    if is_binary(prompt), do: String.trim(prompt), else: nil
+  end
 
   def issue_actions(%Issue{state: "open", repository_id: repository_id}),
     do: Automations.contextual_actions(repository_id, "planning_issue")
@@ -649,6 +711,78 @@ defmodule PtcManager.MaintainerActions.Catalog do
       "Confirm that the coordinator-created local repair branch starts at the exact pull-request head `#{publication.remote_head_sha}`. Push its final HEAD explicitly to the existing remote branch `#{publication.head_ref}`; the local branch name is intentionally different."
     end
   end
+
+  defp preview_repository do
+    %Repository{
+      id: 1,
+      github_owner: "andreasronge",
+      github_name: "example_repository",
+      default_branch: "main",
+      required_pre_pr_reviews: 2,
+      implementation_test_command: "./scripts/ci/pre-publication"
+    }
+  end
+
+  defp preview_issue(repository) do
+    %Issue{
+      id: 123,
+      repository_id: repository.id,
+      number: 123,
+      state: "open",
+      title: "Example: preserve compatibility when loading project configuration",
+      body:
+        "Users with an older configuration file should receive a clear migration message instead of an unexplained failure.",
+      content_digest: String.duplicate("1", 64)
+    }
+  end
+
+  defp preview_job(repository, issue, instructions) do
+    %Job{
+      id: 42,
+      repository_id: repository.id,
+      issue_id: issue.id,
+      fencing_token: 7,
+      branch_name: "ptc-manager/issue-123-job-42",
+      publication_source: "agent",
+      required_review_count: 2,
+      prompt_instructions: instructions
+    }
+  end
+
+  defp preview_publication(repository) do
+    %PrPublication{
+      id: 456,
+      repository_id: repository.id,
+      job_id: 42,
+      source: "agent",
+      state: "published",
+      pr_state: "open",
+      pr_number: 456,
+      branch_name: "ptc-manager/issue-123-job-42",
+      head_ref: "ptc-manager/issue-123-job-42",
+      head_repository: "andreasronge/example_repository",
+      base_sha: String.duplicate("a", 40),
+      remote_base_sha: String.duplicate("b", 40),
+      remote_head_sha: String.duplicate("c", 40),
+      diff_digest: String.duplicate("d", 64),
+      checks_state: "failure",
+      mergeability: "conflicting"
+    }
+  end
+
+  defp preview_digest(repository) do
+    %DailyDigest{
+      id: 789,
+      repository_id: repository.id,
+      digest_date: ~D[2026-08-31],
+      window_started_at: ~U[2026-08-30 22:00:00Z],
+      window_ended_at: ~U[2026-08-31 22:00:00Z],
+      time_zone: "Europe/Stockholm"
+    }
+  end
+
+  defp configured_preview(prompt, instructions),
+    do: PromptConfiguration.append_instructions(prompt, instructions)
 
   defp configured(action_key, prompt), do: PromptConfiguration.append(action_key, prompt)
 end
