@@ -613,7 +613,8 @@ sudo useradd --system --home /var/lib/ptc_manager-gate --gid ptc-manager-repo --
 sudo install -d -o ptc-manager -g ptc-manager -m 0700 /var/lib/ptc_manager
 sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 /var/lib/ptc_manager-output/planning-snapshots
-sudo install -d -o ptc-manager-worker -g ptc-manager-worker -m 0700 /var/lib/ptc_manager-worker
+sudo install -d -o ptc-manager-worker -g ptc-manager-output -m 0710 /var/lib/ptc_manager-worker
+sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 /var/lib/ptc_manager-worker/agent-results
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 0700 /var/lib/ptc_manager-external
 sudo install -d -o ptc-manager-verifier -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-verifier
 sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 /var/lib/ptc_manager-gate
@@ -695,9 +696,11 @@ the explicit exception: its abandoned checkout is removed with Herdr's force
 option because GitHub has already made the work terminal.
 The separate `ptc-manager-publish` group lets only the coordinator and Git verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
-The coordinator and generic Herdr agents exchange schema and result files only
-through the setgid `ptc-manager-output` directory at `PTC_AGENT_ACTION_OUTPUT_DIR`;
-the coordinator database directory is `0700`.
+The coordinator and generic Herdr agents exchange task, schema, and result files
+only through the setgid directory at `PTC_AGENT_ACTION_OUTPUT_DIR`. The default
+`/var/lib/ptc_manager-worker/agent-results` path is writable inside the Herdr
+service sandbox; planning snapshots remain read-only to agents. The coordinator
+database directory is `0700`.
 
 The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed

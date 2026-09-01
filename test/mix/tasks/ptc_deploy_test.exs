@@ -191,6 +191,24 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "-m 2750"
   end
 
+  test "remote deployment gives agents a narrow writable result exchange" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "agent_result_dir=/var/lib/ptc_manager-worker/agent-results"
+    assert script =~ "sudo chmod 0710 /var/lib/ptc_manager-worker"
+
+    assert script =~
+             ~s(sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 "$agent_result_dir")
+
+    assert script =~
+             "Environment=PTC_AGENT_ACTION_OUTPUT_DIR=$agent_result_dir"
+
+    assert script =~ "80-ptc-manager-agent-results.conf"
+
+    assert File.read!(@project_root <> "/deploy/ptc_manager.env.example") =~
+             "PTC_AGENT_ACTION_OUTPUT_DIR=/var/lib/ptc_manager-worker/agent-results"
+  end
+
   test "remote deployment verifies maintenance health before crossing the canary effect boundary" do
     script = File.read!(@remote_script)
 

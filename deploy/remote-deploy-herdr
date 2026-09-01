@@ -41,6 +41,8 @@ health_url=
 maintenance_override=/etc/systemd/system/ptc_manager.service.d/90-ptc-manager-deploy-maintenance.conf
 maintenance_override_backup="/etc/systemd/system/ptc_manager.service.d/.ptc-manager-maintenance-${release_id}.backup"
 maintenance_override_preexisting=false
+agent_result_dir=/var/lib/ptc_manager-worker/agent-results
+agent_result_override=/etc/systemd/system/ptc_manager.service.d/80-ptc-manager-agent-results.conf
 mise_binary=/home/agent/.local/bin/mise
 worker_mise=/usr/local/bin/mise
 node_version=22.23.2
@@ -774,6 +776,14 @@ sudo install -o root -g ptc-manager-repo -m 0640 "$source_archive" "$gate_source
 sudo chmod 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   /var/lib/ptc_manager-output/planning-snapshots
+sudo chown ptc-manager-worker:ptc-manager-output /var/lib/ptc_manager-worker
+sudo chmod 0710 /var/lib/ptc_manager-worker
+sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 "$agent_result_dir"
+sudo install -d -o root -g root -m 0755 "$(dirname "$agent_result_override")"
+printf '%s\n' '[Service]' "Environment=PTC_AGENT_ACTION_OUTPUT_DIR=$agent_result_dir" |
+  sudo tee "$agent_result_override" >/dev/null
+sudo chmod 0644 "$agent_result_override"
+sudo systemctl daemon-reload
 install_worker_mise
 install_worker_node
 
