@@ -203,7 +203,7 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~
              "Environment=PTC_AGENT_ACTION_OUTPUT_DIR=$agent_result_dir"
 
-    assert script =~ "80-ptc-manager-agent-results.conf"
+    assert script =~ "99-ptc-manager-agent-results.conf"
 
     assert File.read!(@project_root <> "/deploy/ptc_manager.env.example") =~
              "PTC_AGENT_ACTION_OUTPUT_DIR=/var/lib/ptc_manager-worker/agent-results"
