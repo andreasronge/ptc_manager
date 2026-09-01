@@ -4,7 +4,7 @@ defmodule PtcManager.DispatchTest do
   alias PtcManager.Dispatch
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent, IssueDependency, Job}
+  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent, Job}
   alias PtcManager.Repo
 
   defmodule FakeGitHub do
@@ -148,13 +148,10 @@ defmodule PtcManager.DispatchTest do
     {repository, issue, _proposal, job, remote} = approved_job_fixture()
     blocker = issue_fixture(repository, %{number: issue.number + 1})
 
-    %IssueDependency{}
-    |> IssueDependency.changeset(%{
-      issue_id: issue.id,
-      blocking_issue_id: blocker.id,
-      blocking_issue_number: blocker.number
+    issue_dependency_fixture(issue, %{
+      blocking_issue: blocker,
+      blocking_repository: repository
     })
-    |> Repo.insert!()
 
     Process.put(:dispatch_github_result, {:ok, remote})
 
@@ -165,7 +162,7 @@ defmodule PtcManager.DispatchTest do
     assert Repo.get!(Job, job.id).state == "cancelled"
   end
 
-  test "dispatch rejects a dependency projection that has not been synchronized" do
+  test "dispatch does not treat dependency prose as the machine-readable contract" do
     repository = repository_fixture()
 
     remote =
@@ -176,11 +173,11 @@ defmodule PtcManager.DispatchTest do
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
     Process.put(:dispatch_github_result, {:ok, remote})
 
-    assert {:error, :issue_dependencies_unresolved} =
+    assert {:ok, %{job: working}} =
              Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
 
-    refute_receive {:dispatch_context, _context}
-    assert Repo.get!(Job, job.id).state == "cancelled"
+    assert_receive {:dispatch_context, _context}
+    assert working.id == job.id
   end
 
   test "a GitHub read failure leaves the approved job queued" do

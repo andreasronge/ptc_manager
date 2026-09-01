@@ -321,7 +321,7 @@ defmodule PtcManager.WorktreesTest do
       state: "open",
       content_digest: issue.content_digest,
       github_updated_at: issue.github_updated_at,
-      blocking_issue_numbers: [],
+      blocking_issues: [],
       dependency_overflow: false
     }
 

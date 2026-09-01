@@ -134,6 +134,7 @@ the real read-only adapters locally:
 
 ```sh
 PTC_REPOSITORY_PATH=/absolute/path/to/ptc_runner \
+GITHUB_READ_TOKEN='github_pat_read_only_token' \
 PTC_GITHUB_SYNC_INTERVAL_MS=300000 \
 PTC_HERDR_SESSION=default \
 PTC_HERDR_SYNC_INTERVAL_MS=10000 \
@@ -156,12 +157,13 @@ clone. Agent work also requires one explicit absolute
 `PTC_WORKTREE_ROOT`; PtcManager does not infer a different root beside each
 checkout.
 
-For a public repository, manual GitHub synchronization works without a token.
-For a private repository or higher rate limits, set `GITHUB_READ_TOKEN` to a
+GitHub issue synchronization requires `GITHUB_READ_TOKEN` because native issue
+dependencies are read through GitHub's authenticated GraphQL API. Set it to a
 fine-grained token with repository metadata, Issues read, and Pull Requests read
-access. To project CI and merge readiness onto the Delivery board, also grant
+access, including for public repositories. To project CI and merge readiness
+onto the Delivery board, also grant
 **Commit statuses: Read** and **Checks: Read**. PtcManager uses the token only
-through its GET-only GitHub client. If either CI source is unavailable, the
+through its read-only GitHub client. If either CI source is unavailable, the
 board reports CI as unknown and will not place that PR in **Ready to merge**.
 
 Automatic draft-PR publishing is a separate, off-by-default capability. Create

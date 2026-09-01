@@ -1,9 +1,19 @@
 defmodule PtcManager.GitHub.IssueSnapshot do
   @moduledoc "Builds the canonical issue version used by sync and dispatch freshness checks."
 
+  alias PtcManager.Operations.Repository
+
   @max_projected_dependencies 100
 
-  def normalize!(remote, repository_id) when is_map(remote) do
+  def normalize!(remote, %Repository{} = repository) when is_map(remote) do
+    normalize!(remote, repository.id, repository_full_name(repository))
+  end
+
+  def normalize!(remote, repository_id) when is_map(remote) and is_integer(repository_id) do
+    normalize!(remote, repository_id, issue_repository_full_name(remote))
+  end
+
+  defp normalize!(remote, repository_id, repository_full_name) do
     body = remote["body"] || ""
     state = remote["state"] || "open"
 
@@ -13,6 +23,12 @@ defmodule PtcManager.GitHub.IssueSnapshot do
     assignee_logins = assignee_logins(remote["assignees"] || [])
 
     updated_at = parse_datetime!(remote["updated_at"])
+    blocking_issues = blocking_issues(remote, repository_full_name)
+    dependency_unknown_count = normalize_unknown_count(remote["blocked_by_unknown_count"])
+
+    dependency_overflow =
+      remote["blocked_by_overflow"] == true or
+        length(blocking_issues) > @max_projected_dependencies
 
     canonical =
       %{
@@ -24,8 +40,9 @@ defmodule PtcManager.GitHub.IssueSnapshot do
         "updated_at" => DateTime.to_iso8601(updated_at)
       }
       |> maybe_put_assignees(assignee_logins)
-
-    blocking_issue_numbers = blocking_issue_numbers(body, remote["number"])
+      |> maybe_put_state_reason(normalize_state_reason(remote["state_reason"]))
+      |> maybe_put_blockers(blocking_issues)
+      |> maybe_put_dependency_counts(dependency_unknown_count, dependency_overflow)
 
     %{
       repository_id: repository_id,
@@ -34,12 +51,14 @@ defmodule PtcManager.GitHub.IssueSnapshot do
       html_url: remote["html_url"],
       body: body,
       state: state,
+      github_state_reason: normalize_state_reason(remote["state_reason"]),
       workflow_label: workflow_label,
       workflow_label_conflict: workflow_label_conflict,
       github_assignees: %{"logins" => assignee_logins},
       github_assignment_projected: true,
-      blocking_issue_numbers: Enum.take(blocking_issue_numbers, @max_projected_dependencies),
-      dependency_overflow: length(blocking_issue_numbers) > @max_projected_dependencies,
+      blocking_issues: Enum.take(blocking_issues, @max_projected_dependencies),
+      dependency_overflow: dependency_overflow,
+      dependency_unknown_count: dependency_unknown_count,
       dependencies_projected: true,
       body_digest: digest(body),
       content_digest: canonical |> Jason.encode!() |> digest(),
@@ -49,22 +68,76 @@ defmodule PtcManager.GitHub.IssueSnapshot do
 
   def digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 
-  def blocking_issue_numbers(body, issue_number) when is_binary(body) do
-    ~r/\bblocked\s+by\s+#(\d+)\b/i
-    |> Regex.scan(body, capture: :all_but_first)
-    |> Enum.map(fn [number] -> String.to_integer(number) end)
-    |> Enum.filter(&(&1 > 0 and &1 <= 2_147_483_647 and &1 != issue_number))
-    |> Enum.uniq()
-    |> Enum.sort()
+  def blocking_issues(remote, default_repository_full_name) when is_map(remote) do
+    remote
+    |> Map.get("blocked_by")
+    |> then(fn blockers -> if is_list(blockers), do: blockers, else: [] end)
+    |> Enum.map(&normalize_blocker(&1, default_repository_full_name))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(&{&1.repository_full_name, &1.number})
+    |> Enum.sort_by(&{&1.repository_full_name, &1.number})
   end
 
-  def blocking_issue_numbers(_body, _issue_number), do: []
+  def blocking_issues(_remote, _default_repository_full_name), do: []
 
-  def projected_blocking_issue_numbers(body, issue_number) do
-    body
-    |> blocking_issue_numbers(issue_number)
-    |> Enum.take(@max_projected_dependencies)
+  defp normalize_blocker(blocker, default_repository_full_name) when is_map(blocker) do
+    with number when is_integer(number) and number > 0 <- blocker["number"],
+         full_name when is_binary(full_name) <-
+           issue_repository_full_name(blocker) || default_repository_full_name,
+         normalized_full_name when normalized_full_name != "" <- normalize_full_name(full_name) do
+      %{
+        repository_full_name: normalized_full_name,
+        number: number,
+        github_id: blocker["id"],
+        node_id: blocker["node_id"],
+        title: blocker["title"],
+        html_url:
+          blocker["html_url"] || "https://github.com/#{normalized_full_name}/issues/#{number}",
+        state: normalize_state(blocker["state"]),
+        state_reason: normalize_state_reason(blocker["state_reason"])
+      }
+    else
+      _invalid -> nil
+    end
   end
+
+  defp normalize_blocker(_blocker, _default_repository_full_name), do: nil
+
+  defp issue_repository_full_name(%{"repository" => %{"full_name" => full_name}})
+       when is_binary(full_name),
+       do: normalize_full_name(full_name)
+
+  defp issue_repository_full_name(%{"repository_url" => repository_url})
+       when is_binary(repository_url) do
+    case Regex.run(~r{/repos/([^/]+/[^/]+)$}, repository_url, capture: :all_but_first) do
+      [full_name] -> normalize_full_name(full_name)
+      _no_match -> nil
+    end
+  end
+
+  defp issue_repository_full_name(%{"html_url" => html_url}) when is_binary(html_url) do
+    case Regex.run(~r{github\.com/([^/]+/[^/]+)/issues/\d+}, html_url, capture: :all_but_first) do
+      [full_name] -> normalize_full_name(full_name)
+      _no_match -> nil
+    end
+  end
+
+  defp issue_repository_full_name(_issue), do: nil
+
+  defp repository_full_name(repository),
+    do: normalize_full_name("#{repository.github_owner}/#{repository.github_name}")
+
+  defp normalize_full_name(full_name), do: full_name |> String.trim() |> String.downcase()
+  defp normalize_state(state) when state in ["open", "closed"], do: state
+  defp normalize_state(_state), do: nil
+
+  defp normalize_unknown_count(count) when is_integer(count) and count >= 0, do: count
+  defp normalize_unknown_count(_count), do: 0
+
+  defp normalize_state_reason(reason) when reason in ["completed", "not_planned", "duplicate"],
+    do: reason
+
+  defp normalize_state_reason(_reason), do: nil
 
   defp assignee_logins(assignees) when is_list(assignees) do
     assignees
@@ -81,6 +154,36 @@ defmodule PtcManager.GitHub.IssueSnapshot do
 
   defp maybe_put_assignees(canonical, []), do: canonical
   defp maybe_put_assignees(canonical, logins), do: Map.put(canonical, "assignees", logins)
+
+  defp maybe_put_state_reason(canonical, nil), do: canonical
+  defp maybe_put_state_reason(canonical, reason), do: Map.put(canonical, "state_reason", reason)
+
+  defp maybe_put_blockers(canonical, []), do: canonical
+
+  defp maybe_put_blockers(canonical, blockers) do
+    Map.put(
+      canonical,
+      "blocked_by",
+      Enum.map(blockers, fn blocker ->
+        Map.take(blocker, [
+          :repository_full_name,
+          :number,
+          :github_id,
+          :node_id,
+          :state,
+          :state_reason
+        ])
+      end)
+    )
+  end
+
+  defp maybe_put_dependency_counts(canonical, 0, false), do: canonical
+
+  defp maybe_put_dependency_counts(canonical, unknown_count, overflow) do
+    canonical
+    |> Map.put("blocked_by_unknown_count", unknown_count)
+    |> Map.put("blocked_by_overflow", overflow)
+  end
 
   defp workflow_label(labels) when is_list(labels) do
     managed =

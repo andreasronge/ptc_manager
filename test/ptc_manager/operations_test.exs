@@ -138,18 +138,25 @@ defmodule PtcManager.OperationsTest do
       dependent = issue_fixture(repository, %{number: 82, workflow_label: "ptc:ready"})
       proposal_fixture(dependent)
 
-      %IssueDependency{}
-      |> IssueDependency.changeset(%{
-        issue_id: dependent.id,
-        blocking_issue_id: blocker.id,
-        blocking_issue_number: blocker.number
-      })
-      |> Repo.insert!()
+      dependency =
+        issue_dependency_fixture(dependent, %{
+          blocking_issue: blocker,
+          blocking_repository: repository
+        })
 
       assert {:error, :issue_dependencies_unresolved} =
                Operations.approve_issue(dependent.id, "andreas")
 
-      blocker |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+      blocker
+      |> Issue.changeset(%{state: "closed", github_state_reason: "completed"})
+      |> Repo.update!()
+
+      dependency
+      |> IssueDependency.changeset(%{
+        blocking_state: "closed",
+        blocking_state_reason: "completed"
+      })
+      |> Repo.update!()
 
       assert {:ok, job} = Operations.approve_issue(dependent.id, "andreas")
       assert job.state == "queued"
@@ -192,6 +199,112 @@ defmodule PtcManager.OperationsTest do
       assert {:error, :issue_dependencies_unresolved} =
                Operations.approve_issue(issue.id, "andreas")
     end
+
+    test "repository-qualified dependencies do not confuse equal issue numbers" do
+      repository = repository_fixture(%{github_owner: "owner", github_name: "application"})
+      other = repository_fixture(%{github_owner: "owner", github_name: "platform"})
+
+      _completed_decoy =
+        issue_fixture(repository, %{
+          number: 81,
+          state: "closed",
+          github_state_reason: "completed"
+        })
+
+      blocker = issue_fixture(other, %{number: 81})
+      dependent = issue_fixture(repository, %{number: 82, workflow_label: "ptc:ready"})
+      proposal_fixture(dependent)
+      dependency = dependency_fixture(dependent, blocker, other)
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(dependent.id, "andreas")
+
+      blocker
+      |> Issue.changeset(%{state: "closed", github_state_reason: "completed"})
+      |> Repo.update!()
+
+      dependency
+      |> IssueDependency.changeset(%{
+        blocking_state: "closed",
+        blocking_state_reason: "completed"
+      })
+      |> Repo.update!()
+
+      assert {:ok, job} = Operations.approve_issue(dependent.id, "andreas")
+      assert job.state == "queued"
+    end
+
+    test "a dependency closed as not planned requires a maintainer decision" do
+      repository = repository_fixture(%{github_owner: "owner", github_name: "application"})
+      dependent = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+      proposal_fixture(dependent)
+
+      issue_dependency_fixture(dependent, %{
+        issue_id: dependent.id,
+        blocking_repository_full_name: "outside/platform",
+        blocking_issue_number: 9,
+        blocking_title: "Cancelled platform work",
+        blocking_html_url: "https://github.com/outside/platform/issues/9",
+        blocking_state: "closed",
+        blocking_state_reason: "not_planned",
+        lookup_state: "resolved"
+      })
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(dependent.id, "andreas")
+    end
+
+    test "a closed dependency without an explicit completed reason fails closed" do
+      repository = repository_fixture()
+      dependent = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+      proposal_fixture(dependent)
+
+      issue_dependency_fixture(dependent, %{
+        blocking_repository: repository,
+        blocking_issue_number: 9,
+        blocking_title: "Closure reason unavailable",
+        blocking_html_url: "https://github.com/owner/repo/issues/9",
+        blocking_state: "closed",
+        blocking_state_reason: nil,
+        lookup_state: "resolved"
+      })
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(dependent.id, "andreas")
+    end
+
+    test "an unknown edge close reason cannot inherit completion from its linked issue" do
+      repository = repository_fixture()
+
+      blocker =
+        issue_fixture(repository, %{
+          number: 19,
+          state: "closed",
+          github_state_reason: "completed"
+        })
+
+      dependent = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+      proposal_fixture(dependent)
+
+      issue_dependency_fixture(dependent, %{
+        blocking_issue: blocker,
+        blocking_repository: repository,
+        blocking_state: "closed",
+        blocking_state_reason: nil
+      })
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(dependent.id, "andreas")
+    end
+
+    test "a blocker hidden from the GitHub reader fails approval closed" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{dependency_unknown_count: 1})
+      proposal_fixture(issue)
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue(issue.id, "andreas")
+    end
   end
 
   describe "create_agent_run/1" do
@@ -210,5 +323,12 @@ defmodule PtcManager.OperationsTest do
 
       assert "is required when the run has ended" in errors_on(changeset).ended_at
     end
+  end
+
+  defp dependency_fixture(issue, blocker, repository) do
+    issue_dependency_fixture(issue, %{
+      blocking_issue: blocker,
+      blocking_repository: repository
+    })
   end
 end

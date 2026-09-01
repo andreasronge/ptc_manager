@@ -1,9 +1,6 @@
 defmodule PtcManager.GitHub.Sync do
   @moduledoc "Persists complete read-only GitHub issue snapshots transactionally."
 
-  @max_dependency_lookups_per_sync 100
-  @unknown_reference_recheck_seconds 86_400
-
   import Ecto.Query
 
   alias PtcManager.Operations
@@ -33,10 +30,7 @@ defmodule PtcManager.GitHub.Sync do
     :global.trans({{__MODULE__, repository.id}, self()}, fn ->
       case Gateway.call(client, :get_issue, [repository, number]) do
         {:ok, remote_issue} ->
-          with {:ok, referenced_issues, unknown_references} <-
-                 fetch_referenced_issues(repository, [remote_issue], client) do
-            persist_issue(repository, remote_issue, referenced_issues, unknown_references)
-          end
+          persist_issue(repository, remote_issue)
 
         {:error, reason} ->
           {:error, reason}
@@ -48,21 +42,20 @@ defmodule PtcManager.GitHub.Sync do
     syncing_repository = mark_syncing(repository)
 
     with {:ok, remote_issues} <- Gateway.call(client, :list_open_issues, [syncing_repository]),
-         {:ok, missing_issues, unknown_references} <-
-           fetch_missing_issues(syncing_repository, remote_issues, client) do
-      persist_snapshot(syncing_repository, remote_issues, missing_issues, unknown_references)
+         {:ok, missing_issues} <- fetch_missing_issues(syncing_repository, remote_issues, client) do
+      persist_snapshot(syncing_repository, remote_issues, missing_issues)
     else
       {:error, reason} -> mark_failed(syncing_repository, reason)
     end
   end
 
-  defp persist_snapshot(repository, remote_issues, missing_issues, unknown_references) do
+  defp persist_snapshot(repository, remote_issues, missing_issues) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
       Repo.transaction(fn ->
         normalized =
-          Enum.map(remote_issues ++ missing_issues, &IssueSnapshot.normalize!(&1, repository.id))
+          Enum.map(remote_issues ++ missing_issues, &IssueSnapshot.normalize!(&1, repository))
 
         existing_issues =
           Issue
@@ -82,15 +75,15 @@ defmodule PtcManager.GitHub.Sync do
           |> Repo.all()
           |> Map.new(&{&1.number, &1})
 
+        dependency_context = dependency_context()
+
         Enum.each(normalized, fn attrs ->
           replace_dependencies(
             Map.fetch!(synchronized_issues, attrs.number),
-            attrs.blocking_issue_numbers,
-            synchronized_issues
+            attrs.blocking_issues,
+            dependency_context
           )
         end)
-
-        record_unknown_references(repository, unknown_references, now)
 
         closed_count = Enum.count(missing_issues, &(&1["state"] == "closed"))
 
@@ -123,25 +116,10 @@ defmodule PtcManager.GitHub.Sync do
     error -> mark_failed(repository, error)
   end
 
-  defp persist_issue(repository, remote_issue, referenced_issues, unknown_references) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
+  defp persist_issue(repository, remote_issue) do
     result =
       Repo.transaction(fn ->
-        attrs = IssueSnapshot.normalize!(remote_issue, repository.id)
-
-        referenced_attrs =
-          Enum.map(referenced_issues, &IssueSnapshot.normalize!(&1, repository.id))
-
-        Enum.each(referenced_attrs, fn referenced ->
-          upsert_issue(
-            Repo.get_by(Issue,
-              repository_id: repository.id,
-              number: referenced.number
-            ),
-            referenced
-          )
-        end)
+        attrs = IssueSnapshot.normalize!(remote_issue, repository)
 
         existing = Repo.get_by(Issue, repository_id: repository.id, number: attrs.number)
         changed? = upsert_issue(existing, attrs) == :changed
@@ -152,15 +130,11 @@ defmodule PtcManager.GitHub.Sync do
           |> Repo.all()
           |> Map.new(&{&1.number, &1})
 
-        Enum.each([attrs | referenced_attrs], fn synchronized_attrs ->
-          replace_dependencies(
-            Map.fetch!(synchronized_issues, synchronized_attrs.number),
-            synchronized_attrs.blocking_issue_numbers,
-            synchronized_issues
-          )
-        end)
-
-        record_unknown_references(repository, unknown_references, now)
+        replace_dependencies(
+          Map.fetch!(synchronized_issues, attrs.number),
+          attrs.blocking_issues,
+          dependency_context()
+        )
 
         %{repository: repository, issue_number: attrs.number, changed?: changed?}
       end)
@@ -186,12 +160,14 @@ defmodule PtcManager.GitHub.Sync do
          %Issue{
            content_digest: digest,
            dependency_overflow: overflow,
+           dependency_unknown_count: unknown_count,
            dependencies_projected: true,
            github_assignment_projected: true
          },
          %{
            content_digest: digest,
            dependency_overflow: overflow,
+           dependency_unknown_count: unknown_count,
            dependencies_projected: true,
            github_assignment_projected: true
          }
@@ -203,17 +179,19 @@ defmodule PtcManager.GitHub.Sync do
     :changed
   end
 
-  defp replace_dependencies(issue, blocking_numbers, issues_by_number) do
+  defp replace_dependencies(issue, blockers, context) do
     existing =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
       |> Repo.all()
-      |> Map.new(&{&1.blocking_issue_number, &1})
+      |> Map.new(&{{&1.blocking_repository_full_name, &1.blocking_issue_number}, &1})
+
+    blocker_keys = MapSet.new(blockers, &{&1.repository_full_name, &1.number})
 
     stale_ids =
       existing
-      |> Map.drop(blocking_numbers)
-      |> Map.values()
+      |> Enum.reject(fn {key, _dependency} -> MapSet.member?(blocker_keys, key) end)
+      |> Enum.map(fn {_key, dependency} -> dependency end)
       |> Enum.map(& &1.id)
 
     if stale_ids != [] do
@@ -222,29 +200,49 @@ defmodule PtcManager.GitHub.Sync do
       |> Repo.delete_all()
     end
 
-    Enum.each(blocking_numbers, fn blocking_number ->
-      blocking_issue = Map.get(issues_by_number, blocking_number)
+    Enum.each(blockers, fn blocker ->
+      blocking_repository = Map.get(context.repositories, blocker.repository_full_name)
+
+      blocking_issue =
+        blocking_repository &&
+          Map.get(context.issues, {blocking_repository.id, blocker.number})
 
       attrs = %{
         issue_id: issue.id,
         blocking_issue_id: blocking_issue && blocking_issue.id,
-        blocking_issue_number: blocking_number,
-        lookup_state: if(blocking_issue, do: "resolved", else: "pending")
+        blocking_repository_id: blocking_repository && blocking_repository.id,
+        blocking_repository_full_name: blocker.repository_full_name,
+        blocking_github_id: blocker.github_id,
+        blocking_node_id: blocker.node_id,
+        blocking_issue_number: blocker.number,
+        blocking_title: blocker.title,
+        blocking_html_url: blocker.html_url,
+        blocking_state: blocker.state,
+        blocking_state_reason: blocker.state_reason,
+        lookup_state: if(blocker.state in ["open", "closed"], do: "resolved", else: "pending"),
+        lookup_checked_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
       }
 
-      case Map.get(existing, blocking_number) do
+      case Map.get(existing, {blocker.repository_full_name, blocker.number}) do
         nil ->
           %IssueDependency{} |> IssueDependency.changeset(attrs) |> Repo.insert!()
 
         dependency ->
-          update_attrs =
-            if blocking_issue,
-              do: Map.put(attrs, :lookup_checked_at, nil),
-              else: Map.drop(attrs, [:lookup_state])
-
-          dependency |> IssueDependency.changeset(update_attrs) |> Repo.update!()
+          dependency |> IssueDependency.changeset(attrs) |> Repo.update!()
       end
     end)
+  end
+
+  defp dependency_context do
+    repositories =
+      Repository
+      |> Repo.all()
+      |> Map.new(fn repository ->
+        {String.downcase("#{repository.github_owner}/#{repository.github_name}"), repository}
+      end)
+
+    issues = Issue |> Repo.all() |> Map.new(&{{&1.repository_id, &1.number}, &1})
+    %{repositories: repositories, issues: issues}
   end
 
   defp fetch_missing_issues(repository, remote_issues, client) do
@@ -255,119 +253,29 @@ defmodule PtcManager.GitHub.Sync do
       |> where([issue], issue.repository_id == ^repository.id)
       |> Repo.all()
 
-    known_numbers = MapSet.new(local_issues, & &1.number)
-    recently_checked_unknowns = recently_checked_unknown_numbers(repository.id)
-
     missing_open_numbers =
       local_issues
       |> Enum.filter(&(&1.state == "open" and not MapSet.member?(open_numbers, &1.number)))
       |> Enum.map(& &1.number)
 
-    unknown_referenced_numbers =
-      remote_issues
-      |> referenced_issue_numbers()
-      |> Enum.reject(
-        &(MapSet.member?(open_numbers, &1) or MapSet.member?(known_numbers, &1) or
-            MapSet.member?(recently_checked_unknowns, &1))
-      )
-
-    with {:ok, missing_open_issues, _unknowns} <-
-           fetch_issue_numbers(missing_open_numbers, repository, client),
-         {:ok, referenced_issues, unknown_references} <-
-           unknown_referenced_numbers
-           |> Enum.take(@max_dependency_lookups_per_sync)
-           |> fetch_issue_numbers(repository, client, allow_unknown: true) do
-      {:ok, missing_open_issues ++ referenced_issues, unknown_references}
-    end
+    fetch_issue_numbers(missing_open_numbers, repository, client)
   end
 
-  defp fetch_referenced_issues(repository, remote_issues, client) do
-    remote_numbers = MapSet.new(remote_issues, & &1["number"])
-    recently_checked_unknowns = recently_checked_unknown_numbers(repository.id)
-
-    remote_issues
-    |> referenced_issue_numbers()
-    |> Enum.reject(
-      &(MapSet.member?(remote_numbers, &1) or MapSet.member?(recently_checked_unknowns, &1))
-    )
-    |> Enum.take(@max_dependency_lookups_per_sync)
-    |> fetch_issue_numbers(repository, client, allow_unknown: true)
-  end
-
-  defp referenced_issue_numbers(remote_issues) do
-    remote_issues
-    |> Enum.flat_map(fn issue ->
-      IssueSnapshot.projected_blocking_issue_numbers(issue["body"] || "", issue["number"])
-    end)
-    |> Enum.uniq()
-  end
-
-  defp fetch_issue_numbers(numbers, repository, client, opts \\ []) do
-    allow_unknown? = Keyword.get(opts, :allow_unknown, false)
-
-    Enum.reduce_while(numbers, {:ok, [], %{}}, fn number, {:ok, snapshots, unknowns} ->
+  defp fetch_issue_numbers(numbers, repository, client) do
+    Enum.reduce_while(numbers, {:ok, []}, fn number, {:ok, snapshots} ->
       case Gateway.call(client, :get_issue, [repository, number]) do
         {:ok, remote_issue} ->
-          {:cont, {:ok, [remote_issue | snapshots], unknowns}}
-
-        {:error, reason} when allow_unknown? ->
-          case definitive_unknown_reference(reason) do
-            {:ok, state} -> {:cont, {:ok, snapshots, Map.put(unknowns, number, state)}}
-            :error -> {:halt, {:error, reason}}
-          end
+          {:cont, {:ok, [remote_issue | snapshots]}}
 
         {:error, reason} ->
           {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, snapshots, unknowns} -> {:ok, Enum.reverse(snapshots), unknowns}
+      {:ok, snapshots} -> {:ok, Enum.reverse(snapshots)}
       {:error, reason} -> {:error, reason}
     end
   end
-
-  defp recently_checked_unknown_numbers(repository_id) do
-    cutoff =
-      DateTime.utc_now()
-      |> DateTime.add(-@unknown_reference_recheck_seconds, :second)
-      |> DateTime.truncate(:microsecond)
-
-    IssueDependency
-    |> join(:inner, [dependency], issue in Issue, on: issue.id == dependency.issue_id)
-    |> where(
-      [dependency, issue],
-      issue.repository_id == ^repository_id and is_nil(dependency.blocking_issue_id) and
-        dependency.lookup_state in ["missing", "pull_request"] and
-        dependency.lookup_checked_at > ^cutoff
-    )
-    |> select([dependency, _issue], dependency.blocking_issue_number)
-    |> Repo.all()
-    |> MapSet.new()
-  end
-
-  defp record_unknown_references(repository, unknown_references, now) do
-    issue_ids =
-      Issue
-      |> where([issue], issue.repository_id == ^repository.id)
-      |> select([issue], issue.id)
-
-    Enum.each(unknown_references, fn {number, state} ->
-      IssueDependency
-      |> where(
-        [dependency],
-        dependency.issue_id in subquery(issue_ids) and
-          dependency.blocking_issue_number == ^number and
-          is_nil(dependency.blocking_issue_id)
-      )
-      |> Repo.update_all(set: [lookup_state: state, lookup_checked_at: now])
-    end)
-  end
-
-  defp definitive_unknown_reference({:github_http_error, 404, _message, _retry_delay}),
-    do: {:ok, "missing"}
-
-  defp definitive_unknown_reference(:github_item_is_pull_request), do: {:ok, "pull_request"}
-  defp definitive_unknown_reference(_reason), do: :error
 
   defp mark_syncing(repository) do
     syncing_repository =

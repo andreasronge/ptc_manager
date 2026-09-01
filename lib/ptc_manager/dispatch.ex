@@ -33,7 +33,7 @@ defmodule PtcManager.Dispatch do
 
   defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity, clock) do
     with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
-         {:ok, canonical} <- normalize_remote(remote, job.repository.id),
+         {:ok, canonical} <- normalize_remote(remote, job.repository),
          {:ok, leased} <-
            Operations.lease_job(job.id, worker_key, canonical, lease_ms,
              capacity: capacity,
@@ -116,8 +116,8 @@ defmodule PtcManager.Dispatch do
     end
   end
 
-  defp normalize_remote(remote, repository_id) do
-    {:ok, IssueSnapshot.normalize!(remote, repository_id)}
+  defp normalize_remote(remote, repository) do
+    {:ok, IssueSnapshot.normalize!(remote, repository)}
   rescue
     error -> {:error, {:invalid_github_issue, error.__struct__}}
   end

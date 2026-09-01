@@ -1,5 +1,7 @@
 defmodule PtcManager.OperationsFixtures do
   alias PtcManager.Operations
+  alias PtcManager.Operations.IssueDependency
+  alias PtcManager.Repo
 
   def repository_fixture(attrs \\ %{}) do
     suffix = System.unique_integer([:positive])
@@ -54,6 +56,31 @@ defmodule PtcManager.OperationsFixtures do
 
     {:ok, proposal} = Operations.create_proposal(Map.merge(defaults, attrs))
     proposal
+  end
+
+  def issue_dependency_fixture(issue, attrs) do
+    blocker = Map.get(attrs, :blocking_issue)
+    repository = Map.get(attrs, :blocking_repository)
+
+    defaults = %{
+      issue_id: issue.id,
+      blocking_issue_id: blocker && blocker.id,
+      blocking_repository_id: repository && repository.id,
+      blocking_repository_full_name:
+        repository && String.downcase("#{repository.github_owner}/#{repository.github_name}"),
+      blocking_issue_number: blocker && blocker.number,
+      blocking_title: blocker && blocker.title,
+      blocking_html_url: blocker && blocker.html_url,
+      blocking_state: blocker && blocker.state,
+      blocking_state_reason: blocker && blocker.github_state_reason,
+      lookup_state: "resolved"
+    }
+
+    persisted_attrs = Map.drop(attrs, [:blocking_issue, :blocking_repository])
+
+    %IssueDependency{}
+    |> IssueDependency.changeset(Map.merge(defaults, persisted_attrs))
+    |> Repo.insert!()
   end
 
   def worker_fixture(attrs \\ %{}) do

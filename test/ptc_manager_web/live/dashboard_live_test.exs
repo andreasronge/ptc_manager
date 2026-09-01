@@ -626,37 +626,44 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     proposal_fixture(dependent, %{readiness: "needs_information"})
 
     dependency =
-      %IssueDependency{}
-      |> IssueDependency.changeset(%{
-        issue_id: dependent.id,
-        blocking_issue_id: blocker.id,
-        blocking_issue_number: blocker.number
+      issue_dependency_fixture(dependent, %{
+        blocking_issue: blocker,
+        blocking_repository: repository
       })
-      |> Repo.insert!()
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
     assert has_element?(
              view,
-             "#issue-#{dependent.id}-blocked-by-#{blocker.number}",
-             "Blocked by ##{blocker.number} · open"
+             "#issue-#{dependent.id}-blocked-by-#{repository.github_owner}-#{repository.github_name}-#{blocker.number}",
+             "Blocked by #{repository.github_owner}/#{repository.github_name}##{blocker.number} · open"
            )
 
     refute has_element?(view, "#issue-dependencies-#{dependent.id}", "All recorded blockers")
 
-    blocker |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+    blocker
+    |> Issue.changeset(%{state: "closed", github_state_reason: "completed"})
+    |> Repo.update!()
+
+    dependency
+    |> IssueDependency.changeset(%{
+      blocking_state: "closed",
+      blocking_state_reason: "completed"
+    })
+    |> Repo.update!()
+
     Operations.notify_changed(:test)
 
     assert has_element?(
              view,
-             "#issue-#{dependent.id}-blocked-by-#{blocker.number}",
-             "Blocked by ##{blocker.number} · completed"
+             "#issue-#{dependent.id}-blocked-by-#{repository.github_owner}-#{repository.github_name}-#{blocker.number}",
+             "Blocked by #{repository.github_owner}/#{repository.github_name}##{blocker.number} · completed"
            )
 
     assert has_element?(
              view,
              "#issue-dependencies-#{dependent.id}",
-             "Run Prepare issue again before approval"
+             "This issue can start when the other approval checks pass"
            )
 
     assert dependency.blocking_issue_id == blocker.id
@@ -668,22 +675,61 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     dependent = issue_fixture(repository, %{number: 94, workflow_label: "ptc:ready"})
     proposal_fixture(dependent)
 
-    %IssueDependency{}
-    |> IssueDependency.changeset(%{
-      issue_id: dependent.id,
-      blocking_issue_id: blocker.id,
-      blocking_issue_number: blocker.number
-    })
-    |> Repo.insert!()
+    dependency =
+      issue_dependency_fixture(dependent, %{
+        blocking_issue: blocker,
+        blocking_repository: repository
+      })
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
     assert has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
 
-    blocker |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+    blocker
+    |> Issue.changeset(%{state: "closed", github_state_reason: "completed"})
+    |> Repo.update!()
+
+    dependency
+    |> IssueDependency.changeset(%{
+      blocking_state: "closed",
+      blocking_state_reason: "completed"
+    })
+    |> Repo.update!()
+
     Operations.notify_changed(:test)
 
     refute has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
+  end
+
+  test "shows a closed blocker with an unknown reason as needing a decision", %{conn: conn} do
+    repository = repository_fixture()
+
+    blocker =
+      issue_fixture(repository, %{
+        number: 95,
+        state: "closed",
+        github_state_reason: "completed"
+      })
+
+    dependent = issue_fixture(repository, %{number: 96, workflow_label: "ptc:ready"})
+    proposal_fixture(dependent)
+
+    issue_dependency_fixture(dependent, %{
+      blocking_issue: blocker,
+      blocking_repository: repository,
+      blocking_state: "closed",
+      blocking_state_reason: nil
+    })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-dependencies-#{dependent.id}",
+             "A prerequisite was closed without being completed"
+           )
+
+    assert has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
   end
 
   test "shows dependency overflow and keeps approval disabled", %{conn: conn} do
@@ -702,6 +748,49 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
   end
 
+  test "shows an exact dependency cycle and keeps every issue blocked", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "owner", github_name: "application"})
+    first = issue_fixture(repository, %{number: 201, workflow_label: "ptc:ready"})
+    second = issue_fixture(repository, %{number: 202, workflow_label: "ptc:ready"})
+    proposal_fixture(first)
+    proposal_fixture(second)
+
+    dependency_fixture(first, second, repository)
+    dependency_fixture(second, first, repository)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-dependency-cycle-#{first.id}",
+             "owner/application#201 → owner/application#202 → owner/application#201"
+           )
+
+    assert has_element?(view, "#approve-issue-#{first.id}[disabled]")
+    assert has_element?(view, "#approve-issue-#{second.id}[disabled]")
+  end
+
+  test "keeps approval disabled for a cycle whose direct blocker is completed", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "owner", github_name: "cycle"})
+    first = issue_fixture(repository, %{number: 211, workflow_label: "ptc:ready"})
+
+    second =
+      issue_fixture(repository, %{
+        number: 212,
+        state: "closed",
+        github_state_reason: "completed"
+      })
+
+    proposal_fixture(first)
+    dependency_fixture(first, second, repository)
+    dependency_fixture(second, first, repository)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#issue-dependency-cycle-#{first.id}")
+    assert has_element?(view, "#approve-issue-#{first.id}[disabled]")
+  end
+
   test "shows an unsynchronized dependency projection and keeps approval disabled", %{conn: conn} do
     repository = repository_fixture()
 
@@ -718,6 +807,22 @@ defmodule PtcManagerWeb.DashboardLiveTest do
              view,
              "#issue-dependencies-#{issue.id}",
              "Dependency state has not been synchronized yet"
+           )
+
+    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+  end
+
+  test "explains blockers hidden from the GitHub reader", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{dependency_unknown_count: 2})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-dependencies-#{issue.id}",
+             "GitHub reports 2 blocker(s) that this account cannot inspect"
            )
 
     assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
@@ -1078,6 +1183,13 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
   defp authenticated_conn(conn) do
     init_test_session(conn, %{authenticated: true, actor: "maintainer"})
+  end
+
+  defp dependency_fixture(issue, blocker, repository) do
+    issue_dependency_fixture(issue, %{
+      blocking_issue: blocker,
+      blocking_repository: repository
+    })
   end
 
   defp publication_fixture(job, state) do

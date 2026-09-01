@@ -109,6 +109,11 @@ defmodule PtcManager.DisposableDeploymentTarget do
 
   def migrate_remaining!(%__MODULE__{} = target), do: migrate!(target, all: true)
 
+  def rollback!(%__MODULE__{} = target, opts \\ [step: 1]) do
+    run_migrations!(target, :down, opts)
+    trace(target, :migrations_rolled_back)
+  end
+
   def record(%__MODULE__{} = target, event) when is_atom(event), do: trace(target, event)
   def trace(%__MODULE__{trace: events}), do: Enum.reverse(events)
 
@@ -135,6 +140,11 @@ defmodule PtcManager.DisposableDeploymentTarget do
   end
 
   defp migrate!(target, opts) do
+    run_migrations!(target, :up, opts)
+    trace(target, :migrations_applied)
+  end
+
+  defp run_migrations!(target, direction, opts) do
     previous_ignore_module_conflict = Code.get_compiler_option(:ignore_module_conflict)
     Code.put_compiler_option(:ignore_module_conflict, true)
 
@@ -150,12 +160,12 @@ defmodule PtcManager.DisposableDeploymentTarget do
         |> Keyword.put(:dynamic_repo, target.repo)
         |> Keyword.put(:log, false)
 
-      Ecto.Migrator.run(Repo, Ecto.Migrator.migrations_path(Repo), :up, migration_opts)
+      Ecto.Migrator.run(Repo, Ecto.Migrator.migrations_path(Repo), direction, migration_opts)
     after
       Code.put_compiler_option(:ignore_module_conflict, previous_ignore_module_conflict)
     end
 
-    trace(target, :migrations_applied)
+    :ok
   end
 
   defp stop_repo!(%__MODULE__{repo: nil} = target) do

@@ -14,6 +14,7 @@ defmodule PtcManager.Operations do
   alias PtcManager.RuntimeIncarnation
   alias PtcManager.Repository.Checkout
   alias PtcManager.WorktreeSecurity
+  alias PtcManager.Operations.DependencyGraph
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -1311,6 +1312,7 @@ defmodule PtcManager.Operations do
     proposals = latest_proposals(issue_ids)
     jobs = active_jobs(issue_ids)
     dependencies = dashboard_dependencies(issue_ids, jobs)
+    dependency_cycles = dependency_cycles(issue_ids)
     latest_jobs = latest_jobs(issue_ids)
     publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
     publication_ids = publications |> Map.values() |> Enum.map(& &1.id)
@@ -1324,6 +1326,7 @@ defmodule PtcManager.Operations do
       %{
         issue: issue,
         dependencies: Map.get(dependencies, issue.id, []),
+        dependency_cycle: Map.get(dependency_cycles, issue.id),
         proposal: Map.get(proposals, issue.id),
         active_job: Map.get(jobs, issue.id),
         latest_job: Map.get(latest_jobs, issue.id),
@@ -2945,17 +2948,30 @@ defmodule PtcManager.Operations do
   defp issue_dependencies_resolved(_repo, %Issue{dependency_overflow: true}),
     do: {:error, :issue_dependencies_unresolved}
 
+  defp issue_dependencies_resolved(_repo, %Issue{dependency_unknown_count: count})
+       when count > 0,
+       do: {:error, :issue_dependencies_unresolved}
+
   defp issue_dependencies_resolved(repo, %Issue{} = issue) do
-    unresolved_count =
+    dependencies =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
       |> join(:left, [dependency], blocker in Issue,
         on: blocker.id == dependency.blocking_issue_id
       )
-      |> where([_dependency, blocker], is_nil(blocker.id) or blocker.state != "closed")
-      |> repo.aggregate(:count)
+      |> select([dependency, blocker], {dependency, blocker})
+      |> repo.all()
 
-    if unresolved_count == 0, do: :ok, else: {:error, :issue_dependencies_unresolved}
+    cycles = dependency_cycles([issue.id])
+
+    if is_nil(Map.get(cycles, issue.id)) and
+         Enum.all?(dependencies, fn {dependency, blocker} ->
+           dependency_satisfied?(dependency, blocker)
+         end) do
+      :ok
+    else
+      {:error, :issue_dependencies_unresolved}
+    end
   end
 
   defp issue_dependency_projection_matches(
@@ -2968,15 +2984,31 @@ defmodule PtcManager.Operations do
   defp issue_dependency_projection_matches(_repo, _issue, %{dependency_overflow: true}),
     do: {:error, :issue_dependencies_unresolved}
 
+  defp issue_dependency_projection_matches(
+         _repo,
+         %Issue{dependency_unknown_count: local_count},
+         %{dependency_unknown_count: remote_count}
+       )
+       when local_count != remote_count,
+       do: {:error, :issue_dependencies_unresolved}
+
   defp issue_dependency_projection_matches(repo, issue, remote) do
-    projected_numbers =
+    projected_keys =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
-      |> order_by([dependency], asc: dependency.blocking_issue_number)
-      |> select([dependency], dependency.blocking_issue_number)
+      |> select(
+        [dependency],
+        {dependency.blocking_repository_full_name, dependency.blocking_issue_number}
+      )
       |> repo.all()
+      |> Enum.sort()
 
-    if projected_numbers == remote.blocking_issue_numbers,
+    remote_keys =
+      remote.blocking_issues
+      |> Enum.map(&{&1.repository_full_name, &1.number})
+      |> Enum.sort()
+
+    if projected_keys == remote_keys,
       do: :ok,
       else: {:error, :issue_dependencies_unresolved}
   end
@@ -3032,16 +3064,39 @@ defmodule PtcManager.Operations do
     IssueDependency
     |> where([dependency], dependency.issue_id in ^issue_ids)
     |> order_by([dependency], asc: dependency.blocking_issue_number)
-    |> preload(:blocking_issue)
+    |> preload([:blocking_issue, :blocking_repository])
     |> Repo.all()
     |> Enum.group_by(& &1.issue_id, fn dependency ->
       %{
         number: dependency.blocking_issue_number,
+        repository_full_name: dependency.blocking_repository_full_name,
+        title: dependency.blocking_title,
+        html_url: dependency.blocking_html_url,
+        state: dependency.blocking_state,
+        state_reason: dependency.blocking_state_reason,
+        lookup_state: dependency.lookup_state,
         issue: dependency.blocking_issue,
         active_job: dependency.blocking_issue && Map.get(jobs, dependency.blocking_issue.id)
       }
     end)
   end
+
+  defp dependency_cycles(issue_ids) do
+    issues =
+      Issue
+      |> preload([:repository, :dependencies])
+      |> Repo.all()
+
+    cycles = DependencyGraph.cycles(issues)
+    Map.take(cycles, issue_ids)
+  end
+
+  defp dependency_satisfied?(%IssueDependency{lookup_state: "resolved"} = dependency, _blocker),
+    do:
+      dependency.blocking_state == "closed" and
+        dependency.blocking_state_reason == "completed"
+
+  defp dependency_satisfied?(_dependency, _blocker), do: false
 
   defp latest_jobs([]), do: %{}
 

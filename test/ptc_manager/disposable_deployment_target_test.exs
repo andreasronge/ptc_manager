@@ -247,6 +247,77 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     assert :migrations_applied in DisposableDeploymentTarget.trace(target)
   end
 
+  @tag migration_opts: [to: 20_260_901_010_000]
+  test "native dependency migration invalidates legacy projections and rolls back exact edges", %{
+    target: target
+  } do
+    timestamp = "2026-09-01T12:00:00.000000Z"
+
+    Repo.query!(
+      """
+      INSERT INTO repositories
+        (id, github_owner, github_name, default_branch, enabled, inserted_at, updated_at)
+      VALUES
+        (1, 'owner', 'app', 'main', 1, ?, ?),
+        (2, 'owner', 'platform', 'main', 1, ?, ?)
+      """,
+      [timestamp, timestamp, timestamp, timestamp]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO issues
+        (id, repository_id, number, title, html_url, state, dependencies_projected,
+         body_digest, content_digest, github_updated_at, inserted_at, updated_at)
+      VALUES
+        (1, 1, 10, 'Dependent', 'https://example.test/issues/10', 'open', 1,
+         'body-1', 'content-1', ?, ?, ?),
+        (2, 1, 7, 'Legacy blocker', 'https://example.test/issues/7', 'open', 1,
+         'body-2', 'content-2', ?, ?, ?)
+      """,
+      [timestamp, timestamp, timestamp, timestamp, timestamp, timestamp]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO issue_dependencies
+        (issue_id, blocking_issue_id, blocking_issue_number, lookup_state, inserted_at)
+      VALUES (1, 2, 7, 'resolved', ?)
+      """,
+      [timestamp]
+    )
+
+    target = DisposableDeploymentTarget.migrate_remaining!(target)
+
+    assert Repo.query!("SELECT count(*) FROM issue_dependencies").rows == [[0]]
+    assert Repo.query!("SELECT dependencies_projected FROM issues WHERE id = 1").rows == [[0]]
+
+    Repo.query!(
+      """
+      INSERT INTO issue_dependencies
+        (issue_id, blocking_repository_id, blocking_repository_full_name,
+         blocking_issue_number, blocking_state, blocking_state_reason, lookup_state,
+         inserted_at)
+      VALUES
+        (1, 1, 'owner/app', 7, 'closed', 'completed', 'resolved', ?),
+        (1, 2, 'owner/platform', 7, 'closed', 'completed', 'resolved', ?)
+      """,
+      [timestamp, timestamp]
+    )
+
+    _target = DisposableDeploymentTarget.rollback!(target, step: 2)
+
+    assert Repo.query!("SELECT count(*) FROM issue_dependencies").rows == [[0]]
+    assert Repo.query!("SELECT dependencies_projected FROM issues WHERE id = 1").rows == [[0]]
+
+    indexes = Repo.query!("PRAGMA index_list(issue_dependencies)").rows
+
+    assert Enum.any?(
+             indexes,
+             &(Enum.at(&1, 1) == "issue_dependencies_issue_id_blocking_issue_number_index")
+           )
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
   defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
 

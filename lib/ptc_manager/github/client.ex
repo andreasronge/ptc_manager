@@ -1,27 +1,35 @@
 defmodule PtcManager.GitHub.Client do
-  @moduledoc "GET-only GitHub REST client used by the synchronization service."
+  @moduledoc "Read-only GitHub GraphQL/REST client used by synchronization services."
 
   @behaviour PtcManager.GitHub
 
   alias PtcManager.Operations.Repository
 
-  @api_version "2022-11-28"
+  @api_version "2026-03-10"
   @per_page 100
   @max_pages 20
+  @graphql_url "https://api.github.com/graphql"
 
   @impl true
   def list_open_issues(%Repository{} = repository) do
-    fetch_pages(repository, 1, [])
+    fetch_graphql_pages(repository, nil, 1, [])
   end
 
   @impl true
   def get_issue(%Repository{} = repository, number) when is_integer(number) and number > 0 do
-    url =
-      "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}/issues/#{number}"
+    variables = %{
+      "owner" => repository.github_owner,
+      "name" => repository.github_name,
+      "number" => number
+    }
 
-    with {:ok, response} <- get(url),
-         {:ok, issue} <- decode_issue(response) do
-      {:ok, issue}
+    with {:ok, %{"repository" => %{"issue" => issue}}} when is_map(issue) <-
+           graphql(issue_query(), variables) do
+      {:ok, normalize_graphql_issue(issue)}
+    else
+      {:ok, %{"repository" => %{"issue" => nil}}} -> {:error, :github_item_is_pull_request}
+      {:ok, _unexpected} -> {:error, :unexpected_github_response}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -36,47 +44,179 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
-  defp fetch_pages(_repository, page, _issues) when page > @max_pages,
+  defp fetch_graphql_pages(_repository, _cursor, page, _issues) when page > @max_pages,
     do: {:error, :pagination_limit_reached}
 
-  defp fetch_pages(repository, page, issues) do
-    url =
-      "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}/issues" <>
-        "?state=open&sort=updated&direction=desc&per_page=#{@per_page}&page=#{page}"
+  defp fetch_graphql_pages(repository, cursor, page, issues) do
+    variables = %{
+      "owner" => repository.github_owner,
+      "name" => repository.github_name,
+      "cursor" => cursor
+    }
 
-    with {:ok, response} <- get(url),
-         {:ok, items} <- decode_items(response) do
-      next_issues = issues ++ Enum.reject(items, &Map.has_key?(&1, "pull_request"))
+    with {:ok,
+          %{
+            "repository" => %{
+              "issues" => %{
+                "nodes" => nodes,
+                "pageInfo" => %{
+                  "hasNextPage" => has_next_page,
+                  "endCursor" => next_cursor
+                }
+              }
+            }
+          }} <- graphql(list_query(), variables),
+         true <- is_list(nodes) do
+      next_issues = issues ++ Enum.map(nodes, &normalize_graphql_issue/1)
 
-      if length(items) < @per_page do
-        {:ok, next_issues}
+      if has_next_page do
+        fetch_graphql_pages(repository, next_cursor, page + 1, next_issues)
       else
-        fetch_pages(repository, page + 1, next_issues)
+        {:ok, next_issues}
       end
+    else
+      false -> {:error, :unexpected_github_response}
+      {:ok, _unexpected} -> {:error, :unexpected_github_response}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  def normalize_graphql_issue(issue) do
+    blocked_by =
+      issue
+      |> get_in(["blockedBy", "nodes"])
+      |> then(fn nodes -> if is_list(nodes), do: Enum.filter(nodes, &is_map/1), else: [] end)
+
+    total_blocked_by = get_in(issue, ["blockedBy", "totalCount"]) || length(blocked_by)
+
+    %{
+      "number" => issue["number"],
+      "title" => issue["title"],
+      "html_url" => issue["url"],
+      "body" => issue["body"] || "",
+      "state" => normalize_enum(issue["state"]),
+      "state_reason" => normalize_enum(issue["stateReason"]),
+      "updated_at" => issue["updatedAt"],
+      "labels" => get_in(issue, ["labels", "nodes"]) || [],
+      "assignees" => get_in(issue, ["assignees", "nodes"]) || [],
+      "blocked_by" => Enum.map(blocked_by, &normalize_graphql_blocker/1),
+      "blocked_by_overflow" => total_blocked_by > @per_page,
+      "blocked_by_unknown_count" =>
+        if(total_blocked_by <= @per_page,
+          do: max(total_blocked_by - length(blocked_by), 0),
+          else: 0
+        )
+    }
+  end
+
+  defp normalize_graphql_blocker(blocker) do
+    %{
+      "id" => blocker["databaseId"],
+      "node_id" => blocker["id"],
+      "number" => blocker["number"],
+      "title" => blocker["title"],
+      "html_url" => blocker["url"],
+      "state" => normalize_enum(blocker["state"]),
+      "state_reason" => normalize_enum(blocker["stateReason"]),
+      "repository" => %{"full_name" => get_in(blocker, ["repository", "nameWithOwner"])}
+    }
+  end
+
+  defp normalize_enum(value) when is_binary(value), do: value |> String.downcase()
+  defp normalize_enum(_value), do: nil
+
+  defp graphql(query, variables) do
+    payload = Jason.encode!(%{"query" => query, "variables" => variables})
+
+    with :ok <- require_graphql_token(),
+         {:ok, body} <- post(@graphql_url, payload),
+         {:ok, decoded} <- Jason.decode(body) do
+      case decoded do
+        %{"errors" => [_error | _rest] = errors} ->
+          {:error, {:github_graphql_error, bounded_errors(errors)}}
+
+        %{"data" => data} when is_map(data) ->
+          {:ok, data}
+
+        _unexpected ->
+          {:error, :unexpected_github_response}
+      end
+    else
+      {:error, %Jason.DecodeError{} = reason} -> {:error, {:invalid_github_json, reason}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp list_query do
+    """
+    query($owner: String!, $name: String!, $cursor: String) {
+      repository(owner: $owner, name: $name) {
+        issues(states: OPEN, first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          nodes { #{issue_fields()} }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+  end
+
+  defp issue_query do
+    """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) { #{issue_fields()} }
+      }
+    }
+    """
+  end
+
+  defp issue_fields do
+    """
+    number title url body state stateReason updatedAt
+    labels(first: 100) { nodes { name } }
+    assignees(first: 100) { nodes { login } }
+    blockedBy(first: 100) {
+      totalCount
+      nodes {
+        id databaseId number title url state stateReason
+        repository { nameWithOwner }
+      }
+    }
+    """
+  end
+
+  defp bounded_errors(errors),
+    do: errors |> inspect(limit: 10, printable_limit: 1_000) |> String.slice(0, 1_000)
+
+  defp require_graphql_token do
+    case Application.get_env(:ptc_manager, :github_read_token) do
+      token when is_binary(token) ->
+        if String.trim(token) == "",
+          do: {:error, :github_graphql_token_required},
+          else: :ok
+
+      _token ->
+        {:error, :github_graphql_token_required}
     end
   end
 
   defp get(url) do
-    headers =
-      [
-        {~c"accept", ~c"application/vnd.github+json"},
-        {~c"user-agent", ~c"ptc-manager-read-only"},
-        {~c"x-github-api-version", String.to_charlist(@api_version)}
-      ]
-      |> maybe_add_token(Application.get_env(:ptc_manager, :github_read_token))
+    request(:get, {String.to_charlist(url), request_headers()}, 15_000)
+  end
 
-    ssl_options = [
-      verify: :verify_peer,
-      cacerts: :public_key.cacerts_get(),
-      customize_hostname_check: [
-        match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
-      ]
-    ]
+  defp post(url, payload) do
+    request =
+      {String.to_charlist(url), request_headers(), ~c"application/json",
+       String.to_charlist(payload)}
 
-    request = {String.to_charlist(url), headers}
-    http_options = [timeout: 15_000, connect_timeout: 5_000, ssl: ssl_options]
+    request(:post, request, 30_000)
+  end
 
-    case :httpc.request(:get, request, http_options, body_format: :binary) do
+  defp request(method, request, timeout) do
+    http_options = [timeout: timeout, connect_timeout: 5_000, ssl: ssl_options()]
+
+    case :httpc.request(method, request, http_options, body_format: :binary) do
       {:ok, {{_version, 200, _reason}, _headers, body}} ->
         {:ok, body}
 
@@ -92,6 +232,25 @@ defmodule PtcManager.GitHub.Client do
       {:error, reason} ->
         {:error, {:github_transport_error, reason}}
     end
+  end
+
+  defp request_headers do
+    [
+      {~c"accept", ~c"application/vnd.github+json"},
+      {~c"user-agent", ~c"ptc-manager-read-only"},
+      {~c"x-github-api-version", String.to_charlist(@api_version)}
+    ]
+    |> maybe_add_token(Application.get_env(:ptc_manager, :github_read_token))
+  end
+
+  defp ssl_options do
+    [
+      verify: :verify_peer,
+      cacerts: :public_key.cacerts_get(),
+      customize_hostname_check: [
+        match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+      ]
+    ]
   end
 
   defp maybe_add_token(headers, token) when is_binary(token) do
@@ -128,21 +287,4 @@ defmodule PtcManager.GitHub.Client do
   end
 
   defp seconds_delay(_value), do: nil
-
-  defp decode_items(body) do
-    case Jason.decode(body) do
-      {:ok, items} when is_list(items) -> {:ok, items}
-      {:ok, _other} -> {:error, :unexpected_github_response}
-      {:error, reason} -> {:error, {:invalid_github_json, reason}}
-    end
-  end
-
-  defp decode_issue(body) do
-    case Jason.decode(body) do
-      {:ok, %{"pull_request" => _pull_request}} -> {:error, :github_item_is_pull_request}
-      {:ok, issue} when is_map(issue) -> {:ok, issue}
-      {:ok, _other} -> {:error, :unexpected_github_response}
-      {:error, reason} -> {:error, {:invalid_github_json, reason}}
-    end
-  end
 end

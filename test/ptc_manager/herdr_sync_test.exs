@@ -577,7 +577,7 @@ defmodule PtcManager.HerdrSyncTest do
                  state: "open",
                  content_digest: second_issue.content_digest,
                  github_updated_at: second_issue.github_updated_at,
-                 blocking_issue_numbers: [],
+                 blocking_issues: [],
                  dependency_overflow: false
                },
                60_000

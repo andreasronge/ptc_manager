@@ -419,6 +419,8 @@ defmodule PtcManagerWeb.DashboardLive do
           item.issue.workflow_label in [nil, "ptc:ready"] and
           item.issue.dependencies_projected and
           not item.issue.dependency_overflow and
+          item.issue.dependency_unknown_count == 0 and
+          is_nil(item.dependency_cycle) and
           implementation_dependencies_resolved?(item.dependencies)
 
   def approvable?(_item), do: false
@@ -658,27 +660,63 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
-  def dependency_status(%{issue: nil}), do: "not synchronized"
-  def dependency_status(%{issue: %{state: "closed"}}), do: "completed"
+  def dependency_status(%{lookup_state: state}) when state != "resolved", do: "unknown"
+
+  def dependency_status(%{state: "closed", state_reason: "completed"}), do: "completed"
+  def dependency_status(%{state: "closed"}), do: "closed without completion"
 
   def dependency_status(%{active_job: %{state: state}}),
     do: job_label(state)
 
+  def dependency_status(%{state: "open"}), do: "open"
+
+  def dependency_status(%{issue: %{state: "closed", github_state_reason: "completed"}}),
+    do: "completed"
+
+  def dependency_status(%{issue: %{state: "closed"}}), do: "closed without completion"
+
   def dependency_status(%{issue: %{state: "open"}}), do: "open"
+  def dependency_status(_dependency), do: "unknown"
 
   def dependencies_resolved?(dependencies) do
-    dependencies != [] and Enum.all?(dependencies, &match?(%{issue: %{state: "closed"}}, &1))
+    dependencies != [] and Enum.all?(dependencies, &dependency_completed?/1)
   end
 
   defp implementation_dependencies_resolved?(dependencies) do
-    Enum.all?(dependencies, &match?(%{issue: %{state: "closed"}}, &1))
+    Enum.all?(dependencies, &dependency_completed?/1)
   end
 
+  def dependency_url(_repository, %{html_url: html_url}) when is_binary(html_url), do: html_url
   def dependency_url(_repository, %{issue: %{html_url: html_url}}), do: html_url
 
-  def dependency_url(repository, %{number: number}) do
-    "https://github.com/#{repository.github_owner}/#{repository.github_name}/issues/#{number}"
+  def dependency_url(_repository, %{repository_full_name: full_name, number: number}) do
+    "https://github.com/#{full_name}/issues/#{number}"
   end
+
+  def dependency_dom_id(issue_id, dependency) do
+    repository = String.replace(dependency.repository_full_name, ~r/[^a-zA-Z0-9_-]/, "-")
+    "issue-#{issue_id}-blocked-by-#{repository}-#{dependency.number}"
+  end
+
+  def dependency_cycle_label(cycle) do
+    Enum.map_join(cycle, " → ", fn {repository, number} -> "#{repository}##{number}" end)
+  end
+
+  def dependencies_unknown?(dependencies) do
+    Enum.any?(
+      dependencies,
+      &(&1.lookup_state != "resolved" or dependency_status(&1) == "unknown")
+    )
+  end
+
+  def dependencies_need_decision?(dependencies) do
+    Enum.any?(dependencies, &(dependency_status(&1) == "closed without completion"))
+  end
+
+  defp dependency_completed?(%{lookup_state: "resolved", state: "closed", state_reason: reason}),
+    do: reason == "completed"
+
+  defp dependency_completed?(_dependency), do: false
 
   defp load_dashboard(socket) do
     repositories = Operations.list_repositories()

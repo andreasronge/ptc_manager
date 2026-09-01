@@ -194,6 +194,7 @@
           <div
             :if={
               item.dependencies != [] or item.issue.dependency_overflow or
+                item.issue.dependency_unknown_count > 0 or
                 not item.issue.dependencies_projected
             }
             id={"issue-dependencies-#{item.issue.id}"}
@@ -205,15 +206,42 @@
             <div class="mt-2 flex flex-wrap gap-2">
               <a
                 :for={dependency <- item.dependencies}
-                id={"issue-#{item.issue.id}-blocked-by-#{dependency.number}"}
+                id={dependency_dom_id(item.issue.id, dependency)}
                 href={dependency_url(item.issue.repository, dependency)}
                 target="_blank"
                 rel="noreferrer"
                 class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300 ring-1 ring-white/10 hover:bg-white/10"
               >
-                Blocked by #{dependency.number} · {dependency_status(dependency)} ↗
+                Blocked by {dependency.repository_full_name}#{dependency.number} · {dependency_status(
+                  dependency
+                )} ↗
               </a>
             </div>
+            <p
+              :if={item.dependency_cycle}
+              id={"issue-dependency-cycle-#{item.issue.id}"}
+              class="mt-3 text-xs font-medium text-rose-300"
+            >
+              Dependency cycle: {dependency_cycle_label(item.dependency_cycle)}. Maintainer attention is required.
+            </p>
+            <p
+              :if={dependencies_unknown?(item.dependencies)}
+              class="mt-3 text-xs text-amber-300"
+            >
+              GitHub did not provide enough information about every blocker. This issue stays out of the work queue until the dependency can be synchronized.
+            </p>
+            <p
+              :if={dependencies_need_decision?(item.dependencies)}
+              class="mt-3 text-xs text-amber-300"
+            >
+              A prerequisite was closed without being completed. Decide whether to remove or replace that dependency before implementation starts.
+            </p>
+            <p
+              :if={item.issue.dependency_unknown_count > 0}
+              class="mt-3 text-xs text-amber-300"
+            >
+              GitHub reports {item.issue.dependency_unknown_count} blocker(s) that this account cannot inspect. This issue stays out of the work queue.
+            </p>
             <p
               :if={not item.issue.dependencies_projected}
               class="mt-3 text-xs text-amber-300"
@@ -229,11 +257,12 @@
             <p
               :if={
                 item.issue.dependencies_projected and not item.issue.dependency_overflow and
-                  dependencies_resolved?(item.dependencies)
+                  item.issue.dependency_unknown_count == 0 and
+                  is_nil(item.dependency_cycle) and dependencies_resolved?(item.dependencies)
               }
               class="mt-3 text-xs text-teal-300"
             >
-              All recorded blockers are complete. Run Prepare issue again before approval.
+              All recorded blockers are complete. This issue can start when the other approval checks pass.
             </p>
           </div>
 

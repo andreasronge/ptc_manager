@@ -1628,9 +1628,24 @@ repository: persisted checkout ownership, canonical Git root/common-directory
 and GitHub-origin validation, explicit worktree roots, legacy single-repository
 upgrade reconciliation, repository-safe external worktree names, and a stable
 repository selector on the existing Planning, Delivery, and Updates pages. It
-is browser-testable with two mocked repositories. Dependency projection,
-configuration health, and the complete two-repository dispatch/publication
-journey remain subsequent Slice 2 checkpoints.
+is browser-testable with two mocked repositories.
+
+Checkpoint B adds repository configuration health without running uncommitted
+policy: checkout ownership, GitHub sync health, and the committed default-branch
+publication gate are visible together and update while synchronization runs.
+
+Checkpoint C replaces issue-body dependency inference with GitHub's native
+`blockedBy` projection. Each local edge retains the exact repository and issue
+identity plus the blocker title, URL, state, and close reason; configured
+repositories may additionally link to their local issue row. Unknown blockers,
+dependency overflow, close-without-completion, and shortest observable cycles
+fail closed and are explained on the Planning card. A single GraphQL page reads
+issue details and up to 100 native blockers per issue, avoiding one REST call
+per open issue. The checkpoint is browser-testable with mocked same-repository,
+cross-repository, completed, inaccessible, not-planned, and cyclic blockers.
+
+The complete two-repository dispatch/publication journey remains the final
+Slice 2 checkpoint.
 
 Acceptance:
 
