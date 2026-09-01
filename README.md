@@ -36,8 +36,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
 - verified base, head, commit count, and diff digest visible before PR acceptance;
 - a configurable test command and a review-skill pass count frozen per task;
 - exact-SHA branch push and draft-PR creation through a GitHub App broker;
-- a strict checked-in `.ptc-manager.yml` contract whose bootstrap and
-  pre-publication commands are frozen from the exact candidate commit;
+- a strict checked-in `.ptc-manager.yml` setup contract with optional broker
+  verification frozen from the exact candidate commit;
 - a credential-free, disposable verifier checkout that must pass the frozen
   gate cleanly before the GitHub App broker can push that SHA;
 - worker-advertised implementation capacity instead of a hard-coded worktree count;
@@ -178,18 +178,35 @@ Store its private key outside the repository, readable only by the coordinator.
 Configure the App ID, installation ID, and PEM path, then set
 `PTC_PUBLICATION_ENABLED=true`.
 
-Every repository that uses brokered publication must commit a strict
-`.ptc-manager.yml` contract. Unknown or missing fields fail closed:
+Every repository that uses writable implementation worktrees must commit a
+strict `.ptc-manager.yml` contract. The bootstrap is required and belongs to
+the repository rather than PtcManager:
 
 ```yaml
 version: 1
 bootstrap:
   command: ./scripts/ptc/bootstrap
   timeout_minutes: 10
+```
+
+When the Herdr agent pushes its own branch and creates the PR, this is the
+complete contract. Repository hooks may provide fast local feedback, while
+GitHub CI and branch protection remain the authoritative merge gate.
+
+Brokered publication is an optional alternative for agents without GitHub
+write credentials. In that mode PtcManager verifies the exact commit in a
+credential-free disposable checkout before its GitHub App publishes the
+branch. Repositories using that mode must also configure:
+
+```yaml
 verification:
   before_publish: ./scripts/ci/pre-publication
   timeout_minutes: 45
 ```
+
+Malformed sections and unknown fields fail closed. Omitting `verification`
+does not weaken brokered publication: a broker job without that section is
+blocked before PtcManager uses its GitHub credential.
 
 `bootstrap.command` is one repository-relative, checked-in executable script.
 Herdr remains responsible for creating the Git worktree. After creation,

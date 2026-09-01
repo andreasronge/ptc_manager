@@ -16,6 +16,13 @@ defmodule PtcManager.Repository.ContractTest do
     timeout_minutes: 45
   """
 
+  @bootstrap_only """
+  version: 1
+  bootstrap:
+    command: ./scripts/ptc/bootstrap
+    timeout_minutes: 10
+  """
+
   test "parses the complete versioned contract" do
     assert {:ok, contract} = Contract.parse(@valid)
     assert contract.version == 1
@@ -23,6 +30,19 @@ defmodule PtcManager.Repository.ContractTest do
     assert contract.bootstrap_timeout_minutes == 10
     assert contract.before_publish_command == "./scripts/ci/pre-publication"
     assert contract.verification_timeout_minutes == 45
+    assert Contract.publication_verification_configured?(contract)
+    assert :ok = Contract.require_publication_verification(contract)
+  end
+
+  test "accepts setup without optional broker verification" do
+    assert {:ok, contract} = Contract.parse(@bootstrap_only)
+    assert contract.bootstrap_command == "./scripts/ptc/bootstrap"
+    assert contract.before_publish_command == nil
+    assert contract.verification_timeout_minutes == nil
+    refute Contract.publication_verification_configured?(contract)
+
+    assert {:error, :repository_publication_verification_missing} =
+             Contract.require_publication_verification(contract)
   end
 
   test "recomputes the frozen job digest and rejects changed gate fields" do
@@ -108,6 +128,12 @@ defmodule PtcManager.Repository.ContractTest do
 
     assert {:error, {:invalid_contract_timeout, :verification}} =
              Contract.parse(String.replace(@valid, "timeout_minutes: 45", "timeout_minutes: 0"))
+
+    assert {:error, {:unexpected_contract_keys, :contract}} =
+             Contract.parse(@bootstrap_only <> "unknown: true\n")
+
+    assert {:error, {:unexpected_contract_keys, :contract}} =
+             Contract.parse("version: 1\n")
   end
 
   test "the checked-in PtcManager contract and executable entrypoints agree" do

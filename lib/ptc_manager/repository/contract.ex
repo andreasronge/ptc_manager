@@ -1,6 +1,6 @@
 defmodule PtcManager.Repository.Contract do
   @moduledoc """
-  Strict, versioned repository-owned setup and verification configuration.
+  Strict, versioned repository-owned setup and optional publication verification.
 
   Contract files are untrusted repository input. Unknown keys and malformed
   values fail closed so a typo cannot silently weaken a publication gate.
@@ -8,6 +8,7 @@ defmodule PtcManager.Repository.Contract do
 
   @filename ".ptc-manager.yml"
   @top_keys MapSet.new(["version", "bootstrap", "verification"])
+  @required_top_keys MapSet.new(["version", "bootstrap"])
   @bootstrap_keys MapSet.new(["command", "timeout_minutes"])
   @verification_keys MapSet.new(["before_publish", "timeout_minutes"])
   @max_command_bytes 2_000
@@ -16,18 +17,16 @@ defmodule PtcManager.Repository.Contract do
   @enforce_keys [
     :version,
     :bootstrap_command,
-    :bootstrap_timeout_minutes,
-    :before_publish_command,
-    :verification_timeout_minutes
+    :bootstrap_timeout_minutes
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [before_publish_command: nil, verification_timeout_minutes: nil]
 
   @type t :: %__MODULE__{
           version: 1,
           bootstrap_command: binary(),
           bootstrap_timeout_minutes: pos_integer(),
-          before_publish_command: binary(),
-          verification_timeout_minutes: pos_integer()
+          before_publish_command: binary() | nil,
+          verification_timeout_minutes: pos_integer() | nil
         }
 
   alias PtcManager.Operations.Job
@@ -75,6 +74,23 @@ defmodule PtcManager.Repository.Contract do
   end
 
   def bootstrap_script(_contract), do: {:error, :workspace_setup_script_missing}
+
+  @doc "Whether the repository opted into the independent broker publication gate."
+  @spec publication_verification_configured?(t()) :: boolean()
+  def publication_verification_configured?(%__MODULE__{
+        before_publish_command: command,
+        verification_timeout_minutes: timeout
+      }) do
+    is_binary(command) and command != "" and is_integer(timeout) and timeout > 0
+  end
+
+  @doc "Requires verification before protected broker credentials may publish a result."
+  @spec require_publication_verification(t()) :: :ok | {:error, atom()}
+  def require_publication_verification(%__MODULE__{} = contract) do
+    if publication_verification_configured?(contract),
+      do: :ok,
+      else: {:error, :repository_publication_verification_missing}
+  end
 
   @doc "Stable digest for the publication-relevant contract values."
   @spec publication_digest(t()) :: binary()
@@ -140,18 +156,14 @@ defmodule PtcManager.Repository.Contract do
   @spec parse(binary()) :: {:ok, t()} | {:error, term()}
   def parse(content) when is_binary(content) do
     with {:ok, decoded} <- decode(content),
-         :ok <- exact_keys(decoded, @top_keys, :contract),
+         :ok <- allowed_keys(decoded, @top_keys, @required_top_keys, :contract),
          1 <- decoded["version"],
          {:ok, bootstrap} <- mapping(decoded["bootstrap"], :bootstrap),
          :ok <- exact_keys(bootstrap, @bootstrap_keys, :bootstrap),
-         {:ok, verification} <- mapping(decoded["verification"], :verification),
-         :ok <- exact_keys(verification, @verification_keys, :verification),
          {:ok, bootstrap_command} <- command(bootstrap["command"], :bootstrap),
          {:ok, bootstrap_timeout} <- timeout(bootstrap["timeout_minutes"], :bootstrap),
-         {:ok, before_publish_command} <-
-           command(verification["before_publish"], :before_publish),
-         {:ok, verification_timeout} <-
-           timeout(verification["timeout_minutes"], :verification) do
+         {:ok, before_publish_command, verification_timeout} <-
+           optional_verification(decoded["verification"]) do
       {:ok,
        %__MODULE__{
          version: 1,
@@ -225,6 +237,35 @@ defmodule PtcManager.Repository.Contract do
 
       true ->
         :ok
+    end
+  end
+
+  defp allowed_keys(mapping, allowed, required, section) do
+    keys = Map.keys(mapping)
+    key_set = MapSet.new(keys)
+
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        {:error, {:invalid_contract_keys, section}}
+
+      not MapSet.subset?(required, key_set) or not MapSet.subset?(key_set, allowed) ->
+        {:error, {:unexpected_contract_keys, section}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp optional_verification(nil), do: {:ok, nil, nil}
+
+  defp optional_verification(value) do
+    with {:ok, verification} <- mapping(value, :verification),
+         :ok <- exact_keys(verification, @verification_keys, :verification),
+         {:ok, before_publish_command} <-
+           command(verification["before_publish"], :before_publish),
+         {:ok, verification_timeout} <-
+           timeout(verification["timeout_minutes"], :verification) do
+      {:ok, before_publish_command, verification_timeout}
     end
   end
 

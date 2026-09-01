@@ -107,6 +107,32 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
         last_synced_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
       })
 
+    setup_only_path = Path.join(root, "setup-only")
+    File.mkdir_p!(setup_only_path)
+
+    File.write!(
+      Path.join(setup_only_path, ".ptc-manager.yml"),
+      """
+      version: 1
+      bootstrap:
+        command: ./scripts/ptc/bootstrap
+        timeout_minutes: 10
+      """
+    )
+
+    git!(setup_only_path, ["init", "-b", "main"])
+    git!(setup_only_path, ["config", "user.email", "test@example.com"])
+    git!(setup_only_path, ["config", "user.name", "PtcManager Test"])
+    git!(setup_only_path, ["add", ".ptc-manager.yml"])
+    git!(setup_only_path, ["commit", "-m", "add setup contract"])
+
+    setup_only =
+      repository_fixture(%{
+        github_owner: "andreas",
+        github_name: "agent-published-repository",
+        local_path: setup_only_path
+      })
+
     missing =
       repository_fixture(%{
         github_owner: "andreas",
@@ -118,8 +144,22 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
 
     assert has_element?(view, "#repository-health-#{ready.id}", "Checkout verified")
     assert has_element?(view, "#repository-health-#{ready.id}", "GitHub read access verified")
-    assert has_element?(view, "#repository-health-#{ready.id}", "Publication gate ready")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{ready.id}",
+             "Optional broker verification ready"
+           )
+
     assert has_element?(view, "#repository-health-#{ready.id}", "mix precommit")
+
+    assert has_element?(view, "#repository-health-#{setup_only.id}", "Repository setup ready")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{setup_only.id}",
+             "broker verification is not configured"
+           )
 
     assert has_element?(
              view,
@@ -128,7 +168,12 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
            )
 
     assert has_element?(view, "#repository-health-#{missing.id}", "Configure an existing")
-    assert has_element?(view, "#repository-health-#{missing.id}", "Publication gate not checked")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{missing.id}",
+             "Repository contract not checked"
+           )
 
     syncing =
       ready
@@ -181,7 +226,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(
              view,
              "#repository-health-#{repository.id}",
-             "Publication gate needs attention"
+             "Repository contract needs attention"
            )
 
     assert has_element?(view, "#repository-health-#{repository.id}", "Add .ptc-manager.yml")
@@ -226,7 +271,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(
              view,
              "#repository-health-#{repository.id}",
-             "Publication gate needs attention"
+             "Repository contract needs attention"
            )
 
     assert has_element?(view, "#repository-health-#{repository.id}", "Add .ptc-manager.yml")

@@ -38,16 +38,12 @@ defmodule PtcManager.Repository.Health do
     with {:ok, branch_sha} <- GitProbe.branch_sha(path, repository.default_branch),
          {:ok, content} <- GitProbe.repository_contract(path, branch_sha),
          {:ok, contract} <- Contract.parse(content) do
-      %{
-        status: :ready,
-        label: "Publication gate ready",
-        detail: contract.before_publish_command
-      }
+      contract_health(contract)
     else
       {:error, reason} ->
         %{
           status: :attention,
-          label: "Publication gate needs attention",
+          label: "Repository contract needs attention",
           detail: gate_error(reason)
         }
     end
@@ -56,9 +52,25 @@ defmodule PtcManager.Repository.Health do
   defp gate_health(_repository, _checkout) do
     %{
       status: :unchecked,
-      label: "Publication gate not checked",
+      label: "Repository contract not checked",
       detail: "Verify the checkout first."
     }
+  end
+
+  defp contract_health(%Contract{} = contract) do
+    if Contract.publication_verification_configured?(contract) do
+      %{
+        status: :ready,
+        label: "Optional broker verification ready",
+        detail: contract.before_publish_command
+      }
+    else
+      %{
+        status: :ready,
+        label: "Repository setup ready",
+        detail: "Agent publishing uses GitHub CI; broker verification is not configured."
+      }
+    end
   end
 
   defp github_health(%Repository{sync_status: "ok", last_synced_at: synced_at}) do

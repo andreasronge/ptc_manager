@@ -25,6 +25,17 @@ defmodule PtcManager.ResultReconcilerTest do
     def for_result(_job, _result), do: {:error, :repository_contract_missing}
   end
 
+  defmodule BootstrapOnlyContract do
+    def for_result(_job, _result) do
+      {:ok,
+       %PtcManager.Repository.Contract{
+         version: 1,
+         bootstrap_command: "./scripts/ptc/bootstrap",
+         bootstrap_timeout_minutes: 10
+       }}
+    end
+  end
+
   setup do
     Process.put(:result_test_pid, self())
     :ok
@@ -123,6 +134,32 @@ defmodule PtcManager.ResultReconcilerTest do
     pending = Repo.get!(Job, job.id)
     assert pending.state == "awaiting_reconciliation"
     assert pending.last_error =~ "repository_contract_missing"
+    refute Repo.get_by(PrPublication, job_id: job.id)
+  end
+
+  test "optional verification remains mandatory for brokered publication" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+
+    Process.put(
+      :result_probe_result,
+      {:ok,
+       %{
+         base_sha: String.duplicate("a", 40),
+         head_sha: String.duplicate("b", 40),
+         diff_digest: String.duplicate("c", 64),
+         commit_count: 1
+       }}
+    )
+
+    assert {:error, {:repository_contract_invalid, :repository_publication_verification_missing}} =
+             ResultReconciler.run_job(job.id,
+               probe: FakeProbe,
+               contract_provider: BootstrapOnlyContract
+             )
+
+    pending = Repo.get!(Job, job.id)
+    assert pending.state == "awaiting_reconciliation"
+    assert pending.last_error =~ "repository_publication_verification_missing"
     refute Repo.get_by(PrPublication, job_id: job.id)
   end
 

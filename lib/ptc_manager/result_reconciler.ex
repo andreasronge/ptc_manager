@@ -2,6 +2,7 @@ defmodule PtcManager.ResultReconciler do
   @moduledoc "Verifies committed implementation branches before GitHub write eligibility."
 
   alias PtcManager.Operations
+  alias PtcManager.Repository.Contract
 
   def run_once(opts \\ []) do
     case Operations.claim_next_result_job() do
@@ -86,5 +87,10 @@ defmodule PtcManager.ResultReconciler do
   defp publication_contract(%{publication_source: "agent"}, _result, _provider),
     do: {:ok, nil}
 
-  defp publication_contract(job, result, provider), do: provider.for_result(job, result)
+  defp publication_contract(job, result, provider) do
+    with {:ok, contract} <- provider.for_result(job, result),
+         :ok <- Contract.require_publication_verification(contract) do
+      {:ok, contract}
+    end
+  end
 end
