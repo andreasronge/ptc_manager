@@ -60,8 +60,6 @@ gate_mise_config="$gate_mise_root/config"
 gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
 gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
 gate_mix_home=/opt/ptc-manager-gate-mix
-gate_contract_probe=
-gate_source_archive=
 gate_tool_home=
 manual_herdr=/home/agent/.local/bin/herdr
 worker_herdr=/usr/local/bin/herdr
@@ -87,14 +85,6 @@ cleanup_remote() {
 
   case "$worker_node_staging" in
     /opt/ptc-manager-node-*) sudo rm -rf -- "$worker_node_staging" ;;
-  esac
-
-  case "$gate_contract_probe" in
-    /var/lib/ptc_manager-gate/deployment-contract.*) sudo rm -rf -- "$gate_contract_probe" ;;
-  esac
-
-  case "$gate_source_archive" in
-    /var/lib/ptc_manager-gate/source-*.tar) sudo rm -f -- "$gate_source_archive" ;;
   esac
 
   case "$gate_tool_home" in
@@ -501,25 +491,6 @@ install_gate_beam_toolchain() {
     /bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix help hex' >/dev/null
 }
 
-verify_gate_contract() {
-  gate_contract_probe=$(sudo -u ptc-manager-gate \
-    mktemp -d "/var/lib/ptc_manager-gate/deployment-contract.XXXXXX")
-  sudo -u ptc-manager-gate mkdir "$gate_contract_probe/home" "$gate_contract_probe/repository"
-  sudo -u ptc-manager-gate tar -xf "$gate_source_archive" -C "$gate_contract_probe/repository"
-
-  sudo -u ptc-manager-gate env -i HOME="$gate_contract_probe/home" \
-    HEX_HOME="$gate_contract_probe/home/.hex" \
-    REBAR_CACHE_DIR="$gate_contract_probe/home/.cache/rebar3" \
-    MIX_HOME="$gate_mix_home" PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C MIX_ENV=test \
-    PTC_WORKSPACE_CACHE_DISABLED=true \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
-    /bin/sh -c 'cd "$1" && ./scripts/ptc/bootstrap && ./scripts/ci/pre-publication' \
-    ptc-manager-gate-contract "$gate_contract_probe/repository"
-
-  sudo rm -rf -- "$gate_contract_probe"
-  gate_contract_probe=
-}
-
 prune_successful_backups() {
   sudo find /opt -maxdepth 1 -type d -name 'ptc_manager-before-*' -printf '%T@ %p\n' |
     sort -nr |
@@ -772,8 +743,6 @@ if id -nG ptc-manager-gate | tr ' ' '\n' | grep -Fx ptc-manager-publish >/dev/nu
 fi
 sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 \
   /var/lib/ptc_manager-gate
-gate_source_archive="/var/lib/ptc_manager-gate/source-${release_id}.tar"
-sudo install -o root -g ptc-manager-repo -m 0640 "$source_archive" "$gate_source_archive"
 sudo chmod 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   /var/lib/ptc_manager-output/planning-snapshots
@@ -817,7 +786,6 @@ echo "Building production release..."
 "$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix release
 install_gate_beam_toolchain
-verify_gate_contract
 
 [ -x "$new_release/bin/ptc_manager" ]
 ensure_no_busy_herdr_agents

@@ -532,9 +532,9 @@ The target defaults to the `herdr-box` SSH host from the local SSH config. Use
 `mix ptc.deploy --dry-run` to show the resolved commit and release identifier
 without running checks or changing either machine.
 
-The task runs the checked-in bootstrap and pre-publication scripts, uploads a
-Git archive rather than uncommitted files, and builds the production release on
-the server with its mise-managed
+The task runs the checked-in bootstrap and pre-publication scripts locally,
+uploads a Git archive rather than uncommitted files, and builds the production
+release on the server with its mise-managed
 Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
 checks both managed runs and the manual and worker Herdr sessions. Non-idle
 agents make deployment stop safely; idle Herdr sessions continue running and
@@ -566,10 +566,10 @@ before replacing the application release. The isolated publication gate uses
 mise separately to install pinned Erlang and Elixir builds directly under a
 root-owned `/opt/ptc-manager-gate-mise` prefix, rejects symlinks escaping that
 prefix, and installs only Hex and Rebar under
-`/opt/ptc-manager-gate-mix`. Before the service is stopped, deployment runs the
-real checked-in bootstrap and pre-publication scripts from an explicitly
-gate-readable copy of the source archive as `ptc-manager-gate`, with a fresh
-HOME and no credentials.
+`/opt/ptc-manager-gate-mix`. This toolchain is used later by credential-free
+agent publication gates. Deployment does not rerun the test suite on the
+server: the local pre-deploy gate is authoritative, while the server verifies
+the production build, migrations, maintenance startup, canary, and health.
 
 The task reads the actual `DATABASE_PATH` and `PORT` from the running systemd
 service, creates a consistent SQLite backup, and replaces `/opt/ptc_manager`.
