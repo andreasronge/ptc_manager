@@ -79,8 +79,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     with :ok <- File.mkdir_p(directory) do
       path = Path.join(directory, "ptc-result-action-#{action.id}-#{action.attempt_count}.json")
       schema_path = Path.rootname(path) <> ".schema.json"
-      :ok = File.write(path, "")
-      :ok = File.chmod(path, 0o660)
       :ok = File.cp(result_schema(action.action_key), schema_path)
       :ok = File.chmod(schema_path, 0o440)
       Process.put({__MODULE__, :output_path}, path)

@@ -104,7 +104,11 @@ defmodule PtcManager.AutomationsTest do
       case Process.delete({__MODULE__, :pending_prompt_result}) do
         :swallowed -> :ok
         {:ready, path, token} -> File.write!(path, token <> "\n")
-        {:result, path} -> File.write!(path, Jason.encode!(result()))
+        {:result, path} ->
+          false = File.exists?(path)
+          temporary_path = path <> ".tmp"
+          File.write!(temporary_path, Jason.encode!(result()))
+          File.rename!(temporary_path, path)
       end
     end
   end
