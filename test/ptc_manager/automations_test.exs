@@ -102,8 +102,12 @@ defmodule PtcManager.AutomationsTest do
 
     defp complete_prompt_result do
       case Process.delete({__MODULE__, :pending_prompt_result}) do
-        :swallowed -> :ok
-        {:ready, path, token} -> File.write!(path, token <> "\n")
+        :swallowed ->
+          :ok
+
+        {:ready, path, token} ->
+          File.write!(path, token <> "\n")
+
         {:result, path} ->
           false = File.exists?(path)
           temporary_path = path <> ".tmp"
