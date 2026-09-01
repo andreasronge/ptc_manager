@@ -117,6 +117,18 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
   end
 
+  test "remote deployment exposes mise for repository-owned worker setup" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "worker_mise=/usr/local/bin/mise"
+    assert script =~ "install_worker_mise"
+    assert script =~ ~s(sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise")
+    assert script =~ ~s(sudo -u ptc-manager-worker -H "$worker_mise" --version)
+
+    assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
+             byte_index(script, "echo \"Building production release...\"")
+  end
+
   test "remote deployment provisions and exercises the isolated gate toolchain" do
     script = File.read!(@remote_script)
 

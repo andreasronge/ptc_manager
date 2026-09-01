@@ -567,13 +567,15 @@ observation-only installations do not require that worker service.
 
 Deployments also install the pinned Node.js runtime used for release builds
 under `/opt/ptc-manager-node-<version>` and expose `node`, `npm`, `npx`, and
-`corepack` through `/usr/local/bin`. Managed Codex and Claude agents therefore
-receive the same Node version even though the worker service cannot read the
-interactive `agent` account's mise installation. The deployment verifies Node
-as the `ptc-manager-worker` user before replacing the application release.
-They similarly use mise to install pinned Erlang and Elixir builds directly
-under a root-owned `/opt/ptc-manager-gate-mise` prefix, reject symlinks escaping
-that prefix, and install only Hex and Rebar under
+`corepack` through `/usr/local/bin`. They install the server's trusted mise
+executable as root-owned `/usr/local/bin/mise` as well. Repository-owned
+bootstrap scripts can therefore install each project's pinned toolchain into
+the persistent worker home without depending on the interactive `agent`
+account. The deployment verifies both Node and mise as `ptc-manager-worker`
+before replacing the application release. The isolated publication gate uses
+mise separately to install pinned Erlang and Elixir builds directly under a
+root-owned `/opt/ptc-manager-gate-mise` prefix, rejects symlinks escaping that
+prefix, and installs only Hex and Rebar under
 `/opt/ptc-manager-gate-mix`. Before the service is stopped, deployment runs the
 real checked-in bootstrap and pre-publication scripts from an explicitly
 gate-readable copy of the source archive as `ptc-manager-gate`, with a fresh

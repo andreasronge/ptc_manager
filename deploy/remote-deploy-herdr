@@ -42,6 +42,7 @@ maintenance_override=/etc/systemd/system/ptc_manager.service.d/90-ptc-manager-de
 maintenance_override_backup="/etc/systemd/system/ptc_manager.service.d/.ptc-manager-maintenance-${release_id}.backup"
 maintenance_override_preexisting=false
 mise_binary=/home/agent/.local/bin/mise
+worker_mise=/usr/local/bin/mise
 node_version=22.23.2
 worker_node_dir="/opt/ptc-manager-node-${node_version}"
 worker_node_staging=
@@ -400,6 +401,11 @@ install_worker_node() {
   sudo -u ptc-manager-worker -H /usr/local/bin/npm --version >/dev/null
   sudo -u ptc-manager-worker -H /usr/local/bin/npx --version >/dev/null
   sudo -u ptc-manager-worker -H /usr/local/bin/corepack --version >/dev/null
+}
+
+install_worker_mise() {
+  sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise"
+  sudo -u ptc-manager-worker -H "$worker_mise" --version >/dev/null
 }
 
 install_gate_beam_toolchain() {
@@ -767,6 +773,7 @@ sudo install -o root -g ptc-manager-repo -m 0640 "$source_archive" "$gate_source
 sudo chmod 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   /var/lib/ptc_manager-output/planning-snapshots
+install_worker_mise
 install_worker_node
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
