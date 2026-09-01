@@ -40,7 +40,8 @@ the approved execution, publication, worktree, and maintainer-action workflows:
   verification frozen from the exact candidate commit;
 - a credential-free, disposable verifier checkout that must pass the frozen
   gate cleanly before the GitHub App broker can push that SHA;
-- persistent light/heavy agent limits instead of a hard-coded worktree count;
+- persistent light/heavy agent limits plus an independent expensive-operation
+  limit instead of a hard-coded worktree count;
 - durable worktree allocation, safe reclamation, and terminal cleanup;
 - canonical PR status and GitHub link in the dashboard;
 - read-only GitHub check-run, commit-status, draft, and merge-conflict signals
@@ -90,6 +91,49 @@ Requirements: Elixir, Erlang/OTP, SQLite, `lsof`, and a C compiler toolchain.
 ```sh
 mix setup
 mix phx.server
+```
+
+### Managed expensive commands remain optional
+
+Repositories keep their ordinary build, test, lint, and run commands. On a Mac,
+in ordinary CI, or in any checkout without a PtcManager context, no resource
+wrapper is needed and commands behave normally.
+
+PtcManager injects `PTC_OPERATION_WRAPPER` only into managed Herdr panes. An
+agent can coordinate a memory-heavy command without changing the command itself:
+
+```sh
+$PTC_OPERATION_WRAPPER run --label test -- mix test
+$PTC_OPERATION_WRAPPER run --label build -- npm run build
+```
+
+The installed `ptc-operation` executable deliberately executes the requested
+command directly when `PTC_MANAGED_OPERATION_CONTEXT` is absent. A repository
+script may therefore use the same invocation locally and on a worker, but no
+repository is required to adopt it. Nested wrappers reuse the active operation
+instead of requesting another slot.
+
+On a managed worker, requests are authenticated over a local Unix socket and
+queued independently of the light/heavy agent-session limits. The Operations
+page shows the waiting or running phase, timings, success rate, percentiles, and
+peak memory. If the coordinator is unavailable in an explicitly managed pane,
+the wrapper exits with status 75 instead of silently bypassing the limit.
+
+Linux cgroup-v2 containment is optional and off unless
+`PTC_OPERATION_CGROUPS=true`. The checked-in Herdr systemd unit delegates only
+the memory and process controllers. Its launcher keeps the Herdr server in a
+separate leaf; each managed pane then receives an agent memory boundary and
+each coordinated command a child cgroup. That makes unwrapped agent commands
+remain bounded and lets PtcManager measure the complete command process tree.
+Enable this only after installing the versioned Herdr unit, launcher, and
+sourceable agent-context helper. It is never enabled on the Mac.
+
+The deterministic state-machine tests run in the normal suite. A sub-second
+socket/process integration test is kept out of the default suite and can be run
+explicitly:
+
+```sh
+./scripts/ci/resource-operation-e2e
 ```
 
 Open <http://localhost:4000> and sign in with `ptc-manager-dev`.
@@ -641,6 +685,10 @@ sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_m
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
+sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
+sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
+sudo install -d -o root -g root -m 0755 /usr/local/libexec
+sudo install -o root -g root -m 0644 deploy/ptc-manager-agent-context /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-git /usr/local/bin/ptc-manager-external-git
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-push /usr/local/bin/ptc-manager-external-push
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-cleanup /usr/local/bin/ptc-manager-external-cleanup

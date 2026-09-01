@@ -30,6 +30,7 @@ defmodule PtcManager.Operations.AgentAction do
     belongs_to :repository, PtcManager.Operations.Repository
     belongs_to :automation_definition_version, PtcManager.Automations.DefinitionVersion
     has_many :agent_runs, PtcManager.Operations.AgentRun
+    has_many :resource_operations, PtcManager.Operations.ResourceOperation
 
     timestamps(type: :utc_datetime_usec)
   end

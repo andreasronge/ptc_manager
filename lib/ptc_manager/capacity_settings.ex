@@ -1,9 +1,10 @@
 defmodule PtcManager.CapacitySettings do
-  @moduledoc "Persists and applies the machine-wide light and heavy agent limits."
+  @moduledoc "Persists and applies machine-wide agent and expensive-operation limits."
 
   use GenServer
 
   alias PtcManager.Operations.CapacitySetting
+  alias PtcManager.ResourceOperations
   alias PtcManager.Repo
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -27,7 +28,21 @@ defmodule PtcManager.CapacitySettings do
   def handle_call(:current, _from, setting), do: {:reply, setting, setting}
 
   def handle_call({:update, attrs}, _from, setting) do
-    case setting |> CapacitySetting.changeset(attrs) |> Repo.update() do
+    changeset = CapacitySetting.changeset(setting, attrs)
+
+    result =
+      Repo.transaction(fn ->
+        case Repo.update(changeset) do
+          {:ok, updated} ->
+            :ok = ResourceOperations.record_capacity_change(updated)
+            updated
+
+          {:error, invalid} ->
+            Repo.rollback(invalid)
+        end
+      end)
+
+    case result do
       {:ok, updated} ->
         apply_runtime(updated)
         wake_dispatchers()
@@ -44,7 +59,8 @@ defmodule PtcManager.CapacitySettings do
       %CapacitySetting{}
       |> CapacitySetting.changeset(%{
         light_agent_capacity: Application.get_env(:ptc_manager, :light_agent_capacity, 2),
-        heavy_agent_capacity: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1)
+        heavy_agent_capacity: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1),
+        operation_capacity: Application.get_env(:ptc_manager, :operation_capacity, 1)
       })
       |> Repo.insert!()
   end
@@ -52,6 +68,7 @@ defmodule PtcManager.CapacitySettings do
   defp apply_runtime(setting) do
     Application.put_env(:ptc_manager, :light_agent_capacity, setting.light_agent_capacity)
     Application.put_env(:ptc_manager, :heavy_agent_capacity, setting.heavy_agent_capacity)
+    Application.put_env(:ptc_manager, :operation_capacity, setting.operation_capacity)
   end
 
   defp wake_dispatchers do

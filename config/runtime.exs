@@ -164,6 +164,36 @@ config :ptc_manager,
     System.get_env("PTC_AGENT_ACTION_INTERVAL_MS", "5000") |> String.to_integer(),
   light_agent_capacity: System.get_env("PTC_LIGHT_AGENT_CAPACITY", "2") |> String.to_integer(),
   heavy_agent_capacity: System.get_env("PTC_HEAVY_AGENT_CAPACITY", "1") |> String.to_integer(),
+  operation_capacity: System.get_env("PTC_OPERATION_CAPACITY", "1") |> String.to_integer(),
+  resource_operation_socket_path:
+    System.get_env(
+      "PTC_OPERATION_SOCKET_PATH",
+      if(config_env() == :prod,
+        do: "/var/lib/ptc_manager-worker/agent-results/operations.sock",
+        else: nil
+      )
+    ),
+  resource_operation_wrapper:
+    System.get_env("PTC_OPERATION_WRAPPER", "/usr/local/bin/ptc-operation"),
+  resource_operation_context_dir:
+    System.get_env(
+      "PTC_OPERATION_CONTEXT_DIR",
+      "/var/lib/ptc_manager-worker/agent-results/operation-contexts"
+    ),
+  resource_operation_cgroups: System.get_env("PTC_OPERATION_CGROUPS", "false") == "true",
+  resource_operation_agent_context:
+    System.get_env(
+      "PTC_OPERATION_AGENT_CONTEXT",
+      "/usr/local/libexec/ptc-manager-agent-context"
+    ),
+  agent_memory_high_bytes:
+    System.get_env("PTC_AGENT_MEMORY_HIGH_BYTES", "2684354560") |> String.to_integer(),
+  agent_memory_max_bytes:
+    System.get_env("PTC_AGENT_MEMORY_MAX_BYTES", "3221225472") |> String.to_integer(),
+  operation_memory_high_bytes:
+    System.get_env("PTC_OPERATION_MEMORY_HIGH_BYTES", "2147483648") |> String.to_integer(),
+  operation_memory_max_bytes:
+    System.get_env("PTC_OPERATION_MEMORY_MAX_BYTES", "2684354560") |> String.to_integer(),
   agent_action_timeout_ms:
     System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "7200000") |> String.to_integer(),
   agent_action_sync_retry_base_ms:

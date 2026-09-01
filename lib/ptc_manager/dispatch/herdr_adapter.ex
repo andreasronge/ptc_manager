@@ -211,7 +211,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp start_implementation_agent(command, workspace_id, pane_id, job, issue, setup_report) do
     agent_name = agent_name(job)
 
-    with {:ok, agent_key} <- start_agent(command, agent_name, pane_id),
+    with {:ok, _context} <-
+           PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
+         {:ok, agent_key} <- start_agent(command, agent_name, pane_id),
          :ok <- prompt_agent(command, agent_name, issue, job) do
       session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
@@ -543,6 +545,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       Branch: #{job.branch_name} → #{repository.default_branch}
       Reviews: #{required_reviews}
       GitHub: #{github_instruction}
+      Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       </context>
       <issue_data>
       Number: #{issue.number}

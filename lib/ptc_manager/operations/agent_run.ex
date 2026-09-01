@@ -26,6 +26,7 @@ defmodule PtcManager.Operations.AgentRun do
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :job, PtcManager.Operations.Job
     belongs_to :agent_action, PtcManager.Operations.AgentAction
+    has_many :resource_operations, PtcManager.Operations.ResourceOperation
 
     timestamps(type: :utc_datetime_usec)
   end

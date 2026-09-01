@@ -44,11 +44,17 @@ intercept or change repository commands.
 
 The wrapper protocol is cooperative scheduling, not the sole safety boundary.
 A managed agent can still execute an arbitrary unwrapped command. Every managed
-agent therefore also runs in its own worker-created cgroup with a configurable
+agent therefore also runs in its own cgroup created from Herdr's delegated
+systemd subtree with a configurable
 memory high-water mark and hard maximum. An unwrapped command may lose the
 statistics and orderly operation queue, but it cannot consume the whole Herdr
 service cgroup or stop unrelated agents. This containment is enabled only on
 managed Linux workers and has no effect on the maintainer's Mac.
+
+Rollout is guarded by `PTC_OPERATION_CGROUPS`: it remains off for an upgraded
+host until the versioned Herdr unit and launcher with cgroup-v2 delegation are
+installed. It is required before concurrent managed agents are treated as
+safely contained; the cooperative queue can be tested independently first.
 
 No executable-name shims, shell aliases, agent-vendor hooks, or PATH replacement
 may be required. A normal checkout remains independently usable.
@@ -117,8 +123,10 @@ fenced job or action and injects a managed-operation context before starting the
 configured Herdr agent kind. The protocol does not branch on Codex, Claude,
 Cursor, or another supported kind.
 
-Before `herdr agent start`, PtcManager writes a mode-`0600`, worker-owned context
-file and asks the pane's interactive shell to source it. The inherited contract
+Before `herdr agent start`, PtcManager writes a coordinator-owned, mode-`0440`
+context file in a setgid directory shared only with the worker identity, then
+asks the pane's interactive shell to source it. The worker can read but cannot
+alter the contract. The inherited contract
 contains only the run identity, fence, local Unix-socket path, wrapper path, and
 an unguessable bounded capability token. The agent receives no SQLite path or
 database credential. A coordinator-owned Unix-socket broker validates the
@@ -174,7 +182,8 @@ Initial ordering is:
 4. other heavy operations;
 5. oldest request first within a priority.
 
-An OS-held slot lock and a broker-owned per-operation cgroup are the final local
+An OS-held slot lock and a per-operation cgroup created beneath the pane's
+delegated agent boundary are the final local
 exclusion and containment boundaries. Database state provides durable ordering
 and UI visibility; it is not by itself proof that a previous process tree has
 stopped. The unprivileged agent cannot move processes out of its operation
@@ -209,7 +218,8 @@ The state machine is `queued -> starting -> running -> terminal`, with explicit
 - Ambiguous identity, process ownership, or lock state fails closed and is
   shown as requiring maintainer attention.
 
-Managed Linux workers isolate every agent and operation in broker-owned cgroups.
+Managed Linux workers isolate every agent and operation in cgroups below a
+systemd subtree delegated only to the Herdr worker identity.
 The Herdr service uses an OOM policy that does not stop the entire service merely
 because one contained child becomes an OOM victim. Operation coordination keeps
 normal verification orderly; cgroups are the required backstop when an agent

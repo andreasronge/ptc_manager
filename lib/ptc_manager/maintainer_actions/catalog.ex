@@ -504,7 +504,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
     merge_authorized? = Keyword.get(opts, :merge_authorized?, false)
 
     """
-    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" review_limit="#{@repair_review_limit}" allowed_outcomes="repaired,repair-blocked" />
+    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" review_limit="#{@repair_review_limit}" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
     <pull_request_data>
     PR: ##{publication.pr_number}
     Branch: #{publication.branch_name}

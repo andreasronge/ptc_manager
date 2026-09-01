@@ -23,6 +23,9 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            :ok <- trust_workspace(path),
            {:ok, workspace, pane} <- open_workspace(action, path),
            name = agent_name(action),
+           {:ok, context} <-
+             PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
+           :ok <- remember_context(context),
            {:ok, agent_key} <- start_agent(name, pane, profile),
            dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
            {:ok, _run} <-
@@ -322,6 +325,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)
     if schema = Process.delete({__MODULE__, :schema_path}), do: File.rm(schema)
     if prompt = Process.delete({__MODULE__, :prompt_path}), do: File.rm(prompt)
+    if context = Process.delete({__MODULE__, :operation_context}), do: File.rm(context)
 
     if ready = Process.delete({__MODULE__, :ready_path}) do
       File.rm(ready)
@@ -330,6 +334,13 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
     :ok
   end
+
+  defp remember_context(%{path: path}) do
+    Process.put({__MODULE__, :operation_context}, path)
+    :ok
+  end
+
+  defp remember_context(nil), do: :ok
 
   defp result_schema("daily_digest"),
     do: Application.app_dir(:ptc_manager, "priv/codex/daily_digest_output.schema.json")

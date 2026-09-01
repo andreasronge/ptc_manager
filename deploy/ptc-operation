@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Run directly, or coordinate one expensive command when context is present."""
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import platform
+import resource
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(prog="ptc-operation")
+    run = parser.add_subparsers(dest="subcommand", required=True).add_parser("run")
+    run.add_argument("--label", required=True)
+    run.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if args.command and args.command[0] == "--":
+        args.command = args.command[1:]
+    if not args.command:
+        parser.error("run requires a command after --")
+    return args
+
+
+def execute_direct(command):
+    os.execvp(command[0], command)
+
+
+def broker_request(context, fields):
+    message = {
+        "token": context["token"],
+        "context_id": context["context_id"],
+        **fields,
+    }
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(10)
+    try:
+        client.connect(context["socket_path"])
+        client.sendall((json.dumps(message, separators=(",", ":")) + "\n").encode())
+        response = b""
+        while b"\n" not in response:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            response += chunk
+        decoded = json.loads(response.split(b"\n", 1)[0])
+        if decoded.get("status") == "error":
+            raise RuntimeError(decoded.get("error", "coordinator error"))
+        return decoded
+    finally:
+        client.close()
+
+
+def broker_request_with_retry(context, fields, attempts=3):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return broker_request(context, fields)
+        except (OSError, RuntimeError, ValueError) as error:
+            last_error = error
+            if attempt + 1 < attempts:
+                time.sleep(0.2 * (attempt + 1))
+    raise last_error
+
+
+def peak_memory_bytes():
+    peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return peak if platform.system() == "Darwin" else peak * 1024
+
+
+def acquire_slot_lock(context, slot_number):
+    path = os.path.join(context["lock_directory"], f"operation-slot-{slot_number}.lock")
+    lock = open(path, "a", encoding="ascii")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock
+    except OSError:
+        lock.close()
+        raise RuntimeError(
+            f"operation slot {slot_number} is still held by another process"
+        )
+
+
+def read_text(path):
+    with open(path, encoding="ascii") as value_file:
+        return value_file.read().strip()
+
+
+def write_text(path, value):
+    with open(path, "w", encoding="ascii") as value_file:
+        value_file.write(f"{value}\n")
+
+
+def create_operation_cgroup(context, operation_id, attempt_token):
+    if not context.get("cgroups"):
+        return None
+    if platform.system() != "Linux" or not os.path.exists(
+        "/sys/fs/cgroup/cgroup.controllers"
+    ):
+        raise RuntimeError("managed operation cgroups require Linux cgroup v2")
+
+    relative = None
+    with open("/proc/self/cgroup", encoding="ascii") as membership:
+        for line in membership:
+            parts = line.rstrip().split(":", 2)
+            if parts[0] == "0":
+                relative = parts[2]
+                break
+    if not relative:
+        raise RuntimeError("current cgroup v2 membership is unavailable")
+
+    current = os.path.join("/sys/fs/cgroup", relative.lstrip("/"))
+    if os.path.basename(current) != "processes" or not os.path.basename(
+        os.path.dirname(current)
+    ).startswith("ptc-agent-"):
+        raise RuntimeError("managed agent cgroup is unavailable")
+
+    agent_root = os.path.dirname(current)
+    safe_token = attempt_token[:12]
+    operation_path = os.path.join(agent_root, f"operation-{operation_id}-{safe_token}")
+    os.mkdir(operation_path)
+    write_text(
+        os.path.join(operation_path, "memory.high"),
+        context["operation_memory_high_bytes"],
+    )
+    write_text(
+        os.path.join(operation_path, "memory.max"),
+        context["operation_memory_max_bytes"],
+    )
+    return operation_path
+
+
+def cgroup_add_process(path, pid):
+    if path:
+        write_text(os.path.join(path, "cgroup.procs"), pid)
+
+
+def cgroup_peak(path):
+    if not path:
+        return peak_memory_bytes()
+    value = read_text(os.path.join(path, "memory.peak"))
+    return int(value) if value and value != "max" else 0
+
+
+def cleanup_cgroup(path):
+    if not path:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        events = read_text(os.path.join(path, "cgroup.events"))
+        if "populated 0" in events:
+            try:
+                os.rmdir(path)
+                return
+            except OSError as error:
+                if error.errno not in (errno.EBUSY, errno.ENOTEMPTY):
+                    raise
+        time.sleep(0.05)
+    raise RuntimeError("operation process tree did not leave its cgroup")
+
+
+def managed_run(args, context):
+    response = broker_request_with_retry(
+        context,
+        {
+            "operation": "request",
+            "invocation_id": str(uuid.uuid4()),
+            "label": args.label,
+        },
+    )
+    operation_id = response["operation_id"]
+    announced_wait = False
+    poll_seconds = float(os.environ.get("PTC_OPERATION_POLL_SECONDS", "0.5"))
+
+    while response.get("status") == "queued":
+        if not announced_wait:
+            print(
+                f"Waiting for PtcManager operation slot: {args.label}", file=sys.stderr
+            )
+            announced_wait = True
+        time.sleep(poll_seconds)
+        response = broker_request_with_retry(
+            context, {"operation": "acquire", "operation_id": operation_id}
+        )
+
+    if response.get("status") != "starting":
+        raise RuntimeError(
+            f"operation entered unexpected state {response.get('status')}"
+        )
+
+    attempt_token = response["attempt_token"]
+    slot_lock = acquire_slot_lock(context, response["slot_number"])
+    cgroup_path = None
+    try:
+        cgroup_path = create_operation_cgroup(context, operation_id, attempt_token)
+    except Exception as error:
+        broker_request_with_retry(
+            context,
+            {
+                "operation": "finish",
+                "operation_id": operation_id,
+                "attempt_token": attempt_token,
+                "exit_status": 75,
+                "peak_memory_bytes": 0,
+                "last_error": f"cgroup setup failed: {error}",
+            },
+        )
+        slot_lock.close()
+        raise
+
+    child_environment = os.environ.copy()
+    child_environment["PTC_OPERATION_ACTIVE"] = str(operation_id)
+    child_environment["PTC_OPERATION_LABEL"] = args.label
+    try:
+        if cgroup_path:
+
+            def child_setup():
+                os.setsid()
+                cgroup_add_process(cgroup_path, os.getpid())
+
+            child = subprocess.Popen(
+                args.command, env=child_environment, preexec_fn=child_setup
+            )
+        else:
+            child = subprocess.Popen(
+                args.command, env=child_environment, start_new_session=True
+            )
+    except Exception as error:
+        cleanup_cgroup(cgroup_path)
+        broker_request_with_retry(
+            context,
+            {
+                "operation": "finish",
+                "operation_id": operation_id,
+                "attempt_token": attempt_token,
+                "exit_status": 75,
+                "peak_memory_bytes": 0,
+                "last_error": f"command start failed: {error}",
+            },
+        )
+        slot_lock.close()
+        raise
+    stop_heartbeat = threading.Event()
+
+    def forward(signum, _frame):
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, forward)
+
+    broker_request_with_retry(
+        context,
+        {
+            "operation": "running",
+            "operation_id": operation_id,
+            "attempt_token": attempt_token,
+            "wrapper_pid": os.getpid(),
+            "cgroup_path": cgroup_path,
+        },
+    )
+
+    def heartbeat():
+        interval = float(os.environ.get("PTC_OPERATION_HEARTBEAT_SECONDS", "5"))
+        while not stop_heartbeat.wait(interval):
+            try:
+                update = broker_request_with_retry(
+                    context,
+                    {
+                        "operation": "heartbeat",
+                        "operation_id": operation_id,
+                        "attempt_token": attempt_token,
+                    },
+                )
+                if update.get("cancel_requested"):
+                    os.killpg(child.pid, signal.SIGTERM)
+            except Exception as error:
+                print(
+                    f"PtcManager operation heartbeat failed: {error}", file=sys.stderr
+                )
+
+    thread = threading.Thread(target=heartbeat, daemon=True)
+    thread.start()
+    status = child.wait()
+    stop_heartbeat.set()
+    thread.join(timeout=1)
+
+    observed_peak = cgroup_peak(cgroup_path)
+    cleanup_cgroup(cgroup_path)
+
+    broker_request_with_retry(
+        context,
+        {
+            "operation": "finish",
+            "operation_id": operation_id,
+            "attempt_token": attempt_token,
+            "exit_status": status if status >= 0 else 128 + abs(status),
+            "peak_memory_bytes": observed_peak,
+        },
+    )
+    slot_lock.close()
+    return status if status >= 0 else 128 + abs(status)
+
+
+def main():
+    args = parse_args()
+    if os.environ.get("PTC_OPERATION_ACTIVE"):
+        execute_direct(args.command)
+
+    context_path = os.environ.get("PTC_MANAGED_OPERATION_CONTEXT")
+    if not context_path:
+        execute_direct(args.command)
+
+    with open(context_path, encoding="utf-8") as context_file:
+        context = json.load(context_file)
+
+    try:
+        return managed_run(args, context)
+    except Exception as error:
+        print(f"ptc-operation: coordinator unavailable: {error}", file=sys.stderr)
+        return 75
+
+
+if __name__ == "__main__":
+    sys.exit(main())

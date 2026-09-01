@@ -1,7 +1,15 @@
 defmodule PtcManager.DemoSeedTest do
   use PtcManager.DataCase, async: false
 
-  alias PtcManager.Operations.{AgentRun, Issue, Job, Repository, WorktreeAllocation}
+  alias PtcManager.Operations.{
+    AgentRun,
+    Issue,
+    Job,
+    Repository,
+    ResourceOperation,
+    WorktreeAllocation
+  }
+
   alias PtcManager.Repo
 
   setup do
@@ -23,6 +31,8 @@ defmodule PtcManager.DemoSeedTest do
     assert Repo.aggregate(Repository, :count) == 1
     assert Repo.aggregate(Issue, :count) == 3
     assert Repo.aggregate(AgentRun, :count) == 2
+    assert Repo.aggregate(ResourceOperation, :count) == 6
+    assert Repo.get_by!(ResourceOperation, state: "running").label == "test"
 
     job = Repo.one!(Job)
     repository = Repo.one!(Repository)

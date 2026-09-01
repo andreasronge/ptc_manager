@@ -7,15 +7,17 @@ After=network-online.target
 Type=simple
 User=ptc-manager-worker
 Group=ptc-manager-worker
+SupplementaryGroups=ptc-manager-output
 WorkingDirectory=/srv/ptc_runner
 EnvironmentFile=/etc/ptc_manager/herdr.env
-ExecStart=/usr/local/bin/herdr --session ${HERDR_SESSION} server
+ExecStart=/usr/local/bin/ptc-manager-herdr-launch --session ${HERDR_SESSION} server
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+Delegate=memory pids
 ReadWritePaths=/var/lib/ptc_manager-worker /srv/ptc_runner /srv/ptc_manager-worktrees
 
 [Install]

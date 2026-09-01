@@ -34,9 +34,9 @@
     >
       <div class="max-w-3xl">
         <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Machine</p>
-        <h2 id="agent-capacity-title" class="mt-1 text-2xl font-semibold">Concurrent agents</h2>
+        <h2 id="agent-capacity-title" class="mt-1 text-2xl font-semibold">Worker capacity</h2>
         <p class="mt-2 text-sm leading-6 text-slate-400">
-          Light agents investigate issues and write summaries. Heavy agents build, test, repair, and merge code. A full heavy pool does not stop light planning work.
+          Light and heavy limits control agent sessions. Expensive-operation slots separately serialize memory-heavy build, test, lint, and verification commands used by managed agents. Normal commands on your Mac and in CI do not require this coordinator.
         </p>
       </div>
 
@@ -44,7 +44,7 @@
         for={%{}}
         as={:capacity}
         phx-submit="save-capacity"
-        class="mt-5 grid max-w-2xl gap-4 sm:grid-cols-2"
+        class="mt-5 grid max-w-4xl gap-4 sm:grid-cols-3"
       >
         <label class="rounded-xl bg-white/[0.035] p-4 text-sm text-slate-300">
           <span class="font-semibold text-white">Light agents</span>
@@ -76,8 +76,23 @@
             class="mt-3 w-24 rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
           />
         </label>
-        <button class="w-fit rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 sm:col-span-2">
-          Save agent limits
+        <label class="rounded-xl bg-white/[0.035] p-4 text-sm text-slate-300">
+          <span class="font-semibold text-white">Expensive operations</span>
+          <span class="mt-1 block text-xs leading-5 text-slate-500">
+            Concurrent managed builds, test suites, linters, and verification process trees.
+          </span>
+          <input
+            type="number"
+            min="1"
+            max="8"
+            required
+            name="capacity[operation_capacity]"
+            value={@capacity_setting.operation_capacity}
+            class="mt-3 w-24 rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+          />
+        </label>
+        <button class="w-fit rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 sm:col-span-3">
+          Save worker limits
         </button>
       </.form>
 

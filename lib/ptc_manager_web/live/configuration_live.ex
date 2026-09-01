@@ -59,11 +59,12 @@ defmodule PtcManagerWeb.ConfigurationLive do
       {:ok, _setting} ->
         {:noreply,
          socket
-         |> put_flash(:info, "Agent capacity updated. Queued work will use the new limits.")
+         |> put_flash(:info, "Worker capacity updated. Queued work will use the new limits.")
          |> load_configuration()}
 
       {:error, _changeset} ->
-        {:noreply, put_flash(socket, :error, "Use a whole number from 1 to 8 for both limits.")}
+        {:noreply,
+         put_flash(socket, :error, "Use a whole number from 1 to 8 for all three limits.")}
     end
   end
 

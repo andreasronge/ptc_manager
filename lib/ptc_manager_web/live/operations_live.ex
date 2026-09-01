@@ -2,6 +2,7 @@ defmodule PtcManagerWeb.OperationsLive do
   use PtcManagerWeb, :live_view
 
   alias PtcManager.CapacitySettings
+  alias PtcManager.ResourceOperations
   alias PtcManager.HostMetrics
   alias PtcManager.Herdr.Transcript
   alias PtcManager.Operations
@@ -250,6 +251,29 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def agent_slot_detail(_active, _capacity, false), do: "Herdr worker offline · work will queue"
 
+  def operation_agent(%{agent_run: %{agent_name: name}}) when is_binary(name) and name != "",
+    do: name
+
+  def operation_agent(%{agent_run: %{role: role}}), do: "#{role} agent"
+  def operation_agent(_operation), do: "managed agent"
+
+  def operation_state(%{state: "queued"}), do: "waiting for slot"
+  def operation_state(%{state: "starting"}), do: "starting"
+  def operation_state(%{state: "running", label: label}), do: label
+  def operation_state(%{state: "cancelling"}), do: "stopping"
+  def operation_state(%{state: "recovery_pending"}), do: "recovering"
+  def operation_state(%{state: state}), do: state
+
+  def operation_slot(%{slot_number: nil}), do: "No slot assigned"
+  def operation_slot(%{slot_number: slot}), do: "Operation slot #{slot}"
+
+  def operation_duration(nil), do: "—"
+  def operation_duration(milliseconds), do: format_milliseconds(milliseconds)
+  def operation_bytes(nil), do: "—"
+  def operation_bytes(value), do: bytes(value)
+  def operation_rate(nil), do: "—"
+  def operation_rate(value), do: percent(value * 100)
+
   def terminal_refresh_label(%{state: "waiting"}),
     do: "Retained session · refreshes every 5 seconds"
 
@@ -347,6 +371,9 @@ defmodule PtcManagerWeb.OperationsLive do
     queued_actions = Operations.list_queued_agent_actions()
     workspace_setups = Operations.list_recent_workspace_setups()
     timeline = Operations.list_agent_timeline(40)
+    resource_operations = ResourceOperations.list_current()
+    recent_resource_operations = ResourceOperations.list_recent(12)
+    resource_statistics = ResourceOperations.statistics()
 
     selected_run =
       case socket.assigns.selected_run do
@@ -373,6 +400,12 @@ defmodule PtcManagerWeb.OperationsLive do
     available_heavy_slots =
       max(capacity_setting.heavy_agent_capacity - active_heavy_slots, 0)
 
+    active_operation_slots =
+      Enum.count(
+        resource_operations,
+        &(&1.state in ~w(starting running cancelling recovery_pending))
+      )
+
     assign(socket,
       workers: workers,
       active_runs: active_runs,
@@ -382,10 +415,15 @@ defmodule PtcManagerWeb.OperationsLive do
       workspace_setups: workspace_setups,
       active_light_slots: active_light_slots,
       active_heavy_slots: active_heavy_slots,
+      active_operation_slots: active_operation_slots,
       light_agent_capacity: capacity_setting.light_agent_capacity,
       heavy_agent_capacity: capacity_setting.heavy_agent_capacity,
+      operation_capacity: capacity_setting.operation_capacity,
       available_light_slots: available_light_slots,
       available_heavy_slots: available_heavy_slots,
+      resource_operations: resource_operations,
+      recent_resource_operations: recent_resource_operations,
+      resource_statistics: resource_statistics,
       herdr_online?: herdr_online?,
       timeline: timeline,
       selected_run: selected_run,

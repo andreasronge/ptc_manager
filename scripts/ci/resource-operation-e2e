@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+project_root=$(git rev-parse --show-toplevel)
+cd "$project_root"
+
+exec mix test --include resource_e2e test/ptc_manager/resource_operation_wrapper_e2e_test.exs

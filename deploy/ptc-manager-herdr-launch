@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+cgroup_relative=$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup)
+cgroup_root="/sys/fs/cgroup${cgroup_relative}"
+server_cgroup="$cgroup_root/server"
+
+mkdir -p "$server_cgroup"
+printf '%s\n' "$$" >"$server_cgroup/cgroup.procs"
+controllers=$(cat "$cgroup_root/cgroup.controllers")
+case " $controllers " in *" memory "*) printf '+memory\n' >"$cgroup_root/cgroup.subtree_control" ;; esac
+case " $controllers " in *" pids "*) printf '+pids\n' >"$cgroup_root/cgroup.subtree_control" ;; esac
+
+exec /usr/local/bin/herdr "$@"

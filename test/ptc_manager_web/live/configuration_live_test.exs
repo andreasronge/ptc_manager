@@ -6,32 +6,40 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
   alias PtcManager.Operations.Repository
   alias PtcManager.{CapacitySettings, Operations, Repo}
 
-  test "edits the independent light and heavy agent limits", %{conn: conn} do
+  test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
     original = CapacitySettings.current()
 
     on_exit(fn ->
       CapacitySettings.update(%{
         light_agent_capacity: original.light_agent_capacity,
-        heavy_agent_capacity: original.heavy_agent_capacity
+        heavy_agent_capacity: original.heavy_agent_capacity,
+        operation_capacity: original.operation_capacity
       })
     end)
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
 
     assert has_element?(view, "#agent-capacity", "Light agents")
+    assert has_element?(view, "#agent-capacity", "Expensive operations")
     assert has_element?(view, "#agent-capacity", "merge → repair → new implementation")
 
     view
     |> form("#agent-capacity form", %{
-      "capacity" => %{"light_agent_capacity" => "3", "heavy_agent_capacity" => "2"}
+      "capacity" => %{
+        "light_agent_capacity" => "3",
+        "heavy_agent_capacity" => "2",
+        "operation_capacity" => "1"
+      }
     })
     |> render_submit()
 
     assert CapacitySettings.current().light_agent_capacity == 3
     assert CapacitySettings.current().heavy_agent_capacity == 2
+    assert CapacitySettings.current().operation_capacity == 1
     assert Application.get_env(:ptc_manager, :light_agent_capacity) == 3
     assert Application.get_env(:ptc_manager, :heavy_agent_capacity) == 2
-    assert render(view) =~ "Agent capacity updated"
+    assert Application.get_env(:ptc_manager, :operation_capacity) == 1
+    assert render(view) =~ "Worker capacity updated"
   end
 
   test "routes repository-specific prompt editing to versioned automations", %{conn: conn} do

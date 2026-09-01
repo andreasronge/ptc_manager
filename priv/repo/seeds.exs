@@ -1,5 +1,5 @@
 alias PtcManager.Operations
-alias PtcManager.Operations.{Job, Repository, WorktreeAllocation}
+alias PtcManager.Operations.{Job, Repository, ResourceOperation, WorktreeAllocation}
 alias PtcManager.Repo
 
 if Repo.aggregate(Repository, :count) == 0 do
@@ -166,7 +166,7 @@ if Repo.aggregate(Repository, :count) == 0 do
       herdr_session: "manager-demo"
     })
 
-  {:ok, _implementer_run} =
+  {:ok, implementer_run} =
     Operations.create_agent_run(%{
       worker_id: worker.id,
       job_id: active_job.id,
@@ -180,6 +180,64 @@ if Repo.aggregate(Repository, :count) == 0 do
       herdr_session: "implementer-demo",
       fencing_token: active_job.fencing_token
     })
+
+  if demo_mode do
+    Enum.with_index([18_000, 31_000, 44_000, 67_000, 96_000], 1)
+    |> Enum.each(fn {duration_ms, index} ->
+      finished_at = DateTime.add(now, -(index * 12), :minute)
+      started_at = DateTime.add(finished_at, -duration_ms, :millisecond)
+      queued_at = DateTime.add(started_at, -(index * 350), :millisecond)
+
+      %ResourceOperation{}
+      |> ResourceOperation.changeset(%{
+        worker_id: worker.id,
+        repository_id: repository.id,
+        job_id: active_job.id,
+        agent_run_id: implementer_run.id,
+        invocation_id: "demo-completed-#{index}",
+        label: Enum.at(~w(lint test build test verify), index - 1),
+        priority: 300,
+        state: "completed",
+        slot_number: 1,
+        fencing_token: index,
+        queued_at: queued_at,
+        started_at: started_at,
+        last_heartbeat_at: finished_at,
+        finished_at: finished_at,
+        wait_duration_ms: index * 350,
+        run_duration_ms: duration_ms,
+        exit_status: 0,
+        peak_memory_bytes: (350 + index * 180) * 1_048_576
+      })
+      |> Repo.insert!()
+    end)
+
+    {:ok, _operation} =
+      PtcManager.ResourceOperations.request(
+        %{
+          worker_id: worker.id,
+          repository_id: repository.id,
+          job_id: active_job.id,
+          agent_run_id: implementer_run.id,
+          invocation_id: "demo-active-test",
+          label: "test",
+          priority: 300,
+          state: "queued"
+        },
+        DateTime.add(now, -25, :second)
+      )
+
+    {:ok, operation} =
+      PtcManager.ResourceOperations.claim_next(worker.id, DateTime.add(now, -20, :second))
+
+    {:ok, _operation} =
+      PtcManager.ResourceOperations.mark_running(
+        operation.id,
+        operation.attempt_token,
+        %{wrapper_pid: 42_001, cgroup_path: "/demo/operation-test"},
+        DateTime.add(now, -19, :second)
+      )
+  end
 
   IO.puts(
     "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation."

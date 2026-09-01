@@ -20,6 +20,8 @@ defmodule PtcManager.Operations.Worker do
 
     has_many :agent_runs, PtcManager.Operations.AgentRun
     has_many :worktree_allocations, PtcManager.Operations.WorktreeAllocation
+    has_many :resource_operations, PtcManager.Operations.ResourceOperation
+    has_many :capacity_changes, PtcManager.Operations.CapacityChange
 
     timestamps(type: :utc_datetime_usec)
   end

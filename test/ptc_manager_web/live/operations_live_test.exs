@@ -2,6 +2,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
   alias PtcManager.{CapacitySettings, Operations}
+  alias PtcManager.ResourceOperations
   alias PtcManager.Operations.{AgentAction, Job, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManagerWeb.OperationsLive
@@ -43,12 +44,17 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     original_capacity = CapacitySettings.current()
 
     {:ok, _setting} =
-      CapacitySettings.update(%{light_agent_capacity: 2, heavy_agent_capacity: 1})
+      CapacitySettings.update(%{
+        light_agent_capacity: 2,
+        heavy_agent_capacity: 1,
+        operation_capacity: 1
+      })
 
     on_exit(fn ->
       CapacitySettings.update(%{
         light_agent_capacity: original_capacity.light_agent_capacity,
-        heavy_agent_capacity: original_capacity.heavy_agent_capacity
+        heavy_agent_capacity: original_capacity.heavy_agent_capacity,
+        operation_capacity: original_capacity.operation_capacity
       })
     end)
 
@@ -130,6 +136,23 @@ defmodule PtcManagerWeb.OperationsLiveTest do
         started_at: DateTime.add(now, -120, :second),
         last_heartbeat_at: now
       })
+
+    {:ok, _resource_operation} =
+      ResourceOperations.request(%{
+        worker_id: worker.id,
+        repository_id: repository.id,
+        job_id: job.id,
+        agent_run_id: run.id,
+        invocation_id: "operations-live-test",
+        label: "test",
+        priority: 20,
+        state: "queued"
+      })
+
+    {:ok, resource_operation} = ResourceOperations.claim_next(worker.id)
+
+    {:ok, resource_operation} =
+      ResourceOperations.mark_running(resource_operation.id, resource_operation.attempt_token)
 
     priority_action =
       %AgentAction{}
@@ -214,6 +237,9 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#metric-agents", "Herdr online")
     assert has_element?(view, "#light-agent-slots", "1/2")
     assert has_element?(view, "#heavy-agent-slots", "1/1")
+    assert has_element?(view, "#operation-slots", "1/1")
+    assert has_element?(view, "#resource-operation-#{resource_operation.id}", "test")
+    assert has_element?(view, "#resource-operation-#{resource_operation.id}", "Operation slot 1")
     assert has_element?(view, "#light-agent-slots", "1 available")
     assert has_element?(view, "#heavy-agent-slots", "0 available")
     assert has_element?(view, "#work-queue")
@@ -273,7 +299,9 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert Repo.get!(AgentAction, daily_action.id).state == "cancelled"
 
     send(view.pid, :metrics_tick)
-    assert render(view) =~ "Light: planning and analysis"
+
+    assert render(view) =~
+             "Agent sessions and expensive command process trees have separate limits"
   end
 
   defp authenticated_conn(conn),

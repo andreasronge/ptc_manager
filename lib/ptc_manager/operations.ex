@@ -1036,27 +1036,37 @@ defmodule PtcManager.Operations do
           })
           |> Repo.update!()
 
+          run_attrs = %{
+            worker_id: worker.id,
+            job_id: job.id,
+            role: Map.get(dispatch, :role, "implementer"),
+            state: "working",
+            agent_name: Map.get(dispatch, :agent_name),
+            status_text: "Implementing the approved issue in an isolated worktree.",
+            started_at: lifecycle_now,
+            last_heartbeat_at: lifecycle_now,
+            herdr_workspace: dispatch.workspace_id,
+            herdr_pane: dispatch.pane_id,
+            herdr_session: dispatch.session,
+            external_key: dispatch.external_key,
+            fencing_token: fencing_token,
+            worker_incarnation_id: worker.worker_incarnation_id,
+            herdr_incarnation_id: worker.herdr_incarnation_id,
+            coordinator_incarnation_id: worker.coordinator_incarnation_id
+          }
+
           run =
-            %AgentRun{}
-            |> AgentRun.changeset(%{
-              worker_id: worker.id,
-              job_id: job.id,
-              role: Map.get(dispatch, :role, "implementer"),
-              state: "working",
-              agent_name: Map.get(dispatch, :agent_name),
-              status_text: "Implementing the approved issue in an isolated worktree.",
-              started_at: lifecycle_now,
-              last_heartbeat_at: lifecycle_now,
-              herdr_workspace: dispatch.workspace_id,
-              herdr_pane: dispatch.pane_id,
-              herdr_session: dispatch.session,
-              external_key: dispatch.external_key,
-              fencing_token: fencing_token,
-              worker_incarnation_id: worker.worker_incarnation_id,
-              herdr_incarnation_id: worker.herdr_incarnation_id,
-              coordinator_incarnation_id: worker.coordinator_incarnation_id
-            })
-            |> Repo.insert!()
+            case Repo.get_by(AgentRun, job_id: job.id, fencing_token: fencing_token) do
+              nil ->
+                %AgentRun{}
+                |> AgentRun.changeset(run_attrs)
+                |> Repo.insert!()
+
+              existing ->
+                existing
+                |> AgentRun.changeset(run_attrs)
+                |> Repo.update!()
+            end
 
           insert_audit!(%{
             actor: "worker:#{worker_key}",

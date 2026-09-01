@@ -1,0 +1,42 @@
+# shellcheck shell=sh
+# Source this file inside a managed Herdr pane. It intentionally modifies the
+# current interactive shell so every later agent process inherits the boundary.
+
+ptc_context_path=$1
+ptc_context_id=$2
+ptc_agent_memory_high=$3
+ptc_agent_memory_max=$4
+ptc_operation_wrapper=$5
+
+case "$ptc_context_id" in
+  *[!A-Za-z0-9_-]*|'') echo "invalid PtcManager context id" >&2; return 1 ;;
+esac
+
+ptc_cgroup_relative=$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup)
+ptc_current_cgroup="/sys/fs/cgroup${ptc_cgroup_relative}"
+
+case "$ptc_current_cgroup" in
+  */ptc-agent-*/processes) ptc_service_cgroup=$(dirname "$(dirname "$ptc_current_cgroup")") ;;
+  */server) ptc_service_cgroup=$(dirname "$ptc_current_cgroup") ;;
+  *) echo "Herdr cgroup delegation is not initialized" >&2; return 1 ;;
+esac
+
+ptc_agent_cgroup="$ptc_service_cgroup/ptc-agent-$ptc_context_id"
+ptc_agent_processes="$ptc_agent_cgroup/processes"
+
+mkdir -p "$ptc_agent_processes" || return 1
+printf '%s\n' "$ptc_agent_memory_high" >"$ptc_agent_cgroup/memory.high" || return 1
+printf '%s\n' "$ptc_agent_memory_max" >"$ptc_agent_cgroup/memory.max" || return 1
+
+ptc_controllers=$(cat "$ptc_agent_cgroup/cgroup.controllers")
+case " $ptc_controllers " in *" memory "*) printf '+memory\n' >"$ptc_agent_cgroup/cgroup.subtree_control" || return 1 ;; esac
+case " $ptc_controllers " in *" pids "*) printf '+pids\n' >"$ptc_agent_cgroup/cgroup.subtree_control" || return 1 ;; esac
+printf '%s\n' "$$" >"$ptc_agent_processes/cgroup.procs" || return 1
+
+export PTC_MANAGED_OPERATION_CONTEXT="$ptc_context_path"
+export PTC_OPERATION_WRAPPER="$ptc_operation_wrapper"
+export PTC_AGENT_CGROUP="$ptc_agent_cgroup"
+
+unset ptc_context_path ptc_context_id ptc_agent_memory_high ptc_agent_memory_max
+unset ptc_operation_wrapper ptc_cgroup_relative ptc_current_cgroup
+unset ptc_service_cgroup ptc_agent_cgroup ptc_agent_processes ptc_controllers
