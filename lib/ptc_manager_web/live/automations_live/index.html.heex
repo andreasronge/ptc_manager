@@ -1,0 +1,139 @@
+<div class="space-y-10">
+  <section
+    :for={{repository, rows} <- @groups}
+    id={"automations-#{repository.id}"}
+    class="space-y-3"
+  >
+    <h2 :if={is_nil(@selected_repository)} class="text-lg font-semibold text-teal-200">
+      {repository_key(repository)}
+    </h2>
+    <div class="overflow-x-auto rounded-2xl border border-white/10 bg-slate-900/60">
+      <table class="min-w-full text-sm">
+        <thead class="text-left text-[11px] uppercase tracking-wide text-slate-500">
+          <tr>
+            <th class="px-4 py-3 font-medium">Automation</th>
+            <th class="px-4 py-3 font-medium">On</th>
+            <th class="px-4 py-3 font-medium">How it runs</th>
+            <th class="px-4 py-3 font-medium">Agent</th>
+            <th class="px-4 py-3 font-medium">Last run</th>
+            <th class="px-4 py-3 font-medium">Next run</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-white/5">
+          <tr
+            :for={row <- rows}
+            id={"automation-row-#{row.definition.id}"}
+            class="align-top transition hover:bg-white/[0.03]"
+          >
+            <td class="px-4 py-3">
+              <div class="flex flex-wrap items-center gap-2">
+                <.link
+                  navigate={page_path(:show, id: row.definition.id, repo: @repo_param)}
+                  class="font-medium text-white hover:text-teal-200"
+                >
+                  {row.definition.name}
+                </.link>
+                <span class="rounded-full bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+                  {if Automations.built_in?(row.definition), do: "built-in", else: "custom"}
+                </span>
+                <span class="font-mono text-[10px] text-slate-500">
+                  v{row.definition.current_version.version}
+                </span>
+              </div>
+              <p class="mt-1 max-w-md text-xs leading-5 text-slate-500">
+                {row.definition.description}
+              </p>
+            </td>
+            <td class="px-4 py-3">
+              <.switch
+                id={"automation-switch-#{row.definition.id}"}
+                enabled={row.definition.enabled}
+                event="toggle-definition"
+                value={row.definition.id}
+                label={"Enable #{row.definition.name}"}
+              />
+            </td>
+            <td
+              phx-click={JS.navigate(page_path(:show, id: row.definition.id, repo: @repo_param))}
+              class="cursor-pointer px-4 py-3 text-slate-300"
+            >
+              {row.summary}
+            </td>
+            <td
+              phx-click={JS.navigate(page_path(:show, id: row.definition.id, repo: @repo_param))}
+              class="cursor-pointer whitespace-nowrap px-4 py-3 text-slate-300"
+            >
+              {agent_label(row.definition.current_version)}
+            </td>
+            <td
+              phx-click={JS.navigate(page_path(:show, id: row.definition.id, repo: @repo_param))}
+              class="cursor-pointer whitespace-nowrap px-4 py-3"
+            >
+              <%= if row.last_run do %>
+                <span class={[
+                  "rounded-full px-2 py-0.5 text-xs",
+                  state_classes(row.last_run.state)
+                ]}>
+                  {row.last_run.state}
+                </span>
+                <span class="ml-2 text-xs text-slate-500">
+                  {relative(@now, row.last_run.requested_at)}
+                </span>
+              <% else %>
+                <span class="text-xs text-slate-600">Never</span>
+              <% end %>
+            </td>
+            <td
+              phx-click={JS.navigate(page_path(:show, id: row.definition.id, repo: @repo_param))}
+              class="cursor-pointer whitespace-nowrap px-4 py-3 text-xs text-slate-400"
+            >
+              <%= if row.next_run do %>
+                {local_time(row.next_run.next_run_at, row.next_run.time_zone)}
+              <% else %>
+                <span class="text-slate-600">—</span>
+              <% end %>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p :if={rows == []} class="px-4 py-6 text-sm text-slate-500">
+        No automations for this repository yet.
+      </p>
+    </div>
+  </section>
+
+  <p :if={@groups == []} class="text-sm text-slate-500">
+    Register a repository on Configuration to receive its automations.
+  </p>
+
+  <section :if={@latest_runs} id="latest-runs">
+    <h2 class="text-lg font-semibold">Latest runs</h2>
+    <ol class="mt-3 divide-y divide-white/5 rounded-2xl border border-white/10 bg-slate-900/60">
+      <li
+        :for={invocation <- @latest_runs}
+        id={"latest-run-#{invocation.id}"}
+        class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm"
+      >
+        <.link
+          navigate={
+            page_path(:show,
+              id: invocation.automation_definition_version.automation_definition.id,
+              repo: @repo_param
+            ) <> "#automation-runs"
+          }
+          class="font-medium text-white hover:text-teal-200"
+        >
+          {invocation.automation_definition_version.automation_definition.name}
+        </.link>
+        <span class="text-xs text-slate-500">{invocation.trigger_type}</span>
+        <span class={["rounded-full px-2 py-0.5 text-xs", state_classes(invocation.state)]}>
+          {invocation.state}
+        </span>
+        <span class="ml-auto text-xs text-slate-500">{timestamp(invocation.requested_at)}</span>
+      </li>
+    </ol>
+    <p :if={@latest_runs == []} class="mt-3 text-sm text-slate-500">
+      No automation has run for this repository yet.
+    </p>
+  </section>
+</div>

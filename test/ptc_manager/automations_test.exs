@@ -274,6 +274,41 @@ defmodule PtcManager.AutomationsTest do
     refute Enum.any?(manager_digest.triggers, &(&1.trigger_type == "manual" and &1.enabled))
   end
 
+  test "a definition may hold several schedules and the bootstrap recognises the built-in one by its marker" do
+    repository = repository_fixture(%{github_name: "ptc_runner"})
+    definition = Automations.get_definition(repository, "daily_digest")
+    built_in = Enum.find(definition.triggers, &(&1.trigger_type == "schedule"))
+    assert built_in.configuration == %{"built_in" => true}
+    assert Automations.default_trigger?(definition, built_in)
+
+    assert {:ok, renamed} =
+             Automations.update_trigger(built_in, %{label: "Renamed by the maintainer"})
+
+    assert {:ok, extra} =
+             Automations.create_trigger(
+               definition,
+               PtcManager.Automations.Schedule.new_trigger_attrs()
+             )
+
+    refute Automations.default_trigger?(definition, extra)
+
+    assert :ok = Automations.ensure_defaults(repository)
+
+    schedules =
+      Automations.get_definition(repository, "daily_digest").triggers
+      |> Enum.filter(&(&1.trigger_type == "schedule"))
+
+    assert Enum.map(schedules, & &1.id) |> Enum.sort() == Enum.sort([renamed.id, extra.id])
+
+    assert {:ok, _deleted} = Automations.delete_trigger(extra)
+
+    assert Automations.trigger_summary(Automations.get_definition(repository, "daily_digest")) ==
+             "Every day at 02:00 · Run now"
+
+    assert Automations.slug_key(repository, "Daily digest") == "daily_digest_2"
+    assert Automations.slug_key(repository, "2 Fast & Furious") == "automation_2_fast_furious"
+  end
+
   test "manual repository actions create one immutable invocation per occurrence" do
     repository = repository_fixture(%{github_name: "ptc_runner"})
     definition = Automations.get_definition(repository, "nightly_ci_investigation")

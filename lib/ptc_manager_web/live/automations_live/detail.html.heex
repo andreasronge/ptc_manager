@@ -1,0 +1,514 @@
+<div class="space-y-8">
+  <section
+    id="automation-header"
+    class="rounded-2xl border border-white/10 bg-slate-900/70 p-5 sm:p-6"
+  >
+    <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">{@definition.name}</h1>
+          <span class="rounded-full bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+            {if @built_in?, do: "built-in", else: "custom"}
+          </span>
+          <span class="rounded-full bg-white/5 px-2 py-0.5 font-mono text-[10px] text-slate-400">
+            v{@definition.current_version.version}
+          </span>
+        </div>
+        <p class="mt-1 text-xs text-teal-300">{repository_key(@definition.repository)}</p>
+        <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">{@definition.description}</p>
+      </div>
+      <div class="flex shrink-0 items-center gap-3">
+        <span class="text-xs text-slate-500">
+          {if @definition.enabled, do: "Enabled", else: "Paused"}
+        </span>
+        <.switch
+          id="automation-enabled"
+          enabled={@definition.enabled}
+          event="toggle-definition"
+          value={@definition.id}
+          label="Enable this automation"
+        />
+        <button
+          :if={manual = manual_trigger(@definition)}
+          id="run-now"
+          phx-click="run"
+          phx-value-trigger-id={manual.id}
+          disabled={!@definition.enabled}
+          title={if(!@definition.enabled, do: "Enable the automation first")}
+          class="rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          {manual.label}
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section id="automation-triggers" class="space-y-3">
+    <div>
+      <h2 class="text-lg font-semibold">When it runs</h2>
+      <p class="mt-1 text-xs text-slate-500">
+        Each trigger can be paused on its own. Nothing runs while the automation itself is paused.
+      </p>
+    </div>
+
+    <ul class="space-y-2">
+      <li
+        :for={trigger <- sorted_triggers(@definition.triggers)}
+        id={"trigger-#{trigger.id}"}
+        class="rounded-2xl border border-white/10 bg-slate-900/60"
+      >
+        <div class="flex flex-wrap items-center gap-3 px-4 py-3">
+          <.switch
+            id={"trigger-switch-#{trigger.id}"}
+            enabled={trigger.enabled}
+            event="toggle-trigger"
+            value={trigger.id}
+            label={"Enable trigger #{trigger_title(trigger)}"}
+          />
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium text-white">
+              <span class="mr-2 rounded bg-white/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+                {trigger_name(trigger)}
+              </span>
+              {trigger_title(trigger)}
+            </p>
+            <p class="mt-0.5 text-xs text-slate-500">{trigger_detail(trigger)}</p>
+          </div>
+          <button
+            type="button"
+            phx-click="toggle-trigger-editor"
+            phx-value-id={trigger.id}
+            class="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-white/20 hover:text-white"
+          >
+            {if MapSet.member?(@open_trigger_ids, trigger.id), do: "Close", else: "Edit"}
+          </button>
+          <button
+            :if={!Automations.default_trigger?(@definition, trigger)}
+            type="button"
+            phx-click="delete-trigger"
+            phx-value-id={trigger.id}
+            data-confirm="Remove this trigger? Runs it already queued are not affected."
+            class="rounded-lg px-2 py-1.5 text-xs text-slate-500 hover:text-rose-300"
+          >
+            Remove
+          </button>
+        </div>
+
+        <div
+          :for={form <- editor_forms(@open_trigger_ids, @trigger_forms, trigger)}
+          id={"trigger-editor-#{trigger.id}"}
+          class="border-t border-white/10 px-4 py-4"
+        >
+          <.form
+            for={form}
+            id={"trigger-form-#{trigger.id}"}
+            phx-change="validate-trigger"
+            phx-submit="save-trigger"
+            class="grid gap-3 sm:grid-cols-2"
+          >
+            <input type="hidden" name="trigger_id" value={trigger.id} />
+
+            <%= case trigger.trigger_type do %>
+              <% "schedule" -> %>
+                <.select_field field={form[:preset]} label="Repeats" options={preset_options()} />
+                <.text_field
+                  :if={form[:preset].value in ["daily", "weekdays", "weekly"]}
+                  field={form[:time]}
+                  label="At"
+                  type="time"
+                  required
+                />
+                <.select_field
+                  :if={form[:preset].value == "weekly"}
+                  field={form[:weekday]}
+                  label="On"
+                  options={weekday_options()}
+                />
+                <.select_field
+                  field={form[:time_zone]}
+                  label="Time zone"
+                  options={time_zone_options()}
+                />
+                <.text_field
+                  :if={form[:time_zone].value == "other"}
+                  field={form[:other_time_zone]}
+                  label="IANA time zone"
+                  placeholder="Asia/Tokyo"
+                />
+                <.text_field
+                  field={form[:cron_expression]}
+                  label={
+                    if(form[:preset].value == "custom",
+                      do: "Cron expression",
+                      else: "Stored cron expression"
+                    )
+                  }
+                  readonly={form[:preset].value != "custom"}
+                  hint="Minute, hour, day of month, month, day of week."
+                  class="sm:col-span-2 [&_input]:font-mono"
+                />
+                <div class="sm:col-span-2 rounded-xl bg-black/20 p-3 text-xs">
+                  <p class="font-semibold text-slate-300">Next runs</p>
+                  <ol class="mt-1 space-y-0.5 text-slate-400">
+                    <li :for={occurrence <- schedule_preview(form)}>
+                      {occurrence_label(occurrence)}
+                    </li>
+                  </ol>
+                  <p :if={schedule_preview(form) == []} class="mt-1 text-slate-500">
+                    Fix the fields above to preview the next runs.
+                  </p>
+                </div>
+              <% "contextual" -> %>
+                <.text_field field={form[:label]} label="Button label" required />
+                <.select_field
+                  field={form[:surface]}
+                  label="Shown on"
+                  options={surface_options(@definition)}
+                  hint="The surface follows what the automation targets."
+                />
+              <% _manual -> %>
+                <.text_field field={form[:label]} label="Button label" required />
+            <% end %>
+
+            <div class="flex gap-2 sm:col-span-2">
+              <button class="rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15">
+                Save {String.downcase(trigger_name(trigger))}
+              </button>
+              <button
+                type="button"
+                phx-click="toggle-trigger-editor"
+                phx-value-id={trigger.id}
+                class="rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-white"
+              >
+                Cancel
+              </button>
+            </div>
+          </.form>
+        </div>
+      </li>
+    </ul>
+
+    <div class="flex flex-wrap gap-2">
+      <button
+        :if={offer_manual?(@definition)}
+        type="button"
+        phx-click="add-trigger"
+        phx-value-type="manual"
+        class="rounded-lg border border-dashed border-white/15 px-3 py-1.5 text-xs text-slate-400 hover:border-white/30 hover:text-white"
+      >
+        + Run now
+      </button>
+      <button
+        :if={offer_schedule?(@definition)}
+        id="add-schedule"
+        type="button"
+        phx-click="add-trigger"
+        phx-value-type="schedule"
+        class="rounded-lg border border-dashed border-white/15 px-3 py-1.5 text-xs text-slate-400 hover:border-white/30 hover:text-white"
+      >
+        + Schedule
+      </button>
+      <button
+        :if={offer_button?(@definition)}
+        id="add-button"
+        type="button"
+        phx-click="add-trigger"
+        phx-value-type="button"
+        class="rounded-lg border border-dashed border-white/15 px-3 py-1.5 text-xs text-slate-400 hover:border-white/30 hover:text-white"
+      >
+        + Button
+      </button>
+      <p
+        :if={!offer_schedule?(@definition)}
+        class="self-center text-xs text-slate-600"
+      >
+        Schedules need a repository-level automation; this one acts on a specific issue or pull request.
+      </p>
+    </div>
+  </section>
+
+  <.form
+    for={@settings_form}
+    id="automation-settings-form"
+    phx-change="validate-settings"
+    phx-submit="save-settings"
+    class="space-y-8"
+  >
+    <section id="automation-identity" class="grid gap-4 lg:grid-cols-2">
+      <.text_field field={@settings_form[:name]} label="Name" required />
+      <.text_field field={@settings_form[:description]} label="Description" required />
+    </section>
+
+    <section id="automation-agent" class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold">Agent and workspace</h2>
+        <p class="mt-1 text-xs text-slate-500">
+          Which agent kind may run this automation, where it works, and what it may do on GitHub.
+        </p>
+      </div>
+      <div class="grid gap-4 lg:grid-cols-2">
+        <.select_field
+          field={@settings_form[:agent_mode]}
+          label="Agent policy"
+          options={DefinitionForm.agent_modes()}
+        />
+        <.select_field
+          field={@settings_form[:agent_kind]}
+          label="Agent kind"
+          options={agent_kind_options(@workers, @settings_form[:agent_kind].value)}
+          disabled={@settings_form[:agent_mode].value == "any"}
+          hint="Kinds reported by online workers, plus configured profiles marked offline."
+        />
+        <%= if @built_in? do %>
+          <div class="text-xs text-slate-400">
+            Workspace
+            <p class="mt-1 rounded-lg border border-white/5 bg-black/20 p-2 text-sm text-slate-300">
+              {profile_label(@definition.current_version.execution_profile)}
+            </p>
+            <span class="mt-1 block leading-5 text-slate-500">
+              Built-in automations run through a fixed adapter, so their workspace cannot change.
+            </span>
+          </div>
+        <% else %>
+          <label class="block text-xs text-slate-400">
+            Workspace
+            <select
+              disabled
+              class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm text-white disabled:opacity-60"
+            >
+              <option selected>
+                {profile_label(@definition.current_version.execution_profile)}
+              </option>
+            </select>
+            <span class="mt-1 block leading-5 text-slate-500">
+              Custom automations inspect a read-only snapshot of the default branch. A writable worktree that can open a pull request is planned but not available yet.
+            </span>
+          </label>
+        <% end %>
+        <.select_field
+          field={@settings_form[:github_access]}
+          label="GitHub access"
+          options={
+            Enum.map(DefinitionForm.github_access_options(), fn {label, value} ->
+              {label, value,
+               value == "brokered_publish" and not @built_in? and
+                 @definition.current_version.github_access != "brokered_publish"}
+            end)
+          }
+        />
+      </div>
+    </section>
+
+    <section id="automation-prompt" class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold">Prompt</h2>
+        <p class="mt-1 text-xs text-slate-500">
+          The complete instruction the agent receives, including any safety rules you want. PtcManager only adds target facts and its machine result protocol.
+        </p>
+      </div>
+      <.textarea_field field={@settings_form[:prompt]} label="Prompt" rows={10} />
+      <div class="flex flex-wrap gap-3">
+        <button
+          type="button"
+          phx-click="show-prompt-preview"
+          class="rounded-xl border border-teal-400/25 bg-teal-400/[0.06] px-4 py-2 text-sm font-semibold text-teal-200 hover:border-teal-400/40"
+        >
+          Preview composed prompt
+        </button>
+        <button
+          :if={@built_in?}
+          type="button"
+          phx-click="restore-suggested-prompt"
+          data-confirm="Replace the prompt with PtcManager's suggestion as a new version?"
+          class="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 hover:border-white/20 hover:text-white"
+        >
+          Restore PtcManager suggestion
+        </button>
+      </div>
+    </section>
+
+    <details
+      id="automation-advanced"
+      open={@advanced_open?}
+      class="rounded-2xl border border-white/10 bg-slate-900/60 p-4"
+    >
+      <summary phx-click="toggle-advanced" class="cursor-pointer text-sm font-semibold">
+        Advanced
+      </summary>
+      <div class="mt-4 grid gap-4 lg:grid-cols-4">
+        <div class="text-xs text-slate-400">
+          Internal key
+          <p class="mt-1 rounded-lg border border-white/5 bg-black/20 p-2 font-mono text-sm text-slate-300">
+            {@definition.key}
+          </p>
+        </div>
+        <.select_field
+          field={@settings_form[:queue_lane]}
+          label="Queue lane"
+          options={DefinitionForm.queue_lanes()}
+        />
+        <.select_field
+          field={@settings_form[:resource_class]}
+          label="Resource class"
+          options={DefinitionForm.resource_classes()}
+        />
+        <.text_field
+          field={@settings_form[:timeout_minutes]}
+          label="Timeout (minutes)"
+          type="number"
+          min="1"
+          max="1440"
+        />
+      </div>
+    </details>
+
+    <div class="flex flex-wrap items-center gap-4">
+      <button class="rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300">
+        Save new version
+      </button>
+      <p class="text-xs text-slate-500">
+        Saving creates v{@definition.current_version.version + 1}. Runs already queued keep their version.
+      </p>
+    </div>
+  </.form>
+
+  <section id="automation-runs" class="space-y-3">
+    <div>
+      <h2 class="text-lg font-semibold">Runs</h2>
+      <p class="mt-1 text-xs text-slate-500">
+        Newest first, across every version of this automation.
+      </p>
+    </div>
+    <ol class="space-y-2">
+      <li
+        :for={run <- @runs}
+        id={"run-#{run.id}"}
+        class="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3"
+      >
+        <div class="flex flex-wrap items-center gap-3">
+          <span class={["rounded-full px-2.5 py-1 text-xs", state_classes(run.state)]}>
+            {run.state}
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium text-white">{run_title(run)}</p>
+            <p class="mt-0.5 text-xs text-slate-500">
+              {timestamp(run.requested_at)} · by {run.requested_by}
+              <span :if={run.selected_agent_kind}>· {run.selected_agent_kind}</span>
+              <span :if={run.source_sha} class="font-mono">
+                · {String.slice(run.source_sha, 0, 12)}
+              </span>
+            </p>
+          </div>
+          <button
+            :if={run.result_markdown}
+            type="button"
+            phx-click="toggle-run"
+            phx-value-id={run.id}
+            class="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-white/20 hover:text-white"
+          >
+            {if MapSet.member?(@open_run_ids, run.id), do: "Hide result", else: "Show result"}
+          </button>
+        </div>
+        <p :if={run.last_error} class="mt-2 text-xs text-rose-300">{run.last_error}</p>
+        <div
+          :if={run.result_markdown && MapSet.member?(@open_run_ids, run.id)}
+          id={"run-result-#{run.id}"}
+          class="mt-3 border-t border-white/10 pt-3 text-sm leading-6 text-slate-300 [&_a]:text-teal-300 [&_a]:underline [&_code]:rounded [&_code]:bg-black/30 [&_code]:px-1 [&_h1]:mt-4 [&_h1]:text-lg [&_h1]:font-semibold [&_h1]:text-white [&_h2]:mt-4 [&_h2]:font-semibold [&_h2]:text-white [&_h3]:mt-3 [&_h3]:font-semibold [&_li]:my-1 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-black/40 [&_pre]:p-3 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
+        >
+          {markdown_html(run.result_markdown)}
+        </div>
+      </li>
+    </ol>
+    <p :if={@runs == []} class="text-sm text-slate-500">This automation has not run yet.</p>
+    <button
+      :if={@more_runs?}
+      id="show-more-runs"
+      type="button"
+      phx-click="show-more-runs"
+      class="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-white/20 hover:text-white"
+    >
+      Show more
+    </button>
+  </section>
+
+  <section id="automation-versions" class="text-xs text-slate-500">
+    Version history: {@definition.versions
+    |> Enum.sort_by(& &1.version, :desc)
+    |> Enum.map_join(" · ", &"v#{&1.version} by #{&1.created_by}")}
+  </section>
+
+  <section :if={length(@repositories) > 1} id="automation-copy" class="text-xs text-slate-500">
+    <p class="font-semibold text-slate-400">Copy to another repository</p>
+    <div class="mt-2 flex flex-wrap gap-2">
+      <button
+        :for={repository <- @repositories}
+        :if={repository.id != @definition.repository_id}
+        phx-click="duplicate"
+        phx-value-repository-id={repository.id}
+        class="rounded-lg border border-white/10 px-3 py-1.5 hover:text-white"
+      >
+        {repository_key(repository)}
+      </button>
+    </div>
+  </section>
+
+  <div
+    :if={@preview_open?}
+    id="automation-prompt-preview-overlay"
+    class="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 p-0 backdrop-blur-sm sm:items-center sm:p-6"
+    phx-window-keydown="close-prompt-preview"
+    phx-key="escape"
+  >
+    <section
+      id="automation-prompt-preview"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="automation-prompt-preview-title"
+      phx-click-away="close-prompt-preview"
+      class="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-t-3xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/50 sm:rounded-3xl"
+    >
+      <header class="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-4 sm:px-6">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">
+            Repository prompt · version {@definition.current_version.version}
+          </p>
+          <h2 id="automation-prompt-preview-title" class="mt-1 text-xl font-semibold text-white">
+            {@definition.name}
+          </h2>
+          <p class="mt-1 text-xs text-slate-500">{repository_key(@definition.repository)}</p>
+        </div>
+        <button
+          type="button"
+          phx-click="close-prompt-preview"
+          class="rounded-xl border border-white/10 px-3 py-2 text-sm font-semibold text-slate-300 hover:border-white/20 hover:text-white"
+        >
+          Close
+        </button>
+      </header>
+
+      <div class="overflow-y-auto p-5 sm:p-6">
+        <div class="mb-4 grid gap-3 text-sm leading-6 sm:grid-cols-2">
+          <div class="rounded-xl border border-teal-400/20 bg-teal-400/[0.06] p-4 text-teal-100/80">
+            <p class="font-semibold text-teal-100">Your complete prompt</p>
+            <p class="mt-1">
+              The automation has one editable instruction. PtcManager does not add hidden safety prose.
+            </p>
+          </div>
+          <div class="rounded-xl border border-sky-400/20 bg-sky-400/[0.06] p-4 text-sky-100/80">
+            <p class="font-semibold text-sky-100">Generated runtime context</p>
+            <p class="mt-1">
+              Repository, issue or PR, branch, SHA, and available GitHub access are inserted from the real queued run. Actions that return private information also receive a schema and result destination.
+            </p>
+          </div>
+        </div>
+        <p class="mb-3 text-xs leading-5 text-slate-500">
+          This preview uses safe example target values and the saved version, not unsaved edits.
+        </p>
+        <pre
+          id={"automation-full-prompt-preview-#{@definition.id}"}
+          class="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-slate-950/80 p-4 font-mono text-xs leading-6 text-slate-200 sm:p-5"
+        >{prompt_preview(@definition)}</pre>
+      </div>
+    </section>
+  </div>
+</div>

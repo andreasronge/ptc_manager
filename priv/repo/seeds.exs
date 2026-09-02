@@ -104,6 +104,7 @@ if Repo.aggregate(Repository, :count) == 0 do
         "herdr" => true,
         "codex" => true,
         "claude" => true,
+        "agent_kinds" => ["claude", "codex"],
         "implementation_slots" =>
           if(demo_mode,
             do: 1,
@@ -240,6 +241,49 @@ if Repo.aggregate(Repository, :count) == 0 do
   end
 
   if demo_mode do
+    # A few finished automation runs so the Automations index has last runs
+    # and the daily update's page has a history to open.
+    alias PtcManager.Automations
+    alias PtcManager.Automations.Invocation
+
+    digest = Automations.get_definition(repository, "daily_digest")
+    nightly = Automations.get_definition(repository, "nightly_ci_investigation")
+
+    [
+      {digest, "schedule", "succeeded", 26 * 60,
+       "## Daily update\n\nTwo pull requests merged: the trace summary now records retry counts, and the CLI prints attempt boundaries. No breaking changes."},
+      {digest, "schedule", "no_changes", 50 * 60,
+       "No repository change was needed. Nothing merged during the previous day."},
+      {nightly, "manual", "failed", 3 * 60, nil}
+    ]
+    |> Enum.each(fn {definition, trigger_type, state, minutes_ago, markdown} ->
+      requested_at = DateTime.add(now, -minutes_ago, :minute)
+      trigger = Enum.find(definition.triggers, &(&1.trigger_type == trigger_type))
+
+      %Invocation{}
+      |> Invocation.changeset(%{
+        repository_id: repository.id,
+        automation_definition_version_id: definition.current_version.id,
+        automation_trigger_id: trigger && trigger.id,
+        trigger_type: trigger_type,
+        trigger_context: %{},
+        state: state,
+        result_status: if(markdown, do: "completed"),
+        result_markdown: markdown,
+        selected_agent_kind: "codex",
+        selected_agent_name: "codex-demo",
+        requested_by: if(trigger_type == "schedule", do: "scheduler", else: "demo-maintainer"),
+        requested_at: requested_at,
+        started_at: DateTime.add(requested_at, 20, :second),
+        ended_at: DateTime.add(requested_at, 400, :second),
+        last_error:
+          if(state == "failed",
+            do: "The agent exited before writing a result file (exit status 1)."
+          )
+      })
+      |> Repo.insert!()
+    end)
+
     # Deterministic machine usage history so the Operations chart has a shape:
     # every 30 seconds for the last hour, every 5 minutes for the last day, and
     # hourly for the rest of the week.

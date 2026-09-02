@@ -81,7 +81,7 @@ defmodule PtcManagerWeb.Layouts do
             </.nav_link>
             <.nav_link
               href={~p"/automations"}
-              active={@current_path == "/automations"}
+              active={String.starts_with?(@current_path, "/automations")}
               icon="hero-bolt-mini"
             >
               Automations

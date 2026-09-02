@@ -40,6 +40,8 @@ defmodule PtcManagerWeb.Router do
       live "/operations/agents", OperationsLive, :agents
       live "/operations/performance", OperationsLive, :performance
       live "/automations", AutomationsLive, :index
+      live "/automations/new", AutomationsLive, :new
+      live "/automations/:id", AutomationsLive, :show
       live "/deployments", DeploymentsLive, :index
       live "/configuration", ConfigurationLive, :index
     end

@@ -4,9 +4,24 @@ defmodule PtcManager.Automations do
   import Ecto.Query
 
   alias Ecto.Multi
-  alias PtcManager.Automations.{Defaults, Definition, DefinitionVersion, Invocation, Trigger}
+
+  alias PtcManager.Automations.{
+    Defaults,
+    Definition,
+    DefinitionVersion,
+    Invocation,
+    Schedule,
+    Trigger
+  }
+
   alias PtcManager.Operations.{AgentAction, Repository}
   alias PtcManager.Repo
+
+  @invocation_preloads [
+    :repository,
+    :automation_trigger,
+    automation_definition_version: :automation_definition
+  ]
 
   def list_definitions(%Repository{id: repository_id}) do
     Definition
@@ -15,6 +30,74 @@ defmodule PtcManager.Automations do
     |> order_by([definition], asc: definition.name, asc: definition.id)
     |> preload([:repository, :current_version, :versions, :triggers])
     |> Repo.all()
+  end
+
+  def get_definition!(id) when is_integer(id) do
+    Definition
+    |> where([definition], is_nil(definition.archived_at))
+    |> preload([:repository, :current_version, :versions, :triggers])
+    |> Repo.get!(id)
+  end
+
+  @doc "Whether PtcManager ships this definition, as opposed to a maintainer-created one."
+  def built_in?(%Definition{} = definition),
+    do: Defaults.get(definition.repository, definition.key) != nil
+
+  @doc """
+  Whether the bootstrap would recreate this trigger if it were deleted.
+
+  Built-in schedules carry a marker in their configuration; other built-in
+  triggers are recognised by their type and surface, as the bootstrap does.
+  """
+  def default_trigger?(%Definition{} = definition, %Trigger{} = trigger) do
+    definition.key
+    |> Defaults.triggers(definition.repository)
+    |> Enum.any?(&matches_default?(&1, trigger))
+  end
+
+  @doc "A plain-language summary of the enabled triggers, such as \"Every day at 03:00 · Run now\"."
+  def trigger_summary(%Definition{triggers: triggers}) do
+    triggers
+    |> Enum.filter(& &1.enabled)
+    |> Enum.sort_by(&{trigger_order(&1.trigger_type), &1.id})
+    |> Enum.map(&trigger_description/1)
+    |> case do
+      [] -> "Paused"
+      parts -> Enum.join(parts, " · ")
+    end
+  end
+
+  def trigger_description(%Trigger{trigger_type: "schedule"} = trigger),
+    do: Schedule.describe(trigger.cron_expression)
+
+  def trigger_description(%Trigger{trigger_type: "manual"}), do: "Run now"
+
+  def trigger_description(%Trigger{trigger_type: "contextual"} = trigger),
+    do: "Button on #{surface_label(trigger.surface)}"
+
+  def surface_label("planning_issue"), do: "Planning issues"
+  def surface_label("delivery_pr"), do: "Delivery pull requests"
+  def surface_label(surface), do: surface
+
+  @doc "The surface a contextual button belongs on for a version's target type."
+  def surface_for_target("issue"), do: "planning_issue"
+  def surface_for_target("pull_request"), do: "delivery_pr"
+  def surface_for_target(_target_type), do: nil
+
+  @doc "Derives an unused internal key for a repository from a human-readable name."
+  def slug_key(%Repository{id: repository_id}, name) when is_binary(name) do
+    base =
+      name
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "_")
+      |> String.trim("_")
+      |> String.slice(0, 60)
+      |> String.trim_trailing("_")
+
+    base =
+      if base =~ ~r/\A[a-z]/, do: base, else: String.trim_trailing("automation_" <> base, "_")
+
+    available_key(repository_id, base)
   end
 
   def get_definition(%Repository{id: repository_id}, key) when is_binary(key) do
@@ -146,16 +229,14 @@ defmodule PtcManager.Automations do
     trigger |> Trigger.changeset(attrs) |> Repo.update()
   end
 
+  def delete_trigger(%Trigger{} = trigger), do: Repo.delete(trigger)
+
   def list_invocations(%Repository{id: repository_id}, limit_count \\ 100) do
     Invocation
     |> where([invocation], invocation.repository_id == ^repository_id)
     |> order_by([invocation], desc: invocation.requested_at, desc: invocation.id)
     |> limit(^limit_count)
-    |> preload([
-      :repository,
-      :automation_trigger,
-      automation_definition_version: :automation_definition
-    ])
+    |> preload(^@invocation_preloads)
     |> Repo.all()
   end
 
@@ -163,12 +244,50 @@ defmodule PtcManager.Automations do
     Invocation
     |> order_by([invocation], desc: invocation.requested_at, desc: invocation.id)
     |> limit(^limit_count)
-    |> preload([
-      :repository,
-      :automation_trigger,
-      automation_definition_version: :automation_definition
-    ])
+    |> preload(^@invocation_preloads)
     |> Repo.all()
+  end
+
+  @doc "Runs of one automation across all of its versions, newest first."
+  def list_invocations_for_definition(%Definition{id: definition_id}, opts \\ []) do
+    limit_count = Keyword.get(opts, :limit, 20)
+    offset_count = Keyword.get(opts, :offset, 0)
+
+    Invocation
+    |> join(:inner, [invocation], version in assoc(invocation, :automation_definition_version))
+    |> where([invocation, version], version.automation_definition_id == ^definition_id)
+    |> order_by([invocation], desc: invocation.requested_at, desc: invocation.id)
+    |> limit(^limit_count)
+    |> offset(^offset_count)
+    |> preload(^@invocation_preloads)
+    |> Repo.all()
+  end
+
+  @doc "The newest run of every automation in a repository, keyed by definition id."
+  def latest_invocation_by_definition(%Repository{id: repository_id}) do
+    ranked =
+      from invocation in Invocation,
+        join: version in assoc(invocation, :automation_definition_version),
+        where: invocation.repository_id == ^repository_id,
+        select: %{
+          id: invocation.id,
+          definition_id: version.automation_definition_id,
+          rank:
+            row_number()
+            |> over(
+              partition_by: version.automation_definition_id,
+              order_by: [desc: invocation.requested_at, desc: invocation.id]
+            )
+        }
+
+    from(invocation in Invocation,
+      join: newest in subquery(ranked),
+      on: newest.id == invocation.id,
+      where: newest.rank == 1,
+      select: {newest.definition_id, invocation}
+    )
+    |> Repo.all()
+    |> Map.new()
   end
 
   def get_trigger!(id) do
@@ -501,28 +620,51 @@ defmodule PtcManager.Automations do
   end
 
   defp ensure_default_triggers(definition, repository, spec) do
-    Enum.each(Defaults.triggers(spec.key, repository), fn attrs ->
-      case Repo.get_by(Trigger,
-             automation_definition_id: definition.id,
-             trigger_type: attrs.trigger_type,
-             surface: attrs.surface
-           ) do
-        nil ->
-          %Trigger{}
-          |> Trigger.changeset(
-            attrs
-            |> Map.put(:automation_definition_id, definition.id)
-            |> maybe_put_next_run()
-          )
-          |> Repo.insert!()
+    existing =
+      Trigger
+      |> where([trigger], trigger.automation_definition_id == ^definition.id)
+      |> Repo.all()
 
-        _existing ->
-          :ok
+    Defaults.triggers(spec.key, repository)
+    |> Enum.reject(fn attrs -> Enum.any?(existing, &matches_default?(attrs, &1)) end)
+    |> Enum.reduce_while(:ok, fn attrs, :ok ->
+      %Trigger{}
+      |> Trigger.changeset(
+        attrs
+        |> Map.put(:automation_definition_id, definition.id)
+        |> Map.put(:configuration, %{"built_in" => true})
+        |> maybe_put_next_run()
+      )
+      |> Repo.insert()
+      |> case do
+        {:ok, _trigger} -> {:cont, :ok}
+        {:error, changeset} -> {:halt, {:error, changeset}}
       end
     end)
+    |> case do
+      :ok ->
+        {:ok, Repo.preload(definition, [:current_version, :versions, :triggers], force: true)}
 
-    {:ok, Repo.preload(definition, [:current_version, :versions, :triggers], force: true)}
+      {:error, changeset} ->
+        {:error, changeset}
+    end
   end
+
+  # A definition may hold several schedules, so a built-in schedule is known by
+  # its marker rather than by its surface. Other trigger types stay unique per
+  # surface and are recognised the way they always were.
+  defp matches_default?(%{trigger_type: "schedule"}, %Trigger{} = trigger),
+    do: trigger.trigger_type == "schedule" and built_in_trigger?(trigger)
+
+  defp matches_default?(spec, %Trigger{} = trigger),
+    do: spec.trigger_type == trigger.trigger_type and spec.surface == trigger.surface
+
+  defp built_in_trigger?(%Trigger{configuration: configuration}),
+    do: is_map(configuration) and configuration["built_in"] == true
+
+  defp trigger_order("schedule"), do: 0
+  defp trigger_order("manual"), do: 1
+  defp trigger_order(_type), do: 2
 
   defp materialize_repository_invocation(
          trigger,
@@ -648,18 +790,9 @@ defmodule PtcManager.Automations do
     end
   end
 
-  defp next_run(expression, time_zone, from)
-       when is_binary(expression) and is_binary(time_zone) do
-    with {:ok, cron} <- Oban.Cron.Expression.parse(expression),
-         {:ok, local} <- DateTime.shift_zone(from, time_zone, Tz.TimeZoneDatabase),
-         %DateTime{} = next_local <- Oban.Cron.Expression.next_at(cron, local) do
-      DateTime.shift_zone(next_local, "Etc/UTC", Tz.TimeZoneDatabase)
-    end
-  rescue
-    _error -> {:error, :invalid_schedule}
-  end
+  defp next_run(expression, time_zone, from),
+    do: Schedule.next_run_at(expression, time_zone, from)
 
-  defp next_run(_expression, _time_zone, _from), do: {:error, :invalid_schedule}
   defp value(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
   defp decode_result(body) when is_binary(body) do

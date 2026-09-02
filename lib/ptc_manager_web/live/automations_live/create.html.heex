@@ -1,0 +1,140 @@
+<div class="space-y-8">
+  <p :if={@repositories == []} class="text-sm text-slate-500">
+    Register a repository on Configuration before creating an automation.
+  </p>
+
+  <.form
+    :if={@new_repository}
+    for={@new_form}
+    id="new-automation-form"
+    phx-change="validate-new"
+    phx-submit="create"
+    class="space-y-8"
+  >
+    <section class="grid gap-4 lg:grid-cols-2">
+      <label class="block text-xs text-slate-400">
+        Repository
+        <select
+          name="automation[repository_id]"
+          class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm text-white"
+        >
+          <option
+            :for={repository <- @repositories}
+            value={repository.id}
+            selected={repository.id == @new_repository.id}
+          >
+            {repository_key(repository)}
+          </option>
+        </select>
+      </label>
+      <div></div>
+      <.text_field
+        field={@new_form[:name]}
+        label="Name"
+        placeholder="Inspect dependencies"
+        required
+      />
+      <.text_field
+        field={@new_form[:description]}
+        label="Description"
+        placeholder="Report risky dependencies once a week."
+        required
+      />
+    </section>
+
+    <section class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold">Prompt</h2>
+        <p class="mt-1 text-xs text-slate-500">
+          The complete instruction the agent receives. PtcManager adds only the repository facts and its result protocol.
+        </p>
+      </div>
+      <.textarea_field field={@new_form[:prompt]} label="Prompt" rows={8} />
+    </section>
+
+    <section class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold">Agent and workspace</h2>
+      </div>
+      <div class="grid gap-4 lg:grid-cols-2">
+        <.select_field
+          field={@new_form[:agent_mode]}
+          label="Agent policy"
+          options={DefinitionForm.agent_modes()}
+        />
+        <.select_field
+          field={@new_form[:agent_kind]}
+          label="Agent kind"
+          options={agent_kind_options(@workers, @new_form[:agent_kind].value)}
+          disabled={@new_form[:agent_mode].value == "any"}
+          hint="Kinds reported by online workers, plus configured profiles marked offline."
+        />
+        <label class="block text-xs text-slate-400">
+          Workspace
+          <select
+            disabled
+            class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm text-white disabled:opacity-60"
+          >
+            <option selected>{profile_label("generic_ephemeral")}</option>
+          </select>
+          <span class="mt-1 block leading-5 text-slate-500">
+            Custom automations inspect a read-only snapshot of the default branch. A writable worktree that can open a pull request is planned but not available yet.
+          </span>
+        </label>
+        <.select_field
+          field={@new_form[:github_access]}
+          label="GitHub access"
+          options={
+            Enum.map(DefinitionForm.github_access_options(), fn {label, value} ->
+              {label, value, value == "brokered_publish"}
+            end)
+          }
+        />
+      </div>
+    </section>
+
+    <details
+      id="automation-advanced"
+      open={@advanced_open?}
+      class="rounded-2xl border border-white/10 bg-slate-900/60 p-4"
+    >
+      <summary phx-click="toggle-advanced" class="cursor-pointer text-sm font-semibold">
+        Advanced
+      </summary>
+      <div class="mt-4 grid gap-4 lg:grid-cols-4">
+        <.text_field
+          field={@new_form[:key]}
+          label="Internal key"
+          hint="Derived from the name. It can be changed until the first save."
+          class="[&_input]:font-mono"
+        />
+        <.select_field
+          field={@new_form[:queue_lane]}
+          label="Queue lane"
+          options={DefinitionForm.queue_lanes()}
+        />
+        <.select_field
+          field={@new_form[:resource_class]}
+          label="Resource class"
+          options={DefinitionForm.resource_classes()}
+        />
+        <.text_field
+          field={@new_form[:timeout_minutes]}
+          label="Timeout (minutes)"
+          type="number"
+          min="1"
+          max="1440"
+        />
+      </div>
+    </details>
+
+    <div class="flex flex-wrap items-center gap-4">
+      <button class="rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300">
+        Create paused automation
+      </button>
+      <p class="text-xs text-slate-500">
+        You will be taken to the new automation to review it and enable it.
+      </p>
+    </div>
+  </.form>
+</div>
