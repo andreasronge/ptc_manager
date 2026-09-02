@@ -12,7 +12,11 @@ defmodule PtcManager.OperationsFixtures do
       default_branch: "main"
     }
 
-    {:ok, repository} = Operations.create_repository(Map.merge(defaults, attrs))
+    {:ok, repository} =
+      retry_sqlite_sandbox_handoff(fn ->
+        Operations.create_repository(Map.merge(defaults, attrs))
+      end)
+
     repository
   end
 
@@ -130,5 +134,23 @@ defmodule PtcManager.OperationsFixtures do
     value
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
+  end
+
+  # A LiveView from the preceding non-async test can release its sandbox owner
+  # just after ExUnit starts the next test. SQLite reports that brief ownership
+  # handoff as busy instead of waiting. Keep the retry inside test fixtures so
+  # production writes retain their fail-closed behavior.
+  defp retry_sqlite_sandbox_handoff(fun, attempts_left \\ 3)
+
+  defp retry_sqlite_sandbox_handoff(fun, attempts_left) do
+    fun.()
+  rescue
+    error in Exqlite.Error ->
+      if attempts_left > 1 and error.message in ["Database busy", "database is locked"] do
+        Process.sleep(10)
+        retry_sqlite_sandbox_handoff(fun, attempts_left - 1)
+      else
+        reraise(error, __STACKTRACE__)
+      end
   end
 end
