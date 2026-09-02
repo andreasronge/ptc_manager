@@ -639,9 +639,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
     github_instruction =
       if job.publication_source == "agent" do
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request. Do not merge."
+        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
       else
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Do not push, create a pull request, or merge."
+        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END. Do not push, create a pull request, or merge."
       end
 
     context =
@@ -650,7 +650,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       Repository: #{repository.github_owner}/#{repository.github_name}
       Issue: ##{issue.number}
       Branch: #{job.branch_name} → #{repository.default_branch}
-      Reviews: #{required_reviews}
+      Workspace: PtcManager created and initialized this worktree; do not create, initialize, or garbage-collect worktrees.
+      Independent reviews: #{required_reviews} — the number of cold independent review sessions to run on the finished change; 0 skips review. Follow the repository's review workflow for running and following up each session.
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       </context>

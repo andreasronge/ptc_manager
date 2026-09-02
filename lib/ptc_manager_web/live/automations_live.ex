@@ -498,11 +498,8 @@ defmodule PtcManagerWeb.AutomationsLive do
     version = definition.current_version
 
     prompt =
-      if Catalog.configurable_action?(definition.key) do
-        Catalog.preview(definition.key, version.prompt, definition.repository)
-      else
+      Catalog.preview(definition.key, version.prompt, definition.repository) ||
         generic_prompt_preview(definition, version.prompt)
-      end
 
     maybe_add_result_protocol(prompt, version.execution_profile)
   end

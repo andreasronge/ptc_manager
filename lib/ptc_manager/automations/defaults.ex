@@ -36,7 +36,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 7_200,
       result_type: "implementation",
       prompt:
-        "Fix the issue completely. Follow the repository instructions, validate the change, perform the configured reviews, commit it, and publish a pull request that closes the issue and includes a short retrospective. Do not merge it."
+        "Fix the issue completely. Follow the repository instructions, validate the change, perform the configured reviews, commit it, and publish a pull request that closes the issue. Its description needs a summary, what you verified beyond the repository hooks, and a `## Retrospective` section with two items that may each be `none`: untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or that you had to guess at. Do not merge it."
     },
     %{
       key: "prepare_issue",
@@ -172,7 +172,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "repository_report",
       prompt: """
-      Inspect the latest completed nightly GitHub Actions workflow for this repository. If it succeeded, report that no action was needed. If it failed, inspect bounded logs, search open and closed issues for the supplied stable occurrence marker, and create or update exactly one GitHub issue describing the failure, evidence, and a useful next step. Never create a duplicate for the same workflow run. Return a concise private Markdown report and every GitHub URL changed.
+      Inspect the latest completed nightly GitHub Actions workflow for this repository. If it succeeded, report that no action was needed. If it failed, inspect bounded logs, search open and closed issues for the supplied invocation marker, and create or update exactly one GitHub issue describing the failure, evidence, and a useful next step. Never create a duplicate for the same workflow run. Return a concise private Markdown report and every GitHub URL changed.
       """
     }
   ]
@@ -188,6 +188,10 @@ defmodule PtcManager.Automations.Defaults do
   end
 
   def get(repository, key), do: Enum.find(all(repository), &(&1.key == key))
+
+  @doc "Returns the built-in display name for an automation key, or nil for a custom key."
+  def name(key) when is_binary(key),
+    do: Enum.find_value(@definitions, &(&1.key == key && &1.name))
 
   def triggers("daily_digest", repository) do
     enabled = repository.github_name == "ptc_runner"
