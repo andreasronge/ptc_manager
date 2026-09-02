@@ -55,7 +55,7 @@ defmodule PtcManager.AutomationsTest do
           complete_prompt_result()
           {:ok, ~s({"result":{"state":"idle"}})}
 
-        Enum.take(args, 2) == ["worktree", "remove"] ->
+        Enum.take(args, 2) == ["workspace", "close"] ->
           {:ok, "{}"}
 
         true ->

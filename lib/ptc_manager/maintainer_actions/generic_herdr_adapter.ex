@@ -403,7 +403,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp cleanup do
     if workspace = Process.delete({__MODULE__, :workspace}) do
-      _ = command().run(["worktree", "remove", "--workspace", workspace, "--force"])
+      _ = command().run(["workspace", "close", workspace])
     end
 
     if path = Process.delete({__MODULE__, :trusted_path}) do
