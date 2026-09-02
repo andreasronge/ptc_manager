@@ -197,43 +197,74 @@ defmodule PtcManager.MaintainerActions do
         {:ok, :empty}
 
       candidate ->
-        with {:ok, prepared} <- prepare_for_execution(candidate, sync),
-             {:ok, {action, token}} <- Operations.claim_agent_action(prepared.id) do
-          result =
-            try do
-              Gateway.call(adapter, :run, [action])
-            after
-              release_planning_source_snapshot(action)
-            end
-
-          current_action = AgentAction |> Repo.get!(action.id) |> Repo.preload(:repository)
-          sync_result = sync_after_execution(sync, current_action, result)
-
-          case sync_result do
-            {:ok, summary} ->
-              settled_result = settle_repair_result(current_action, result, summary)
-
-              Operations.complete_agent_action(
-                action.id,
-                token,
-                store_private_analysis(current_action, settled_result, summary)
-              )
-
-            {:terminal_error, reason} ->
-              Operations.complete_agent_action(
-                action.id,
-                token,
-                {:error, {:postflight_failed, reason}}
-              )
-
-            {:error, reason} ->
-              Operations.mark_agent_action_sync_pending(action.id, token, result, reason)
-          end
-        else
+        case prepare_and_claim(candidate, sync) do
+          {:ok, {action, token}} -> execute_claimed(adapter, sync, action, token)
+          {:skip, :no_longer_queued} -> {:ok, :empty}
           {:deferred, action} -> {:ok, action}
           {:terminal, action} -> {:ok, action}
           {:error, reason} -> {:error, reason}
         end
+    end
+  end
+
+  defp prepare_and_claim(candidate, sync) do
+    lock_id = {{__MODULE__, :agent_action_preflight, candidate.id}, self()}
+
+    case :global.trans(lock_id, fn ->
+           current =
+             AgentAction
+             |> Repo.get(candidate.id)
+             |> case do
+               nil -> nil
+               action -> Repo.preload(action, [:repository, :automation_definition_version])
+             end
+
+           if match?(%AgentAction{state: "queued"}, current) do
+             with {:ok, prepared} <- prepare_for_execution(current, sync),
+                  {:ok, {_action, _token}} = claimed <-
+                    Operations.claim_agent_action(prepared.id) do
+               claimed
+             end
+           else
+             {:skip, :no_longer_queued}
+           end
+         end) do
+      :aborted -> {:error, :agent_action_preflight_lock_failed}
+      {:aborted, reason} -> {:error, {:agent_action_preflight_lock_failed, reason}}
+      result -> result
+    end
+  end
+
+  defp execute_claimed(adapter, sync, action, token) do
+    result =
+      try do
+        Gateway.call(adapter, :run, [action])
+      after
+        release_planning_source_snapshot(action)
+      end
+
+    current_action = AgentAction |> Repo.get!(action.id) |> Repo.preload(:repository)
+    sync_result = sync_after_execution(sync, current_action, result)
+
+    case sync_result do
+      {:ok, summary} ->
+        settled_result = settle_repair_result(current_action, result, summary)
+
+        Operations.complete_agent_action(
+          action.id,
+          token,
+          store_private_analysis(current_action, settled_result, summary)
+        )
+
+      {:terminal_error, reason} ->
+        Operations.complete_agent_action(
+          action.id,
+          token,
+          {:error, {:postflight_failed, reason}}
+        )
+
+      {:error, reason} ->
+        Operations.mark_agent_action_sync_pending(action.id, token, result, reason)
     end
   end
 

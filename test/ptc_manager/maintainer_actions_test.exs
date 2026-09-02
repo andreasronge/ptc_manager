@@ -77,6 +77,23 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule RacingSourceSnapshot do
+    def prepare(repository, action_id, _snapshot) do
+      counter = Application.fetch_env!(:ptc_manager, :planning_snapshot_test_counter)
+      Agent.update(counter, &(&1 + 1))
+      Process.sleep(100)
+
+      {:ok,
+       %{
+         sha: String.duplicate("6", 40),
+         ref: repository.default_branch,
+         path: "/tmp/ptc-manager-racing-snapshot-#{action_id}"
+       }}
+    end
+
+    def release(_repository, _action_id, _snapshot), do: :ok
+  end
+
   defmodule FakeAdapter do
     @behaviour PtcManager.MaintainerActions.Adapter
 
@@ -119,6 +136,25 @@ defmodule PtcManager.MaintainerActionsTest do
          "suggestions" => [],
          "decision_question" => "",
          "decision_options" => []
+       }}
+    end
+  end
+
+  defmodule ConcurrentPlanningAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(_action) do
+      {:ok,
+       %{
+         "outcome" => "ready",
+         "private_summary" => "The issue is ready to implement.",
+         "why_it_matters" => "The requested behavior is clear.",
+         "scope" => "small",
+         "risk" => "low",
+         "technical_evidence" => "Inspected the relevant source and tests.",
+         "github_changes" => ["Applied ptc:ready"],
+         "evidence" => ["Inspected the relevant source and tests"],
+         "created_issue_numbers" => []
        }}
     end
   end
@@ -716,6 +752,40 @@ defmodule PtcManager.MaintainerActionsTest do
     assert proposal.readiness == "needs_breakdown"
     assert proposal.plain_summary =~ "two changes"
     assert Repo.get!(Issue, issue.id).workflow_label == nil
+  end
+
+  test "concurrent planning pollers prepare and claim an action only once" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{number: 4_602, workflow_label: nil})
+    {:ok, queued} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    previous_snapshot = Application.get_env(:ptc_manager, :planning_source_snapshot)
+    previous_counter = Application.get_env(:ptc_manager, :planning_snapshot_test_counter)
+    Application.put_env(:ptc_manager, :planning_source_snapshot, RacingSourceSnapshot)
+    Application.put_env(:ptc_manager, :planning_snapshot_test_counter, counter)
+
+    on_exit(fn ->
+      restore_test_env(:planning_source_snapshot, previous_snapshot)
+      restore_test_env(:planning_snapshot_test_counter, previous_counter)
+    end)
+
+    results =
+      1..2
+      |> Enum.map(fn _index ->
+        Task.async(fn ->
+          MaintainerActions.run_once(
+            adapter: ConcurrentPlanningAdapter,
+            sync: NoopSync,
+            lane: :planning
+          )
+        end)
+      end)
+      |> Task.await_many(5_000)
+
+    assert Agent.get(counter, & &1) == 1
+    assert Enum.count(results, &match?({:ok, %AgentAction{id: id}} when id == queued.id, &1)) == 1
+    assert Enum.count(results, &(&1 == {:ok, :empty})) == 1
   end
 
   test "private analysis result contract rejects GitHub writes" do
