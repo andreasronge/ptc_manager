@@ -130,7 +130,7 @@ config :ptc_manager,
       ]
     }
   },
-  implementation_agent_start_timeout_ms: 60_000,
+  implementation_agent_start_timeout_ms: 120_000,
   implementation_agent_publishes_pr: false,
   required_pre_pr_reviews_default: 2
 

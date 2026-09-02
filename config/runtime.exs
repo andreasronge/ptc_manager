@@ -332,7 +332,7 @@ config :ptc_manager,
   implementation_agent_args: implementation_agent_args,
   agent_profiles: agent_profiles,
   implementation_agent_start_timeout_ms:
-    System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "60000")
+    System.get_env("PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS", "120000")
     |> String.to_integer(),
   implementation_agent_publishes_pr: implementation_agent_publishes_pr
 

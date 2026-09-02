@@ -496,7 +496,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         "--dangerously-bypass-approvals-and-sandbox"
       ])
 
-    timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
+    timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
     command_timeout = timeout + @agent_start_command_grace_ms
 
     case run_with(

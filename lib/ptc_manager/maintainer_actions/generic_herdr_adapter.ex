@@ -137,7 +137,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   defp start_agent(name, pane, profile, workspace_path) do
-    timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
+    timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
 
     args =
       [
