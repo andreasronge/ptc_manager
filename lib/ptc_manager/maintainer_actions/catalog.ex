@@ -4,70 +4,10 @@ defmodule PtcManager.MaintainerActions.Catalog do
   alias PtcManager.DailyDigests.DailyDigest
   alias PtcManager.Operations.{Issue, Job, PrPublication, Repository}
   alias PtcManager.Automations
+  alias PtcManager.Automations.Defaults
   alias PtcManager.Dispatch.HerdrAdapter, as: ImplementationAdapter
 
   @prompt_version 1
-  @issue_review_limit 3
-  @repair_review_limit 2
-
-  @configurable_actions [
-    %{
-      key: "private_issue_analysis",
-      label: "Private issue analysis",
-      button: "Investigate privately",
-      description: "Create the simple, private planning summary shown in the backlog."
-    },
-    %{
-      key: "implement_issue",
-      label: "Implement issue",
-      button: "Approve and start",
-      description:
-        "Implement, test, review, commit, push, and create the issue pull request, including its Agent retrospective section."
-    },
-    %{
-      key: "prepare_issue",
-      label: "Prepare issue",
-      button: "Prepare issue",
-      description: "Investigate an issue and make its GitHub state implementation-ready."
-    },
-    %{
-      key: "review_issue",
-      label: "Review issue",
-      button: "Review issue",
-      description: "Challenge issue readiness with independent Codex reviews."
-    },
-    %{
-      key: "daily_digest",
-      label: "Daily update",
-      button: "Generate daily update",
-      description:
-        "Summarize the previous calendar day's merged pull requests and dated direct commits as a private, easy-to-read update."
-    },
-    %{
-      key: "resolve_issue_decision",
-      label: "Resolve issue decision",
-      button: "Apply decision",
-      description:
-        "Apply the maintainer's selected answer to GitHub and move the issue out of needs-decision."
-    },
-    %{
-      key: "repair_pr",
-      label: "Fix pull request",
-      button: "Fix",
-      description: "Repair CI failures or conflicts and push the existing PR branch."
-    },
-    %{
-      key: "repair_and_merge_pr",
-      label: "Fix and merge pull request",
-      button: "Fix and merge",
-      description: "Repair, verify, push, wait for CI, and merge the exact PR."
-    }
-  ]
-
-  def configurable_actions, do: @configurable_actions
-
-  def configurable_action?(action_key) when is_binary(action_key),
-    do: Enum.any?(@configurable_actions, &(&1.key == action_key))
 
   @doc "Returns a safe, realistic example of the complete configured action prompt."
   def preview(action_key, instructions \\ nil, repository \\ nil) when is_binary(action_key) do
@@ -380,16 +320,11 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def build("repair_and_merge_pr", _target), do: {:error, :pull_request_not_open}
   def build(_action_key, _target), do: {:error, :unknown_agent_action}
 
-  def label("private_issue_analysis"), do: "Private issue analysis"
-  def label("prepare_issue"), do: "Prepare issue"
-  def label("review_issue"), do: "Review issue"
-  def label("daily_digest"), do: "Daily update"
-  def label("resolve_issue_decision"), do: "Apply decision"
-  def label("pr_retrospective"), do: "PR retrospective"
-  def label("create_retrospective_issue"), do: "Create follow-up issue"
-  def label("repair_pr"), do: "Fix CI or conflicts"
-  def label("repair_and_merge_pr"), do: "Approve and merge"
-  def label(action_key), do: action_key |> String.replace("_", " ") |> String.capitalize()
+  @doc "Display name for a flash message: the built-in automation name, or the humanized key."
+  def label(action_key) when is_binary(action_key) do
+    Defaults.name(action_key) ||
+      action_key |> String.replace("_", " ") |> String.capitalize()
+  end
 
   defp build_retrospective(repository, issue, publication) do
     {:ok,
@@ -446,7 +381,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   defp review_issue_prompt(repository, issue) do
     """
-    <runtime_context action="review_issue" repository="#{repository.github_owner}/#{repository.github_name}" github_access="trusted_direct" review_limit="#{@issue_review_limit}" allowed_outcomes="ready,blocked,needs-decision,reject" />
+    <runtime_context action="review_issue" repository="#{repository.github_owner}/#{repository.github_name}" github_access="trusted_direct" allowed_outcomes="ready,blocked,needs-decision,reject" />
     <issue_data>
     Number: #{issue.number}
     Title: #{issue.title}
@@ -504,7 +439,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
     merge_authorized? = Keyword.get(opts, :merge_authorized?, false)
 
     """
-    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" review_limit="#{@repair_review_limit}" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
+    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
     <pull_request_data>
     PR: ##{publication.pr_number}
     Branch: #{publication.branch_name}

@@ -735,7 +735,7 @@ defmodule PtcManager.DispatchTest do
 
     assert prompt =~ "Fix the issue completely"
     assert prompt =~ "Follow the repository instructions"
-    assert prompt =~ "Reviews: 2"
+    assert prompt =~ "Independent reviews: 2"
     refute prompt =~ "Run this configured test command exactly"
     refute prompt =~ "codex-review"
     assert prompt =~ "PtcManager will publish it"
@@ -758,8 +758,8 @@ defmodule PtcManager.DispatchTest do
     tricky_prompt =
       PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, tricky_issue, tricky_job)
 
-    assert easy_prompt =~ "Reviews: 0"
-    assert tricky_prompt =~ "Reviews: 3"
+    assert easy_prompt =~ "Independent reviews: 0"
+    assert tricky_prompt =~ "Independent reviews: 3"
     refute tricky_prompt =~ "codex-review"
   end
 
@@ -792,7 +792,7 @@ defmodule PtcManager.DispatchTest do
 
     assert prompt =~ "publish a pull request that closes the issue"
     assert prompt =~ "Branch: #{job.branch_name} → main"
-    assert prompt =~ "Reviews: 2"
+    assert prompt =~ "Independent reviews: 2"
     assert prompt =~ "Read the issue, its comments, linked issues"
     assert prompt =~ "Push this branch and create a pull request. Do not merge."
     refute prompt =~ "fencing_token"

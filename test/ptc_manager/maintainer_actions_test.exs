@@ -812,13 +812,14 @@ defmodule PtcManager.MaintainerActionsTest do
              |> ActionAdapter.validate_result("private_issue_analysis")
   end
 
-  test "review issue prompt exposes the configured review limit without provider-specific prose" do
+  test "review issue prompt carries only the runtime context without provider-specific prose" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 43})
 
     assert {:ok, action} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
     assert action.action_key == "review_issue"
-    assert action.prompt =~ ~s(review_limit="3")
+    assert action.prompt =~ ~s(<runtime_context action="review_issue")
+    refute action.prompt =~ "review_limit"
     refute action.prompt =~ "codex-review"
     assert action.prompt =~ "Review whether the issue is genuinely ready"
   end

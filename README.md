@@ -1,88 +1,47 @@
 # PtcManager
 
-PtcManager is a private maintainer console for reviewing GitHub work, approving
-agent jobs, and seeing what Codex or Claude agents are doing and how long they
-have been running. The coding agent tests and commits its implementation;
-its task prompt asks it to run the configured number of `codex-review` skill
-passes and fix their findings. PtcManager verifies and publishes the final
-commit through its credential-isolated GitHub broker; the maintainer's next
-consequential decision is whether the PR may merge.
+PtcManager is a private maintainer console for GitHub repositories and the
+Codex or Claude agents working on them. A maintainer reads plain-language
+summaries of issues and pull requests, presses one named button to start
+bounded agent work, and decides when a pull request may merge. Deterministic
+code owns every state transition; agent output is validated data, never
+authority. The product principles are in [PLAN.md](PLAN.md).
 
-The current Slice 4 increment adds the first PR decision-support path on top of
-the approved execution, publication, worktree, and maintainer-action workflows:
+The console has six views:
 
-- a responsive issue inbox with private plain-language summaries;
-- four focused maintainer views: **Planning** for backlog decisions,
-  **Delivery** for the approval-to-merge Kanban, **Updates** for daily change
-  briefings, **Operations** for machine capacity plus the agent/task timeline,
-  **Automations** for repository actions, schedules, prompts, and history, and
-  **Configuration** for repository onboarding and compatibility prompt instructions;
-- an **Approve and start** workflow backed by SQLite transactions, with a
-  per-task choice of zero to three independent Codex review passes;
-- one active implementation job per issue, enforced by the database;
-- a live agent-activity panel with agent name, worker, role, task, start time,
-  elapsed time, heartbeat, and Herdr identifiers, plus five recent ended runs;
-- password authentication, CSRF protection, and approval audit events;
-- deterministic demo data so the UI works without GitHub or model credentials;
-- manual or periodic read-only GitHub issue synchronization;
-- read-only Herdr agent reconciliation with lost-agent detection;
-- optional private Codex investigations in an ephemeral read-only sandbox;
-- synchronous GitHub freshness checks immediately before dispatch;
-- durable worker leases and monotonically increasing fencing tokens;
-- isolated Herdr worktrees and named Codex or Claude implementation agents;
-- safe failure and lost-lease states visible in the dashboard;
-- bounded, credential-free verification of a non-empty committed branch diff;
-- fenced reconciliation claims that are safe to retry after interruption;
-- verified base, head, commit count, and diff digest visible before PR acceptance;
-- repository-owned validation instructions and a provider-neutral review-pass count frozen per task;
-- exact-SHA branch push and draft-PR creation through a GitHub App broker;
-- a strict checked-in `.ptc-manager.yml` setup contract with optional broker
-  verification frozen from the exact candidate commit;
-- a credential-free, disposable verifier checkout that must pass the frozen
-  gate cleanly before the GitHub App broker can push that SHA;
-- persistent light/heavy agent limits plus an independent expensive-operation
-  limit instead of a hard-coded worktree count;
-- durable worktree allocation, safe reclamation, and terminal cleanup;
-- canonical PR status and GitHub link in the dashboard;
-- read-only GitHub check-run, commit-status, draft, and merge-conflict signals
-  that import every open repository PR and place it in In progress, Needs
-  attention, or Ready to merge;
-- a generic durable agent-action queue with **Investigate privately**,
-  **Prepare issue**, **Review issue**, **Fix**, and **Approve and merge**
-  buttons, all visible alongside queued implementation jobs on **Operations**;
-- repository-specific, immutable prompt versions for private issue analysis,
-  Approve-and-start implementation, and every active maintainer action. Each
-  automation has one completely editable prompt, including any safety guidance
-  the maintainer wants. PtcManager supplies a project-specific suggestion and
-  adds only concise runtime facts and the machine result protocol. Queued and
-  running actions keep their frozen version;
-- a direct Delivery-board **Approve and merge** action once CI and mergeability
-  are clean. New implementation agents include a configurable retrospective in
-  the PR description rather than starting a separate retrospective agent;
-- one shared clock/spinner status language for queued and actively running work
-  across Planning, Delivery, and Operations;
-- canonical display of the mutually exclusive `ptc:ready`, `ptc:blocked`, and
-  `ptc:needs-decision` GitHub labels;
-- structured projection of canonical `Blocked by #<number>` issue dependencies,
-  with blocker links and status in the dashboard;
-- approval and dispatch checks that prevent unresolved dependencies from
-  starting implementation;
-- agent-action attempts, results, and elapsed time in the shared activity view.
-- an **Approve for merge** decision bound to the exact analyzed PR version;
-- explicit stale-approval display when the observed head, base, or diff changes.
+- **Planning** — the issue backlog with private summaries, the canonical
+  `ptc:ready`, `ptc:blocked`, and `ptc:needs-decision` labels, `Blocked by
+  #<number>` dependencies, and the contextual issue actions;
+- **Delivery** — the approval-to-merge Kanban fed by read-only GitHub check,
+  status, draft, and mergeability signals, with **Fix** and **Fix and merge**
+  actions and an **Approve for merge** decision bound to the exact PR version;
+- **Updates** — private daily briefings of merged pull requests and commits;
+- **Operations** — machine capacity, the agent and expensive-command timeline,
+  and bounded read-only terminal panels;
+- **Automations** — one editable, versioned prompt per repository automation,
+  with its triggers, schedules, agent policy, and run history;
+- **Configuration** — repository onboarding, checkout health, and agent
+  capacity.
 
-Upgrades still honor the former `PTC_REQUIRED_PRE_PR_REVIEWS` value when this
-release first backfills already-existing jobs. It no longer overrides new
-per-task choices after that migration.
+Implementation work runs in an isolated Herdr worktree that the repository's
+own `.ptc-manager.yml` bootstrap prepares. The agent implements, validates,
+runs the number of independent reviews frozen on the job, and either pushes
+its branch and opens the pull request itself (agent publication) or commits
+locally for PtcManager's credential-isolated GitHub App broker to verify and
+publish. The maintainer's next consequential decision is whether that pull
+request may merge.
 
 Dispatch, maintainer actions, and publishing are disabled by default. The
-implementation prompt forbids GitHub writes unless the explicit agent-publication
-trial mode is enabled. In this initial version the worker
-identity also hosts explicitly queued maintainer actions and therefore has an
-authenticated `gh` session; technical separation is deferred. The broker can
-publish only the fenced, verified job branch and one PR; it does **not** merge,
-close issues, edit issue text, or trust labels as commands. See
-[PLAN.md](PLAN.md).
+implementation prompt forbids GitHub writes unless agent publication is
+enabled. The worker identity also hosts explicitly queued maintainer actions
+and therefore has an authenticated `gh` session; technical separation is
+deferred. The broker can publish only the fenced, verified job branch and one
+PR; it does **not** merge, close issues, edit issue text, or trust labels as
+commands.
+
+Upgrades still honor the former `PTC_REQUIRED_PRE_PR_REVIEWS` value when this
+release first backfills already-existing jobs; it no longer overrides new
+per-task choices after that migration.
 
 ### Machine usage history
 
@@ -355,12 +314,13 @@ defence against a malicious author weakening their own gate. A PR that changes
 gate policy needs explicit human review, and protected-branch CI remains the
 merge boundary.
 
-In broker mode, the generated task tells the implementation agent to run the
-configured tests, invoke the `codex-review` skill the configured number of
-times, fix findings, and commit without using GitHub credentials. This review loop is agent-owned
+In broker mode, the task prompt tells the implementation agent to validate the
+change, run the number of independent reviews frozen on the job, fix findings,
+and commit without using GitHub credentials. The review loop is agent-owned
 prompt policy: PtcManager does not launch reviewers or store review evidence.
-The agent places its bounded retrospective in the final commit message, and the
-broker copies that section into the draft PR description.
+The agent places its retrospective in the final commit message between
+`PTC-AGENT-RETROSPECTIVE-BEGIN` and `PTC-AGENT-RETROSPECTIVE-END` lines, and
+the broker copies that section into the draft PR description.
 The broker stages untrusted Git data separately, re-verifies the base, head, and
 diff, pushes only the deterministic job branch, and creates or reconciles one
 draft PR. Codex, Claude, Herdr, and the worker never receive its short-lived
@@ -477,9 +437,10 @@ GitHub synchronization.
 
 GitHub assignment is projected as the advisory work claim. Issue cards show
 `Taken by @login`, and PtcManager will not approve duplicate implementation
-while any assignee remains. This matches `ptc_runner`'s worktree helper, which
-assigns the issue and posts its standardized claim comment before work begins;
-the periodic issue sync therefore does not need to fetch every comment. Rows
+while any assignee remains. Implementation agents that publish their own pull
+request are told to assign the issue to themselves before work begins, and
+`ptc_runner`'s worktree helper does the same for work started by hand; the
+periodic issue sync therefore does not need to fetch every comment. Rows
 that predate this projection remain approval-ineligible until their first
 successful GitHub synchronization confirms the assignment state.
 
