@@ -187,9 +187,14 @@ The authenticated routes are:
   expensive-operation statistics and workspace-preparation timings. Select an
   agent on either tab to open a bounded, read-only terminal panel; active
   panels refresh every five seconds and expose no prompt or input controls;
-- `/automations` — repository-scoped, immutable action versions; one complete
-  editable prompt with a runtime preview; Herdr-kind selectors; manual and scheduled
-  triggers; Run now; cross-repository copying; and durable result history;
+- `/automations` — one row per automation of the selected repository: enabled
+  switch, a plain-language "how it runs" summary, agent policy, last run, and
+  next run, plus the five latest runs. `/automations/:id` opens one automation:
+  its triggers (Run now, schedules built from presets with a time zone and a
+  next-runs preview, contextual buttons), agent kind and GitHub access, the
+  complete editable prompt with a runtime preview, advanced settings, its own
+  run history, versions, and cross-repository copying. `/automations/new`
+  creates a paused custom automation with a key derived from its name;
 - `/configuration` — safe registration and health checks for dedicated repository
   checkouts, with direct links to each repository's prompt and automation settings.
 
@@ -508,6 +513,20 @@ previews that editable prompt together with example runtime context.
 A trigger points at the current
 version only when it materializes a run, so later edits cannot alter queued or
 running work.
+
+The Automations index lists the selected repository's automations with an
+enabled switch, a summary of the enabled triggers ("Every day at 02:00 · Run
+now"), the agent policy, and the last and next run. Each automation has its own
+page. Repository-level automations may hold several schedules; each schedule is
+built from a preset (every day, weekdays, a weekday, hourly, or a raw cron
+expression), a time, and a time zone, and shows its next three runs in that
+zone with the UTC equivalent. Issue and pull-request automations get contextual
+buttons on the Planning or Delivery surface instead. The agent kind selector
+offers the kinds reported by online workers and the configured agent profiles,
+marking profiles no online worker currently reports as offline. Built-in
+triggers can be paused but not removed, because the bootstrap would recreate
+them. Custom automations run in a read-only snapshot of the default branch; a
+writable workspace that can open a pull request is a planned follow-up.
 
 `generic_ephemeral` actions run through Herdr with an explicit opaque kind. The
 configured selector may accept any healthy profile, prefer one kind with
