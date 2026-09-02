@@ -16,7 +16,7 @@ defmodule PtcManager.WorktreePoller do
       task =
         Task.Supervisor.async_nolink(
           PtcManager.TaskSupervisor,
-          &Worktrees.cleanup_terminal_once/0
+          &Worktrees.cleanup_once/0
         )
 
       {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}

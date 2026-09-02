@@ -180,6 +180,30 @@ defmodule PtcManager.Repository.GitProbe do
 
   def reclaimable(_path, _branch, _expected_head), do: {:error, :invalid_worktree_identity}
 
+  @doc """
+  Proves that a retained worktree holds nothing worth keeping.
+
+  Nothing can be lost when the checkout is clean, has no untracked files, and
+  its head adds no commit beyond the repository's default branch.
+  """
+  def empty_worktree(path, default_branch)
+      when is_binary(path) and is_binary(default_branch) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         {:ok, ""} <- git(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+         {:ok, head_sha} <- revision(path, "HEAD^{commit}"),
+         {:ok, base_ref} <- base_ref(path, default_branch),
+         {:ok, 0} <- commit_count(path, base_ref, head_sha) do
+      :ok
+    else
+      false -> {:error, :worktree_path_unavailable}
+      {:ok, count} when is_integer(count) -> {:error, :worktree_has_commits}
+      {:ok, _status} -> {:error, :worktree_has_changes}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def empty_worktree(_path, _default_branch), do: {:error, :invalid_worktree_identity}
+
   @doc "Proves that a repaired head preserves the already-published PR history."
   def descendant?(path, ancestor, head)
       when is_binary(path) and is_binary(ancestor) and is_binary(head) do

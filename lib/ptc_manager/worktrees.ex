@@ -2,10 +2,15 @@ defmodule PtcManager.Worktrees do
   @moduledoc "Enforces worker-advertised worktree capacity and safe reclamation."
 
   alias PtcManager.Operations
+  alias PtcManager.Operations.WorktreeAllocation
   alias PtcManager.ExternalPrSessions
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.Gateway
   alias PtcManager.Repository.GitProbe
+  alias PtcManager.WorktreeSecurity
+
+  @missing_worktree_reason "Removed automatically: the worktree no longer existed on disk."
+  @empty_worktree_reason "Removed automatically: the worktree was clean with no commits beyond the default branch."
 
   def ensure_slot(worker_key, capacity, adapter, probe \\ GitProbe)
 
@@ -23,6 +28,125 @@ defmodule PtcManager.Worktrees do
       :ok
     else
       {:error, :worktree_capacity}
+    end
+  end
+
+  @doc "Runs one terminal cleanup and, when nothing terminal is waiting, one abandoned-worktree cleanup."
+  def cleanup_once(
+        adapter \\ configured_adapter(),
+        probe \\ GitProbe,
+        external_adapter \\ configured_external_adapter()
+      ) do
+    case cleanup_terminal_once(adapter, probe, external_adapter) do
+      {:ok, :empty} -> cleanup_abandoned_once(adapter, probe)
+      other -> other
+    end
+  end
+
+  @doc """
+  Removes one retained `attention` worktree that provably holds nothing worth keeping.
+
+  A lost or failed attempt keeps its worktree because the coordinator cannot
+  know whether uncommitted work matters. Two cases carry no such risk: the
+  directory no longer exists inside a healthy worktree root, or a credential-free
+  Git check proves the checkout is clean with no commit beyond the default
+  branch. Everything else waits for a maintainer's explicit discard.
+  """
+  def cleanup_abandoned_once(adapter \\ configured_adapter(), probe \\ GitProbe) do
+    candidate =
+      Operations.list_workers_with_worktrees()
+      |> Enum.flat_map(& &1.worktree_allocations)
+      |> Enum.filter(&(&1.state == "attention"))
+      |> Enum.sort_by(&{&1.last_used_at, &1.id})
+      |> Enum.find_value(fn allocation ->
+        case abandoned_reason(allocation, probe) do
+          {:ok, reason} -> {allocation, reason}
+          :keep -> nil
+        end
+      end)
+
+    case candidate do
+      nil ->
+        {:ok, :empty}
+
+      {allocation, reason} ->
+        remove_retained(allocation, adapter, :remove_worktree, %{
+          actor: "coordinator",
+          reason: reason
+        })
+    end
+  end
+
+  @doc "Force-removes one retained `attention` worktree on a maintainer's explicit instruction."
+  def discard_attention(allocation_id, actor, adapter \\ configured_adapter())
+      when is_integer(allocation_id) and is_binary(actor) and actor != "" do
+    case Operations.get_worktree_allocation(allocation_id) do
+      nil ->
+        {:error, :worktree_allocation_missing}
+
+      %WorktreeAllocation{state: "attention"} = allocation ->
+        if Operations.worktree_consumes_execution_slot?(allocation) do
+          {:error, :worktree_in_use}
+        else
+          remove_retained(allocation, adapter, :discard_worktree, %{
+            actor: actor,
+            reason: "Discarded by the maintainer; uncommitted work was not kept."
+          })
+        end
+
+      %WorktreeAllocation{} ->
+        {:error, :worktree_not_retained}
+    end
+  end
+
+  defp abandoned_reason(allocation, probe) do
+    cond do
+      Operations.worktree_consumes_execution_slot?(allocation) -> :keep
+      not managed_path?(allocation.path) -> :keep
+      not File.exists?(allocation.path) -> {:ok, @missing_worktree_reason}
+      not real_directory?(allocation.path) -> :keep
+      empty_worktree?(allocation, probe) -> {:ok, @empty_worktree_reason}
+      true -> :keep
+    end
+  end
+
+  # A missing directory only proves abandonment when the managed root itself
+  # is present and intact; an unmounted or replaced root must not look empty.
+  defp managed_path?(path) when is_binary(path) do
+    root = Application.get_env(:ptc_manager, :worktree_root)
+
+    is_binary(root) and Path.type(path) == :absolute and File.dir?(root) and
+      WorktreeSecurity.validate_configured_root(root) == :ok and
+      String.starts_with?(Path.expand(path), Path.expand(root) <> "/")
+  end
+
+  defp managed_path?(_path), do: false
+
+  defp real_directory?(path) do
+    match?({:ok, %{type: :directory}}, File.lstat(path))
+  end
+
+  defp empty_worktree?(%{path: path, job: %{repository: %{default_branch: branch}}}, probe)
+       when is_binary(branch) do
+    probe.empty_worktree(path, branch) == :ok
+  end
+
+  defp empty_worktree?(_allocation, _probe), do: false
+
+  defp remove_retained(allocation, adapter, function, audit) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    with {:ok, claimed, token} <-
+           Operations.claim_worktree_cleanup(allocation.id, now, from: ["attention"]),
+         :ok <- remove_claimed(claimed, adapter, token, function, audit) do
+      :ok
+    else
+      {:error, :worktree_cleanup_already_claimed} ->
+        {:error, :worktree_cleanup_already_claimed}
+
+      {:error, reason, claimed, token} ->
+        _ = Operations.fail_worktree_cleanup(claimed.id, token, reason)
+        {:error, {:worktree_cleanup_failed, reason}}
     end
   end
 
@@ -95,10 +219,10 @@ defmodule PtcManager.Worktrees do
   defp verify_clean_head(allocation, _probe),
     do: {:error, :worktree_clean_head_unavailable, allocation, allocation.cleanup_token}
 
-  defp remove_claimed(allocation, adapter, token) do
-    case Gateway.call(adapter, :remove_worktree, [allocation]) do
+  defp remove_claimed(allocation, adapter, token, function \\ :remove_worktree, audit \\ nil) do
+    case Gateway.call(adapter, removal_function(adapter, function), [allocation]) do
       :ok ->
-        case Operations.complete_worktree_cleanup(allocation.id, token) do
+        case Operations.complete_worktree_cleanup(allocation.id, token, audit) do
           {:ok, _allocation} -> :ok
           {:error, reason} -> {:error, reason, allocation, token}
         end
@@ -110,6 +234,20 @@ defmodule PtcManager.Worktrees do
         {:error, {:unexpected_worktree_cleanup_result, other}, allocation, token}
     end
   end
+
+  # Adapters may omit the forced removal; fall back to the ordinary one.
+  defp removal_function(adapter, :discard_worktree) do
+    module = adapter_module(adapter)
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :discard_worktree, 1),
+      do: :discard_worktree,
+      else: :remove_worktree
+  end
+
+  defp removal_function(_adapter, function), do: function
+
+  defp adapter_module(%module{}), do: module
+  defp adapter_module(module) when is_atom(module), do: module
 
   defp configured_adapter,
     do: Application.fetch_env!(:ptc_manager, :dispatch_adapter)

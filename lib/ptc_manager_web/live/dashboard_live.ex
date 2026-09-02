@@ -8,6 +8,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
+  alias PtcManager.Worktrees
   alias PtcManager.Publications
   alias PtcManager.PublicationStatusPoller
   alias PtcManager.PublisherPoller
@@ -142,6 +143,29 @@ defmodule PtcManagerWeb.DashboardLive do
            :error,
            "The decision could not be queued. Synchronize GitHub and try again."
          )}
+    end
+  end
+
+  def handle_event("discard-worktree", %{"allocation-id" => allocation_id}, socket) do
+    with {allocation_id, ""} <- Integer.parse(allocation_id),
+         :ok <- Worktrees.discard_attention(allocation_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Worktree discarded.")
+       |> load_dashboard()}
+    else
+      {:error, :worktree_in_use} ->
+        {:noreply, put_flash(socket, :error, "That worktree still belongs to an active agent.")}
+
+      {:error, :worktree_not_retained} ->
+        {:noreply, put_flash(socket, :error, "That worktree is no longer waiting for attention.")}
+
+      {:error, {:worktree_cleanup_failed, reason}} ->
+        {:noreply,
+         put_flash(socket, :error, "The worktree could not be removed: #{inspect(reason)}")}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "That worktree could not be discarded.")}
     end
   end
 
@@ -497,6 +521,11 @@ defmodule PtcManagerWeb.DashboardLive do
     do: Enum.count(worker.worktree_allocations, &(&1.state == "waiting"))
 
   def worktree_state_label(state), do: state |> String.replace("_", " ")
+
+  def discardable_worktree?(%{state: "attention"} = allocation),
+    do: not Operations.worktree_consumes_execution_slot?(allocation)
+
+  def discardable_worktree?(_allocation), do: false
 
   def required_reviews(repository), do: ReviewPolicy.default_count(repository)
 

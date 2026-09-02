@@ -2,7 +2,7 @@ defmodule PtcManager.WorktreesTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{Job, PrPublication, WorktreeAllocation}
+  alias PtcManager.Operations.{AuditEvent, Job, PrPublication, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManager.Worktrees
 
@@ -11,17 +11,122 @@ defmodule PtcManager.WorktreesTest do
       send(Process.get(:worktree_test_pid), {:remove_worktree, allocation.id})
       Process.get(:worktree_remove_result, :ok)
     end
+
+    def discard_worktree(allocation) do
+      send(Process.get(:worktree_test_pid), {:discard_worktree, allocation.id})
+      Process.get(:worktree_remove_result, :ok)
+    end
   end
 
   defmodule FakeProbe do
     def reclaimable(_path, _branch, _head), do: Process.get(:worktree_probe_result, :ok)
+    def empty_worktree(_path, _branch), do: Process.get(:worktree_empty_result, :ok)
   end
 
   setup do
     Process.put(:worktree_test_pid, self())
     Process.put(:worktree_remove_result, :ok)
     Process.put(:worktree_probe_result, :ok)
+    Process.put(:worktree_empty_result, :ok)
     :ok
+  end
+
+  describe "abandoned attention worktrees" do
+    test "a retained worktree missing from a healthy root is removed automatically" do
+      allocation = attention_allocation!(missing_path())
+
+      assert :ok = Worktrees.cleanup_once(FakeAdapter, FakeProbe)
+
+      assert_receive {:remove_worktree, allocation_id}
+      assert allocation_id == allocation.id
+      removed = Repo.get!(WorktreeAllocation, allocation.id)
+      assert removed.state == "removed"
+      assert removed.removed_at
+
+      assert %{actor: "coordinator", details: %{"reason" => reason}} =
+               Repo.get_by!(AuditEvent,
+                 action: "worktree.removed",
+                 target_id: allocation.id
+               )
+
+      assert reason =~ "no longer existed"
+    end
+
+    test "a clean retained worktree with no commits is removed automatically" do
+      allocation = attention_allocation!(existing_path())
+
+      assert :ok = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+
+      assert_receive {:remove_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
+
+      assert %{details: %{"reason" => reason}} =
+               Repo.get_by!(AuditEvent, action: "worktree.removed", target_id: allocation.id)
+
+      assert reason =~ "clean with no commits"
+    end
+
+    test "a retained worktree with changes or commits waits for the maintainer" do
+      allocation = attention_allocation!(existing_path())
+      Process.put(:worktree_empty_result, {:error, :worktree_has_changes})
+
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+
+      refute_receive {:remove_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
+    test "a retained worktree outside the managed root is never touched automatically" do
+      allocation = attention_allocation!("/definitely/not/managed/worktree")
+
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+
+      refute_receive {:remove_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
+    test "a retained worktree whose agent is still active is kept" do
+      allocation = attention_allocation!(missing_path(), job_state: "working")
+
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+      refute_receive {:remove_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+
+      assert {:error, :worktree_in_use} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+    end
+
+    test "a maintainer discard force-removes a dirty retained worktree and is audited" do
+      allocation = attention_allocation!(existing_path())
+      Process.put(:worktree_empty_result, {:error, :worktree_has_changes})
+
+      assert :ok = Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert_receive {:discard_worktree, allocation_id}
+      assert allocation_id == allocation.id
+      refute_receive {:remove_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
+
+      assert %{actor: "andreas", details: %{"reason" => reason}} =
+               Repo.get_by!(AuditEvent, action: "worktree.removed", target_id: allocation.id)
+
+      assert reason =~ "Discarded by the maintainer"
+
+      assert {:error, :worktree_not_retained} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+    end
+
+    test "a failed discard keeps the worktree for attention with the Herdr error" do
+      allocation = attention_allocation!(existing_path())
+      Process.put(:worktree_remove_result, {:error, :workspace_busy})
+
+      assert {:error, {:worktree_cleanup_failed, :workspace_busy}} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      kept = Repo.get!(WorktreeAllocation, allocation.id)
+      assert kept.state == "attention"
+      assert kept.last_error =~ "workspace_busy"
+    end
   end
 
   test "retains an open PR worktree without consuming an execution slot" do
@@ -309,6 +414,49 @@ defmodule PtcManager.WorktreesTest do
              Operations.fail_worktree_cleanup(allocation.id, token, :already_missing)
 
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
+  end
+
+  defp attention_allocation!(path, opts \\ []) do
+    {_repository, job, remote} = approved_job_fixture()
+    {:ok, leased} = lease_pool_job(job.id, remote, 1)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    job_state = Keyword.get(opts, :job_state, "lost")
+
+    leased
+    |> Job.changeset(%{
+      state: job_state,
+      ended_at: if(job_state in ~w(lost failed), do: now)
+    })
+    |> Repo.update!()
+
+    Repo.get_by!(WorktreeAllocation, job_id: leased.id)
+    |> WorktreeAllocation.changeset(%{
+      state: "attention",
+      path: path,
+      herdr_workspace: "retained-workspace",
+      last_error: "Herdr confirmed that the retained managed agent is no longer present.",
+      last_used_at: now
+    })
+    |> Repo.update!()
+  end
+
+  defp missing_path do
+    Path.join(
+      Application.fetch_env!(:ptc_manager, :worktree_root),
+      "ptc-manager-missing-#{System.unique_integer([:positive])}"
+    )
+  end
+
+  defp existing_path do
+    path =
+      Path.join(
+        Application.fetch_env!(:ptc_manager, :worktree_root),
+        "ptc-manager-retained-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 
   defp approved_job_fixture(repository \\ nil) do

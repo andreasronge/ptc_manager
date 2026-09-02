@@ -48,7 +48,28 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  def remove_worktree(_allocation, _opts), do: {:error, :worktree_workspace_missing}
+  def remove_worktree(allocation, _opts) do
+    if worktree_missing?(allocation), do: :ok, else: {:error, :worktree_workspace_missing}
+  end
+
+  @impl true
+  def discard_worktree(allocation), do: discard_worktree(allocation, [])
+
+  @doc false
+  def discard_worktree(%{herdr_workspace: workspace} = allocation, opts)
+      when is_binary(workspace) and workspace != "" and is_list(opts) do
+    command = Keyword.get(opts, :command, Command)
+
+    case run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]) do
+      {:ok, _output} ->
+        :ok
+
+      {:error, reason} ->
+        if worktree_missing?(allocation), do: :ok, else: {:error, reason}
+    end
+  end
+
+  def discard_worktree(allocation, _opts), do: remove_worktree(allocation, [])
 
   @doc "Starts a named Herdr agent in a fresh worktree rooted at an imported PR head."
   def start_pull_request_action(action, publication, repository) do

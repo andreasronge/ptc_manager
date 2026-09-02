@@ -218,6 +218,25 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :worktree_changed} = GitProbe.reclaimable(path, "main", expected_head)
   end
 
+  test "an empty worktree is clean and adds no commit beyond the default branch" do
+    path = repository_with_base()
+    worktree = path <> "-worktree"
+    on_exit(fn -> File.rm_rf!(worktree) end)
+    git!(path, ["worktree", "add", "-b", "ptc-manager/issue-2-job-28", worktree, "main"])
+
+    assert :ok = GitProbe.empty_worktree(worktree, "main")
+
+    File.write!(Path.join(worktree, "notes.txt"), "scratch\n")
+    assert {:error, :worktree_has_changes} = GitProbe.empty_worktree(worktree, "main")
+
+    git!(worktree, ["add", "notes.txt"])
+    git!(worktree, ["commit", "-m", "partial work"])
+    assert {:error, :worktree_has_commits} = GitProbe.empty_worktree(worktree, "main")
+
+    assert {:error, :worktree_path_unavailable} =
+             GitProbe.empty_worktree(worktree <> "-missing", "main")
+  end
+
   defp repository_with_base do
     path =
       Path.join(System.tmp_dir!(), "ptc-manager-git-probe-#{System.unique_integer([:positive])}")

@@ -1953,20 +1953,29 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc "Loads one allocation with everything the cleanup policy inspects."
+  def get_worktree_allocation(allocation_id) when is_integer(allocation_id) do
+    WorktreeAllocation
+    |> preload(job: [:issue, :repository, :pr_publication, :agent_runs])
+    |> Repo.get(allocation_id)
+  end
+
   def claim_worktree_cleanup(
         allocation_id,
-        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond),
+        opts \\ []
       )
-      when is_integer(allocation_id) do
+      when is_integer(allocation_id) and is_list(opts) do
     token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
     expires_at = DateTime.add(now, 300, :second)
+    claimable_states = Keyword.get(opts, :from, ["terminal", "reclaimable"])
 
     {updated, _rows} =
       WorktreeAllocation
       |> where(
         [allocation],
         allocation.id == ^allocation_id and
-          (allocation.state in ["terminal", "reclaimable"] or
+          (allocation.state in ^claimable_states or
              (allocation.state == "cleaning" and allocation.cleanup_expires_at <= ^now))
       )
       |> Repo.update_all(
@@ -1993,10 +2002,30 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def complete_worktree_cleanup(allocation_id, token)
+  def complete_worktree_cleanup(allocation_id, token, audit \\ nil)
       when is_integer(allocation_id) and is_binary(token) do
-    cleanup_transition(allocation_id, token, "removed", nil)
+    case cleanup_transition(allocation_id, token, "removed", nil) do
+      {:ok, allocation} = removed ->
+        record_worktree_removal(allocation, audit)
+        removed
+
+      error ->
+        error
+    end
   end
+
+  defp record_worktree_removal(allocation, %{actor: actor, reason: reason})
+       when is_binary(actor) and is_binary(reason) do
+    insert_audit!(%{
+      actor: actor,
+      action: "worktree.removed",
+      target_type: "worktree_allocation",
+      target_id: allocation.id,
+      details: %{"job_id" => allocation.job_id, "reason" => reason}
+    })
+  end
+
+  defp record_worktree_removal(_allocation, _audit), do: :ok
 
   def fail_worktree_cleanup(allocation_id, token, reason)
       when is_integer(allocation_id) and is_binary(token) do

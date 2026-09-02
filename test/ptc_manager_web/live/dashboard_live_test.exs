@@ -1,6 +1,20 @@
 defmodule PtcManagerWeb.DashboardLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
+  defmodule DiscardingAdapter do
+    def dispatch(_context), do: {:error, :unused}
+    def remove_worktree(_allocation), do: {:error, :force_required}
+
+    def discard_worktree(allocation) do
+      send(
+        Application.fetch_env!(:ptc_manager, :dashboard_discard_test_pid),
+        {:discard_worktree, allocation.id}
+      )
+
+      :ok
+    end
+  end
+
   alias PtcManager.Operations
 
   alias PtcManager.Operations.{
@@ -1019,6 +1033,55 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert html =~ "Implementation worktrees"
     assert html =~ "1 / 3"
     assert Repo.get!(Operations.Worker, worker.id)
+  end
+
+  test "lets the maintainer discard a retained worktree that needs attention", %{conn: conn} do
+    worker = worker_fixture(%{name: "Hetzner agent pool"})
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    job
+    |> Job.changeset(%{state: "lost", ended_at: now, lease_owner: worker.worker_key})
+    |> Repo.update!()
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "attention",
+        path: "/tmp/retained-dashboard-worktree",
+        herdr_workspace: "w1P",
+        last_error: "Herdr confirmed that the retained managed agent is no longer present.",
+        last_used_at: now
+      })
+      |> Repo.insert!()
+
+    previous_adapter = Application.get_env(:ptc_manager, :dispatch_adapter)
+    Application.put_env(:ptc_manager, :dispatch_adapter, DiscardingAdapter)
+    Application.put_env(:ptc_manager, :dashboard_discard_test_pid, self())
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :dispatch_adapter, previous_adapter)
+      Application.delete_env(:ptc_manager, :dashboard_discard_test_pid)
+    end)
+
+    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/")
+    assert html =~ "Cleanup requires attention"
+    assert html =~ "Discard worktree"
+
+    view
+    |> element("#worktree-allocation-#{allocation.id} button", "Discard worktree")
+    |> render_click()
+
+    assert_receive {:discard_worktree, allocation_id}
+    assert allocation_id == allocation.id
+    assert render(view) =~ "Worktree discarded."
+    refute render(view) =~ "Discard worktree"
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
   end
 
   test "offers a safe manual retry while branch verification is pending", %{conn: conn} do

@@ -812,7 +812,12 @@ through Herdr only after a credential-free Git check proves a non-terminal
 checkout is clean and its exact head is on the PR branch. Dirty, missing, or
 unpushed non-terminal work is retained for attention. A merged or closed PR is
 the explicit exception: its abandoned checkout is removed with Herdr's force
-option because GitHub has already made the work terminal.
+option because GitHub has already made the work terminal. A retained worktree
+that no longer exists inside a healthy worktree root, or that a credential-free
+Git check proves clean with no commit beyond the default branch, is removed
+automatically because nothing can be lost. Every other retained worktree waits
+until the maintainer chooses **Discard worktree** on the dashboard, which
+force-removes it and records who discarded it.
 The separate `ptc-manager-publish` group lets only the coordinator and Git verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
 The coordinator and generic Herdr agents exchange task, schema, and result files

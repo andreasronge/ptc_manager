@@ -818,6 +818,16 @@
               <p :if={allocation.last_error} class="mt-1 text-amber-300">
                 Cleanup requires attention
               </p>
+              <button
+                :if={discardable_worktree?(allocation)}
+                type="button"
+                phx-click="discard-worktree"
+                phx-value-allocation-id={allocation.id}
+                data-confirm="Discard this worktree? Uncommitted work in it is lost."
+                class="mt-2 rounded-md border border-rose-400/20 px-2 py-1 text-[11px] font-semibold text-rose-300 hover:bg-rose-400/10"
+              >
+                Discard worktree
+              </button>
             </div>
           </div>
           <p :if={worker.worktree_allocations == []} class="mt-3 text-xs text-slate-600">
