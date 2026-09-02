@@ -29,7 +29,7 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
         local_path: workspace.repository
       )
 
-    %{leased: leased}
+    %{leased: leased, workspace: workspace}
   end
 
   test "a completed Herdr worktree failure with nothing at the reserved path ends safely", %{
@@ -65,6 +65,25 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
             {:uncertain,
              {:worktree_create_unconfirmed, {:herdr_exit, 1, "herdr: connection refused"},
               :enoent}}} = dispatch(leased, command)
+  end
+
+  test "a Codex implementation agent trusts the checkout and its worktree", %{
+    leased: leased,
+    workspace: workspace
+  } do
+    worktree_path = leased.worktree_allocation.path
+    configured = Application.get_env(:ptc_manager, :implementation_agent_args)
+
+    assert HerdrAdapter.agent_arguments("codex", [workspace.repository, worktree_path]) ==
+             configured ++
+               [
+                 "-c",
+                 ~s(projects={"#{workspace.repository}"={trust_level="trusted"},) <>
+                   ~s("#{worktree_path}"={trust_level="trusted"}})
+               ]
+
+    assert HerdrAdapter.agent_arguments("codex", []) == configured
+    assert HerdrAdapter.agent_arguments("claude", [workspace.repository]) == configured
   end
 
   defp dispatch(leased, command) do

@@ -787,6 +787,11 @@ sudo -u ptc-manager-worker -H gh auth login
 sudo -u ptc-manager-external -H codex login
 ```
 
+Managed Codex agents trust their repository checkout and worktree through a
+per-process configuration override, so no checkout needs a persistent trust
+entry in the worker's Codex configuration and no agent waits on Codex's
+interactive trust question.
+
 Each checkout persisted as a repository's `local_path` is owned and writable
 only by the worker. Both services run with `ProtectSystem=strict`, so every
 such checkout must also be listed in `ReadWritePaths` of

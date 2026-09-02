@@ -162,19 +162,13 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   @doc false
   def expand_agent_args(args, workspace_path) when is_list(args) and is_binary(workspace_path) do
     expanded_path = Path.expand(workspace_path)
-    toml_path = ~s("#{escape_toml_basic_string(expanded_path)}")
+    toml_path = PtcManager.CodexTrust.toml_basic_string(expanded_path)
 
     Enum.map(args, fn argument ->
       argument
       |> String.replace("{{workspace_path_toml}}", toml_path)
       |> String.replace("{{workspace_path}}", expanded_path)
     end)
-  end
-
-  defp escape_toml_basic_string(value) do
-    value
-    |> String.replace("\\", "\\\\")
-    |> String.replace("\"", "\\\"")
   end
 
   defp prompt_and_wait(name, action, output_path, schema_path) do

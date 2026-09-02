@@ -30,6 +30,7 @@ defmodule PtcManager.TestGitWorkspace do
 
     def gateway(pid), do: %__MODULE__{pid: pid}
     def workspaces(%__MODULE__{} = command), do: GenServer.call(command.pid, :workspaces)
+    def agent_starts(%__MODULE__{} = command), do: GenServer.call(command.pid, :agent_starts)
 
     def run(%__MODULE__{} = command, args, timeout) do
       GenServer.call(command.pid, {:run, args, timeout}, :infinity)
@@ -37,12 +38,21 @@ defmodule PtcManager.TestGitWorkspace do
 
     @impl true
     def init({workspace, runner}) do
-      {:ok, %{workspace: %{workspace | runner: runner}, workspaces: %{}}}
+      {:ok, %{workspace: %{workspace | runner: runner}, workspaces: %{}, agent_starts: []}}
     end
 
     @impl true
     def handle_call(:workspaces, _from, state) do
       {:reply, state.workspaces |> Map.values() |> Enum.sort_by(& &1.id), state}
+    end
+
+    def handle_call(:agent_starts, _from, state) do
+      {:reply, Enum.reverse(state.agent_starts), state}
+    end
+
+    def handle_call({:run, ["agent", "start" | _] = args, timeout}, _from, state) do
+      result = PtcManager.TestGitWorkspace.run(state.workspace, args, timeout)
+      {:reply, result, %{state | agent_starts: [args | state.agent_starts]}}
     end
 
     def handle_call({:run, ["worktree", "create" | _] = args, timeout}, _from, state) do

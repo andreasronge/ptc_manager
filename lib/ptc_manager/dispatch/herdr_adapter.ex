@@ -89,7 +89,13 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
       case PtcManager.ManagedOperationContext.prepare_action(Command, pane_id, action) do
         {:ok, _context} ->
-          start_pull_request_agent(workspace_id, pane_id, agent_name, worktree_path)
+          start_pull_request_agent(
+            workspace_id,
+            pane_id,
+            agent_name,
+            repository_path,
+            worktree_path
+          )
 
         {:error, reason} ->
           _ = remove_action_workspace(workspace_id)
@@ -98,8 +104,14 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  defp start_pull_request_agent(workspace_id, pane_id, agent_name, worktree_path) do
-    case start_agent(agent_name, pane_id) do
+  defp start_pull_request_agent(
+         workspace_id,
+         pane_id,
+         agent_name,
+         repository_path,
+         worktree_path
+       ) do
+    case start_agent(Command, agent_name, pane_id, [repository_path, worktree_path]) do
       {:ok, agent_key} ->
         session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
@@ -192,7 +204,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
             |> Map.put(:worktree_created_duration_ms, worktree_duration_ms)
             |> Map.put(:workspace_id, workspace_id)
 
-          start_implementation_agent(command, workspace_id, pane_id, job, issue, report)
+          start_implementation_agent(command, path, workspace_id, pane_id, job, issue, report)
 
         {:error, report} when is_map(report) ->
           report =
@@ -220,12 +232,22 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  defp start_implementation_agent(command, workspace_id, pane_id, job, issue, setup_report) do
+  defp start_implementation_agent(
+         command,
+         repository_path,
+         workspace_id,
+         pane_id,
+         job,
+         issue,
+         setup_report
+       ) do
     agent_name = agent_name(job)
+    worktree_path = job.worktree_allocation.path
 
     with {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
-         {:ok, agent_key} <- start_agent(command, agent_name, pane_id),
+         {:ok, agent_key} <-
+           start_agent(command, agent_name, pane_id, [repository_path, worktree_path]),
          :ok <- prompt_agent(command, agent_name, issue, job) do
       session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
@@ -516,16 +538,31 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     )
   end
 
-  defp start_agent(name, pane_id), do: start_agent(Command, name, pane_id)
+  @doc """
+  Returns the agent command line for one managed workspace.
 
-  defp start_agent(command, name, pane_id) do
-    kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
-
-    agent_args =
+  Codex only accepts a prompt in a directory it trusts and asks interactively
+  otherwise, which leaves a freshly started implementation agent blocked before
+  PtcManager can deliver the task. The trust override covers the repository
+  checkout, where Codex resolves trust for a linked worktree, and the worktree
+  itself; other agent kinds receive the configured arguments unchanged.
+  """
+  def agent_arguments(kind, trusted_paths) when is_binary(kind) and is_list(trusted_paths) do
+    configured =
       Application.get_env(:ptc_manager, :implementation_agent_args, [
         "--dangerously-bypass-approvals-and-sandbox"
       ])
 
+    if kind == "codex" and trusted_paths != [] do
+      configured ++ PtcManager.CodexTrust.override_args(trusted_paths)
+    else
+      configured
+    end
+  end
+
+  defp start_agent(command, name, pane_id, trusted_paths) do
+    kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
+    agent_args = agent_arguments(kind, trusted_paths)
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
     command_timeout = timeout + @agent_start_command_grace_ms
 

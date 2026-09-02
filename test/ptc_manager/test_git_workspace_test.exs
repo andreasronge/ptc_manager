@@ -67,6 +67,23 @@ defmodule PtcManager.TestGitWorkspaceTest do
     assert workspace_id == allocation.herdr_workspace
     assert worktree_path == allocation.path
 
+    assert [["agent", "start", "impl_j" <> _ | start_options]] =
+             TestGitWorkspace.HerdrCommand.agent_starts(command)
+
+    assert Enum.take(start_options, 8) == [
+             "--kind",
+             "codex",
+             "--pane",
+             "#{workspace_id}:p1",
+             "--timeout",
+             "120000",
+             "--",
+             "--dangerously-bypass-approvals-and-sandbox"
+           ]
+
+    assert Enum.drop(start_options, 8) ==
+             PtcManager.CodexTrust.override_args([workspace.repository, allocation.path])
+
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     working
