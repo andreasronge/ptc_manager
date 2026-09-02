@@ -8,6 +8,21 @@ defmodule PtcManager.AutomationsTest do
   alias PtcManager.MaintainerActions
   alias PtcManager.Repo
 
+  defmodule GitTrustCommand do
+    def git_command(_args), do: {"", 0}
+  end
+
+  defmodule ClaudeTrustCommand do
+    def trust_command(args) do
+      send(
+        Application.fetch_env!(:ptc_manager, :worker_claude_trust_test_pid),
+        {:claude_trust, args}
+      )
+
+      {"", 0}
+    end
+  end
+
   defmodule GenericHerdrCommand do
     def run(args, _timeout \\ nil) do
       cond do
@@ -384,6 +399,109 @@ defmodule PtcManager.AutomationsTest do
     [run] = PtcManager.Operations.list_active_agent_runs()
     assert run.agent_name == invocation.selected_agent_name
     assert run.herdr_workspace == "generic-workspace"
+  end
+
+  test "a Claude profile trusts the snapshot for the worker before starting and revokes it after" do
+    keys = [
+      :dispatch_enabled,
+      :generic_herdr_command,
+      :agent_profiles,
+      :herdr_run_as_user,
+      :worktree_root,
+      :worker_repository_trust_command,
+      :worker_claude_trust_command,
+      :worker_claude_trust_test_pid
+    ]
+
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :generic_herdr_command, GenericHerdrCommand)
+    Application.put_env(:ptc_manager, :herdr_run_as_user, "ptc-manager-worker")
+    Application.put_env(:ptc_manager, :worker_repository_trust_command, GitTrustCommand)
+    # The fixture repository is the temporary directory itself, so its parent
+    # plays the managed root that makes the workspace eligible for trust.
+    Application.put_env(
+      :ptc_manager,
+      :worktree_root,
+      System.tmp_dir!() |> Path.expand() |> Path.dirname()
+    )
+
+    Application.put_env(:ptc_manager, :worker_claude_trust_command, ClaudeTrustCommand)
+    Application.put_env(:ptc_manager, :worker_claude_trust_test_pid, self())
+
+    Application.put_env(:ptc_manager, :agent_profiles, %{
+      "claude" => %{
+        "enabled" => true,
+        "args" => [
+          "--dangerously-skip-permissions",
+          "{{workspace_path}}",
+          "{{workspace_path_toml}}"
+        ]
+      }
+    })
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, nil} -> Application.delete_env(:ptc_manager, key)
+        {key, value} -> Application.put_env(:ptc_manager, key, value)
+      end)
+    end)
+
+    repository = repository_fixture(%{github_name: "ptc_runner", local_path: System.tmp_dir!()})
+    definition = Automations.get_definition(repository, "nightly_ci_investigation")
+
+    attrs =
+      definition.current_version
+      |> Map.from_struct()
+      |> Map.take([
+        :target_type,
+        :execution_profile,
+        :github_access,
+        :queue_lane,
+        :resource_class,
+        :lock_policy,
+        :timeout_seconds,
+        :result_type,
+        :result_protocol_version,
+        :prompt,
+        :configuration_snapshot
+      ])
+      |> Map.put(:prompt, String.duplicate("Long context line.\n", 1_000))
+      |> Map.put(:agent_selector, %{
+        "mode" => "require",
+        "preferred_kind" => "claude",
+        "required_capabilities" => []
+      })
+
+    assert {:ok, _version} = Automations.create_version(definition, attrs, "test")
+    trigger = Automations.get_definition(repository, definition.key).triggers |> hd()
+    assert {:ok, invocation} = Automations.run_trigger(trigger, "maintainer")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    assert {:ok, _worker} =
+             PtcManager.Operations.create_worker(%{
+               worker_key: "herdr:default",
+               name: "Herdr default",
+               status: "online",
+               capabilities: %{"herdr" => true},
+               last_heartbeat_at: now,
+               worker_incarnation_id: "worker-test",
+               herdr_incarnation_id: "herdr-test",
+               coordinator_incarnation_id: PtcManager.RuntimeIncarnation.current()
+             })
+
+    assert {:ok, {action, _token}} =
+             PtcManager.Operations.claim_agent_action(invocation.agent_action_id)
+
+    assert {:ok, %{"outcome" => "no-changes"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    workspace_path = Process.get({GenericHerdrCommand, :workspace_path})
+    assert is_binary(workspace_path)
+    assert_receive {:claude_trust, ["allow", ^workspace_path]}
+    assert_receive {:claude_trust, ["revoke", ^workspace_path]}
+    assert Repo.get!(Invocation, invocation.id).selected_agent_kind == "claude"
   end
 
   test "agent profile workspace placeholders preserve one argument and quote TOML paths" do

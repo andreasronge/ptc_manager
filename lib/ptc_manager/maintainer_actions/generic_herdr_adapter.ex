@@ -10,6 +10,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Operations.AgentAction
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerRepositoryTrust
+  alias PtcManager.Repository.WorkerClaudeTrust
 
   @command_grace_ms 5_000
   @prompt_stall_recovery_ms 30_000
@@ -137,6 +138,28 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   defp start_agent(name, pane, profile, workspace_path) do
+    with :ok <- trust_agent_workspace(profile.kind, workspace_path) do
+      run_agent_start(name, pane, profile, workspace_path)
+    end
+  end
+
+  defp trust_agent_workspace("claude", workspace_path) do
+    case WorkerClaudeTrust.allow(workspace_path) do
+      {:ok, :trusted} ->
+        Process.put({__MODULE__, :claude_trusted_path}, workspace_path)
+        :ok
+
+      {:ok, :not_required} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp trust_agent_workspace(_kind, _workspace_path), do: :ok
+
+  defp run_agent_start(name, pane, profile, workspace_path) do
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
 
     args =
@@ -402,6 +425,10 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
     if path = Process.delete({__MODULE__, :trusted_path}) do
       _ = WorkerRepositoryTrust.revoke(path)
+    end
+
+    if path = Process.delete({__MODULE__, :claude_trusted_path}) do
+      _ = WorkerClaudeTrust.revoke(path)
     end
 
     if output = Process.delete({__MODULE__, :output_path}), do: File.rm(output)

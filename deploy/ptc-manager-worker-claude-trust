@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+# PtcManager invokes this root-owned wrapper through its narrowly scoped sudo
+# rule so the Herdr worker's own Claude Code configuration records that one
+# managed directory is trusted before an agent starts there. Claude Code asks
+# "Do you trust this folder?" per exact path, keeps the answer only in the
+# worker's ~/.claude.json, and offers no start-up flag for interactive panes.
+
+fail() {
+  echo "ptc-manager-worker-claude-trust: $1" >&2
+  exit 2
+}
+
+[ "$#" -eq 2 ] || fail "expected allow|revoke and an absolute PATH"
+
+mode=$1
+path=$2
+
+case "$mode" in
+  allow|revoke) ;;
+  *) fail "mode must be allow or revoke" ;;
+esac
+
+case "$path" in
+  /*) ;;
+  *) fail "path must be absolute" ;;
+esac
+
+case "$path/" in
+  *"/../"*|*"/./"*|*"//"*) fail "path must be normalized" ;;
+esac
+
+exec /usr/bin/python3 - "$mode" "$path" <<'PY'
+import fcntl
+import json
+import os
+import sys
+import tempfile
+
+mode, path = sys.argv[1], sys.argv[2]
+home = os.path.expanduser("~")
+config = os.path.join(home, ".claude.json")
+
+with open(os.path.join(home, ".claude.json.ptc-lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    data = {}
+    if os.path.exists(config):
+        with open(config) as handle:
+            data = json.load(handle)
+
+    if not isinstance(data, dict):
+        sys.exit("ptc-manager-worker-claude-trust: ~/.claude.json is not a JSON object")
+
+    projects = data.setdefault("projects", {})
+
+    if mode == "allow":
+        projects.setdefault(path, {})["hasTrustDialogAccepted"] = True
+    else:
+        entry = projects.get(path)
+        if isinstance(entry, dict):
+            entry.pop("hasTrustDialogAccepted", None)
+            if not entry:
+                projects.pop(path, None)
+
+    descriptor, temporary = tempfile.mkstemp(prefix=".claude.json.", dir=home)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(data, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, config)
+PY

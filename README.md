@@ -734,6 +734,7 @@ sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_m
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
+sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-claude-trust /usr/local/bin/ptc-manager-worker-claude-trust
 sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
@@ -796,6 +797,16 @@ ssh -t herdr-box sudo -u ptc-manager-worker -H env NO_OPEN_BROWSER=1 cursor-agen
 The deployment links `claude` from the worker Node directory and copies the
 pinned Cursor CLI from `/home/agent/.local/share/cursor-agent/versions/` into
 `/opt/ptc-manager-cursor-agent/` so both are on the worker's service `PATH`.
+
+Each agent kind has its own way past interactive start-up questions. Codex
+receives a per-process `-c projects=...` trust override, the Cursor CLI takes
+`--force --trust`, and Claude Code, which asks "Do you trust this folder?" per
+exact path with no start-up flag, is pre-answered by the coordinator through
+the root-owned `ptc-manager-worker-claude-trust` helper before each managed
+agent starts. Claude Code's one-time "Bypass Permissions mode" acknowledgment
+must be accepted once as the worker, or skipped with
+`{"skipDangerousModePermissionPrompt": true}` in the worker's
+`~/.claude/settings.json`.
 
 Managed Codex agents trust their repository checkout and worktree through a
 per-process configuration override, so no checkout needs a persistent trust

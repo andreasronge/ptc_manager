@@ -8,6 +8,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @remote_script Path.join(@project_root, "deploy/remote-deploy-herdr")
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
+  @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @self_deploy_command Path.join(@project_root, "scripts/ptc/deploy")
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
@@ -24,6 +25,7 @@ defmodule Mix.Tasks.PtcDeployTest do
           @remote_script,
           @worker_git,
           @worker_bootstrap,
+          @claude_trust,
           @failure_policy,
           @self_deploy_command,
           @self_deploy_runner,
@@ -31,6 +33,51 @@ defmodule Mix.Tasks.PtcDeployTest do
         ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
+  end
+
+  test "the worker Claude trust helper records and removes one exact path" do
+    home =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-claude-trust-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(home)
+    on_exit(fn -> File.rm_rf!(home) end)
+    config = Path.join(home, ".claude.json")
+
+    File.write!(
+      config,
+      Jason.encode!(%{
+        "theme" => "dark",
+        "projects" => %{"/other" => %{"hasTrustDialogAccepted" => true, "history" => []}}
+      })
+    )
+
+    path = "/managed/planning-snapshots/ptc-manager-planning-a74-b5d9b142"
+
+    assert {_output, 0} = helper(home, ["allow", path])
+    trusted = Jason.decode!(File.read!(config))
+    assert get_in(trusted, ["projects", path, "hasTrustDialogAccepted"]) == true
+    assert get_in(trusted, ["projects", "/other", "hasTrustDialogAccepted"]) == true
+    assert trusted["theme"] == "dark"
+
+    assert {_output, 0} = helper(home, ["revoke", path])
+    revoked = Jason.decode!(File.read!(config))
+    refute Map.has_key?(revoked["projects"], path)
+    assert get_in(revoked, ["projects", "/other", "history"]) == []
+
+    assert {output, 2} = helper(home, ["allow", "relative/path"])
+    assert output =~ "absolute"
+    assert {output, 2} = helper(home, ["allow", "/managed/../escape"])
+    assert output =~ "normalized"
+    assert {output, 2} = helper(home, ["forget", path])
+    assert output =~ "allow or revoke"
+    assert Jason.decode!(File.read!(config)) == revoked
+  end
+
+  defp helper(home, args) do
+    System.cmd("sh", [@claude_trust | args], env: [{"HOME", home}], stderr_to_stdout: true)
   end
 
   test "self-deploy command runs from its immutable archive without a Git checkout" do

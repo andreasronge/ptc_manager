@@ -8,6 +8,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Gateway
   alias PtcManager.CommandEnvironment
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.WorkerClaudeTrust
   alias PtcManager.Repository.WorkspaceSetup
   alias PtcManager.ReviewPolicy
   alias PtcManager.WorktreeSecurity
@@ -132,7 +133,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          repository_path,
          worktree_path
        ) do
-    case start_agent(Command, agent_name, pane_id, [repository_path, worktree_path]) do
+    case start_agent(Command, agent_name, pane_id, repository_path, worktree_path) do
       {:ok, agent_key} ->
         session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
@@ -268,7 +269,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     with {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
          {:ok, agent_key} <-
-           start_agent(command, agent_name, pane_id, [repository_path, worktree_path]),
+           start_agent(command, agent_name, pane_id, repository_path, worktree_path),
          :ok <- prompt_agent(command, agent_name, issue, job) do
       session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
@@ -581,8 +582,15 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  defp start_agent(command, name, pane_id, trusted_paths) do
+  defp start_agent(command, name, pane_id, repository_path, workspace_path) do
     kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
+
+    with :ok <- WorkerClaudeTrust.prepare(kind, workspace_path) do
+      run_agent_start(command, name, pane_id, kind, [repository_path, workspace_path])
+    end
+  end
+
+  defp run_agent_start(command, name, pane_id, kind, trusted_paths) do
     agent_args = agent_arguments(kind, trusted_paths)
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
     command_timeout = timeout + @agent_start_command_grace_ms
