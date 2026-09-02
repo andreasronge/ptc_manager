@@ -52,7 +52,9 @@ defmodule Mix.Tasks.PtcDeployTest do
     )
 
     File.write!(Path.join(source, "deploy/deployment-failure-policy"), "#!/bin/sh\nexit 0\n")
-    assert {"", 0} = System.cmd("tar", ["-cf", archive, "-C", source, "."])
+    # Match the repository archive layout exactly. GNU tar preserves the leading
+    # "./" when archiving ".", while git archive and bsdtar expose "deploy/...".
+    assert {"", 0} = System.cmd("tar", ["-cf", archive, "-C", source, "deploy"])
 
     sha = String.duplicate("a", 40)
 

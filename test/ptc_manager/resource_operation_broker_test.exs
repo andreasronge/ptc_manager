@@ -132,7 +132,9 @@ defmodule PtcManager.ResourceOperationBrokerTest do
 
     command = ManagedOperationContext.shell_command(issued.path, issued.payload)
     assert command =~ ". '/usr/local/libexec/ptc-manager-agent-context'"
-    assert command =~ "PTC_OPERATION_CONTEXT_READY:"
+    assert command =~ "'PTC_OPERATION_CONTEXT_READY'"
+    assert command =~ issued.payload["context_id"]
+    refute command =~ "PTC_OPERATION_CONTEXT_READY:#{issued.payload["context_id"]}"
     File.rm_rf!(directory)
   end
 

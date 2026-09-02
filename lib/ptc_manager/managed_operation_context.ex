@@ -86,7 +86,11 @@ defmodule PtcManager.ManagedOperationContext do
   end
 
   def shell_command(path, payload) do
-    marker = "PTC_OPERATION_CONTEXT_READY:#{payload["context_id"]}"
+    marker_command =
+      "printf '\\n%s:%s\\n' " <>
+        shell_quote("PTC_OPERATION_CONTEXT_READY") <>
+        " " <>
+        shell_quote(payload["context_id"])
 
     if payload["cgroups"] do
       ". " <>
@@ -103,12 +107,15 @@ defmodule PtcManager.ManagedOperationContext do
           " ",
           &(to_string(&1) |> shell_quote())
         ) <>
-        " && printf '\\n#{marker}\\n'"
+        " && " <>
+        marker_command
     else
       "export PTC_MANAGED_OPERATION_CONTEXT=" <>
         shell_quote(path) <>
         " PTC_OPERATION_WRAPPER=" <>
-        shell_quote(wrapper_path()) <> " && printf '\\n#{marker}\\n'"
+        shell_quote(wrapper_path()) <>
+        " && " <>
+        marker_command
     end
   end
 
@@ -172,17 +179,53 @@ defmodule PtcManager.ManagedOperationContext do
 
     with {:ok, _output} <-
            command.run(["pane", "run", pane_id, shell_command(context.path, context.payload)]) do
-      case command.run(pane_wait_args(pane_id, marker)) do
-        {:error, reason} when attempts_left > 1 ->
-          if pane_wait_timeout?(reason) do
-            establish_pane_context(command, pane_id, context, attempts_left - 1)
-          else
-            {:error, reason}
-          end
+      await_pane_context(command, pane_id, marker, attempts_left)
+    end
+  end
 
-        result ->
-          result
-      end
+  defp await_pane_context(command, pane_id, marker, attempts_left) do
+    case command.run(pane_wait_args(pane_id, marker)) do
+      {:error, reason} when attempts_left > 0 ->
+        if pane_wait_timeout?(reason) do
+          case read_visible_pane(command, pane_id, marker) do
+            {:ok, output} ->
+              {:ok, output}
+
+            :not_found when attempts_left > 1 ->
+              await_pane_context(command, pane_id, marker, attempts_left - 1)
+
+            :not_found ->
+              {:error, reason}
+
+            {:error, read_reason} ->
+              {:error, read_reason}
+          end
+        else
+          {:error, reason}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp read_visible_pane(command, pane_id, marker) do
+    case command.run([
+           "pane",
+           "read",
+           pane_id,
+           "--source",
+           "visible",
+           "--lines",
+           "30",
+           "--format",
+           "text"
+         ]) do
+      {:ok, output} when is_binary(output) ->
+        if String.contains?(output, marker), do: {:ok, output}, else: :not_found
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -194,7 +237,7 @@ defmodule PtcManager.ManagedOperationContext do
       "--match",
       marker,
       "--source",
-      "recent",
+      "visible",
       "--lines",
       "20",
       "--timeout",
