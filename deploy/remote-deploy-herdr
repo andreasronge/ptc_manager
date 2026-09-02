@@ -70,6 +70,9 @@ mise_binary=/home/agent/.local/bin/mise
 worker_mise=/usr/local/bin/mise
 node_version=22.23.2
 worker_node_dir="/opt/ptc-manager-node-${node_version}"
+cursor_agent_version=2026.08.25-3e8eec8
+cursor_agent_source="/home/agent/.local/share/cursor-agent/versions/${cursor_agent_version}"
+cursor_agent_root=/opt/ptc-manager-cursor-agent
 worker_node_staging=
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 erlang_version=29.0.3
@@ -404,6 +407,31 @@ ensure_private_worktree_root() {
     [ "$current" = "/" ] && break
     current=$(dirname "$current")
   done
+}
+
+# Herdr starts every agent kind by its canonical executable on the worker's
+# service PATH. Codex already lives in /usr/local/bin; Claude Code is the
+# native binary shipped inside the worker Node directory, and the Cursor CLI is
+# copied from the pinned per-user installation into a root-owned tree. Login
+# state stays per identity, so the worker still signs in once after this.
+install_worker_agents() {
+  if sudo test -x "$worker_node_dir/bin/claude"; then
+    sudo ln -sfn "$worker_node_dir/bin/claude" /usr/local/bin/claude
+  fi
+
+  if [ -x "$cursor_agent_source/cursor-agent" ]; then
+    sudo install -d -o root -g root -m 0755 "$cursor_agent_root"
+
+    if ! sudo test -d "$cursor_agent_root/$cursor_agent_version"; then
+      cursor_agent_staging=$(sudo mktemp -d "$cursor_agent_root/.staging.XXXXXX")
+      sudo cp -a "$cursor_agent_source/." "$cursor_agent_staging/"
+      sudo chown -R root:root "$cursor_agent_staging"
+      sudo mv "$cursor_agent_staging" "$cursor_agent_root/$cursor_agent_version"
+    fi
+
+    sudo ln -sfn "$cursor_agent_root/$cursor_agent_version/cursor-agent" \
+      /usr/local/bin/cursor-agent
+  fi
 }
 
 install_worker_node() {
@@ -851,6 +879,7 @@ sudo rm -f -- \
 sudo systemctl daemon-reload
 install_worker_mise
 install_worker_node
+install_worker_agents
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.

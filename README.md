@@ -779,13 +779,23 @@ then performs an ordinary fast-forward push from a fresh bare repository through
 a narrow root-owned wrapper running as the authenticated worker; the repair
 agent never receives that credential and its repository configuration is never
 used by the credential-bearing push process.
-Authenticate the worker's configured Herdr agents and required GitHub identities:
+Authenticate the worker's configured Herdr agents and required GitHub identities.
+Each login uses the subscription account in a browser on your own machine; the
+worker keeps the resulting token under its own home directory, so a login done
+as the interactive `agent` user does not count:
 
 ```sh
 sudo -u ptc-manager-worker -H codex login
 sudo -u ptc-manager-worker -H gh auth login
 sudo -u ptc-manager-external -H codex login
+# Claude Code and the Cursor CLI, once the deployment has exposed them:
+ssh -t herdr-box sudo -u ptc-manager-worker -H claude auth login
+ssh -t herdr-box sudo -u ptc-manager-worker -H env NO_OPEN_BROWSER=1 cursor-agent login
 ```
+
+The deployment links `claude` from the worker Node directory and copies the
+pinned Cursor CLI from `/home/agent/.local/share/cursor-agent/versions/` into
+`/opt/ptc-manager-cursor-agent/` so both are on the worker's service `PATH`.
 
 Managed Codex agents trust their repository checkout and worktree through a
 per-process configuration override, so no checkout needs a persistent trust
