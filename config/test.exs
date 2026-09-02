@@ -10,6 +10,7 @@ config :ptc_manager, Oban,
   plugins: false
 
 config :ptc_manager,
+  github_client: PtcManager.TestGitHubClient,
   github_sync_interval_ms: 0,
   herdr_sync_interval_ms: 0,
   agent_actions_enabled: false,

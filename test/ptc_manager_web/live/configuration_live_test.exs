@@ -58,16 +58,17 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
   end
 
   test "registers another repository disabled with its own automation defaults", %{conn: conn} do
-    path = Path.join(System.tmp_dir!(), "ptc-manager-onboarding-checkout")
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    refute has_element?(view, "#add-repository input[name='repository[local_path]']")
+    assert has_element?(view, "#add-repository button", "Add repository")
 
     view
     |> form("#add-repository form", %{
       "repository" => %{
         "github_owner" => "andreasronge",
         "github_name" => "ptc_manager",
-        "default_branch" => "main",
-        "local_path" => path
+        "default_branch" => "main"
       }
     })
     |> render_submit()
@@ -76,8 +77,237 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
       Repo.get_by!(Repository, github_owner: "andreasronge", github_name: "ptc_manager")
 
     refute repository.enabled
+    assert repository.local_path == "/srv/ptc_manager"
     assert length(PtcManager.Automations.list_definitions(repository)) == 11
     assert has_element?(view, "#repository-health-#{repository.id}", "Disabled")
+    assert has_element?(view, "#repository-health-#{repository.id}", "/srv/ptc_manager")
+  end
+
+  test "keeps repository input and explains GitHub validation failures", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :test_github_repositories, :all)
+    on_exit(fn -> Application.put_env(:ptc_manager, :test_github_repositories, previous) end)
+
+    Application.put_env(:ptc_manager, :test_github_repositories, %{
+      {"andreasronge", "offline"} => {:error, {:github_transport_error, :timeout}}
+    })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    html =
+      view
+      |> form("#add-repository form",
+        repository: %{github_owner: "andreasronge", github_name: "typo", default_branch: "trunk"}
+      )
+      |> render_submit()
+
+    assert html =~ "could not find that exact owner/name"
+    assert has_element?(view, "input[name='repository[github_name]'][value='typo']")
+    refute Repo.get_by(Repository, github_name: "typo")
+
+    html =
+      view
+      |> form("#add-repository form",
+        repository: %{
+          github_owner: "andreasronge",
+          github_name: "offline",
+          default_branch: "main"
+        }
+      )
+      |> render_submit()
+
+    assert html =~ "GitHub access is currently unavailable"
+    refute Repo.get_by(Repository, github_name: "offline")
+  end
+
+  test "rejects names that cannot produce a safe checkout component without persistence" do
+    before_count = Repo.aggregate(Repository, :count)
+
+    assert {:error, :unsafe_repository_name} =
+             Operations.onboard_repository(%{
+               github_owner: "andreasronge",
+               github_name: "../escape",
+               default_branch: "main",
+               enabled: false
+             })
+
+    assert Repo.aggregate(Repository, :count) == before_count
+  end
+
+  test "normalizes string-keyed onboarding attributes and keeps repositories disabled" do
+    assert {:ok, repository} =
+             Operations.onboard_repository(%{
+               "github_owner" => "andreasronge",
+               "github_name" => "string-keys",
+               "default_branch" => "trunk",
+               "enabled" => true,
+               "local_path" => "/tmp/not-used"
+             })
+
+    assert repository.local_path == "/srv/string-keys"
+    assert repository.default_branch == "trunk"
+    refute repository.enabled
+  end
+
+  test "requires confirmation and removes only internal records", %{conn: conn} do
+    checkout = Path.join(System.tmp_dir!(), "ptc-retired-#{System.unique_integer([:positive])}")
+
+    repository =
+      repository_fixture(%{
+        github_owner: "andreasronge",
+        github_name: "retired",
+        local_path: checkout
+      })
+
+    checkout = repository.local_path
+    File.mkdir_p!(checkout)
+    marker = Path.join(checkout, "keep-me")
+    File.write!(marker, "external")
+    on_exit(fn -> File.rm_rf!(checkout) end)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> element("#repository-health-#{repository.id} button", "Remove repository")
+    |> render_click()
+
+    assert has_element?(view, "#remove-repository-dialog", "andreasronge/retired")
+    assert Repo.get(Repository, repository.id)
+
+    view |> element("#remove-repository-dialog button", "Cancel") |> render_click()
+    assert Repo.get(Repository, repository.id)
+
+    view
+    |> element("#repository-health-#{repository.id} button", "Remove repository")
+    |> render_click()
+
+    view |> element("#remove-repository-dialog button", "Remove repository") |> render_click()
+    refute Repo.get(Repository, repository.id)
+    assert File.read!(marker) == "external"
+  end
+
+  test "refuses confirmed removal while managed work is active", %{conn: conn} do
+    repository = repository_fixture(%{github_name: "busy-repository"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    assert {:ok, _action} =
+             Operations.enqueue_agent_action(%{
+               repository_id: repository.id,
+               action_key: "prepare_issue",
+               target_type: "repository",
+               target_id: repository.id,
+               target_label: "Busy repository",
+               prompt_version: 1,
+               prompt: "Inspect",
+               actor: "maintainer",
+               requested_at: now
+             })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> element("#repository-health-#{repository.id} button", "Remove repository")
+    |> render_click()
+
+    html =
+      view
+      |> element("#remove-repository-dialog button", "Remove repository")
+      |> render_click()
+
+    assert html =~ "has active managed work"
+    assert Repo.get(Repository, repository.id)
+  end
+
+  test "refuses removal while a retained external workspace awaits cleanup" do
+    repository = repository_fixture(%{github_name: "retained-workspace"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, action} =
+      Operations.enqueue_agent_action(%{
+        repository_id: repository.id,
+        action_key: "repair_pr",
+        target_type: "pull_request",
+        target_id: 42,
+        target_label: "Retained workspace",
+        prompt_version: 1,
+        prompt: "Repair",
+        actor: "maintainer",
+        requested_at: now
+      })
+
+    action
+    |> PtcManager.Operations.AgentAction.changeset(%{state: "done", ended_at: now})
+    |> Repo.update!()
+
+    worker = worker_fixture(%{worker_key: "herdr:retained-removal"})
+
+    assert {:ok, _run} =
+             Operations.create_agent_run(%{
+               worker_id: worker.id,
+               agent_action_id: action.id,
+               role: "implementer",
+               state: "done",
+               status_text: "Awaiting external workspace cleanup.",
+               started_at: now,
+               last_heartbeat_at: now,
+               ended_at: now,
+               herdr_workspace: "retained-external-workspace"
+             })
+
+    assert {:error, :active_work} = Operations.remove_repository(repository.id)
+    assert Repo.get(Repository, repository.id)
+  end
+
+  test "allows removal after a generic action closed its workspace" do
+    repository = repository_fixture(%{github_name: "closed-generic-workspace"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, action} =
+      Operations.enqueue_agent_action(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "repository",
+        target_id: repository.id,
+        target_label: "Completed generic action",
+        prompt_version: 1,
+        prompt: "Inspect",
+        actor: "maintainer",
+        requested_at: now
+      })
+
+    action
+    |> PtcManager.Operations.AgentAction.changeset(%{state: "done", ended_at: now})
+    |> Repo.update!()
+
+    worker = worker_fixture(%{worker_key: "herdr:closed-generic-removal"})
+
+    assert {:ok, _run} =
+             Operations.create_agent_run(%{
+               worker_id: worker.id,
+               agent_action_id: action.id,
+               role: "manager",
+               state: "done",
+               status_text: "Workspace closed.",
+               started_at: now,
+               last_heartbeat_at: now,
+               ended_at: now,
+               herdr_workspace: "historical-generic-workspace"
+             })
+
+    assert {:ok, _repository} = Operations.remove_repository(repository.id)
+    refute Repo.get(Repository, repository.id)
+  end
+
+  test "clears a confirmation dialog after peer removal", %{conn: conn} do
+    repository = repository_fixture(%{github_name: "peer-removed"})
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> element("#repository-health-#{repository.id} button", "Remove repository")
+    |> render_click()
+
+    assert has_element?(view, "#remove-repository-dialog")
+    assert {:ok, _repository} = Operations.remove_repository(repository.id)
+    refute render(view) =~ "remove-repository-dialog"
   end
 
   test "shows repository checkout, GitHub, and publication-gate health", %{conn: conn} do

@@ -11,6 +11,27 @@ defmodule PtcManager.GitHub.Client do
   @graphql_url "https://api.github.com/graphql"
 
   @impl true
+  def get_repository(owner, name) when is_binary(owner) and is_binary(name) do
+    variables = %{"owner" => owner, "name" => name}
+
+    case graphql(repository_query(), variables, repository_lookup: true) do
+      {:ok, %{"repository" => nil}} ->
+        {:error, :repository_not_found}
+
+      {:ok, %{"repository" => %{"nameWithOwner" => full_name} = repository}} ->
+        if full_name == owner <> "/" <> name,
+          do: {:ok, repository},
+          else: {:error, :repository_not_found}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_github_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
   def list_open_issues(%Repository{} = repository) do
     fetch_graphql_pages(repository, nil, 1, [])
   end
@@ -126,13 +147,20 @@ defmodule PtcManager.GitHub.Client do
   defp normalize_enum(value) when is_binary(value), do: value |> String.downcase()
   defp normalize_enum(_value), do: nil
 
-  defp graphql(query, variables) do
+  defp graphql(query, variables, opts \\ []) do
     payload = Jason.encode!(%{"query" => query, "variables" => variables})
+    repository_lookup? = opts[:repository_lookup] == true
 
     with :ok <- require_graphql_token(),
          {:ok, body} <- post(@graphql_url, payload),
          {:ok, decoded} <- Jason.decode(body) do
       case decoded do
+        %{"data" => %{"repository" => nil} = data, "errors" => errors}
+        when repository_lookup? ->
+          if Enum.any?(errors, &(is_map(&1) and &1["type"] == "NOT_FOUND")),
+            do: {:ok, data},
+            else: {:error, {:github_graphql_error, bounded_errors(errors)}}
+
         %{"errors" => [_error | _rest] = errors} ->
           {:error, {:github_graphql_error, bounded_errors(errors)}}
 
@@ -157,6 +185,14 @@ defmodule PtcManager.GitHub.Client do
           pageInfo { hasNextPage endCursor }
         }
       }
+    }
+    """
+  end
+
+  defp repository_query do
+    """
+    query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) { nameWithOwner }
     }
     """
   end

@@ -9,6 +9,9 @@ defmodule PtcManager.GitHub do
 
   alias PtcManager.Operations.Repository
 
+  @callback get_repository(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   @callback list_open_issues(Repository.t()) :: {:ok, [map()]} | {:error, term()}
   @callback get_issue(Repository.t(), pos_integer()) :: {:ok, map()} | {:error, term()}
+
+  @optional_callbacks get_repository: 2
 end

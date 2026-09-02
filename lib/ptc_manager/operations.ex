@@ -10,6 +10,7 @@ defmodule PtcManager.Operations do
   import Ecto.Query
   alias Ecto.Multi
   alias PtcManager.Repo
+  alias PtcManager.RepoTransaction
   alias PtcManager.ReviewPolicy
   alias PtcManager.RuntimeIncarnation
   alias PtcManager.Repository.Checkout
@@ -46,6 +47,7 @@ defmodule PtcManager.Operations do
   )
   @superseded_herdr_status "Superseded duplicate of the action-owned Herdr run."
   @topic "operations"
+  @github_component ~r/\A[A-Za-z0-9_.-]+\z/
 
   def subscribe, do: Phoenix.PubSub.subscribe(PtcManager.PubSub, @topic)
 
@@ -65,6 +67,45 @@ defmodule PtcManager.Operations do
   def get_issue!(id), do: Issue |> preload(:repository) |> Repo.get!(id)
 
   def create_repository(attrs) do
+    insert_repository(attrs)
+  end
+
+  def onboard_repository(attrs) do
+    with {:ok, attrs} <- prepare_repository(attrs),
+         :ok <- verify_repository(attrs) do
+      insert_repository(attrs)
+    end
+  end
+
+  def with_repository_lifecycle_lock(repository_id, fun)
+      when is_integer(repository_id) and is_function(fun, 0) do
+    :global.trans({{PtcManager.RepositoryLifecycle, repository_id}, self()}, fun)
+  end
+
+  def remove_repository(repository_id) when is_integer(repository_id) do
+    with_repository_lifecycle_lock(repository_id, fn ->
+      do_remove_repository(repository_id)
+    end)
+  end
+
+  defp do_remove_repository(repository_id) do
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        if repository_active_work?(repository_id), do: Repo.rollback(:active_work)
+
+        delete_repository_records(repository_id)
+        Repo.delete!(repository)
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp insert_repository(attrs) do
     Multi.new()
     |> Multi.insert(:repository, Repository.changeset(%Repository{}, attrs))
     |> Multi.run(:automations, fn _repo, %{repository: repository} ->
@@ -79,6 +120,184 @@ defmodule PtcManager.Operations do
       {:error, :repository, changeset, _changes} -> {:error, changeset}
       {:error, _step, reason, _changes} -> {:error, reason}
     end
+  end
+
+  defp prepare_repository(attrs) do
+    owner = Map.get(attrs, :github_owner) || Map.get(attrs, "github_owner")
+    name = Map.get(attrs, :github_name) || Map.get(attrs, "github_name")
+    default_branch = Map.get(attrs, :default_branch) || Map.get(attrs, "default_branch")
+
+    if safe_github_component?(owner) and safe_github_component?(name) do
+      {:ok,
+       %{
+         github_owner: owner,
+         github_name: name,
+         default_branch: default_branch,
+         local_path: "/srv/#{name}",
+         enabled: false
+       }}
+    else
+      {:error, :unsafe_repository_name}
+    end
+  end
+
+  defp safe_github_component?(value),
+    do:
+      is_binary(value) and value not in [".", ".."] and byte_size(value) <= 100 and
+        Regex.match?(@github_component, value)
+
+  defp verify_repository(attrs) do
+    client = Application.fetch_env!(:ptc_manager, :github_client)
+
+    result =
+      if Code.ensure_loaded?(client) and function_exported?(client, :get_repository, 2),
+        do: client.get_repository(attrs.github_owner, attrs.github_name),
+        else: {:error, :repository_lookup_unsupported}
+
+    case result do
+      {:ok, _repository} -> :ok
+      {:error, :repository_not_found} -> {:error, :repository_not_found}
+      {:error, _reason} -> {:error, :github_unavailable}
+    end
+  end
+
+  defp repository_active_work?(repository_id) do
+    Repo.exists?(
+      from job in Job,
+        where: job.repository_id == ^repository_id and job.state in ^@active_job_states
+    ) or
+      Repo.exists?(
+        from action in AgentAction,
+          where:
+            action.repository_id == ^repository_id and
+              action.state in ["queued", "running", "sync_pending"]
+      ) or
+      Repo.exists?(
+        from run in AgentRun,
+          left_join: action in AgentAction,
+          on: action.id == run.agent_action_id,
+          left_join: job in Job,
+          on: job.id == run.job_id,
+          where:
+            (action.repository_id == ^repository_id or job.repository_id == ^repository_id) and
+              (run.state not in ["done", "failed", "lost"] or
+                 (action.action_key in ^@repair_action_keys and not is_nil(run.herdr_workspace)))
+      ) or
+      Repo.exists?(
+        from invocation in PtcManager.Automations.Invocation,
+          where:
+            invocation.repository_id == ^repository_id and
+              invocation.state in ["queued", "running", "synchronizing"]
+      ) or
+      Repo.exists?(
+        from deployment in PtcManager.Deployments.Deployment,
+          where:
+            deployment.repository_id == ^repository_id and
+              deployment.state in ["queued", "draining", "starting", "running"]
+      ) or
+      Repo.exists?(
+        from publication in PrPublication,
+          where:
+            publication.repository_id == ^repository_id and
+              publication.state in ["queued", "publishing"]
+      ) or
+      Repo.exists?(
+        from operation in PtcManager.Operations.ResourceOperation,
+          where:
+            operation.repository_id == ^repository_id and
+              operation.state not in ["completed", "failed", "cancelled", "lost"]
+      ) or
+      Repo.exists?(
+        from allocation in WorktreeAllocation,
+          join: job in Job,
+          on: job.id == allocation.job_id,
+          where:
+            job.repository_id == ^repository_id and
+              allocation.state != "removed"
+      )
+  end
+
+  defp delete_repository_records(repository_id) do
+    job_ids = from(job in Job, where: job.repository_id == ^repository_id, select: job.id)
+
+    issue_ids =
+      from(issue in Issue, where: issue.repository_id == ^repository_id, select: issue.id)
+
+    action_ids =
+      from(action in AgentAction,
+        where: action.repository_id == ^repository_id,
+        select: action.id
+      )
+
+    publication_ids =
+      from(publication in PrPublication,
+        where: publication.repository_id == ^repository_id,
+        select: publication.id
+      )
+
+    proposal_ids =
+      from(proposal in Proposal,
+        where: proposal.issue_id in subquery(issue_ids),
+        select: proposal.id
+      )
+
+    Repo.delete_all(
+      from operation in PtcManager.Operations.ResourceOperation,
+        where: operation.repository_id == ^repository_id
+    )
+
+    Repo.delete_all(
+      from invocation in PtcManager.Automations.Invocation,
+        where: invocation.repository_id == ^repository_id
+    )
+
+    Repo.delete_all(
+      from digest in PtcManager.DailyDigests.DailyDigest,
+        where: digest.repository_id == ^repository_id
+    )
+
+    Repo.delete_all(
+      from approval in MergeApproval, where: approval.publication_id in subquery(publication_ids)
+    )
+
+    Repo.delete_all(
+      from analysis in PrAnalysis, where: analysis.publication_id in subquery(publication_ids)
+    )
+
+    Repo.delete_all(
+      from run in AgentRun,
+        where: run.job_id in subquery(job_ids) or run.agent_action_id in subquery(action_ids)
+    )
+
+    Repo.delete_all(
+      from allocation in WorktreeAllocation, where: allocation.job_id in subquery(job_ids)
+    )
+
+    Repo.delete_all(
+      from publication in PrPublication, where: publication.repository_id == ^repository_id
+    )
+
+    Repo.delete_all(from job in Job, where: job.repository_id == ^repository_id)
+    Repo.delete_all(from action in AgentAction, where: action.repository_id == ^repository_id)
+
+    Repo.delete_all(
+      from approval in Approval, where: approval.proposal_id in subquery(proposal_ids)
+    )
+
+    Repo.delete_all(from proposal in Proposal, where: proposal.issue_id in subquery(issue_ids))
+    Repo.delete_all(from issue in Issue, where: issue.repository_id == ^repository_id)
+
+    Repo.delete_all(
+      from deployment in PtcManager.Deployments.Deployment,
+        where: deployment.repository_id == ^repository_id
+    )
+
+    definitions =
+      from definition in PtcManager.Automations.Definition,
+        where: definition.repository_id == ^repository_id
+
+    Repo.update_all(definitions, set: [current_version_id: nil])
+    Repo.delete_all(definitions)
   end
 
   def create_issue(attrs),
