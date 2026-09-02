@@ -3307,6 +3307,7 @@ defmodule PtcManager.Operations do
   defp setup_error(%{error: reason}), do: bounded_error(reason)
   defp setup_error(_report), do: "workspace_setup_failed"
 
+  defp bounded_error(reason) when is_binary(reason), do: String.slice(reason, 0, 500)
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)
 
   defp configured_agent_capacity,

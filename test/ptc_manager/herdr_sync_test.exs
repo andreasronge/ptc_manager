@@ -596,7 +596,8 @@ defmodule PtcManager.HerdrSyncTest do
       lease_owner: "herdr:absent",
       started_at: DateTime.add(now(), -120, :second),
       reconciling_at: now(),
-      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+      last_error: "{:agent_launch_after_workspace_setup, :herdr_timeout}"
     })
     |> Repo.update!()
 
@@ -625,6 +626,10 @@ defmodule PtcManager.HerdrSyncTest do
     assert failed.state == "failed"
     assert failed.ended_at
     assert failed.last_error =~ "no managed agent"
+
+    assert failed.last_error =~
+             "Earlier error: {:agent_launch_after_workspace_setup, :herdr_timeout}"
+
     assert {:ok, _replacement_job} = Operations.approve_issue(issue.id, "andreas")
   end
 

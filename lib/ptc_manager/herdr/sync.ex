@@ -21,6 +21,7 @@ defmodule PtcManager.Herdr.Sync do
   @superseded_status "Superseded duplicate of the action-owned Herdr run."
   @recoverable_attention_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation)
   @missing_retained_error "Herdr confirmed that the retained managed agent is no longer present."
+  @absent_agent_error "Herdr confirmed that no managed agent exists for this attempt."
 
   def sync(opts \\ []) do
     clock = Keyword.get(opts, :clock, PtcManager.Clock.System)
@@ -1112,6 +1113,8 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp fail_absent_attempt(job, lifecycle_now) do
+    message = absent_agent_error(job.last_error)
+
     {updated, _rows} =
       Job
       |> where(
@@ -1124,18 +1127,13 @@ defmodule PtcManager.Herdr.Sync do
         set: [
           state: "failed",
           ended_at: lifecycle_now,
-          last_error: "Herdr confirmed that no managed agent exists for this attempt.",
+          last_error: message,
           updated_at: lifecycle_now
         ]
       )
 
     if updated == 1 do
-      mark_worktree_attention(
-        job.id,
-        "Herdr confirmed that no managed agent exists for this attempt.",
-        lifecycle_now
-      )
-
+      mark_worktree_attention(job.id, message, lifecycle_now)
       insert_reconciliation_audit!(job, "job.absent_agent_confirmed")
 
       true
@@ -1143,6 +1141,14 @@ defmodule PtcManager.Herdr.Sync do
       false
     end
   end
+
+  # The uncertain launch already recorded why dispatch stopped; keep that cause
+  # next to the absence confirmation instead of replacing it.
+  defp absent_agent_error(previous)
+       when is_binary(previous) and previous != "" and previous != @absent_agent_error,
+       do: String.slice("#{@absent_agent_error} Earlier error: #{previous}", 0, 500)
+
+  defp absent_agent_error(_previous), do: @absent_agent_error
 
   defp insert_reconciliation_audit!(job, action) do
     %AuditEvent{}

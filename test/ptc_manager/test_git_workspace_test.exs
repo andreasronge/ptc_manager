@@ -5,8 +5,6 @@ defmodule PtcManager.TestGitWorkspaceTest do
 
   alias PtcManager.Dispatch
   alias PtcManager.Dispatch.HerdrAdapter
-  alias PtcManager.GitHub.IssueSnapshot
-  alias PtcManager.Operations
   alias PtcManager.Operations.{Job, PrPublication, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManager.TestGitWorkspace
@@ -26,30 +24,8 @@ defmodule PtcManager.TestGitWorkspaceTest do
   end
 
   setup do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "ptc-manager-git-workspace-#{System.unique_integer([:positive, :monotonic])}"
-      )
-
-    workspace = TestGitWorkspace.new!(root)
+    workspace = TestGitWorkspace.configure_dispatch!("ptc-manager-git-workspace")
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
-
-    keys = [:dispatch_enabled, :worktree_root, :worktree_permission_check]
-    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
-
-    Application.put_env(:ptc_manager, :dispatch_enabled, true)
-    Application.put_env(:ptc_manager, :worktree_root, workspace.worktree_root)
-    Application.put_env(:ptc_manager, :worktree_permission_check, false)
-
-    on_exit(fn ->
-      Enum.each(previous, fn
-        {key, nil} -> Application.delete_env(:ptc_manager, key)
-        {key, value} -> Application.put_env(:ptc_manager, key, value)
-      end)
-
-      File.rm_rf!(root)
-    end)
 
     %{scenario: scenario, workspace: workspace}
   end
@@ -158,18 +134,49 @@ defmodule PtcManager.TestGitWorkspaceTest do
              )
   end
 
+  test "a read-only source Git directory ends dispatch safely with Git's explanation", %{
+    scenario: scenario,
+    workspace: workspace
+  } do
+    leased =
+      TestScenario.leased_implementation!(scenario,
+        number: 52,
+        local_path: workspace.repository
+      )
+
+    # Mirrors a checkout the Herdr service sandbox mounts read-only: Git cannot
+    # record the job branch, so no worktree exists afterwards. Root ignores
+    # directory modes, so the failure can only be reproduced as another user.
+    heads = Path.join(workspace.repository, ".git/refs/heads")
+    File.chmod!(heads, 0o555)
+    on_exit(fn -> File.chmod!(heads, 0o755) end)
+
+    command = TestGitWorkspace.with_runner(workspace, scenario)
+
+    result =
+      HerdrAdapter.dispatch(
+        %{job: leased, issue: leased.issue, repository: leased.repository},
+        command: command
+      )
+
+    if File.stat!(heads).access == :read do
+      assert {:error, {:safe, {:worktree_create_failed, message}}} = result
+      assert message =~ "cannot lock ref"
+      assert message =~ leased.branch_name
+    end
+
+    refute File.exists?(leased.worktree_allocation.path)
+  end
+
   test "production adoption rejects a clean standalone clone at the reserved path", %{
     scenario: scenario,
     workspace: workspace
   } do
-    %{job: job, repository: repository, remote_issue: remote_issue} =
-      TestScenario.approved_implementation!(scenario,
+    leased =
+      TestScenario.leased_implementation!(scenario,
         number: 51,
         local_path: workspace.repository
       )
-
-    canonical = IssueSnapshot.normalize!(remote_issue, repository.id)
-    assert {:ok, leased} = Operations.lease_job(job.id, "herdr:scenario", canonical, 60_000)
 
     :ok =
       TestGitWorkspace.standalone_clone_at!(

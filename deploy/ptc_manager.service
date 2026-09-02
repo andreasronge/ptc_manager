@@ -21,8 +21,9 @@ ProtectHome=true
 ProtectSystem=strict
 # Linked worktrees keep fetched objects and per-worktree state in the source
 # repository's Git directory, while their checked-out files live under the
-# worktree root.
-ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-worker /var/lib/ptc_manager-external /var/lib/ptc_manager-output /var/lib/ptc_manager-publish /var/lib/ptc_manager-deploy /srv/ptc_runner/.git /srv/ptc_manager-worktrees /srv/ptc_manager-external
+# worktree root. List the `.git` directory of every repository checkout
+# persisted as `repositories.local_path`.
+ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-worker /var/lib/ptc_manager-external /var/lib/ptc_manager-output /var/lib/ptc_manager-publish /var/lib/ptc_manager-deploy /srv/ptc_runner/.git /srv/ptc_manager/.git /srv/ptc_manager-worktrees /srv/ptc_manager-external
 
 [Install]
 WantedBy=multi-user.target

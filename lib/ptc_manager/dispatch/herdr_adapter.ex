@@ -215,6 +215,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           {:error, {:uncertain, {:unexpected_workspace_setup_result, other}}}
       end
     else
+      {:error, {:safe, _reason} = safe} -> {:error, safe}
       {:error, reason} -> {:error, {:uncertain, reason}}
     end
   end
@@ -324,9 +325,38 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       {:ok, output}
     else
       {:error, recovery_error} ->
-        {:error, {:worktree_create_unconfirmed, create_error, recovery_error}}
+        classify_unconfirmed_worktree(create_error, recovery_error)
     end
   end
+
+  # Herdr answers a completed but failed `worktree create` with a structured
+  # `worktree_create_failed` error. When nothing exists at the reserved path,
+  # that outcome is final: Git created no worktree, so Herdr opened no workspace
+  # and started no agent. Ending the attempt with Git's own explanation is safer
+  # than waiting for absence reconciliation to replace it with a generic one.
+  defp classify_unconfirmed_worktree(create_error, :enoent) do
+    case completed_worktree_create_failure(create_error) do
+      {:ok, message} -> {:error, {:safe, {:worktree_create_failed, message}}}
+      :error -> {:error, {:worktree_create_unconfirmed, create_error, :enoent}}
+    end
+  end
+
+  defp classify_unconfirmed_worktree(create_error, recovery_error),
+    do: {:error, {:worktree_create_unconfirmed, create_error, recovery_error}}
+
+  defp completed_worktree_create_failure({:herdr_exit, _status, output})
+       when is_binary(output) do
+    with {:ok, %{"error" => %{"code" => "worktree_create_failed"} = error}} <-
+           Jason.decode(output),
+         message when is_binary(message) and message != "" <-
+           Map.get(error, "message", "worktree_create_failed") do
+      {:ok, message}
+    else
+      _ -> :error
+    end
+  end
+
+  defp completed_worktree_create_failure(_create_error), do: :error
 
   defp exact_created_worktree(repository_path, path, branch, base_sha) do
     with {:ok, %{type: :directory}} <- File.lstat(path),

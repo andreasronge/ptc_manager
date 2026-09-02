@@ -253,6 +253,38 @@ defmodule PtcManager.DispatchTest do
     assert Repo.aggregate(AgentRun, :count) == 0
   end
 
+  test "a definitive worktree creation failure ends the job with Git's explanation" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    git_error =
+      "Preparing worktree (new branch 'ptc-manager/issue-2-job-27')\n" <>
+        "fatal: cannot lock ref 'refs/heads/ptc-manager/issue-2-job-27': " <>
+        "unable to create directory for .git/refs/heads/ptc-manager/issue-2-job-27"
+
+    Process.put(
+      :dispatch_adapter_result,
+      {:error, {:safe, {:worktree_create_failed, git_error}}}
+    )
+
+    assert {:error, {:worktree_create_failed, ^git_error}} =
+             Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+
+    failed = Repo.get!(Job, job.id)
+    allocation = Repo.get_by!(Operations.WorktreeAllocation, job_id: job.id)
+    assert failed.state == "failed"
+    assert failed.ended_at
+    assert failed.last_error =~ "Herdr could not create the job worktree"
+    assert failed.last_error =~ "cannot lock ref"
+    refute failed.last_error =~ "\\n"
+    assert allocation.state == "removed"
+    assert Repo.aggregate(AgentRun, :count) == 0
+
+    actions = Repo.all(from audit in AuditEvent, select: audit.action)
+    assert "job.dispatch_failed" in actions
+    refute "job.dispatch_uncertain" in actions
+  end
+
   test "a changed GitHub issue cancels the stale approval before dispatch" do
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
     changed = Map.put(remote, "title", "Changed after approval")

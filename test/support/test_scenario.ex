@@ -85,6 +85,16 @@ defmodule PtcManager.TestScenario do
     }
   end
 
+  @doc "Approves one implementation and leases it to the scenario worker."
+  def leased_implementation!(%__MODULE__{} = scenario, opts \\ []) do
+    %{job: job, repository: repository, remote_issue: remote_issue} =
+      approved_implementation!(scenario, opts)
+
+    canonical = IssueSnapshot.normalize!(remote_issue, repository.id)
+    {:ok, leased} = Operations.lease_job(job.id, "herdr:scenario", canonical, 60_000)
+    leased
+  end
+
   def put_issue(%__MODULE__{} = scenario, repository, issue) when is_map(issue) do
     GenServer.call(scenario.pid, {:put_issue, repository.id, issue})
   end

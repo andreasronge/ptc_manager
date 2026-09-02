@@ -169,6 +169,48 @@ defmodule PtcManager.TestGitWorkspace do
 
   def with_runner(%__MODULE__{} = workspace, runner), do: %{workspace | runner: runner}
 
+  @doc """
+  Builds one disposable workspace and points dispatch configuration at it.
+
+  Call from a test or setup block: the previous configuration and the on-disk
+  workspace are restored and removed when that test exits.
+  """
+  def configure_dispatch!(prefix) when is_binary(prefix) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workspace = new!(root)
+
+    keys = [:dispatch_enabled, :worktree_root, :worktree_permission_check]
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :worktree_root, workspace.worktree_root)
+    Application.put_env(:ptc_manager, :worktree_permission_check, false)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Enum.each(previous, fn
+        {key, nil} -> Application.delete_env(:ptc_manager, key)
+        {key, value} -> Application.put_env(:ptc_manager, key, value)
+      end)
+
+      File.rm_rf!(root)
+    end)
+
+    workspace
+  end
+
+  @doc "Encodes Git's explanation the way Herdr reports a completed, failed worktree creation."
+  def herdr_worktree_create_error(message) when is_binary(message) do
+    Jason.encode!(%{
+      "error" => %{"code" => "worktree_create_failed", "message" => String.trim(message)},
+      "id" => "cli:worktree:create"
+    })
+  end
+
   def standalone_clone_at!(%__MODULE__{} = workspace, path, branch) do
     run!(git!(), ["clone", "--no-local", workspace.repository, path])
     run!(git!(), ["-C", path, "switch", "-c", branch])
@@ -190,8 +232,14 @@ defmodule PtcManager.TestGitWorkspace do
                ["-C", cwd, "worktree", "add", "-b", branch, path, base],
                stderr_to_stdout: true
              ) do
-          {:ok, _output} -> {:ok, herdr_worktree_response(path)}
-          {:error, _reason} = error -> error
+          {:ok, _output} ->
+            {:ok, herdr_worktree_response(path)}
+
+          {:error, {:exit, _status, output}} ->
+            {:error, {:herdr_exit, 1, herdr_worktree_create_error(output)}}
+
+          {:error, _reason} = error ->
+            error
         end
 
       ["worktree", "open" | _options] ->

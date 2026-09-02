@@ -100,6 +100,7 @@ self_deploy_access_candidate="/tmp/ptc-manager-self-deploy-access-${release_id}"
 coordinator_environment_files=
 coordinator_session=
 worker_session=
+worker_service_pid=
 worktree_root=
 remote_script=$0
 deployment_phase=pre_stop
@@ -273,6 +274,37 @@ ensure_no_managed_runs() {
     echo "refusing to deploy while $active_runs managed agent run(s) are active" >&2
     return 1
   fi
+}
+
+# Linked worktrees write the job branch, fetched objects, and per-worktree
+# metadata into each repository checkout's Git directory. Both services mount
+# the rest of the filesystem read-only, so a checkout missing from their
+# ReadWritePaths fails every implementation dispatch with "cannot lock ref".
+# Probe the running mount namespaces rather than the unit files so an edited
+# but not yet restarted unit is reported here instead of by the next job.
+ensure_repository_checkouts_writable() {
+  probe_pid=$1
+  probe_service=$2
+  probe_suffix=$3
+
+  sudo sqlite3 -readonly "$database_path" \
+    "select local_path from repositories where enabled = 1 and coalesce(local_path, '') != '';" |
+    while IFS= read -r checkout; do
+      case "$checkout" in
+        /*) ;;
+        *)
+          echo "repository checkout path is not absolute: $checkout" >&2
+          exit 1
+          ;;
+      esac
+
+      probe_path="${checkout}${probe_suffix}"
+
+      if ! sudo nsenter -t "$probe_pid" -m -- /bin/sh -c '[ -d "$1" ] && [ -w "$1" ]' sh "$probe_path"; then
+        echo "repository checkout is not writable inside $probe_service: $probe_path; add it to that unit's ReadWritePaths and restart the service before deploying" >&2
+        exit 1
+      fi
+    done
 }
 
 busy_agent_count() {
@@ -623,6 +655,7 @@ command -v sqlite3 >/dev/null
 command -v flock >/dev/null
 command -v jq >/dev/null
 command -v python3 >/dev/null
+command -v nsenter >/dev/null
 [ -x "$failure_policy" ]
 [ -x "$mise_binary" ]
 [ -x "$manual_herdr" ]
@@ -780,6 +813,10 @@ fi
 
 ensure_no_managed_runs
 ensure_no_busy_herdr_agents
+ensure_repository_checkouts_writable "$service_pid" "$service_name.service" /.git
+if [ -n "$worker_service_pid" ]; then
+  ensure_repository_checkouts_writable "$worker_service_pid" ptc_manager-herdr.service ""
+fi
 capture_maintenance_override
 ensure_private_worktree_root "$worktree_root"
 if ! id -u ptc-manager-gate >/dev/null 2>&1; then

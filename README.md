@@ -722,9 +722,9 @@ sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 /var/lib/ptc_man
 sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
 sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2750 /srv/ptc_manager-worktrees
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 2770 /srv/ptc_manager-external
-sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner
-sudo chmod -R g+rX,o-rwx /srv/ptc_runner
-sudo find /srv/ptc_runner -type d -exec chmod g+s {} +
+sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner /srv/ptc_manager
+sudo chmod -R g-w,g+rX,o-rwx /srv/ptc_runner /srv/ptc_manager
+sudo find /srv/ptc_runner /srv/ptc_manager -type d -exec chmod g+s {} +
 sudo install -d -o root -g root -m 0755 /etc/ptc_manager
 sudo install -o root -g root -m 0644 deploy/ptc_manager.service /etc/systemd/system/ptc_manager.service
 sudo install -o root -g root -m 0644 deploy/ptc_manager-herdr.service /etc/systemd/system/ptc_manager-herdr.service
@@ -788,7 +788,14 @@ sudo -u ptc-manager-external -H codex login
 ```
 
 Each checkout persisted as a repository's `local_path` is owned and writable
-only by the worker.
+only by the worker. Both services run with `ProtectSystem=strict`, so every
+such checkout must also be listed in `ReadWritePaths` of
+`ptc_manager-herdr.service`, and its `.git` directory in `ReadWritePaths` of
+`ptc_manager.service`; a checkout outside those lists fails every
+implementation dispatch with Git's `cannot lock ref`. After adding a
+repository, reinstall both unit files, run `systemctl daemon-reload`, and
+restart both services. The deployment refuses to proceed while a configured
+checkout is read-only inside a running service.
 The `ptc-manager-repo` group gives the coordinator, verifier, and gate
 read/execute access without filesystem write access. The worker-owned
 `PTC_WORKTREE_ROOT` contains only job worktrees. It and every ancestor must be

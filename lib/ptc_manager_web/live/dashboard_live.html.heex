@@ -749,6 +749,9 @@
             class="mt-3 text-xs text-rose-300"
           >
             The last attempt stopped safely. Review the service audit log before trying again.
+            <span class="mt-1 block break-words font-mono text-rose-200">
+              {item.latest_job.last_error}
+            </span>
           </p>
         </article>
 

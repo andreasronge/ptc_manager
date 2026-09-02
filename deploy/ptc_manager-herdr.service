@@ -18,7 +18,11 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 Delegate=memory pids
-ReadWritePaths=/var/lib/ptc_manager-worker /srv/ptc_runner /srv/ptc_manager-worktrees
+# Every repository checkout persisted as `repositories.local_path` must be
+# writable here: `git worktree add` records the job branch and per-worktree
+# metadata inside the source checkout's Git directory. A checkout missing from
+# this list fails every implementation dispatch with "cannot lock ref".
+ReadWritePaths=/var/lib/ptc_manager-worker /srv/ptc_runner /srv/ptc_manager /srv/ptc_manager-worktrees
 
 [Install]
 WantedBy=multi-user.target

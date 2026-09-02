@@ -105,6 +105,19 @@ defmodule PtcManager.Dispatch do
           lifecycle_now
         )
 
+      {:error, {:safe, {:worktree_create_failed, message}}} when is_binary(message) ->
+        _ =
+          Operations.mark_dispatch_failed(
+            leased.id,
+            leased.fencing_token,
+            worker_key,
+            "Herdr could not create the job worktree: #{message}",
+            lease_now,
+            lifecycle_now
+          )
+
+        {:error, {:worktree_create_failed, message}}
+
       {:error, {:safe, {:workspace_setup_failed, report}}} ->
         reason = Map.get(report, :error) || :workspace_setup_failed
 
