@@ -2,6 +2,7 @@ defmodule PtcManager.PublicationStatusReconciler do
   @moduledoc "Discovers agent-created PRs and reconciles canonical status through completion."
 
   alias PtcManager.Gateway
+  alias PtcManager.Operations
   alias PtcManager.Publications
 
   def run_once(opts \\ []) do
@@ -24,8 +25,16 @@ defmodule PtcManager.PublicationStatusReconciler do
       status_result ->
         discovery_result =
           case Publications.next_agent_for_discovery() do
-            nil -> {:ok, :empty}
-            publication -> discover_agent_publication(client, publication)
+            nil ->
+              {:ok, :empty}
+
+            publication ->
+              Operations.with_repository_lifecycle_lock(publication.repository_id, fn ->
+                case PtcManager.Repo.get(PtcManager.Operations.PrPublication, publication.id) do
+                  nil -> {:ok, :repository_removed}
+                  _current_publication -> discover_agent_publication(client, publication)
+                end
+              end)
           end
 
         status_result
@@ -39,32 +48,53 @@ defmodule PtcManager.PublicationStatusReconciler do
       PtcManager.Operations.list_repositories()
       |> Enum.filter(& &1.enabled)
       |> Enum.reduce_while({:ok, :empty}, fn repository, _acc ->
-        case Gateway.call(client, :list_open, [repository]) do
-          {:ok, pulls} ->
-            with {:ok, confirmed_pulls} <- confirm_missing_external(client, repository, pulls),
-                 {:ok, summary} <-
-                   Publications.sync_external_open_pull_requests(repository, confirmed_pulls) do
-              {:cont, {:ok, summary}}
-            else
-              {:retry_after, delay_ms} -> {:halt, {:retry_after, delay_ms}}
-              {:error, reason} -> {:halt, {:error, reason}}
-            end
+        result =
+          Operations.with_repository_lifecycle_lock(repository.id, fn ->
+            reconcile_external_repository(client, repository)
+          end)
 
-          {:retry, {:after, delay_ms, _reason}} when is_integer(delay_ms) ->
-            {:halt, {:retry_after, delay_ms}}
-
-          {:retry, reason} ->
-            {:halt, {:error, reason}}
-
-          {:blocked, reason} ->
-            {:halt, {:error, reason}}
-
-          other ->
-            {:halt, {:error, {:unexpected_pull_request_list_result, other}}}
+        case result do
+          {:ok, :repository_removed} -> {:cont, {:ok, :empty}}
+          {:ok, _summary} = success -> {:cont, success}
+          {:retry_after, _delay_ms} = retry -> {:halt, retry}
+          {:error, _reason} = error -> {:halt, error}
         end
       end)
     else
       {:ok, :empty}
+    end
+  end
+
+  defp reconcile_external_repository(client, repository) do
+    case Operations.get_repository(repository.id) do
+      nil ->
+        {:ok, :repository_removed}
+
+      current_repository ->
+        case Gateway.call(client, :list_open, [current_repository]) do
+          {:ok, pulls} ->
+            with {:ok, confirmed_pulls} <-
+                   confirm_missing_external(client, current_repository, pulls),
+                 {:ok, summary} <-
+                   Publications.sync_external_open_pull_requests(
+                     current_repository,
+                     confirmed_pulls
+                   ) do
+              {:ok, summary}
+            end
+
+          {:retry, {:after, delay_ms, _reason}} when is_integer(delay_ms) ->
+            {:retry_after, delay_ms}
+
+          {:retry, reason} ->
+            {:error, reason}
+
+          {:blocked, reason} ->
+            {:error, reason}
+
+          other ->
+            {:error, {:unexpected_pull_request_list_result, other}}
+        end
     end
   end
 
@@ -146,6 +176,18 @@ defmodule PtcManager.PublicationStatusReconciler do
         {:ok, :empty}
 
       publication ->
+        Operations.with_repository_lifecycle_lock(publication.repository_id, fn ->
+          reconcile_open_publication(client, publication)
+        end)
+    end
+  end
+
+  defp reconcile_open_publication(client, publication) do
+    case PtcManager.Repo.get(PtcManager.Operations.PrPublication, publication.id) do
+      nil ->
+        {:ok, :repository_removed}
+
+      _current_publication ->
         case Gateway.call(client, :status, [publication]) do
           {:ok, result} ->
             outcome = Publications.record_remote_status(publication.id, result)

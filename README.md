@@ -509,18 +509,28 @@ agent uses a stable invocation marker when searching for or creating a failure
 issue, which makes a retry deduplicate against GitHub rather than trusting local
 memory.
 
-To onboard another private repository:
+To onboard another public or private repository:
 
 1. create a dedicated clone on the worker and authenticate the existing `gh`
    CLI identity for it;
 2. commit a `.ptc-manager.yml` contract whose bootstrap command prepares that
    repository; add broker verification only if PtcManager will publish for the agent;
-3. use **Configuration → Add another GitHub repository** to register the exact
-   absolute checkout path; it starts disabled;
+3. use **Configuration → Add another GitHub repository** to register its exact
+   GitHub `owner/name`; PtcManager verifies access with the configured read-only
+   GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
+   and creates the repository disabled;
 4. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
 5. enable only the definitions and schedules that repository needs, then test a
    read-only action before approving implementation work.
+
+The Configuration page displays the derived checkout path. A repository can be
+removed there after explicit confirmation, but only when all managed jobs,
+actions, automation invocations, deployments, resource operations, and worktree
+lifecycles are terminal. Removal transactionally deletes PtcManager-owned
+configuration and synchronized database records. It never changes the GitHub
+repository or deletes server checkouts, worktrees, branches, pull requests, or
+issues. Existing configured repository paths are preserved during upgrades.
 
 `ptc_manager` intentionally receives daily updates and scheduled nightly checks
 disabled. Its checked-in pre-publication contract runs the same ExDNA

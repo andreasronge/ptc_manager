@@ -18,8 +18,11 @@ defmodule PtcManager.GitHub.Sync do
   def sync_repository(%Repository{} = repository, opts \\ []) do
     client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :github_client))
 
-    :global.trans({{__MODULE__, repository.id}, self()}, fn ->
-      do_sync_repository(repository, client)
+    Operations.with_repository_lifecycle_lock(repository.id, fn ->
+      case Operations.get_repository(repository.id) do
+        nil -> {:ok, :repository_removed}
+        current_repository -> do_sync_repository(current_repository, client)
+      end
     end)
   end
 
@@ -27,13 +30,16 @@ defmodule PtcManager.GitHub.Sync do
       when is_integer(number) and number > 0 do
     client = Keyword.get(opts, :client, Application.fetch_env!(:ptc_manager, :github_client))
 
-    :global.trans({{__MODULE__, repository.id}, self()}, fn ->
-      case Gateway.call(client, :get_issue, [repository, number]) do
-        {:ok, remote_issue} ->
-          persist_issue(repository, remote_issue)
+    Operations.with_repository_lifecycle_lock(repository.id, fn ->
+      case Operations.get_repository(repository.id) do
+        nil ->
+          {:ok, :repository_removed}
 
-        {:error, reason} ->
-          {:error, reason}
+        current_repository ->
+          case Gateway.call(client, :get_issue, [current_repository, number]) do
+            {:ok, remote_issue} -> persist_issue(current_repository, remote_issue)
+            {:error, reason} -> {:error, reason}
+          end
       end
     end)
   end
