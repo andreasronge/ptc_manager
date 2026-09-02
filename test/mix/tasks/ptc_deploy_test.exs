@@ -149,6 +149,17 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert output =~ "read-only canary"
   end
 
+  test "direct and managed deployments assign operational-mode ownership explicitly" do
+    local = File.read!(@local_script)
+    remote = File.read!(@remote_script)
+    managed = File.read!(@self_deploy_command)
+
+    assert local =~ "'$commit_sha' direct"
+    assert managed =~ "\"$requested_sha\" managed"
+    assert remote =~ "if [ \"$activation_owner\" = managed ]"
+    assert remote =~ "OperationalMode.enter_draining()"
+  end
+
   test "busy-agent filter accepts every Herdr response envelope" do
     agent = %{"agent_status" => "working"}
 

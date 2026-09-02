@@ -32,4 +32,4 @@ tar -xOf "$source_archive" deploy/remote-deploy-herdr >"$remote_script"
 tar -xOf "$source_archive" deploy/deployment-failure-policy >"$failure_policy"
 chmod 0700 "$remote_script" "$failure_policy"
 
-exec "$remote_script" "$release_id" "$source_archive" "$failure_policy" "$requested_sha"
+exec "$remote_script" "$release_id" "$source_archive" "$failure_policy" "$requested_sha" managed

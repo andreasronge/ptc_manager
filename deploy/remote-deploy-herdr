@@ -5,6 +5,7 @@ release_id=${1:-}
 source_archive=${2:-}
 failure_policy=${3:-}
 source_commit_sha=${4:-}
+activation_owner=${5:-}
 
 case "$release_id" in
   *[!A-Za-z0-9.-]*|'')
@@ -40,6 +41,14 @@ if [ "${#source_commit_sha}" -ne 40 ] && [ "${#source_commit_sha}" -ne 64 ]; the
   echo "invalid source commit sha length" >&2
   exit 2
 fi
+
+case "$activation_owner" in
+  direct|managed) ;;
+  *)
+    echo "invalid deployment activation owner" >&2
+    exit 2
+    ;;
+esac
 
 service_name=ptc_manager
 application_dir=/opt/ptc_manager
@@ -891,10 +900,14 @@ remove_maintenance_override
 
 sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
   "case PtcManager.DeploymentCanary.activate(\"deploy-${release_id}\") do :ok -> :ok; {:error, reason} -> raise \"deployment activation failed: #{inspect(reason)}\" end"
-sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
-  'PtcManager.OperationalMode.enter_draining()' >/dev/null
+if [ "$activation_owner" = managed ]; then
+  sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
+    'PtcManager.OperationalMode.enter_draining()' >/dev/null
+  echo "Service is healthy. Ordinary work remains drained until the host runner records completion."
+else
+  echo "Service is healthy and ordinary work is active after direct deployment."
+fi
 deployment_phase=complete
-echo "Service is healthy. Ordinary work remains drained until the host runner records completion."
 echo "Release backup: $release_backup"
 echo "Database backup: $database_backup"
 prune_successful_backups
