@@ -40,9 +40,9 @@
       "maxItems": 50,
       "items": {"type": "string", "minLength": 1, "maxLength": 1000}
     },
-    "decision_question": {"description": "A question for the maintainer, only when the outcome is needs-decision in an action whose allowed_outcomes include it; otherwise an empty string.", "type": "string", "maxLength": 1000},
+    "decision_question": {"description": "A question for the maintainer. Only the prepare_issue, review_issue, and resolve_issue_decision actions may fill this, and only with outcome needs-decision; every other action and outcome must use an empty string.", "type": "string", "maxLength": 1000},
     "decision_options": {
-      "description": "Answer options for decision_question; an empty array whenever decision_question is empty.",
+      "description": "Answer options for decision_question, two to four entries when it is set; an empty array whenever decision_question is empty.",
       "type": "array",
       "maxItems": 4,
       "items": {
@@ -57,13 +57,13 @@
       }
     },
     "created_issue_numbers": {
-      "description": "Numbers of GitHub issues this action created; an empty array unless the action created issues.",
+      "description": "Numbers of GitHub issues this action itself created on GitHub. Only the create_retrospective_issue action with outcome followups-created, or a trusted action reporting completed or no-changes, may list issues; every other action must use an empty array.",
       "type": "array",
       "maxItems": 50,
       "items": {"type": "integer", "minimum": 1}
     },
     "suggestions": {
-      "description": "Optional follow-up issue suggestions for the maintainer; an empty array when there are none.",
+      "description": "Follow-up issue suggestions. Only the pr_retrospective action with outcome followups-proposed may fill this; every other action and outcome, including private_issue_analysis, must use an empty array. Put analysis findings in technical_evidence instead.",
       "type": "array",
       "maxItems": 5,
       "items": {
