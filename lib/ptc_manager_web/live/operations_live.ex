@@ -457,7 +457,9 @@ defmodule PtcManagerWeb.OperationsLive do
   def queued_action_label(action), do: String.replace(action.action_key, "_", " ")
 
   def queued_action_lane_label(action) do
-    if Operations.planning_agent_action?(action), do: "Light work", else: "Heavy work"
+    if Operations.agent_action_resource_class(action) == "light",
+      do: "Light work",
+      else: "Heavy work"
   end
 
   def queue_age(now, requested_at), do: duration(now, requested_at, nil)

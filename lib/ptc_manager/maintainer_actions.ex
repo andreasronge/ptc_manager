@@ -182,17 +182,26 @@ defmodule PtcManager.MaintainerActions do
 
     sync = Keyword.get(opts, :sync, ActionSync)
     lane = Keyword.get(opts, :lane, :any)
+    resource_class = Keyword.get(opts, :resource_class, :any)
     Operations.expire_agent_action_attempts()
-    if lane in [:planning, :any], do: reap_planning_worktrees()
+
+    if lane in [:planning, :any] do
+      reap_planning_worktrees()
+      reap_investigation_worktree()
+    end
 
     case Operations.next_agent_action_sync_pending_for_lane(lane) do
-      nil -> execute_next(adapter, sync, lane)
+      nil -> execute_next(adapter, sync, lane, resource_class)
       action -> reconcile_action(action, sync)
     end
   end
 
-  defp execute_next(adapter, sync, lane) do
-    case Operations.next_agent_action_candidate_for_lane(lane) do
+  defp execute_next(adapter, sync, lane, resource_class) do
+    case Operations.next_agent_action_candidate_for_lane(
+           lane,
+           DateTime.utc_now() |> DateTime.truncate(:microsecond),
+           resource_class
+         ) do
       nil ->
         {:ok, :empty}
 
@@ -499,7 +508,7 @@ defmodule PtcManager.MaintainerActions do
         action.prompt <>
           """
 
-          <source_snapshot ref="#{source_ref}" sha="#{source_sha}" default_branch="#{repository.default_branch}" workspace="read_only" />
+          <source_snapshot ref="#{source_ref}" sha="#{source_sha}" default_branch="#{repository.default_branch}" workspace="#{issue_workspace(action)}"#{expensive_commands(action)} />
           """
 
       Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt)
@@ -620,6 +629,21 @@ defmodule PtcManager.MaintainerActions do
 
   defp maybe_put_source_path(snapshot, _source), do: snapshot
 
+  defp issue_workspace(%{
+         automation_definition_version: %{execution_profile: "ephemeral_investigation"}
+       }),
+       do: "writable_disposable"
+
+  defp issue_workspace(_action), do: "read_only"
+
+  defp expensive_commands(%{
+         automation_definition_version: %{execution_profile: "ephemeral_investigation"}
+       }),
+       do:
+         ~s( expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly")
+
+  defp expensive_commands(_action), do: ""
+
   defp release_planning_source_snapshot(
          %AgentAction{action_key: action_key, repository: repository} = action
        )
@@ -691,6 +715,23 @@ defmodule PtcManager.MaintainerActions do
     |> preload(:repository)
     |> Repo.all()
     |> Enum.each(&release_planning_source_snapshot/1)
+  end
+
+  defp reap_investigation_worktree do
+    adapter =
+      Application.get_env(
+        :ptc_manager,
+        :investigation_workspace_adapter,
+        HerdrAdapter
+      )
+
+    case PtcManager.InvestigationWorkspaces.cleanup_terminal_once(adapter) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Investigation workspace cleanup deferred: #{inspect(reason)}")
+    end
   end
 
   defp repair_needed?(status) do

@@ -50,6 +50,10 @@ defmodule PtcManager.DispatchTest do
     end
   end
 
+  defmodule FailingSourceUpdater do
+    def refresh(_repository), do: {:error, :repository_source_refresh_failed}
+  end
+
   setup do
     Process.put(:dispatch_test_pid, self())
 
@@ -162,7 +166,9 @@ defmodule PtcManager.DispatchTest do
                lease_ms: 60_000
              )
 
-    assert_receive {:dispatch_context, %{job: leased}}
+    assert_receive {:dispatch_context, %{job: leased, source: source}}
+    assert source.sha == String.duplicate("a", 40)
+    assert source.ref == "refs/heads/main"
     assert leased.id == job.id
     assert leased.state == "starting"
     assert leased.fencing_token == 1
@@ -181,6 +187,21 @@ defmodule PtcManager.DispatchTest do
     actions = Repo.all(from audit in AuditEvent, select: audit.action)
     assert "job.leased" in actions
     assert "job.started" in actions
+  end
+
+  test "a failed default-branch refresh leaves approved work queued" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, :repository_source_refresh_failed} =
+             Dispatch.run_once(
+               github: FakeGitHub,
+               adapter: FakeAdapter,
+               source_updater: FailingSourceUpdater
+             )
+
+    assert Repo.get!(Job, job.id).state == "queued"
+    refute_receive {:dispatch_context, _context}
   end
 
   test "persists workspace setup evidence before marking the agent working" do
@@ -623,7 +644,8 @@ defmodule PtcManager.DispatchTest do
              PtcManager.Dispatch.HerdrAdapter.dispatch(%{
                job: leased,
                issue: leased.issue,
-               repository: leased.repository
+               repository: leased.repository,
+               source: %{sha: String.duplicate("a", 40), ref: "refs/remotes/origin/main"}
              })
 
     assert dispatch.workspace_id == "w-slow"
@@ -702,7 +724,8 @@ defmodule PtcManager.DispatchTest do
              PtcManager.Dispatch.HerdrAdapter.dispatch(%{
                job: leased,
                issue: leased.issue,
-               repository: leased.repository
+               repository: leased.repository,
+               source: %{sha: String.duplicate("a", 40), ref: "refs/remotes/origin/main"}
              })
 
     assert report.exit_status == 17

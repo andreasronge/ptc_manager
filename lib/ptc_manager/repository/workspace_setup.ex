@@ -1,8 +1,8 @@
 defmodule PtcManager.Repository.WorkspaceSetup do
-  @moduledoc "Runs one repository-owned setup script before an implementation agent starts."
+  @moduledoc "Runs one repository-owned setup script before an agent gets a writable worktree."
 
   alias PtcManager.CommandEnvironment
-  alias PtcManager.Operations.Job
+  alias PtcManager.Operations.{AgentAction, Job}
   alias PtcManager.Repository.{Contract, GitProbe}
 
   @type report :: %{
@@ -23,22 +23,25 @@ defmodule PtcManager.Repository.WorkspaceSetup do
   @callback run(binary(), struct()) :: {:ok, report()} | {:error, report()}
 
   def run(path, %Job{} = job), do: run(path, job, [])
+  def run(path, %AgentAction{} = action), do: run(path, action, [])
 
   @doc false
-  def run(path, %Job{} = job, opts) when is_binary(path) and is_list(opts) do
+  def run(path, owner, opts)
+      when is_binary(path) and is_list(opts) and
+             (is_struct(owner, Job) or is_struct(owner, AgentAction)) do
     runner = Keyword.get(opts, :runner, PtcManager.Repository.WorkspaceSetup.Runner)
     started_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     started = System.monotonic_time(:millisecond)
 
     result =
-      with {:ok, source_sha} <- GitProbe.current_job_head(path, job),
-           :ok <- GitProbe.reclaimable(path, job.branch_name, source_sha),
+      with {:ok, branch, source_sha} <- workspace_identity(path, owner),
+           :ok <- GitProbe.reclaimable(path, branch, source_sha),
            {:ok, contract} <- Contract.for_workspace(path, source_sha),
            {:ok, script} <- Contract.bootstrap_script(contract),
            :ok <- GitProbe.tracked_executable(path, source_sha, script),
            execution <- runner.run(path, script, contract.bootstrap_timeout_minutes * 60_000),
            {:ok, output, truncated} <- successful_execution(execution, script, source_sha),
-           :ok <- GitProbe.reclaimable(path, job.branch_name, source_sha) do
+           :ok <- GitProbe.reclaimable(path, branch, source_sha) do
         {:ok, script, source_sha, 0, output, truncated}
       else
         {:error, {:workspace_setup_exit, status, output, truncated, script, source_sha}} ->
@@ -48,7 +51,7 @@ defmodule PtcManager.Repository.WorkspaceSetup do
           {:error, script, source_sha, nil, "", false, reason}
 
         {:error, reason} ->
-          {:error, nil, current_head(path, job), nil, "", false, reason}
+          {:error, nil, current_head(path, owner), nil, "", false, reason}
       end
 
     ended_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -102,12 +105,31 @@ defmodule PtcManager.Repository.WorkspaceSetup do
   defp successful_execution(_other, script, sha),
     do: {:error, {:workspace_setup_runner, :invalid_workspace_setup_result, script, sha}}
 
-  defp current_head(path, job) do
-    case GitProbe.current_job_head(path, job) do
+  defp current_head(path, owner) do
+    case workspace_head(path, owner) do
       {:ok, sha} -> sha
       _error -> nil
     end
   end
+
+  defp workspace_identity(path, %Job{branch_name: branch} = job) do
+    with {:ok, source_sha} <- GitProbe.current_job_head(path, job) do
+      {:ok, branch, source_sha}
+    end
+  end
+
+  defp workspace_identity(path, %AgentAction{} = action) do
+    with {:ok, identity} <-
+           PtcManager.Repository.InvestigationWorkspace.identity(action),
+         {:ok, source_sha} <- GitProbe.current_investigation_head(path, action) do
+      {:ok, identity.branch, source_sha}
+    end
+  end
+
+  defp workspace_head(path, %Job{} = job), do: GitProbe.current_job_head(path, job)
+
+  defp workspace_head(path, %AgentAction{} = action),
+    do: GitProbe.current_investigation_head(path, action)
 
   defp report(
          state,

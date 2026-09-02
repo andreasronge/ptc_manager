@@ -151,6 +151,168 @@ defmodule PtcManager.AutomationsTest do
     end
   end
 
+  defmodule InvestigationWorkspaceSetup do
+    def run(path, action) do
+      send(Process.get(:investigation_test_pid), {:investigation_setup, path, action.id})
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      report = %{
+        state: "passed",
+        script: "scripts/ptc/bootstrap",
+        source_sha: action.target_snapshot["source_sha"],
+        started_at: now,
+        ended_at: now,
+        duration_ms: 1,
+        exit_status: 0,
+        output: "ready\n",
+        output_truncated: false,
+        cache_state: "hit",
+        phase_durations: %{},
+        error: nil
+      }
+
+      Process.get(:investigation_setup_result) || {:ok, report}
+    end
+  end
+
+  defmodule InvestigationHerdrCommand do
+    def run(args, _timeout \\ nil) do
+      send(Process.get(:investigation_test_pid), {:investigation_command, args})
+
+      cond do
+        Enum.take(args, 2) == ["worktree", "create"] ->
+          path = args |> Enum.drop_while(&(&1 != "--path")) |> Enum.at(1)
+          File.mkdir_p!(path)
+
+          if Process.get(:investigation_attach_failure) do
+            PtcManager.Repo.update_all(
+              PtcManager.Operations.AgentRun,
+              set: [state: "done"]
+            )
+          end
+
+          {:ok,
+           Jason.encode!(%{
+             "result" => %{
+               "workspace" => %{"workspace_id" => "investigation-workspace"},
+               "root_pane" => %{"pane_id" => "investigation-pane"}
+             }
+           })}
+
+        Enum.take(args, 2) == ["agent", "start"] ->
+          {:ok,
+           Jason.encode!(%{
+             "result" => %{"agent" => %{"agent_session" => %{"value" => "review-session"}}}
+           })}
+
+        Enum.take(args, 2) == ["agent", "prompt"] ->
+          complete_prompt(args)
+          {:ok, ~s({"result":{"state":"working"}})}
+
+        Enum.take(args, 2) == ["agent", "wait"] ->
+          {:ok, ~s({"result":{"state":"idle"}})}
+
+        Enum.take(args, 2) == ["worktree", "remove"] ->
+          Process.get(:investigation_remove_result) || {:ok, "{}"}
+
+        true ->
+          {:error, {:unexpected_command, args}}
+      end
+    end
+
+    defp complete_prompt(args) do
+      prompt = Enum.at(args, 3)
+
+      if String.starts_with?(prompt, "Initialization check only.") do
+        [token] = Regex.run(~r/exactly (ready-\d+-\d+)/, prompt, capture: :all_but_first)
+        [path] = Regex.run(~r/rename it to (\/\S+?\.ready)\./, prompt, capture: :all_but_first)
+        File.write!(path, token <> "\n")
+      else
+        [prompt_path] = Regex.run(~r/task at (.+?\.txt)\./, prompt, capture: :all_but_first)
+        task = File.read!(prompt_path)
+        [path] = Regex.run(~r/to (\/\S+?\.json)\b/, task, capture: :all_but_first)
+
+        result = %{
+          "outcome" => "ready",
+          "private_summary" => "The regression was reproduced.",
+          "why_it_matters" => "The issue is ready to implement.",
+          "scope" => "small",
+          "risk" => "medium",
+          "technical_evidence" => "A focused test reproduced the failure.",
+          "github_changes" => ["Updated the issue evidence."],
+          "evidence" => ["mix test test/example_test.exs"],
+          "decision_question" => "",
+          "decision_options" => [],
+          "created_issue_numbers" => [],
+          "suggestions" => []
+        }
+
+        File.write!(path, Jason.encode!(result))
+      end
+    end
+  end
+
+  defmodule InvestigationCleanupAdapter do
+    def open_action_workspace(repository_path, path, label) do
+      send(
+        Process.get(:investigation_test_pid),
+        {:investigation_recover, repository_path, path, label}
+      )
+
+      {:ok, "recovered-investigation-workspace"}
+    end
+
+    def remove_action_workspace(workspace) do
+      send(Process.get(:investigation_test_pid), {:investigation_cleanup, workspace})
+      :ok
+    end
+  end
+
+  defmodule MissingInvestigationCleanupAdapter do
+    def remove_action_workspace(workspace) do
+      send(Process.get(:investigation_test_pid), {:investigation_cleanup_missing, workspace})
+
+      PtcManager.Dispatch.HerdrAdapter.action_workspace_removal_result(
+        {:error,
+         {:herdr_exit, 1, Jason.encode!(%{"error" => %{"code" => "workspace_not_found"}})}}
+      )
+    end
+  end
+
+  defmodule UncertainInvestigationCleanupAdapter do
+    def remove_action_workspace(workspace) do
+      send(Process.get(:investigation_test_pid), {:investigation_cleanup_uncertain, workspace})
+      {:error, :herdr_unavailable}
+    end
+  end
+
+  defmodule InvestigationCleanupGit do
+    def run(args) do
+      send(Process.get(:investigation_test_pid), {:investigation_cleanup_git, args})
+
+      case Process.get(:investigation_cleanup_git_results, []) do
+        [result | remaining] ->
+          Process.put(:investigation_cleanup_git_results, remaining)
+          result
+
+        [] ->
+          {"", 0}
+      end
+    end
+  end
+
+  defmodule ChangedBranchCleanupGit do
+    def run(args) do
+      send(Process.get(:investigation_test_pid), {:changed_branch_cleanup_git, args})
+
+      case args do
+        ["-C", _, "update-ref", "-d", "refs/heads/" <> _branch] -> {"", 0}
+        ["-C", _, "update-ref", "-d", "refs/heads/" <> _branch, _old_sha] -> {"changed", 1}
+        _args -> {"", 0}
+      end
+    end
+  end
+
   test "new repositories receive versioned built-in definitions idempotently" do
     repository = repository_fixture()
 
@@ -165,6 +327,492 @@ defmodule PtcManager.AutomationsTest do
 
     assert :ok = Automations.ensure_defaults(repository)
     assert length(Automations.list_definitions(repository)) == 11
+
+    review = Automations.get_definition(repository, "review_issue")
+    assert review.current_version.execution_profile == "ephemeral_investigation"
+    assert review.current_version.resource_class == "heavy"
+    assert review.current_version.prompt =~ "run relevant tests"
+  end
+
+  test "review issue prepares and removes a writable disposable investigation worktree" do
+    %{action: action, issue: issue, root: root, source_sha: source_sha} =
+      claimed_investigation_fixture!()
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    assert_receive {:investigation_command,
+                    [
+                      "worktree",
+                      "create",
+                      "--cwd",
+                      _,
+                      "--branch",
+                      branch,
+                      "--base",
+                      ^source_sha,
+                      "--path",
+                      path | _rest
+                    ]}
+
+    assert branch =~ "review-issue-#{issue.id}-action-#{action.id}"
+    assert String.starts_with?(path, root <> "/")
+    assert_receive {:investigation_setup, ^path, action_id}
+    assert action_id == action.id
+    assert_receive {:investigation_command, ["agent", "start" | start_args]}
+    assert path in start_args
+
+    assert_receive {:investigation_command,
+                    ["worktree", "remove", "--workspace", "investigation-workspace", "--force"]}
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    assert run.workspace_setup_state == "passed"
+    assert run.workspace_setup_script == "scripts/ptc/bootstrap"
+    assert run.workspace_setup_duration_ms == 1
+    assert run.workspace_setup_exit_status == 0
+    assert run.workspace_setup_output == "ready\n"
+    assert run.workspace_setup_cache_state == "hit"
+  end
+
+  test "failed investigation setup retains its bounded diagnostics" do
+    %{action: action} = claimed_investigation_fixture!()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    sha256 = String.duplicate("c", 64)
+
+    Process.put(
+      :investigation_setup_result,
+      {:error,
+       %{
+         state: "failed",
+         script: "scripts/ptc/bootstrap",
+         source_sha: sha256,
+         started_at: now,
+         ended_at: DateTime.add(now, 2, :second),
+         duration_ms: 2_000,
+         exit_status: 17,
+         output: "dependency installation failed\n",
+         output_truncated: false,
+         cache_state: "miss",
+         phase_durations: %{"dependencies_ms" => 1_900},
+         error: :workspace_setup_failed
+       }}
+    )
+
+    assert {:error, {:investigation_workspace_setup_failed, :workspace_setup_failed}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    assert run.workspace_setup_state == "failed"
+    assert run.workspace_setup_source_sha == sha256
+    assert run.workspace_setup_duration_ms == 2_000
+    assert run.workspace_setup_exit_status == 17
+    assert run.workspace_setup_output == "dependency installation failed\n"
+    assert run.workspace_setup_cache_state == "miss"
+    assert run.workspace_setup_phase_durations == %{"dependencies_ms" => 1_900}
+    assert run.workspace_setup_error == ":workspace_setup_failed"
+    refute_receive {:investigation_command, ["agent", "start" | _args]}
+  end
+
+  test "failed investigation cleanup is persisted and retried after the action ends" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    assert run.herdr_workspace == "investigation-workspace"
+    assert Map.fetch!(run, :disposable_cleanup_state) == "workspace_open"
+    assert is_binary(Map.fetch!(run, :disposable_worktree_path))
+    assert is_binary(Map.fetch!(run, :disposable_worktree_branch))
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.id == run.id
+    assert cleaned.herdr_workspace == nil
+    assert Map.fetch!(cleaned, :disposable_cleanup_state) == nil
+    assert Map.fetch!(cleaned, :disposable_worktree_path) == nil
+    assert Map.fetch!(cleaned, :disposable_worktree_branch) == nil
+    assert_receive {:investigation_cleanup, "investigation-workspace"}
+
+    assert_receive {:investigation_cleanup_git,
+                    [
+                      "-C",
+                      _,
+                      "update-ref",
+                      "-d",
+                      "refs/heads/" <> _branch
+                    ]}
+  end
+
+  test "an attach failure removes the decoded Herdr workspace" do
+    %{action: action} = claimed_investigation_fixture!()
+    Process.put(:investigation_attach_failure, true)
+
+    assert {:error, :agent_action_run_missing} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    assert_receive {:investigation_command,
+                    ["worktree", "remove", "--workspace", "investigation-workspace", "--force"]}
+  end
+
+  test "terminal cleanup recovers a Herdr workspace after a crash before its id was persisted" do
+    %{action: action, root: root, token: token} = claimed_investigation_fixture!()
+    {:ok, identity} = PtcManager.Repository.InvestigationWorkspace.identity(action)
+    path = PtcManager.Repository.InvestigationWorkspace.path(root, action.repository, action)
+
+    assert {:ok, _run} =
+             PtcManager.Operations.prepare_agent_action_disposable_workspace(
+               action.id,
+               action.attempt_count,
+               path,
+               identity.branch
+             )
+
+    File.mkdir_p!(path)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(action.id, token, {:error, :killed})
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.disposable_cleanup_state == nil
+    expected_label = "review-issue-#{action.target_id}"
+
+    assert_receive {:investigation_recover, repository_path, ^path, ^expected_label}
+
+    assert repository_path == Path.expand(System.tmp_dir!())
+    assert_receive {:investigation_cleanup, "recovered-investigation-workspace"}
+  end
+
+  test "investigation cleanup is leased and treats already-removed resources as success" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    File.rm_rf!(run.disposable_worktree_path)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    assert {:ok, _claimed, cleanup_token} =
+             PtcManager.Operations.claim_disposable_workspace_cleanup(run.id)
+
+    assert {:ok, :empty} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               MissingInvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    refute_receive {:investigation_cleanup_missing, _workspace}
+
+    assert {:ok, _released} =
+             PtcManager.Operations.fail_disposable_workspace_cleanup(run.id, cleanup_token)
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               MissingInvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.disposable_cleanup_state == nil
+    assert_receive {:investigation_cleanup_missing, "investigation-workspace"}
+  end
+
+  test "investigation cleanup retains workspace identity after an uncertain removal failure" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    File.rm_rf!(run.disposable_worktree_path)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    assert {:error, {:investigation_workspace_cleanup_failed, :herdr_unavailable}} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               UncertainInvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    retained = Repo.get!(PtcManager.Operations.AgentRun, run.id)
+    assert retained.herdr_workspace == "investigation-workspace"
+    assert retained.disposable_cleanup_state == "workspace_open"
+    assert retained.disposable_cleanup_token == nil
+    assert_receive {:investigation_cleanup_uncertain, "investigation-workspace"}
+  end
+
+  test "workspace-not-found cleanup removes a worktree that still exists on disk" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    assert File.dir?(run.disposable_worktree_path)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               MissingInvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.disposable_cleanup_state == nil
+    assert_receive {:investigation_cleanup_missing, "investigation-workspace"}
+
+    assert_receive {:investigation_cleanup_git,
+                    ["-C", _, "worktree", "remove", "--force", "--", worktree_path]}
+
+    assert worktree_path == run.disposable_worktree_path
+  end
+
+  test "investigation cleanup retries an already-deleted branch idempotently" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+
+    assert {:ok, _claimed, cleanup_token} =
+             PtcManager.Operations.claim_disposable_workspace_cleanup(run.id)
+
+    assert {:ok, branch_pending} =
+             PtcManager.Operations.advance_disposable_workspace_cleanup(
+               run.id,
+               cleanup_token,
+               "workspace_open",
+               "branch_pending"
+             )
+
+    assert branch_pending.disposable_cleanup_state == "branch_pending"
+
+    assert {:ok, _released} =
+             PtcManager.Operations.fail_disposable_workspace_cleanup(run.id, cleanup_token)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    Process.put(:investigation_cleanup_git_results, [{"missing", 1}, {"", 1}])
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.disposable_cleanup_state == nil
+
+    assert_receive {:investigation_cleanup_git, ["-C", _, "update-ref", "-d", "refs/heads/" <> _]}
+
+    assert_receive {:investigation_cleanup_git,
+                    ["-C", _, "show-ref", "--verify", "--quiet", "refs/heads/" <> _]}
+  end
+
+  test "investigation cleanup deletes its unique branch even when the agent committed" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               ChangedBranchCleanupGit
+             )
+
+    assert cleaned.disposable_cleanup_state == nil
+
+    assert_receive {:changed_branch_cleanup_git,
+                    ["-C", _, "update-ref", "-d", "refs/heads/" <> _branch]}
+  end
+
+  test "repository removal waits for disposable cleanup metadata to clear" do
+    %{action: action, root: root, token: token} = claimed_investigation_fixture!()
+    {:ok, identity} = PtcManager.Repository.InvestigationWorkspace.identity(action)
+    path = PtcManager.Repository.InvestigationWorkspace.path(root, action.repository, action)
+
+    assert {:ok, _run} =
+             PtcManager.Operations.prepare_agent_action_disposable_workspace(
+               action.id,
+               action.attempt_count,
+               path,
+               identity.branch
+             )
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(action.id, token, {:error, :stopped})
+
+    assert {:error, :active_work} = PtcManager.Operations.remove_repository(action.repository_id)
+  end
+
+  test "heavy issue reviews and legacy repairs share implementation capacity" do
+    previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
+    previous_capacity = Application.get_env(:ptc_manager, :heavy_agent_capacity)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :heavy_agent_capacity, 1)
+
+    on_exit(fn ->
+      restore_env(:dispatch_enabled, previous_dispatch)
+      restore_env(:heavy_agent_capacity, previous_capacity)
+    end)
+
+    repository = repository_fixture()
+    implementation_issue = issue_fixture(repository, %{number: 9_101})
+    proposal_fixture(implementation_issue)
+    {:ok, job} = PtcManager.Operations.approve_issue(implementation_issue.id, "maintainer")
+
+    worker_fixture(%{
+      worker_key: "herdr:default",
+      capabilities: %{"herdr" => true, "implementation_slots" => 1}
+    })
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    legacy_repair =
+      %PtcManager.Operations.AgentAction{}
+      |> PtcManager.Operations.AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_pr",
+        target_type: "pull_request",
+        target_id: 9_100,
+        target_label: "legacy repair",
+        prompt_version: 1,
+        prompt: "Repair the pull request",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "done",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now
+      })
+      |> Repo.insert!()
+
+    worker = Repo.get_by!(PtcManager.Operations.Worker, worker_key: "herdr:default")
+
+    assert {:ok, legacy_run} =
+             PtcManager.Operations.create_agent_run(%{
+               worker_id: worker.id,
+               agent_action_id: legacy_repair.id,
+               role: "implementer",
+               state: "working",
+               agent_name: "legacy_repair",
+               started_at: now,
+               last_heartbeat_at: now
+             })
+
+    remote = %{
+      state: "open",
+      content_digest: implementation_issue.content_digest,
+      github_updated_at: implementation_issue.github_updated_at,
+      blocking_issues: [],
+      dependency_overflow: false
+    }
+
+    assert {:error, :dispatch_capacity} =
+             PtcManager.Operations.lease_job(job.id, "herdr:default", remote, 60_000)
+
+    legacy_run
+    |> PtcManager.Operations.AgentRun.changeset(%{state: "done", ended_at: now})
+    |> Repo.update!()
+
+    assert {:ok, _leased} =
+             PtcManager.Operations.lease_job(job.id, "herdr:default", remote, 60_000)
+
+    review_issue = issue_fixture(repository, %{number: 9_102})
+
+    assert {:ok, review} =
+             MaintainerActions.enqueue("review_issue", review_issue.id, "maintainer")
+
+    assert {:error, :dispatch_capacity} = PtcManager.Operations.claim_agent_action(review.id)
+  end
+
+  test "queued repair work has priority over a heavy issue review" do
+    previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    on_exit(fn -> restore_env(:dispatch_enabled, previous_dispatch) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{number: 9_111})
+    assert {:ok, review} = MaintainerActions.enqueue("review_issue", issue.id, "maintainer")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %PtcManager.Operations.AgentAction{}
+    |> PtcManager.Operations.AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "repair_pr",
+      target_type: "pull_request",
+      target_id: 9_112,
+      target_label: "priority repair",
+      prompt_version: 1,
+      prompt: "Repair the pull request",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "queued",
+      attempt_count: 0,
+      requested_at: now
+    })
+    |> Repo.insert!()
+
+    worker_fixture(%{
+      worker_key: "herdr:default",
+      capabilities: %{"herdr" => true, "implementation_slots" => 1}
+    })
+
+    assert {:error, :delivery_priority} = PtcManager.Operations.claim_agent_action(review.id)
   end
 
   test "editing an action creates an immutable version used only by future actions" do
@@ -549,4 +1197,70 @@ defmodule PtcManager.AutomationsTest do
                "/tmp/a b"
              )
   end
+
+  defp claimed_investigation_fixture! do
+    previous_command = Application.get_env(:ptc_manager, :generic_herdr_command)
+    previous_profiles = Application.get_env(:ptc_manager, :agent_profiles)
+    previous_setup = Application.get_env(:ptc_manager, :workspace_setup)
+    previous_root = Application.get_env(:ptc_manager, :worktree_root)
+    previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
+    previous_cleanup_git = Application.get_env(:ptc_manager, :investigation_cleanup_git)
+    Process.put(:investigation_test_pid, self())
+
+    root = Path.join(System.tmp_dir!(), "ptc-investigation-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+
+    Application.put_env(:ptc_manager, :generic_herdr_command, InvestigationHerdrCommand)
+    Application.put_env(:ptc_manager, :workspace_setup, InvestigationWorkspaceSetup)
+    Application.put_env(:ptc_manager, :worktree_root, root)
+    Application.put_env(:ptc_manager, :dispatch_enabled, true)
+    Application.put_env(:ptc_manager, :investigation_cleanup_git, InvestigationCleanupGit)
+
+    Application.put_env(:ptc_manager, :agent_profiles, %{
+      "codex" => %{"enabled" => true, "args" => ["--fixture", "{{workspace_path}}"]}
+    })
+
+    on_exit(fn ->
+      File.rm_rf!(root)
+      restore_env(:generic_herdr_command, previous_command)
+      restore_env(:agent_profiles, previous_profiles)
+      restore_env(:workspace_setup, previous_setup)
+      restore_env(:worktree_root, previous_root)
+      restore_env(:dispatch_enabled, previous_dispatch)
+      restore_env(:investigation_cleanup_git, previous_cleanup_git)
+    end)
+
+    repository = repository_fixture(%{github_name: "ptc_runner", local_path: System.tmp_dir!()})
+    issue = issue_fixture(repository, %{number: 91})
+    assert {:ok, queued} = MaintainerActions.enqueue("review_issue", issue.id, "maintainer")
+    source_sha = String.duplicate("a", 40)
+
+    action =
+      queued
+      |> PtcManager.Operations.AgentAction.changeset(%{
+        target_snapshot: %{"source_sha" => source_sha, "source_path" => "/read-only/evidence"}
+      })
+      |> Repo.update!()
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    assert {:ok, _worker} =
+             PtcManager.Operations.create_worker(%{
+               worker_key: "herdr:default",
+               name: "Herdr default",
+               status: "online",
+               capabilities: %{"herdr" => true},
+               last_heartbeat_at: now,
+               worker_incarnation_id: "worker-review",
+               herdr_incarnation_id: "herdr-review",
+               coordinator_incarnation_id: PtcManager.RuntimeIncarnation.current()
+             })
+
+    assert {:ok, {action, token}} = PtcManager.Operations.claim_agent_action(action.id)
+
+    %{action: action, issue: issue, root: root, source_sha: source_sha, token: token}
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
+  defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
 end

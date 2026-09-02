@@ -38,6 +38,7 @@ defmodule PtcManager.Operations do
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @capacity_run_states ~w(queued starting working idle unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
+  @legacy_heavy_action_keys ["review_issue" | @repair_action_keys]
   @merge_action_key "repair_and_merge_pr"
   @planning_action_keys ~w(
     daily_digest
@@ -181,7 +182,8 @@ defmodule PtcManager.Operations do
           where:
             (action.repository_id == ^repository_id or job.repository_id == ^repository_id) and
               (run.state not in ["done", "failed", "lost"] or
-                 (action.action_key in ^@repair_action_keys and not is_nil(run.herdr_workspace)))
+                 (action.action_key in ^@repair_action_keys and not is_nil(run.herdr_workspace)) or
+                 not is_nil(run.disposable_cleanup_state))
       ) or
       Repo.exists?(
         from invocation in PtcManager.Automations.Invocation,
@@ -370,9 +372,10 @@ defmodule PtcManager.Operations do
 
   def next_agent_action_candidate_for_lane(
         lane,
-        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond),
+        resource_class \\ :any
       )
-      when lane in [:any, :planning, :writing] do
+      when lane in [:any, :planning, :writing] and resource_class in [:any, "light", "heavy"] do
     blocked_repository_ids =
       AgentAction
       |> where([action], action.state == "sync_pending")
@@ -388,6 +391,7 @@ defmodule PtcManager.Operations do
         action.state == "queued" and action.repository_id not in ^blocked_repository_ids and
           (is_nil(action.next_sync_attempt_at) or action.next_sync_attempt_at <= ^now)
       )
+      |> agent_action_resource_class(resource_class)
       |> agent_action_lane(lane)
 
     if lane == :planning do
@@ -1327,23 +1331,15 @@ defmodule PtcManager.Operations do
         job = Repo.get!(Job, job_id)
 
         with :ok <- valid_lease(job, fencing_token, worker_key, lease_now) do
-          attrs = %{
-            herdr_workspace: Map.get(report, :workspace_id),
-            worktree_created_duration_ms: Map.get(report, :worktree_created_duration_ms),
-            workspace_setup_state: Map.fetch!(report, :state),
-            workspace_setup_script: Map.get(report, :script),
-            workspace_setup_source_sha: Map.get(report, :source_sha),
-            workspace_setup_started_at: Map.fetch!(report, :started_at),
-            workspace_setup_ended_at: Map.fetch!(report, :ended_at),
-            workspace_setup_duration_ms: Map.fetch!(report, :duration_ms),
-            workspace_setup_exit_status: Map.get(report, :exit_status),
-            workspace_setup_output: Map.get(report, :output, ""),
-            workspace_setup_output_truncated: Map.get(report, :output_truncated, false),
-            workspace_setup_cache_state: Map.get(report, :cache_state),
-            workspace_setup_phase_durations: Map.get(report, :phase_durations, %{}),
-            last_used_at: lifecycle_now,
-            last_error: setup_error(report)
-          }
+          attrs =
+            report
+            |> workspace_setup_evidence()
+            |> Map.merge(%{
+              herdr_workspace: Map.get(report, :workspace_id),
+              worktree_created_duration_ms: Map.get(report, :worktree_created_duration_ms),
+              last_used_at: lifecycle_now,
+              last_error: setup_error(report)
+            })
 
           allocation =
             WorktreeAllocation
@@ -1378,6 +1374,172 @@ defmodule PtcManager.Operations do
     case result do
       {:ok, allocation} -> notify_and_return({:ok, allocation})
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def record_agent_action_workspace_setup(action_id, attempt_count, report)
+      when is_integer(action_id) and is_integer(attempt_count) and is_map(report) do
+    attrs =
+      report
+      |> workspace_setup_evidence()
+      |> Map.put(:workspace_setup_error, setup_error(report))
+
+    update_agent_action_attempt_run(action_id, attempt_count, attrs)
+  end
+
+  def prepare_agent_action_disposable_workspace(action_id, attempt_count, path, branch)
+      when is_integer(action_id) and is_integer(attempt_count) and is_binary(path) and
+             is_binary(branch) do
+    update_agent_action_attempt_run(action_id, attempt_count, %{
+      disposable_worktree_path: path,
+      disposable_worktree_branch: branch,
+      disposable_cleanup_state: "planned",
+      disposable_cleanup_token: nil,
+      disposable_cleanup_expires_at: nil,
+      status_text: "Preparing a disposable investigation workspace."
+    })
+  end
+
+  def attach_agent_action_disposable_workspace(
+        action_id,
+        attempt_count,
+        workspace,
+        pane,
+        session
+      )
+      when is_integer(action_id) and is_integer(attempt_count) and is_binary(workspace) and
+             is_binary(pane) and is_binary(session) do
+    update_agent_action_attempt_run(action_id, attempt_count, %{
+      herdr_workspace: workspace,
+      herdr_pane: pane,
+      herdr_session: session,
+      disposable_cleanup_state: "workspace_open",
+      status_text: "Bootstrapping a disposable investigation workspace."
+    })
+  end
+
+  def claim_disposable_workspace_cleanup(
+        run_id,
+        now \\ DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      )
+      when is_integer(run_id) do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    lease_ms = Application.get_env(:ptc_manager, :disposable_cleanup_lease_ms, 300_000)
+    expires_at = DateTime.add(now, lease_ms, :millisecond)
+
+    {updated, _rows} =
+      AgentRun
+      |> where(
+        [run],
+        run.id == ^run_id and not is_nil(run.disposable_cleanup_state) and
+          (is_nil(run.disposable_cleanup_token) or
+             is_nil(run.disposable_cleanup_expires_at) or
+             run.disposable_cleanup_expires_at <= ^now)
+      )
+      |> Repo.update_all(
+        set: [
+          disposable_cleanup_token: token,
+          disposable_cleanup_expires_at: expires_at,
+          updated_at: now
+        ]
+      )
+
+    if updated == 1 do
+      notify_changed(__MODULE__)
+      {:ok, disposable_cleanup_run!(run_id), token}
+    else
+      {:error, :disposable_workspace_cleanup_already_claimed}
+    end
+  end
+
+  def advance_disposable_workspace_cleanup(run_id, token, expected_state, next_state)
+      when is_integer(run_id) and is_binary(token) and
+             expected_state in ["planned", "workspace_open"] and next_state == "branch_pending" do
+    disposable_cleanup_transition(run_id, token, expected_state, %{
+      herdr_workspace: nil,
+      herdr_pane: nil,
+      external_key: nil,
+      disposable_cleanup_state: next_state
+    })
+  end
+
+  def fail_disposable_workspace_cleanup(run_id, token)
+      when is_integer(run_id) and is_binary(token) do
+    disposable_cleanup_transition(run_id, token, nil, %{
+      disposable_cleanup_token: nil,
+      disposable_cleanup_expires_at: nil
+    })
+  end
+
+  def complete_disposable_workspace_cleanup(run_id, token)
+      when is_integer(run_id) and is_binary(token) do
+    disposable_cleanup_transition(run_id, token, "branch_pending", %{
+      herdr_workspace: nil,
+      herdr_pane: nil,
+      external_key: nil,
+      disposable_worktree_path: nil,
+      disposable_worktree_branch: nil,
+      disposable_cleanup_state: nil,
+      disposable_cleanup_token: nil,
+      disposable_cleanup_expires_at: nil
+    })
+  end
+
+  defp disposable_cleanup_transition(run_id, token, expected_state, attrs) do
+    now = utc_now()
+
+    query =
+      AgentRun
+      |> where(
+        [run],
+        run.id == ^run_id and run.disposable_cleanup_token == ^token
+      )
+      |> maybe_expect_disposable_cleanup_state(expected_state)
+
+    {updated, _rows} =
+      Repo.update_all(query, set: Map.to_list(Map.put(attrs, :updated_at, now)))
+
+    if updated == 1 do
+      notify_changed(__MODULE__)
+      {:ok, disposable_cleanup_run!(run_id)}
+    else
+      {:error, :stale_disposable_workspace_cleanup_claim}
+    end
+  end
+
+  defp maybe_expect_disposable_cleanup_state(query, nil), do: query
+
+  defp maybe_expect_disposable_cleanup_state(query, state),
+    do: where(query, [run], run.disposable_cleanup_state == ^state)
+
+  defp disposable_cleanup_run!(run_id) do
+    AgentRun
+    |> preload(agent_action: [:repository, :automation_definition_version])
+    |> Repo.get!(run_id)
+  end
+
+  defp update_agent_action_attempt_run(action_id, attempt_count, attrs) do
+    case AgentRun
+         |> where(
+           [run],
+           run.agent_action_id == ^action_id and run.fencing_token == ^attempt_count and
+             run.state in ["starting", "working", "unknown"]
+         )
+         |> order_by([run], desc: run.id)
+         |> limit(1)
+         |> Repo.one() do
+      %AgentRun{} = run -> update_disposable_agent_run(run, attrs)
+      nil -> {:error, :agent_action_run_missing}
+    end
+  end
+
+  defp update_disposable_agent_run(%AgentRun{} = run, attrs) do
+    run
+    |> AgentRun.changeset(Map.put(attrs, :last_heartbeat_at, utc_now()))
+    |> Repo.update()
+    |> case do
+      {:ok, updated} -> notify_and_return({:ok, updated})
+      {:error, changeset} -> {:error, changeset}
     end
   end
 
@@ -1957,9 +2119,19 @@ defmodule PtcManager.Operations do
   end
 
   defp light_agent_run?(%AgentRun{agent_action: %AgentAction{} = action}),
-    do: planning_agent_action?(action)
+    do: agent_action_resource_class(action) == "light"
 
   defp light_agent_run?(_run), do: false
+
+  def agent_action_resource_class(%{
+        automation_definition_version: %{resource_class: resource_class}
+      })
+      when resource_class in ["light", "heavy"],
+      do: resource_class
+
+  def agent_action_resource_class(%{action_key: action_key}) when is_binary(action_key) do
+    if action_key in @legacy_heavy_action_keys, do: "heavy", else: "light"
+  end
 
   def list_waiting_agent_runs do
     AgentRun
@@ -2490,10 +2662,17 @@ defmodule PtcManager.Operations do
       |> join(:left, [run, action], publication in PrPublication,
         on: action.target_type == "pull_request" and publication.id == action.target_id
       )
-      |> where(
+      |> join(
+        :left,
         [run, action, publication],
+        version in assoc(action, :automation_definition_version)
+      )
+      |> where(
+        [run, action, publication, version],
         run.worker_id == ^worker.id and not is_nil(run.agent_action_id) and
           run.state in ^@capacity_run_states and
+          (version.resource_class == "heavy" or
+             (is_nil(version.id) and action.action_key in ^@legacy_heavy_action_keys)) and
           (action.action_key not in ^@repair_action_keys or is_nil(publication.job_id))
       )
       |> repo.aggregate(:count)
@@ -3145,10 +3324,11 @@ defmodule PtcManager.Operations do
 
   defp agent_action_worker!(
          %AgentAction{
-           automation_definition_version: %{execution_profile: "generic_ephemeral"}
+           automation_definition_version: %{execution_profile: profile}
          } = action,
          now
-       ) do
+       )
+       when profile in ["generic_ephemeral", "ephemeral_investigation"] do
     if Application.get_env(:ptc_manager, :dispatch_enabled, false),
       do: generic_herdr_action_worker!(action, now),
       else: get_or_create_agent_action_worker!(now)
@@ -3156,7 +3336,7 @@ defmodule PtcManager.Operations do
 
   defp agent_action_worker!(%AgentAction{}, now), do: get_or_create_agent_action_worker!(now)
 
-  defp generic_herdr_action_worker!(action, _now) do
+  defp generic_herdr_action_worker!(action, now) do
     session = Application.get_env(:ptc_manager, :herdr_session, "default")
 
     worker =
@@ -3165,10 +3345,35 @@ defmodule PtcManager.Operations do
         _worker -> Repo.rollback(:worker_unavailable)
       end
 
+    resource_class = action.automation_definition_version.resource_class
+
     capacity =
-      if action.automation_definition_version.resource_class == "heavy",
+      if resource_class == "heavy",
         do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1),
         else: Application.get_env(:ptc_manager, :light_agent_capacity, 2)
+
+    result =
+      with :ok <- heavy_action_priority_available(resource_class) do
+        if resource_class == "heavy" do
+          dispatch_capacity_available(Repo, worker, capacity, now)
+        else
+          generic_action_capacity_available(Repo, worker, resource_class, capacity, now)
+        end
+      end
+
+    case result do
+      :ok -> worker
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp heavy_action_priority_available("heavy"), do: heavy_delivery_priority_unlocked()
+  defp heavy_action_priority_available("light"), do: :ok
+
+  defp generic_action_capacity_available(repo, worker, resource_class, capacity, now) do
+    Worker
+    |> where([candidate], candidate.id == ^worker.id)
+    |> repo.update_all(set: [updated_at: now])
 
     active_count =
       AgentRun
@@ -3181,11 +3386,11 @@ defmodule PtcManager.Operations do
       |> where(
         [run, _candidate, version],
         run.worker_id == ^worker.id and run.state in ^@capacity_run_states and
-          version.resource_class == ^action.automation_definition_version.resource_class
+          version.resource_class == ^resource_class
       )
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
-    if active_count < capacity, do: worker, else: Repo.rollback(:dispatch_capacity)
+    if active_count < capacity, do: :ok, else: {:error, :dispatch_capacity}
   end
 
   defp herdr_agent_action_worker!(%AgentAction{action_key: action_key} = action, now) do
@@ -3312,6 +3517,36 @@ defmodule PtcManager.Operations do
   end
 
   defp agent_action_lane(query, :any), do: query
+
+  defp agent_action_resource_class(query, :any), do: query
+
+  defp agent_action_resource_class(query, resource_class)
+       when resource_class in ["light", "heavy"] do
+    version_ids =
+      from version in PtcManager.Automations.DefinitionVersion,
+        where: version.resource_class == ^resource_class,
+        select: version.id
+
+    case resource_class do
+      "heavy" ->
+        where(
+          query,
+          [action],
+          action.automation_definition_version_id in subquery(version_ids) or
+            (is_nil(action.automation_definition_version_id) and
+               action.action_key in ^@legacy_heavy_action_keys)
+        )
+
+      "light" ->
+        where(
+          query,
+          [action],
+          action.automation_definition_version_id in subquery(version_ids) or
+            (is_nil(action.automation_definition_version_id) and
+               action.action_key not in ^@legacy_heavy_action_keys)
+        )
+    end
+  end
 
   defp repository_dispatch_unlocked(repository_id) do
     if repository_merge_locked?(repository_id), do: {:error, :merge_priority}, else: :ok
@@ -3631,6 +3866,22 @@ defmodule PtcManager.Operations do
   defp setup_error(%{state: "passed"}), do: nil
   defp setup_error(%{error: reason}), do: bounded_error(reason)
   defp setup_error(_report), do: "workspace_setup_failed"
+
+  defp workspace_setup_evidence(report) do
+    %{
+      workspace_setup_state: Map.fetch!(report, :state),
+      workspace_setup_script: Map.get(report, :script),
+      workspace_setup_source_sha: Map.get(report, :source_sha),
+      workspace_setup_started_at: Map.fetch!(report, :started_at),
+      workspace_setup_ended_at: Map.fetch!(report, :ended_at),
+      workspace_setup_duration_ms: Map.fetch!(report, :duration_ms),
+      workspace_setup_exit_status: Map.get(report, :exit_status),
+      workspace_setup_output: Map.get(report, :output, ""),
+      workspace_setup_output_truncated: Map.get(report, :output_truncated, false),
+      workspace_setup_cache_state: Map.get(report, :cache_state),
+      workspace_setup_phase_durations: Map.get(report, :phase_durations, %{})
+    }
+  end
 
   defp bounded_error(reason) when is_binary(reason), do: String.slice(reason, 0, 500)
   defp bounded_error(reason), do: reason |> inspect(limit: 20) |> String.slice(0, 500)

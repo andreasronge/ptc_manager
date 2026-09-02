@@ -256,6 +256,8 @@ config :ptc_manager,
     System.get_env("PTC_EXTERNAL_PR_GIT_WRAPPER", "/usr/local/bin/ptc-manager-external-git"),
   external_pr_reconcile_enabled: external_pr_reconcile_enabled,
   agent_action_output_dir: System.get_env("PTC_AGENT_ACTION_OUTPUT_DIR"),
+  source_refresh_timeout_ms:
+    System.get_env("PTC_SOURCE_REFRESH_TIMEOUT_MS", "60000") |> String.to_integer(),
   dispatch_interval_ms: System.get_env("PTC_DISPATCH_INTERVAL_MS", "5000") |> String.to_integer(),
   dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
   implementation_idle_timeout_ms:

@@ -63,7 +63,7 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
 
     assert {:ok, snapshot} = SourceSnapshot.capture(repository)
     assert snapshot.sha == String.trim(expected_sha)
-    assert snapshot.ref == "main"
+    assert snapshot.ref == "refs/heads/main"
   end
 
   @tag nightly: false

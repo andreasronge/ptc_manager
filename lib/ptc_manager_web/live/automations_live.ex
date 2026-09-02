@@ -970,7 +970,8 @@ defmodule PtcManagerWeb.AutomationsLive do
     Automations.compose_prompt(user_prompt, runtime)
   end
 
-  defp maybe_add_result_protocol(prompt, "generic_ephemeral") do
+  defp maybe_add_result_protocol(prompt, profile)
+       when profile in ["generic_ephemeral", "ephemeral_investigation"] do
     prompt <>
       GenericHerdrAdapter.result_protocol(
         "<generated-result-path>.json",

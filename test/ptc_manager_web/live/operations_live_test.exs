@@ -73,10 +73,10 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       assert has_element?(view, "#metric-application-memory", "PtcManager memory")
       assert has_element?(view, "#metric-disk")
       assert has_element?(view, "#metric-agents", "Herdr online")
-      assert has_element?(view, "#light-agent-slots", "1/2")
-      assert has_element?(view, "#heavy-agent-slots", "1/1")
+      assert has_element?(view, "#light-agent-slots", "0/2")
+      assert has_element?(view, "#heavy-agent-slots", "2/1")
       assert has_element?(view, "#operation-slots", "1/1")
-      assert has_element?(view, "#light-agent-slots", "1 available")
+      assert has_element?(view, "#light-agent-slots", "2 available")
       assert has_element?(view, "#heavy-agent-slots", "0 available")
 
       assert has_element?(view, "#machine-usage", "Machine usage")
@@ -117,7 +117,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       assert has_element?(view, "#work-queue")
       assert has_element?(view, "#queued-action-#{context.priority_action.id}", "Merge priority")
       assert has_element?(view, "#queued-action-#{context.priority_action.id}", "Heavy work")
-      assert has_element?(view, "#queued-action-#{context.planning_action.id}", "Light work")
+      assert has_element?(view, "#queued-action-#{context.planning_action.id}", "Heavy work")
       assert has_element?(view, "#queued-action-#{context.daily_action.id}", "Daily update")
       assert has_element?(view, "#queued-job-#{context.queued_job.id}", "Implementation")
       assert has_element?(view, "#queued-job-#{context.queued_job.id}", "3 review passes")
@@ -206,6 +206,12 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       view |> element("#close-agent-detail") |> render_click()
       assert_patch(view, ~p"/operations/agents?maintenance=1")
       refute has_element?(view, "#agent-detail-panel")
+
+      view |> element("#timeline-run-#{context.planning_run.id} a") |> render_click()
+      assert has_element?(view, "#agent-workspace-setup", "scripts/ptc/bootstrap")
+      assert has_element?(view, "#agent-workspace-setup", "Warm cache")
+      assert has_element?(view, "#agent-workspace-setup", "Dependencies 1.9s")
+      assert has_element?(view, "#agent-workspace-setup-output", "review setup ready")
     end
 
     test "the Performance tab shows expensive-operation statistics and workspace preparation",
@@ -255,6 +261,16 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       refute has_element?(view, "#agent-detail-panel")
       assert render(view) =~ "That agent run is no longer available."
     end
+  end
+
+  test "queue labels use resource class instead of queue lane" do
+    assert OperationsLive.queued_action_lane_label(%{
+             automation_definition_version: %{resource_class: "light"}
+           }) == "Light work"
+
+    assert OperationsLive.queued_action_lane_label(%{
+             automation_definition_version: %{resource_class: "heavy"}
+           }) == "Heavy work"
   end
 
   defp stub_transcript(_context) do
@@ -415,7 +431,17 @@ defmodule PtcManagerWeb.OperationsLiveTest do
         state: "working",
         agent_name: "review_issue_9005",
         started_at: DateTime.add(now, -60, :second),
-        last_heartbeat_at: now
+        last_heartbeat_at: now,
+        workspace_setup_state: "passed",
+        workspace_setup_script: "scripts/ptc/bootstrap",
+        workspace_setup_source_sha: String.duplicate("b", 40),
+        workspace_setup_started_at: DateTime.add(now, -63, :second),
+        workspace_setup_ended_at: DateTime.add(now, -60, :second),
+        workspace_setup_duration_ms: 3_000,
+        workspace_setup_exit_status: 0,
+        workspace_setup_output: "review setup ready\n",
+        workspace_setup_cache_state: "hit",
+        workspace_setup_phase_durations: %{"dependencies_ms" => 1_900}
       })
 
     {:ok, failed_run} =
