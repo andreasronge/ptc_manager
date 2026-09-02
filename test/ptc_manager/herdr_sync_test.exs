@@ -165,6 +165,27 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.aggregate(AgentRun, :count) == 1
   end
 
+  test "a stale unknown record of a finished action is marked lost" do
+    %{action: action, run: run, worker: worker} = active_repair_run_fixture("stale-record")
+    action |> AgentAction.changeset(%{state: "done", ended_at: now()}) |> Repo.update!()
+
+    # The repair ran in a job's retained implementer, so the record carries that
+    # agent's name and no Herdr identity of its own; an outage marked it unknown.
+    run
+    |> AgentRun.changeset(%{state: "unknown", agent_name: "impl_j25_f1", external_key: nil})
+    |> Repo.update!()
+
+    Process.put(:herdr_result, {:ok, []})
+    assert {:ok, %{lost_count: 1}} = Sync.sync(client: FakeClient, session: "stale-record")
+
+    lost = Repo.get!(AgentRun, run.id)
+    assert lost.state == "lost"
+    assert lost.ended_at
+    assert lost.status_text =~ "no Herdr agent remains"
+    assert Repo.get!(AgentAction, action.id).state == "done"
+    assert Repo.get!(Worker, worker.id).status == "online"
+  end
+
   test "reconciles current agents and marks missing activity lost" do
     Process.put(
       :herdr_result,

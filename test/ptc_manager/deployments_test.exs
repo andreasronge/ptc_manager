@@ -3,7 +3,7 @@ defmodule PtcManager.DeploymentsTest do
 
   alias PtcManager.Deployments
   alias PtcManager.Deployments.Deployment
-  alias PtcManager.Operations.AgentRun
+  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent}
   alias PtcManager.Repository.GitProbe
   alias PtcManager.{OperationalMode, Repo}
 
@@ -91,39 +91,83 @@ defmodule PtcManager.DeploymentsTest do
     %{spool: spool}
   end
 
-  test "deployment drains new work and launches only after active managed runs finish" do
+  test "deployment drains new work, names what holds it, and launches once that work finishes" do
     repository = deployable_repository()
     worker = worker_fixture()
-    now = now()
 
-    run =
-      %AgentRun{}
-      |> AgentRun.changeset(%{
-        worker_id: worker.id,
-        role: "implementer",
-        state: "working",
-        started_at: now,
-        last_heartbeat_at: now
-      })
-      |> Repo.insert!()
+    run = agent_run!(worker, %{state: "working", agent_name: "impl_j7_f1"})
+    # A retained implementer sitting on a prompt for an open PR is nobody's work.
+    agent_run!(worker, %{state: "blocked", agent_name: "impl_j25_f1"})
+    # A stale record of an action that already finished is not work either.
+    agent_run!(worker, %{state: "unknown", agent_action_id: action!(repository, "done").id})
+    guarded_action = action!(repository, "running")
+
+    agent_run!(worker, %{
+      state: "blocked",
+      agent_name: "repair_pr9_a#{guarded_action.id}_f1",
+      agent_action_id: guarded_action.id
+    })
 
     assert {:ok, deployment} = Deployments.request(repository, "andreas")
     assert deployment.state == "draining"
     assert OperationalMode.mode() == :draining
     refute_receive {:deployment_started, _, _}, 100
 
-    assert Deployments.advance() in [:ok, :idle]
+    assert Deployments.advance() == :ok
     refute_receive {:deployment_started, _, _}, 100
+    waiting = Repo.get!(Deployment, deployment.id)
+    assert waiting.status_text =~ "Waiting for 2 managed agents"
+    assert waiting.status_text =~ "impl_j7_f1 (working, started"
+    assert waiting.status_text =~ "repair_pr9_a#{guarded_action.id}_f1 (blocked, started"
+    refute waiting.status_text =~ "impl_j25_f1"
 
-    run
-    |> AgentRun.changeset(%{state: "done", ended_at: now()})
-    |> Repo.update!()
+    run |> AgentRun.changeset(%{state: "done", ended_at: now()}) |> Repo.update!()
+    guarded_action |> AgentAction.changeset(%{state: "done", ended_at: now()}) |> Repo.update!()
 
-    assert Deployments.advance() in [:ok, :idle]
+    assert Deployments.advance() == :ok
     assert_receive {:deployment_started, started, contract}
     assert started.requested_sha == deployment.requested_sha
     assert contract.deployment_command == "./scripts/ptc/deploy"
     assert Repo.get!(Deployment, deployment.id).state == "running"
+  end
+
+  test "a waiting deployment fails as soon as the default branch moves on" do
+    repository = deployable_repository()
+    agent_run!(worker_fixture(), %{state: "working"})
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+
+    File.write!(Path.join(repository.local_path, "CHANGE.md"), "main moved on\n")
+    git!(repository.local_path, ["add", "CHANGE.md"])
+    git!(repository.local_path, ["commit", "-m", "move main"])
+
+    assert Deployments.advance() == :ok
+    assert Repo.get!(Deployment, deployment.id).state == "draining"
+
+    assert Deployments.advance(check_head?: true) == :ok
+    failed = Repo.get!(Deployment, deployment.id)
+    assert failed.state == "failed"
+    assert failed.status_text =~ "main moved to"
+    assert failed.status_text =~ "Request it again"
+    assert failed.last_error =~ "no longer the default-branch head"
+    assert OperationalMode.mode() == :active
+    refute_receive {:deployment_started, _, _}, 100
+  end
+
+  test "a waiting deployment can be cancelled until the host runner starts" do
+    repository = deployable_repository()
+    agent_run!(worker_fixture(), %{state: "working"})
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+    assert OperationalMode.mode() == :draining
+
+    assert {:ok, %Deployment{state: "cancelled"} = cancelled} =
+             Deployments.cancel(deployment.id, "andreas")
+
+    assert cancelled.status_text =~ "Cancelled by andreas"
+    assert OperationalMode.mode() == :active
+    assert Repo.get_by!(AuditEvent, action: "deployment.cancelled").target_id == deployment.id
+    assert {:error, :deployment_not_cancellable} = Deployments.cancel(deployment.id, "andreas")
+    assert Deployments.advance() == :idle
+    refute_receive {:deployment_started, _, _}, 100
   end
 
   test "a host status file completes the persisted deployment", %{spool: spool} do
@@ -361,6 +405,36 @@ defmodule PtcManager.DeploymentsTest do
     git!(path, ["commit", "-m", "add deployment contract"])
 
     repository_fixture(%{github_owner: owner, github_name: name, local_path: path, enabled: true})
+  end
+
+  defp agent_run!(worker, attrs) do
+    now = now()
+
+    %AgentRun{}
+    |> AgentRun.changeset(
+      Map.merge(
+        %{worker_id: worker.id, role: "implementer", started_at: now, last_heartbeat_at: now},
+        attrs
+      )
+    )
+    |> Repo.insert!()
+  end
+
+  defp action!(repository, state) do
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "repair_pr",
+      target_type: "pull_request",
+      target_id: 9,
+      target_label: "example/repo#9",
+      prompt: "Repair PR 9",
+      actor: "maintainer",
+      state: state,
+      attempt_count: 1,
+      requested_at: now()
+    })
+    |> Repo.insert!()
   end
 
   defp contract(command) do

@@ -9,8 +9,12 @@ defmodule PtcManager.Deployments do
   alias PtcManager.Repository.{Checkout, Contract, GitProbe}
   alias PtcManager.{Gateway, OperationalMode, Operations, Repo, RepoTransaction}
 
-  @active_run_states ~w(queued starting working blocked unknown)
+  @driving_run_states ~w(queued starting working)
+  @attention_run_states ~w(blocked unknown)
+  @active_action_states ~w(queued running sync_pending)
+  @driven_job_states ~w(starting working idle blocked reconciling)
   @active_deployment_states ~w(queued draining starting running)
+  @cancellable_states ~w(queued draining)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   def request(%Repository{} = repository, actor) when is_binary(actor) and actor != "" do
@@ -84,32 +88,171 @@ defmodule PtcManager.Deployments do
     }
   end
 
-  def advance do
+  @doc """
+  Cancels a deployment that has not been handed to the host runner yet and
+  lifts the drain when nothing else is waiting.
+  """
+  def cancel(deployment_id, actor) when is_integer(deployment_id) and is_binary(actor) do
+    outcome =
+      RepoTransaction.immediate(fn ->
+        deployment = Repo.get!(Deployment, deployment_id)
+
+        if deployment.state in @cancellable_states do
+          cancelled =
+            deployment
+            |> Deployment.changeset(%{
+              state: "cancelled",
+              finished_at: now(),
+              status_text: "Cancelled by #{actor} before the host runner started."
+            })
+            |> Repo.update!()
+
+          %AuditEvent{}
+          |> AuditEvent.changeset(%{
+            actor: actor,
+            action: "deployment.cancelled",
+            target_type: "deployment",
+            target_id: deployment.id,
+            details: %{"requested_sha" => deployment.requested_sha}
+          })
+          |> Repo.insert!()
+
+          cancelled
+        else
+          Repo.rollback(:deployment_not_cancellable)
+        end
+      end)
+
+    case outcome do
+      {:ok, cancelled} ->
+        if active() == [], do: leave_deployment_drain()
+        Operations.notify_changed(__MODULE__)
+        {:ok, Repo.preload(cancelled, :repository)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Agent runs a deployment must wait for: runs the coordinator is driving, and
+  blocked or unknown runs whose agent action or job is still in flight.
+
+  A retained agent sitting on a prompt for an open pull request, or a stale
+  record of an action that already finished, does not hold a deployment:
+  restarting PtcManager never touches Herdr agents.
+  """
+  def drain_blockers do
+    AgentRun
+    |> join(:left, [run], action in assoc(run, :agent_action))
+    |> join(:left, [run], job in assoc(run, :job))
+    |> where(
+      [run, action, job],
+      run.state in ^@driving_run_states or
+        (run.state in ^@attention_run_states and
+           (action.state in ^@active_action_states or job.state in ^@driven_job_states))
+    )
+    |> order_by([run], asc: run.id)
+    |> Repo.all()
+  end
+
+  @doc "The status a waiting deployment shows, naming the runs that hold the drain."
+  def drain_status_text(blockers) when is_list(blockers) do
+    count = length(blockers)
+    noun = if count == 1, do: "managed agent", else: "managed agents"
+
+    bounded(
+      "Waiting for #{count} #{noun} to finish; new work is paused. Holding the drain: " <>
+        Enum.map_join(blockers, ", ", &blocker_label/1) <> ".",
+      2_000
+    )
+  end
+
+  @doc """
+  Moves every active deployment forward: ingests host status files, expires
+  stalled runs, and launches a waiting deployment once nothing holds the
+  drain. With `check_head?: true` a waiting deployment whose requested revision
+  is no longer the default-branch head fails at once instead of at launch.
+  """
+  def advance(opts \\ []) do
     had_active_deployment = active() != []
     if had_active_deployment, do: ensure_active_deployment_drains()
     ingest_status_files()
     expire_stalled_deployments()
 
-    case active() do
-      [] ->
-        if had_active_deployment, do: leave_deployment_drain()
-        :idle
+    result =
+      case active() do
+        [] ->
+          :idle
 
-      deployments ->
-        Enum.each(deployments, &advance/1)
+        deployments ->
+          Enum.each(deployments, &advance(&1, opts))
+          :ok
+      end
+
+    if had_active_deployment and active() == [], do: leave_deployment_drain()
+    result
+  end
+
+  defp advance(%Deployment{state: state} = deployment, opts)
+       when state in ~w(queued draining) do
+    _ = OperationalMode.enter_draining()
+
+    with :ok <- ensure_head_unchanged(deployment, Keyword.get(opts, :check_head?, false)) do
+      case drain_blockers() do
+        [] -> launch(deployment)
+        blockers -> describe_drain(deployment, blockers)
+      end
+    end
+  end
+
+  defp advance(%Deployment{}, _opts), do: :ok
+
+  defp describe_drain(deployment, blockers) do
+    text = drain_status_text(blockers)
+
+    if deployment.state == "draining" and deployment.status_text == text do
+      :ok
+    else
+      _ = transition(deployment, %{state: "draining", status_text: text})
+      :ok
+    end
+  end
+
+  defp blocker_label(%AgentRun{} = run) do
+    name = run.agent_name || "run ##{run.id}"
+    since = run.started_at || run.inserted_at
+    "#{name} (#{run.state}, started #{Calendar.strftime(since, "%d %b %H:%M")} UTC)"
+  end
+
+  defp ensure_head_unchanged(_deployment, false), do: :ok
+
+  defp ensure_head_unchanged(deployment, true) do
+    source = Application.fetch_env!(:ptc_manager, :deployment_revision_source)
+
+    case Gateway.call(source, :latest, [deployment.repository]) do
+      {:ok, head_sha} when is_binary(head_sha) and head_sha != deployment.requested_sha ->
+        supersede(deployment, head_sha)
+
+      _unchanged_or_unknown ->
         :ok
     end
   end
 
-  defp advance(%Deployment{state: state} = deployment) when state in ~w(queued draining) do
-    _ = OperationalMode.enter_draining()
+  defp supersede(deployment, head_sha) do
+    branch = deployment.repository.default_branch
 
-    unless active_managed_runs?() do
-      launch(deployment)
-    end
+    transition(deployment, %{
+      state: "failed",
+      finished_at: now(),
+      status_text:
+        "#{branch} moved to #{String.slice(head_sha, 0, 12)} while the deployment waited. Request it again to deploy the current head.",
+      last_error:
+        "requested revision #{deployment.requested_sha} is no longer the default-branch head (#{head_sha})"
+    })
+
+    {:error, :deployment_superseded}
   end
-
-  defp advance(%Deployment{}), do: :ok
 
   defp launch(deployment) do
     runner = Application.fetch_env!(:ptc_manager, :deployment_runner)
@@ -118,7 +261,7 @@ defmodule PtcManager.Deployments do
       RepoTransaction.immediate(fn ->
         current = Deployment |> Repo.get!(deployment.id) |> Repo.preload(:repository)
 
-        if current.state in ~w(queued draining) and not active_managed_runs?() do
+        if current.state in ~w(queued draining) and drain_blockers() == [] do
           current
           |> Deployment.changeset(%{
             state: "starting",
@@ -253,12 +396,6 @@ defmodule PtcManager.Deployments do
       :ok -> :ok
       {:error, reason} -> fail(deployment, reason)
     end
-  end
-
-  defp active_managed_runs? do
-    AgentRun
-    |> where([run], run.state in ^@active_run_states)
-    |> Repo.exists?()
   end
 
   defp contract(%Repository{} = repository) do

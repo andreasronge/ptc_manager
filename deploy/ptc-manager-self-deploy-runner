@@ -46,12 +46,15 @@ write_status() {
   mv "$status_tmp" "$status_path"
 }
 
+failure_reason=""
+
 deployment_failed() {
   status=$?
   [ "$status" -ne 0 ] || status=1
   trap - EXIT HUP INT TERM
-  write_status failed "" "Deployment stopped safely; inspect the retained service output." \
-    "repository deployment command exited with status $status"
+  error="repository deployment command exited with status $status"
+  [ -z "$failure_reason" ] || error="$failure_reason"
+  write_status failed "" "Deployment stopped safely; inspect the retained service output." "$error"
   cleanup_files
   exit "$status"
 }
@@ -98,7 +101,8 @@ git -C "$checkout" fetch --quiet --prune origin \
   "+refs/heads/$default_branch:refs/remotes/origin/$default_branch"
 remote_sha=$(git -C "$checkout" rev-parse "refs/remotes/origin/$default_branch^{commit}")
 [ "$remote_sha" = "$requested_sha" ] || {
-  echo "requested revision is no longer the default-branch head" >&2
+  failure_reason="requested revision $(printf '%s' "$requested_sha" | cut -c1-12) is no longer the $default_branch head ($(printf '%s' "$remote_sha" | cut -c1-12)); request the deployment again"
+  echo "$failure_reason" >&2
   exit 1
 }
 

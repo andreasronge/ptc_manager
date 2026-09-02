@@ -92,6 +92,16 @@
           <p class="mt-1 text-xs leading-5 text-amber-100/70">
             {status.active_deployment.status_text}
           </p>
+          <button
+            :if={status.active_deployment.state in ~w(queued draining)}
+            id={"cancel-deployment-#{status.active_deployment.id}"}
+            phx-click="cancel-deployment"
+            phx-value-id={status.active_deployment.id}
+            data-confirm="Cancel this deployment and resume new work?"
+            class="mt-3 rounded-lg border border-amber-400/30 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-400/10"
+          >
+            Cancel deployment
+          </button>
         </div>
 
         <button

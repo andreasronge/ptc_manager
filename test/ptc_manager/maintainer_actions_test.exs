@@ -1532,9 +1532,9 @@ defmodule PtcManager.MaintainerActionsTest do
       })
 
     assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
-    assert {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
+    assert {:ok, {action, token}} = Operations.claim_agent_action(queued.id)
 
-    assert {:ok, %{"outcome" => "repaired"}} = RetainedHerdrAdapter.run(action)
+    assert {:ok, %{"outcome" => "repaired"} = result} = RetainedHerdrAdapter.run(action)
 
     assert_receive {:retained_herdr_prompt, args, timeout}
     assert Enum.take(args, 3) == ["agent", "prompt", retained_run.agent_name]
@@ -1550,6 +1550,15 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action_run.agent_name == retained_run.agent_name
     assert action_run.herdr_workspace == retained_run.herdr_workspace
     assert action_run.herdr_pane == retained_run.herdr_pane
+
+    # Completing the action closes its own record; the job's retained run alone
+    # keeps representing the agent, so nothing is left for a drain to wait on.
+    assert {:ok, _completed} = Operations.complete_agent_action(action.id, token, {:ok, result})
+    action_run = Repo.get!(AgentRun, action_run.id)
+    assert action_run.state == "done"
+    assert action_run.ended_at
+    assert action_run.status_text =~ "retained implementer keeps its session"
+    assert Repo.get!(AgentRun, retained_run.id).state == "waiting"
   end
 
   test "a failed retained Herdr prompt keeps the slot occupied and marks the run unknown" do

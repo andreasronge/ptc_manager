@@ -18,6 +18,7 @@ defmodule PtcManager.Herdr.Sync do
 
   alias PtcManager.Repo
   @terminal_states ~w(done failed lost)
+  @terminal_action_states ~w(done failed cancelled)
   @superseded_status "Superseded duplicate of the action-owned Herdr run."
   @recoverable_attention_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation)
   @missing_retained_error "Herdr confirmed that the retained managed agent is no longer present."
@@ -207,7 +208,7 @@ defmodule PtcManager.Herdr.Sync do
         agent_now,
         snapshot_started_at,
         lease_now
-      )
+      ) + mark_orphaned_action_runs_lost(worker, observed_run_ids, agent_now)
 
     absent_count =
       resolve_absent_reconciling_jobs(
@@ -688,6 +689,33 @@ defmodule PtcManager.Herdr.Sync do
     end)
 
     length(missing_runs)
+  end
+
+  # An action run that lost its Herdr identity during an outage after its
+  # action already finished is observed by nothing: no live agent maps back to
+  # it, and the missing-run check only knows runs with an external key. Left
+  # as "unknown" it would hold deployments forever.
+  defp mark_orphaned_action_runs_lost(worker, observed_run_ids, now) do
+    AgentRun
+    |> join(:inner, [run], action in assoc(run, :agent_action))
+    |> where(
+      [run, action],
+      run.worker_id == ^worker.id and run.state == "unknown" and is_nil(run.job_id) and
+        action.state in ^@terminal_action_states
+    )
+    |> Repo.all()
+    |> Enum.reject(&MapSet.member?(observed_run_ids, &1.id))
+    |> Enum.map(fn run ->
+      run
+      |> AgentRun.changeset(%{
+        state: "lost",
+        status_text: "The action finished; no Herdr agent remains for this record.",
+        last_heartbeat_at: now,
+        ended_at: now
+      })
+      |> Repo.update!()
+    end)
+    |> length()
   end
 
   defp upsert_worker(session, status, heartbeat_at, extra_attrs) do

@@ -42,6 +42,27 @@ defmodule PtcManagerWeb.DeploymentsLive do
     end
   end
 
+  def handle_event("cancel-deployment", %{"id" => id}, socket) do
+    with {deployment_id, ""} <- Integer.parse(id),
+         {:ok, _deployment} <- Deployments.cancel(deployment_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Deployment cancelled. New work resumes.")
+       |> load()}
+    else
+      {:error, :deployment_not_cancellable} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The host runner has already started; wait for it to finish."
+         )}
+
+      _invalid ->
+        {:noreply, put_flash(socket, :error, "The deployment could not be cancelled.")}
+    end
+  end
+
   @impl true
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, load(socket)}
 

@@ -3233,6 +3233,17 @@ defmodule PtcManager.Operations do
         do: Repo.get(PrPublication, action.target_id)
 
     cond do
+      # A repair that resumed a job's retained implementer runs in that agent;
+      # the job's own run keeps representing it. Leaving this duplicate open
+      # produces a record nothing reconciles, which then holds deployments.
+      duplicate_of_retained_job_run?(run) ->
+        if state == "done",
+          do:
+            {"done",
+             "Completed #{String.replace(action.action_key, "_", " ")}; the retained implementer keeps its session.",
+             now},
+          else: {"failed", "The action failed; the retained implementer keeps its session.", now}
+
       action.action_key in @repair_action_keys and is_binary(run.herdr_workspace) and
         match?(%PrPublication{pr_state: "open"}, publication) and state == "done" ->
         {"waiting", "Repair turn finished; retained while the PR remains open.", nil}
@@ -3248,6 +3259,17 @@ defmodule PtcManager.Operations do
         {"failed", "The action failed; details are retained in PtcManager.", now}
     end
   end
+
+  defp duplicate_of_retained_job_run?(%AgentRun{agent_name: name} = run) when is_binary(name) do
+    AgentRun
+    |> where(
+      [other],
+      other.id != ^run.id and other.agent_name == ^name and not is_nil(other.job_id)
+    )
+    |> Repo.exists?()
+  end
+
+  defp duplicate_of_retained_job_run?(_run), do: false
 
   defp active_merge_repository_ids do
     AgentAction

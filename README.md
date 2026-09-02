@@ -642,14 +642,22 @@ refreshes the comparison. The private repository is read using the existing
 `GITHUB_READ_TOKEN`; no separate GitHub account is introduced.
 
 **Deploy when safe** records an audited request and enters drain mode: existing
-managed work may finish, but no new work starts. When the managed-agent count
-reaches zero, PtcManager hands the exact default-branch SHA to a narrowly
-authorized systemd service. That service survives the application restart,
-rechecks that the SHA is still the branch head, builds and installs it, and
-reports completion back through a bounded status file. The new release remains
-drained until that completion is recorded. A failure is shown in deployment
-history and follows the same fail-closed maintenance behavior as `mix
-ptc.deploy`.
+managed work may finish, but no new work starts. The drain waits only for work
+PtcManager is driving: runs that are queued, starting, or working, and blocked
+or unknown runs whose agent action or job is still in flight. A retained agent
+sitting on a prompt for an open pull request, or a stale record of an action
+that already finished, does not hold a deployment, because restarting
+PtcManager never touches Herdr agents. While waiting, the deployment names the
+runs holding it, and **Cancel deployment** lifts the drain. Once a minute the
+coordinator rechecks the default-branch head; if it moved past the requested
+SHA, the deployment fails at once with a request to deploy the current head.
+When nothing holds the drain, PtcManager hands the exact default-branch SHA to
+a narrowly authorized systemd service. That service survives the application
+restart, rechecks that the SHA is still the branch head, builds and installs
+it, and reports completion back through a bounded status file. The new release
+remains drained until that completion is recorded. A failure is shown in
+deployment history and follows the same fail-closed maintenance behavior as
+`mix ptc.deploy`.
 
 Repository deployment is opt-in. Its strict repository-owned contract is:
 
