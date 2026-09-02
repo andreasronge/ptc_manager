@@ -26,7 +26,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            {:ok, context} <-
              PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
            :ok <- remember_context(context),
-           {:ok, agent_key} <- start_agent(name, pane, profile),
+           {:ok, agent_key} <- start_agent(name, pane, profile, path),
            dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
@@ -134,7 +134,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
   end
 
-  defp start_agent(name, pane, profile) do
+  defp start_agent(name, pane, profile, workspace_path) do
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 60_000)
 
     args =
@@ -149,12 +149,30 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         "--timeout",
         Integer.to_string(timeout),
         "--"
-      ] ++ profile.args
+      ] ++ expand_agent_args(profile.args, workspace_path)
 
     case command().run(args, timeout + @command_grace_ms) do
       {:ok, output} -> {:ok, decode_agent_key(output, pane)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc false
+  def expand_agent_args(args, workspace_path) when is_list(args) and is_binary(workspace_path) do
+    expanded_path = Path.expand(workspace_path)
+    toml_path = ~s("#{escape_toml_basic_string(expanded_path)}")
+
+    Enum.map(args, fn argument ->
+      argument
+      |> String.replace("{{workspace_path_toml}}", toml_path)
+      |> String.replace("{{workspace_path}}", expanded_path)
+    end)
+  end
+
+  defp escape_toml_basic_string(value) do
+    value
+    |> String.replace("\\", "\\\\")
+    |> String.replace("\"", "\\\"")
   end
 
   defp prompt_and_wait(name, action, output_path, schema_path) do

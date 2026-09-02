@@ -141,7 +141,15 @@ implementation_agent_args =
 agent_profiles =
   case System.get_env("PTC_AGENT_PROFILES_JSON") do
     value when value in [nil, ""] ->
-      %{implementation_agent_kind => %{"enabled" => true, "args" => implementation_agent_args}}
+      args =
+        if implementation_agent_kind == "codex" do
+          implementation_agent_args ++
+            ["-c", ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})]
+        else
+          implementation_agent_args
+        end
+
+      %{implementation_agent_kind => %{"enabled" => true, "args" => args}}
 
     value ->
       case Jason.decode(value) do

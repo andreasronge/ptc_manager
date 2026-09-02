@@ -12,6 +12,9 @@ defmodule PtcManager.AutomationsTest do
     def run(args, _timeout \\ nil) do
       cond do
         Enum.take(args, 2) == ["worktree", "open"] ->
+          workspace_path = Enum.at(args, Enum.find_index(args, &(&1 == "--cwd")) + 1)
+          Process.put({__MODULE__, :workspace_path}, workspace_path)
+
           {:ok,
            Jason.encode!(%{
              "result" => %{
@@ -21,6 +24,11 @@ defmodule PtcManager.AutomationsTest do
            })}
 
         Enum.take(args, 2) == ["agent", "start"] ->
+          workspace_path = Process.get({__MODULE__, :workspace_path})
+          false = Enum.any?(args, &String.contains?(&1, "{{workspace_path"))
+          true = workspace_path in args
+          true = ~s("#{workspace_path}") in args
+
           {:ok,
            Jason.encode!(%{
              "result" => %{"agent" => %{"agent_session" => %{"value" => "generic-session"}}}
@@ -293,7 +301,10 @@ defmodule PtcManager.AutomationsTest do
     Application.put_env(:ptc_manager, :generic_herdr_command, GenericHerdrCommand)
 
     Application.put_env(:ptc_manager, :agent_profiles, %{
-      "test-maintainer" => %{"enabled" => true, "args" => ["--fixture"]}
+      "test-maintainer" => %{
+        "enabled" => true,
+        "args" => ["--fixture", "{{workspace_path}}", "{{workspace_path_toml}}"]
+      }
     })
 
     on_exit(fn ->
@@ -362,5 +373,16 @@ defmodule PtcManager.AutomationsTest do
     [run] = PtcManager.Operations.list_active_agent_runs()
     assert run.agent_name == invocation.selected_agent_name
     assert run.herdr_workspace == "generic-workspace"
+  end
+
+  test "agent profile workspace placeholders preserve one argument and quote TOML paths" do
+    assert ["--cwd=/tmp/a b", ~s(projects={"/tmp/a b"={trust_level="trusted"}})] ==
+             PtcManager.MaintainerActions.GenericHerdrAdapter.expand_agent_args(
+               [
+                 "--cwd={{workspace_path}}",
+                 ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})
+               ],
+               "/tmp/a b"
+             )
   end
 end

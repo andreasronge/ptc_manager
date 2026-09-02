@@ -121,7 +121,14 @@ config :ptc_manager,
   implementation_agent_kind: "codex",
   implementation_agent_args: ["--dangerously-bypass-approvals-and-sandbox"],
   agent_profiles: %{
-    "codex" => %{"enabled" => true, "args" => ["--dangerously-bypass-approvals-and-sandbox"]}
+    "codex" => %{
+      "enabled" => true,
+      "args" => [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})
+      ]
+    }
   },
   implementation_agent_start_timeout_ms: 60_000,
   implementation_agent_publishes_pr: false,
