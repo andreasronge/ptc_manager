@@ -74,7 +74,7 @@ defmodule PtcManagerWeb.Layouts do
             </.nav_link>
             <.nav_link
               href={~p"/operations"}
-              active={@current_path == "/operations"}
+              active={String.starts_with?(@current_path, "/operations")}
               icon="hero-chart-bar-square-mini"
             >
               Operations

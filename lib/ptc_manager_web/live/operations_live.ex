@@ -1,18 +1,38 @@
 defmodule PtcManagerWeb.OperationsLive do
   use PtcManagerWeb, :live_view
 
+  import PtcManagerWeb.UsageChart
+
   alias PtcManager.CapacitySettings
   alias PtcManager.ResourceOperations
   alias PtcManager.HostMetrics
   alias PtcManager.Herdr.Transcript
+  alias PtcManager.MachineUsage
   alias PtcManager.Operations
   alias PtcManager.ReviewPolicy
   alias PtcManagerWeb.TimeFormat
+
+  embed_templates "operations_live/*"
+
+  @tabs [
+    %{action: :index, label: "Now", path: "/operations"},
+    %{action: :agents, label: "Agents", path: "/operations/agents"},
+    %{action: :performance, label: "Performance", path: "/operations/performance"}
+  ]
+
+  @timeline_filters [
+    {"all", "All", nil},
+    {"active", "Active", ~w(queued starting working idle blocked unknown)},
+    {"done", "Done", ~w(done)},
+    {"failed", "Failed", ~w(failed lost)},
+    {"waiting", "Retained", ~w(waiting)}
+  ]
 
   @impl true
   def mount(_params, session, socket) do
     if connected?(socket) do
       Operations.subscribe()
+      MachineUsage.subscribe()
       Process.send_after(self(), :metrics_tick, 1_500)
     end
 
@@ -26,21 +46,36 @@ defmodule PtcManagerWeb.OperationsLive do
      |> assign(:agent_output, nil)
      |> assign(:agent_output_error, nil)
      |> assign(:agent_output_timer, nil)
-     |> load_operations()}
+     |> assign(:range, MachineUsage.range(nil))
+     |> assign(:usage, nil)
+     |> assign(:timeline_filter, "all")
+     |> assign(:include_maintenance?, false)
+     |> assign(
+       workers: [],
+       active_runs: [],
+       waiting_runs: [],
+       queued_jobs: [],
+       queued_actions: [],
+       resource_operations: [],
+       recent_resource_operations: [],
+       resource_statistics: nil,
+       workspace_setups: [],
+       timeline: [],
+       timeline_groups: []
+     )}
   end
 
   @impl true
-  def handle_params(%{"agent" => id}, _uri, socket) do
-    {:noreply, open_agent(socket, id)}
-  end
-
-  def handle_params(_params, _uri, socket) do
+  def handle_params(params, _uri, socket) do
     {:noreply,
      socket
-     |> cancel_agent_output_timer()
-     |> assign(:selected_run, nil)
-     |> assign(:agent_output, nil)
-     |> assign(:agent_output_error, nil)}
+     |> assign(:now, DateTime.utc_now())
+     |> assign(:range, MachineUsage.range(params["range"]))
+     |> assign(:timeline_filter, timeline_filter(params["state"]))
+     |> assign(:include_maintenance?, params["maintenance"] == "1")
+     |> load_operations()
+     |> load_usage()
+     |> select_agent(params["agent"])}
   end
 
   @impl true
@@ -57,6 +92,9 @@ defmodule PtcManagerWeb.OperationsLive do
   def handle_info({:operations_changed, _source}, socket),
     do: {:noreply, load_operations(socket)}
 
+  def handle_info({:machine_usage_sampled, _sample}, socket),
+    do: {:noreply, socket |> assign(:now, DateTime.utc_now()) |> load_usage()}
+
   def handle_info(:agent_output_tick, %{assigns: %{selected_run: nil}} = socket),
     do: {:noreply, assign(socket, :agent_output_timer, nil)}
 
@@ -70,7 +108,7 @@ defmodule PtcManagerWeb.OperationsLive do
 
   @impl true
   def handle_event("close_agent", _params, socket),
-    do: {:noreply, push_patch(socket, to: ~p"/operations")}
+    do: {:noreply, push_patch(socket, to: close_path(socket.assigns))}
 
   def handle_event("cancel_queued_job", %{"id" => id}, socket) do
     cancel_queued_work(socket, id, &Operations.cancel_queued_job/2, "Implementation job")
@@ -80,40 +118,77 @@ defmodule PtcManagerWeb.OperationsLive do
     cancel_queued_work(socket, id, &Operations.cancel_queued_agent_action/2, "Agent action")
   end
 
-  defp open_agent(socket, id) do
-    with {run_id, ""} <- Integer.parse(id),
-         %{} = run <- Enum.find(socket.assigns.timeline, &(&1.id == run_id)) do
-      socket
-      |> cancel_agent_output_timer()
-      |> assign(:selected_run, run)
-      |> load_agent_output()
-      |> schedule_agent_output()
-    else
-      _failure ->
-        socket
-        |> cancel_agent_output_timer()
-        |> assign(:selected_run, nil)
-        |> assign(:agent_output, nil)
-        |> assign(:agent_output_error, nil)
-        |> put_flash(:error, "That agent run is no longer available.")
-    end
+  # Navigation ---------------------------------------------------------------
+
+  def tabs, do: @tabs
+
+  def tab_title(:index), do: "Capacity right now"
+  def tab_title(:agents), do: "Agent history"
+  def tab_title(:performance), do: "Performance"
+
+  def tab_description(:index),
+    do: "Can this machine take more work, and what is running on it at this moment?"
+
+  def tab_description(:agents),
+    do: "What the agents have been doing, newest first, with a read-only terminal for each run."
+
+  def tab_description(:performance),
+    do:
+      "How long expensive commands and workspace preparation take, so slow builds are visible early."
+
+  @doc "Builds a path for an Operations tab, dropping blank query parameters."
+  def tab_path(action, params \\ []) do
+    base = Enum.find(@tabs, &(&1.action == action)).path
+
+    query =
+      params
+      |> Enum.reject(fn {_key, value} -> value in [nil, "", false] end)
+      |> URI.encode_query()
+
+    if query == "", do: base, else: base <> "?" <> query
   end
 
-  defp cancel_queued_work(socket, id, cancel, label) do
-    with {work_id, ""} <- Integer.parse(id),
-         {:ok, _work} <- cancel.(work_id, socket.assigns.actor) do
-      {:noreply,
-       socket
-       |> put_flash(:info, "#{label} cancelled.")
-       |> load_operations()}
-    else
-      _failure ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "That work has already started or left the queue.")
-         |> load_operations()}
-    end
+  def range_path(key), do: tab_path(:index, range: range_param(key))
+
+  def filter_path(filter, include_maintenance?) do
+    tab_path(:agents,
+      state: if(filter != "all", do: filter),
+      maintenance: if(include_maintenance?, do: "1")
+    )
   end
+
+  def agent_path(assigns, run),
+    do: tab_path(assigns.live_action, current_params(assigns) ++ [agent: run.id])
+
+  def close_path(assigns), do: tab_path(assigns.live_action, current_params(assigns))
+
+  defp current_params(%{live_action: :index, range: range}),
+    do: [range: range_param(range.key)]
+
+  defp current_params(%{live_action: :agents} = assigns) do
+    [
+      state: if(assigns.timeline_filter != "all", do: assigns.timeline_filter),
+      maintenance: if(assigns.include_maintenance?, do: "1")
+    ]
+  end
+
+  defp current_params(_assigns), do: []
+
+  defp range_param(key), do: if(key == MachineUsage.default_range_key(), do: nil, else: key)
+
+  def timeline_filters,
+    do: Enum.map(@timeline_filters, fn {key, label, _states} -> {key, label} end)
+
+  defp timeline_filter(key) do
+    if List.keymember?(@timeline_filters, key, 0), do: key, else: "all"
+  end
+
+  defp timeline_states(filter) do
+    {_key, _label, states} = List.keyfind(@timeline_filters, filter, 0)
+    states
+  end
+
+  # Presentation helpers -----------------------------------------------------
 
   def percent(nil), do: "—"
   def percent(value), do: :erlang.float_to_binary(value / 1, decimals: 1) <> "%"
@@ -142,6 +217,77 @@ defmodule PtcManagerWeb.OperationsLive do
         </div>
       </div>
     </article>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :active, :integer, required: true
+  attr :capacity, :integer, required: true
+  attr :color, :string, required: true
+  attr :herdr_online?, :boolean, required: true
+
+  def slot_meter(assigns) do
+    ~H"""
+    <div id={@id}>
+      <p class="text-xs text-slate-400">{@label}</p>
+      <p class="mt-1 text-2xl font-semibold">
+        {@active}<span class="text-sm text-slate-500">/{@capacity}</span>
+      </p>
+      <div class="mt-2 flex gap-1">
+        <span
+          :for={slot <- slot_markers(@capacity)}
+          class={[
+            "h-1.5 flex-1 rounded-full",
+            slot <= @active && @color,
+            slot > @active && "bg-white/10"
+          ]}
+        >
+        </span>
+      </div>
+      <p class="mt-2 text-[11px] leading-4 text-slate-500">
+        {agent_slot_detail(@active, @capacity, @herdr_online?)}
+      </p>
+    </div>
+    """
+  end
+
+  attr :run, :map, required: true
+  attr :now, :any, required: true
+  attr :path, :string, required: true
+
+  def run_card(assigns) do
+    ~H"""
+    <.link
+      patch={@path}
+      aria-label={"View read-only terminal for #{run_name(@run)}"}
+      class="group block w-full rounded-2xl border border-white/10 bg-slate-900/70 p-4 text-left transition hover:border-teal-400/30 hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-400/50 sm:p-5"
+    >
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0">
+          <p class="text-sm font-semibold text-slate-100 group-hover:text-teal-200">
+            {run_name(@run)} <span class="ml-1 text-xs text-slate-600">View output →</span>
+          </p>
+          <p class="mt-1 text-sm leading-6 text-slate-300">{run_task(@run)}</p>
+        </div>
+        <.work_status state={@run.state} label={@run.state} />
+      </div>
+      <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>{@run.worker.name}</span>
+        <span>Started {timestamp(@run.started_at)}</span>
+        <span>{duration(@now, @run.started_at, @run.ended_at)}</span>
+        <span :if={@run.ended_at}>Ended {timestamp(@run.ended_at)}</span>
+        <span
+          :if={!@run.ended_at && @run.state != "waiting"}
+          class="inline-flex items-center gap-1.5 text-teal-300"
+        >
+          <.icon name="hero-arrow-path-mini" class="size-3.5 motion-safe:animate-spin" /> Running now
+        </span>
+        <span :if={@run.state == "waiting"} class="inline-flex items-center gap-1.5 text-violet-300">
+          <.icon name="hero-pause-mini" class="size-3.5" /> Retained with open PR
+        </span>
+      </div>
+    </.link>
     """
   end
 
@@ -228,6 +374,25 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def timestamp(datetime), do: Calendar.strftime(datetime, "%d %b · %H:%M")
 
+  @doc "Groups timeline runs by the UTC day they started, newest first."
+  def timeline_groups(runs, now) do
+    today = DateTime.to_date(now)
+
+    runs
+    |> Enum.chunk_by(&DateTime.to_date(&1.started_at))
+    |> Enum.map(fn [first | _rest] = group ->
+      {day_label(DateTime.to_date(first.started_at), today), group}
+    end)
+  end
+
+  def day_label(date, today) do
+    case Date.diff(today, date) do
+      0 -> "Today"
+      1 -> "Yesterday"
+      _days -> Calendar.strftime(date, "%a %d %b")
+    end
+  end
+
   def state_classes(state) when state in ["working", "done"],
     do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
 
@@ -241,6 +406,12 @@ defmodule PtcManagerWeb.OperationsLive do
     do: "bg-rose-400/15 text-rose-300 ring-rose-400/20"
 
   def state_classes(_state), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+
+  def marker_classes(state) when state in ["working", "done"], do: "bg-teal-400"
+  def marker_classes(state) when state in ["failed", "lost"], do: "bg-rose-400"
+  def marker_classes(state) when state in ["blocked", "unknown"], do: "bg-amber-400"
+  def marker_classes("waiting"), do: "bg-violet-400"
+  def marker_classes(_state), do: "bg-sky-400"
 
   def slot_markers(total) when is_integer(total) and total > 0, do: 1..total
   def slot_markers(_total), do: []
@@ -363,97 +534,121 @@ defmodule PtcManagerWeb.OperationsLive do
 
   def workspace_setup_phases(_allocation), do: []
 
+  # Loading ------------------------------------------------------------------
+
   defp load_operations(socket) do
+    now = socket.assigns.now
     workers = Operations.list_workers_with_worktrees()
     active_runs = Operations.list_active_agent_runs()
     waiting_runs = Operations.list_waiting_agent_runs()
-    queued_jobs = Operations.list_queued_jobs()
-    queued_actions = Operations.list_queued_agent_actions()
-    workspace_setups = Operations.list_recent_workspace_setups()
-    timeline = Operations.list_agent_timeline(40)
-    resource_operations = ResourceOperations.list_current()
-    recent_resource_operations = ResourceOperations.list_recent(12)
-    resource_statistics = ResourceOperations.statistics()
-
-    selected_run =
-      case socket.assigns.selected_run do
-        nil -> nil
-        selected -> Enum.find(timeline, &(&1.id == selected.id)) || selected
-      end
-
+    usage = Operations.agent_slot_usage(workers, active_runs, now)
     capacity_setting = CapacitySettings.current()
+    available_light_slots = max(capacity_setting.light_agent_capacity - usage.light, 0)
+    available_heavy_slots = max(capacity_setting.heavy_agent_capacity - usage.heavy, 0)
 
-    online_herdr_worker_ids =
-      workers
-      |> Enum.filter(&online_herdr_worker?(&1, socket.assigns.now))
-      |> Enum.map(& &1.id)
-      |> MapSet.new()
-
-    {active_light_slots, active_heavy_slots} =
-      active_agent_slots(active_runs, online_herdr_worker_ids)
-
-    herdr_online? = MapSet.size(online_herdr_worker_ids) > 0
-
-    available_light_slots =
-      max(capacity_setting.light_agent_capacity - active_light_slots, 0)
-
-    available_heavy_slots =
-      max(capacity_setting.heavy_agent_capacity - active_heavy_slots, 0)
-
-    active_operation_slots =
-      Enum.count(
-        resource_operations,
-        &(&1.state in ~w(starting running cancelling recovery_pending))
-      )
-
-    assign(socket,
+    socket
+    |> assign(
       workers: workers,
       active_runs: active_runs,
       waiting_runs: waiting_runs,
-      queued_jobs: queued_jobs,
-      queued_actions: queued_actions,
-      workspace_setups: workspace_setups,
-      active_light_slots: active_light_slots,
-      active_heavy_slots: active_heavy_slots,
-      active_operation_slots: active_operation_slots,
+      active_light_slots: usage.light,
+      active_heavy_slots: usage.heavy,
       light_agent_capacity: capacity_setting.light_agent_capacity,
       heavy_agent_capacity: capacity_setting.heavy_agent_capacity,
       operation_capacity: capacity_setting.operation_capacity,
       available_light_slots: available_light_slots,
       available_heavy_slots: available_heavy_slots,
-      resource_operations: resource_operations,
-      recent_resource_operations: recent_resource_operations,
-      resource_statistics: resource_statistics,
-      herdr_online?: herdr_online?,
-      timeline: timeline,
-      selected_run: selected_run,
-      available_slots: available_light_slots + available_heavy_slots
+      available_slots: available_light_slots + available_heavy_slots,
+      herdr_online?: usage.herdr_online?
+    )
+    |> load_tab(socket.assigns.live_action)
+    |> refresh_selected_run()
+  end
+
+  defp load_tab(socket, :index) do
+    assign(socket,
+      queued_jobs: Operations.list_queued_jobs(),
+      queued_actions: Operations.list_queued_agent_actions(),
+      resource_operations: ResourceOperations.list_current(),
+      active_operation_slots: ResourceOperations.count_active()
     )
   end
 
-  defp active_agent_slots(runs, online_worker_ids) do
-    runs
-    |> Enum.filter(fn run ->
-      run.state in ~w(queued starting working idle unknown) and
-        MapSet.member?(online_worker_ids, run.worker_id)
-    end)
-    |> Enum.reduce({0, 0}, fn run, {light, heavy} ->
-      if light_agent_run?(run), do: {light + 1, heavy}, else: {light, heavy + 1}
-    end)
+  defp load_tab(socket, :agents) do
+    timeline =
+      Operations.list_agent_timeline(40,
+        states: timeline_states(socket.assigns.timeline_filter),
+        include_maintenance: socket.assigns.include_maintenance?
+      )
+
+    assign(socket,
+      timeline: timeline,
+      timeline_groups: timeline_groups(timeline, socket.assigns.now)
+    )
   end
 
-  defp online_herdr_worker?(worker, now) do
-    stale_after_ms = Application.get_env(:ptc_manager, :herdr_stale_after_ms, 60_000)
-
-    worker.status == "online" && worker.capabilities["herdr"] == true &&
-      match?(%DateTime{}, worker.last_heartbeat_at) &&
-      DateTime.diff(now, worker.last_heartbeat_at, :millisecond) < stale_after_ms
+  defp load_tab(socket, :performance) do
+    assign(socket,
+      workspace_setups: Operations.list_recent_workspace_setups(),
+      recent_resource_operations: ResourceOperations.list_recent(12),
+      resource_statistics: ResourceOperations.statistics()
+    )
   end
 
-  defp light_agent_run?(%{agent_action: %{} = action}),
-    do: Operations.planning_agent_action?(action)
+  defp load_usage(%{assigns: %{live_action: :index}} = socket) do
+    assign(socket, :usage, MachineUsage.series(socket.assigns.range.key, now: socket.assigns.now))
+  end
 
-  defp light_agent_run?(_run), do: false
+  defp load_usage(socket), do: assign(socket, :usage, nil)
+
+  defp loaded_runs(assigns), do: assigns.timeline ++ assigns.active_runs ++ assigns.waiting_runs
+
+  defp refresh_selected_run(%{assigns: %{selected_run: nil}} = socket), do: socket
+
+  defp refresh_selected_run(%{assigns: %{selected_run: selected}} = socket) do
+    refreshed = Enum.find(loaded_runs(socket.assigns), &(&1.id == selected.id)) || selected
+    assign(socket, :selected_run, refreshed)
+  end
+
+  defp select_agent(socket, nil) do
+    socket
+    |> cancel_agent_output_timer()
+    |> assign(:selected_run, nil)
+    |> assign(:agent_output, nil)
+    |> assign(:agent_output_error, nil)
+  end
+
+  defp select_agent(socket, id) do
+    with {run_id, ""} <- Integer.parse(id),
+         %{} = run <- Enum.find(loaded_runs(socket.assigns), &(&1.id == run_id)) do
+      socket
+      |> cancel_agent_output_timer()
+      |> assign(:selected_run, run)
+      |> load_agent_output()
+      |> schedule_agent_output()
+    else
+      _failure ->
+        socket
+        |> select_agent(nil)
+        |> put_flash(:error, "That agent run is no longer available.")
+    end
+  end
+
+  defp cancel_queued_work(socket, id, cancel, label) do
+    with {work_id, ""} <- Integer.parse(id),
+         {:ok, _work} <- cancel.(work_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "#{label} cancelled.")
+       |> load_operations()}
+    else
+      _failure ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "That work has already started or left the queue.")
+         |> load_operations()}
+    end
+  end
 
   defp load_agent_output(%{assigns: %{selected_run: run}} = socket) do
     reader = Application.get_env(:ptc_manager, :herdr_transcript_reader, Transcript)

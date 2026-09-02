@@ -239,6 +239,43 @@ if Repo.aggregate(Repository, :count) == 0 do
       )
   end
 
+  if demo_mode do
+    # Deterministic machine usage history so the Operations chart has a shape:
+    # every 30 seconds for the last hour, every 5 minutes for the last day, and
+    # hourly for the rest of the week.
+    now_unix = DateTime.to_unix(now)
+    week_start = now_unix - 7 * 86_400
+
+    sample_times =
+      Enum.uniq(
+        Enum.map(0..119, &(now_unix - &1 * 30)) ++
+          Enum.map(0..287, &(now_unix - &1 * 300)) ++
+          Enum.map(0..167, &(now_unix - &1 * 3_600))
+      )
+
+    demo_samples =
+      Enum.map(sample_times, fn unix ->
+        heavy = if rem(unix, 7_200) < 4_500, do: 1, else: 0
+        light = if rem(div(unix, 600), 3) == 0, do: 1, else: 0
+        operations = if heavy == 1 and rem(div(unix, 300), 4) == 0, do: 1, else: 0
+        jitter = :erlang.phash2(unix, 9) - 4
+        cpu = 6 + heavy * 38 + light * 11 + operations * 28 + jitter
+
+        %{
+          sampled_at: DateTime.from_unix!(unix),
+          cpu_percent: cpu / 1,
+          memory_percent: (14 + heavy * 22 + operations * 16 + jitter / 2) / 1,
+          disk_percent: 18.0 + (unix - week_start) / (7 * 86_400) * 1.5,
+          load_one: cpu / 100 * 4,
+          active_light_agents: light,
+          active_heavy_agents: heavy,
+          active_operations: operations
+        }
+      end)
+
+    Repo.insert_all(PtcManager.MachineUsage.Sample, demo_samples)
+  end
+
   IO.puts(
     "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation."
   )

@@ -37,6 +37,8 @@ defmodule PtcManagerWeb.Router do
       live "/updates", DailyDigestLive, :index
       live "/updates/:id", DailyDigestLive, :show
       live "/operations", OperationsLive, :index
+      live "/operations/agents", OperationsLive, :agents
+      live "/operations/performance", OperationsLive, :performance
       live "/automations", AutomationsLive, :index
       live "/deployments", DeploymentsLive, :index
       live "/configuration", ConfigurationLive, :index

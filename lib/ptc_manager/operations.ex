@@ -1921,6 +1921,46 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  @doc """
+  Counts the light and heavy agent sessions occupying slots on online Herdr
+  workers. Retained (waiting) sessions and runs on offline workers do not count.
+  """
+  def agent_slot_usage(now \\ DateTime.utc_now()) do
+    agent_slot_usage(list_workers(), list_active_agent_runs(), now)
+  end
+
+  def agent_slot_usage(workers, active_runs, %DateTime{} = now) do
+    online_worker_ids =
+      workers
+      |> Enum.filter(&herdr_worker_online?(&1, now))
+      |> MapSet.new(& &1.id)
+
+    {light, heavy} =
+      Enum.reduce(active_runs, {0, 0}, fn run, {light, heavy} ->
+        cond do
+          run.state not in @capacity_run_states -> {light, heavy}
+          not MapSet.member?(online_worker_ids, run.worker_id) -> {light, heavy}
+          light_agent_run?(run) -> {light + 1, heavy}
+          true -> {light, heavy + 1}
+        end
+      end)
+
+    %{light: light, heavy: heavy, herdr_online?: MapSet.size(online_worker_ids) > 0}
+  end
+
+  def herdr_worker_online?(%Worker{} = worker, %DateTime{} = now) do
+    stale_after_ms = Application.get_env(:ptc_manager, :herdr_stale_after_ms, 60_000)
+
+    worker.status == "online" and worker.capabilities["herdr"] == true and
+      match?(%DateTime{}, worker.last_heartbeat_at) and
+      DateTime.diff(now, worker.last_heartbeat_at, :millisecond) < stale_after_ms
+  end
+
+  defp light_agent_run?(%AgentRun{agent_action: %AgentAction{} = action}),
+    do: planning_agent_action?(action)
+
+  defp light_agent_run?(_run), do: false
+
   def list_waiting_agent_runs do
     AgentRun
     |> without_orphaned_action_duplicates()
@@ -1984,10 +2024,17 @@ defmodule PtcManager.Operations do
     |> order_by([run], desc: run.ended_at, desc: run.id)
   end
 
-  def list_agent_timeline(limit \\ 40) when is_integer(limit) and limit > 0 do
+  @doc """
+  Lists the newest agent runs. Options narrow the list: `states` keeps only the
+  given run states, and `include_maintenance: false` hides runs that belong to
+  neither a job nor an agent action, such as deployment canaries.
+  """
+  def list_agent_timeline(limit \\ 40, opts \\ []) when is_integer(limit) and limit > 0 do
     AgentRun
     |> without_orphaned_action_duplicates()
     |> where([run], is_nil(run.status_text) or run.status_text != ^@superseded_herdr_status)
+    |> filter_timeline_states(Keyword.get(opts, :states))
+    |> filter_timeline_maintenance(Keyword.get(opts, :include_maintenance, true))
     |> order_by([run], desc: run.started_at, desc: run.id)
     |> limit(^limit)
     |> preload([
@@ -2012,6 +2059,14 @@ defmodule PtcManager.Operations do
         run.agent_name not in subquery(action_agent_names)
     )
   end
+
+  defp filter_timeline_states(query, nil), do: query
+  defp filter_timeline_states(query, states), do: where(query, [run], run.state in ^states)
+
+  defp filter_timeline_maintenance(query, true), do: query
+
+  defp filter_timeline_maintenance(query, false),
+    do: where(query, [run], not is_nil(run.job_id) or not is_nil(run.agent_action_id))
 
   def list_workers_with_worktrees do
     Worker

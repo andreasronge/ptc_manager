@@ -1,13 +1,13 @@
 <Layouts.app flash={@flash} current_path="/operations">
-  <section class="mb-8">
+  <section class="mb-6">
     <p class="text-xs font-semibold uppercase tracking-[0.24em] text-teal-300">Machine room</p>
     <div class="mt-3 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div>
         <h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">
-          Capacity and agent history
+          {tab_title(@live_action)}
         </h1>
         <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
-          A simple answer to two questions: can this machine take more work, and what have the agents been doing?
+          {tab_description(@live_action)}
         </p>
       </div>
       <div
@@ -17,594 +17,35 @@
         {capacity_label(assigns)}
       </div>
     </div>
-  </section>
-
-  <section aria-label="Machine capacity" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-    <.metric_card
-      id="metric-cpu"
-      label="CPU now"
-      value={percent(@metrics.cpu_percent)}
-      detail={"#{@metrics.cores} cores · load #{load_text(@metrics.load_average)}"}
-      percent={@metrics.cpu_percent}
-      color="bg-teal-400"
-    />
-    <.metric_card
-      id="metric-memory"
-      label="Memory used"
-      value={percent(@metrics.memory_percent)}
-      detail={"#{bytes(@metrics.memory_used_bytes)} of #{bytes(@metrics.memory_total_bytes)}"}
-      percent={@metrics.memory_percent}
-      color="bg-sky-400"
-    />
-    <.metric_card
-      id="metric-application-memory"
-      label="PtcManager memory"
-      value={bytes(@metrics.application_memory_bytes)}
-      detail={"#{percent(@metrics.application_memory_percent)} of machine memory"}
-      percent={@metrics.application_memory_percent}
-      color="bg-cyan-400"
-    />
-    <.metric_card
-      id="metric-disk"
-      label="Build disk used"
-      value={percent(@metrics.disk_percent)}
-      detail={"#{bytes(@metrics.disk_used_bytes)} of #{bytes(@metrics.disk_total_bytes)}"}
-      percent={@metrics.disk_percent}
-      color="bg-violet-400"
-    />
-    <article id="metric-agents" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <div class="flex items-center justify-between gap-3">
-        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Worker slots</p>
-        <span class={[
-          "rounded-full px-2 py-0.5 text-[11px] ring-1",
-          @herdr_online? && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
-          !@herdr_online? && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
-        ]}>
-          {if @herdr_online?, do: "Herdr online", else: "Herdr offline"}
-        </span>
-      </div>
-      <div class="mt-3 grid grid-cols-3 gap-3">
-        <div id="light-agent-slots">
-          <p class="text-xs text-slate-400">Light</p>
-          <p class="mt-1 text-2xl font-semibold">
-            {@active_light_slots}<span class="text-sm text-slate-500">/{@light_agent_capacity}</span>
-          </p>
-          <div class="mt-2 flex gap-1">
-            <span
-              :for={slot <- slot_markers(@light_agent_capacity)}
-              class={[
-                "h-1.5 flex-1 rounded-full",
-                slot <= @active_light_slots && "bg-sky-400",
-                slot > @active_light_slots && "bg-white/10"
-              ]}
-            >
-            </span>
-          </div>
-          <p class="mt-2 text-[11px] leading-4 text-slate-500">
-            {agent_slot_detail(@active_light_slots, @light_agent_capacity, @herdr_online?)}
-          </p>
-        </div>
-        <div id="heavy-agent-slots">
-          <p class="text-xs text-slate-400">Heavy</p>
-          <p class="mt-1 text-2xl font-semibold">
-            {@active_heavy_slots}<span class="text-sm text-slate-500">/{@heavy_agent_capacity}</span>
-          </p>
-          <div class="mt-2 flex gap-1">
-            <span
-              :for={slot <- slot_markers(@heavy_agent_capacity)}
-              class={[
-                "h-1.5 flex-1 rounded-full",
-                slot <= @active_heavy_slots && "bg-teal-400",
-                slot > @active_heavy_slots && "bg-white/10"
-              ]}
-            >
-            </span>
-          </div>
-          <p class="mt-2 text-[11px] leading-4 text-slate-500">
-            {agent_slot_detail(@active_heavy_slots, @heavy_agent_capacity, @herdr_online?)}
-          </p>
-        </div>
-        <div id="operation-slots">
-          <p class="text-xs text-slate-400">Operations</p>
-          <p class="mt-1 text-2xl font-semibold">
-            {@active_operation_slots}<span class="text-sm text-slate-500">/{@operation_capacity}</span>
-          </p>
-          <div class="mt-2 flex gap-1">
-            <span
-              :for={slot <- slot_markers(@operation_capacity)}
-              class={[
-                "h-1.5 flex-1 rounded-full",
-                slot <= @active_operation_slots && "bg-violet-400",
-                slot > @active_operation_slots && "bg-white/10"
-              ]}
-            >
-            </span>
-          </div>
-          <p class="mt-2 text-[11px] leading-4 text-slate-500">
-            {agent_slot_detail(@active_operation_slots, @operation_capacity, @herdr_online?)}
-          </p>
-        </div>
-      </div>
-      <p class="mt-3 border-t border-white/10 pt-3 text-[11px] text-slate-500">
-        Agent sessions and expensive command process trees have separate limits · {length(
-          @waiting_runs
-        )} retained
-      </p>
-    </article>
-  </section>
-
-  <section
-    id="resource-operations"
-    class="mt-8 rounded-2xl border border-white/10 bg-slate-900/60 p-5"
-  >
-    <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-      <div>
-        <h2 class="text-lg font-semibold">Expensive operations</h2>
-        <p class="mt-1 text-xs text-slate-500">
-          Managed build, test, lint, and verification commands. Direct commands on a Mac or in CI are unaffected.
-        </p>
-      </div>
-      <span class="text-xs text-slate-500">
-        {@resource_statistics.count} completed in 7 days · {percent(
-          @resource_statistics.utilization * 100
-        )} utilized
-      </span>
-    </div>
-
-    <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <article id="operation-stat-count" class="rounded-xl bg-black/20 p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Runs</p>
-        <p class="mt-1 text-xl font-semibold">{@resource_statistics.count}</p>
-        <p class="mt-1 text-xs text-slate-500">
-          {operation_rate(@resource_statistics.success_rate)} successful
-        </p>
-      </article>
-      <article id="operation-stat-average" class="rounded-xl bg-black/20 p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Average</p>
-        <p class="mt-1 text-xl font-semibold">
-          {operation_duration(@resource_statistics.average_duration_ms)}
-        </p>
-        <p class="mt-1 text-xs text-slate-500">
-          Total {operation_duration(@resource_statistics.total_duration_ms)}
-        </p>
-      </article>
-      <article id="operation-stat-p80" class="rounded-xl bg-black/20 p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Typical spread</p>
-        <p class="mt-1 text-xl font-semibold">
-          {operation_duration(@resource_statistics.p20_duration_ms)}–{operation_duration(
-            @resource_statistics.p80_duration_ms
-          )}
-        </p>
-        <p class="mt-1 text-xs text-slate-500">
-          p20–p80 · queue p80 {operation_duration(@resource_statistics.p80_wait_ms)}
-        </p>
-      </article>
-      <article id="operation-stat-memory" class="rounded-xl bg-black/20 p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Peak memory</p>
-        <p class="mt-1 text-xl font-semibold">
-          {operation_bytes(@resource_statistics.max_peak_memory_bytes)}
-        </p>
-        <p class="mt-1 text-xs text-slate-500">
-          p80 {operation_bytes(@resource_statistics.p80_peak_memory_bytes)}
-        </p>
-      </article>
-    </div>
-
-    <div :if={@resource_operations != []} class="mt-4 grid gap-3 lg:grid-cols-2">
-      <article
-        :for={operation <- @resource_operations}
-        id={"resource-operation-#{operation.id}"}
-        class="rounded-xl border border-white/10 bg-black/20 p-4"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="text-sm font-semibold text-slate-100">{operation.label}</p>
-            <p class="mt-1 text-xs text-slate-400">
-              {operation.repository.github_owner}/{operation.repository.github_name} · {operation_agent(
-                operation
-              )}
-            </p>
-          </div>
-          <span class="rounded-full bg-violet-400/15 px-2.5 py-1 text-[10px] font-semibold text-violet-200 ring-1 ring-violet-400/20">
-            {operation_state(operation)}
-          </span>
-        </div>
-        <p class="mt-3 text-xs text-slate-500">
-          {operation_slot(operation)} · queued {duration(@now, operation.queued_at, nil)}
-        </p>
-      </article>
-    </div>
-    <p
-      :if={@resource_operations == []}
-      class="mt-4 rounded-xl bg-black/20 px-4 py-5 text-sm text-slate-500"
+    <nav
+      id="operations-tabs"
+      aria-label="Operations sections"
+      class="mt-6 flex gap-1 overflow-x-auto border-b border-white/10"
     >
-      No managed expensive operation is queued or running.
-    </p>
-
-    <details
-      :if={@recent_resource_operations != []}
-      id="recent-resource-operations"
-      class="mt-4 rounded-xl border border-white/10 bg-black/20 p-4"
-    >
-      <summary class="cursor-pointer text-sm font-semibold text-slate-200">
-        Recent operations ({length(@recent_resource_operations)})
-      </summary>
-      <div class="mt-3 divide-y divide-white/10">
-        <div
-          :for={operation <- @recent_resource_operations}
-          id={"recent-resource-operation-#{operation.id}"}
-          class="grid gap-1 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center sm:gap-4"
-        >
-          <p class="truncate text-slate-300">
-            <span class="font-semibold text-slate-100">{operation.label}</span>
-            · {operation.repository.github_owner}/{operation.repository.github_name}
-          </p>
-          <p class="text-slate-500">
-            {operation.state} · {operation_duration(operation.run_duration_ms)}
-          </p>
-          <p class="text-slate-500">peak {operation_bytes(operation.peak_memory_bytes)}</p>
-        </div>
-      </div>
-    </details>
+      <.link
+        :for={tab <- tabs()}
+        patch={tab.path}
+        aria-current={if @live_action == tab.action, do: "page"}
+        class={[
+          "-mb-px whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition",
+          @live_action == tab.action && "border-teal-400 text-white",
+          @live_action != tab.action &&
+            "border-transparent text-slate-400 hover:border-white/20 hover:text-white"
+        ]}
+      >
+        {tab.label}
+      </.link>
+    </nav>
   </section>
 
-  <section id="work-queue" class="mt-8 rounded-2xl border border-white/10 bg-slate-900/60 p-5">
-    <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-      <div>
-        <h2 class="text-lg font-semibold">Work queue</h2>
-        <p class="mt-1 text-xs text-slate-500">
-          Every job waiting for an agent. Fix-and-merge work is always selected first.
-        </p>
-      </div>
-      <span class="text-xs text-slate-500">
-        {length(@queued_actions) + length(@queued_jobs)} waiting
-      </span>
-    </div>
-
-    <div class="mt-4 grid gap-3 lg:grid-cols-2">
-      <article
-        :for={action <- @queued_actions}
-        id={"queued-action-#{action.id}"}
-        class="rounded-xl border border-white/10 bg-black/20 p-4"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="text-sm font-semibold text-slate-100">{action.target_label}</p>
-            <p class="mt-1 text-xs text-slate-400">
-              {queued_action_label(action)} · {queued_action_lane_label(action)}
-            </p>
-          </div>
-          <span class={[
-            "rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",
-            action.action_key == "repair_and_merge_pr" &&
-              "bg-teal-400/15 text-teal-300 ring-teal-400/20",
-            action.action_key == "repair_pr" &&
-              "bg-amber-400/15 text-amber-300 ring-amber-400/20",
-            action.action_key not in ["repair_and_merge_pr", "repair_pr"] &&
-              "bg-sky-400/15 text-sky-300 ring-sky-400/20"
-          ]}>
-            <%= case action.action_key do %>
-              <% "repair_and_merge_pr" -> %>
-                Merge priority
-              <% "repair_pr" -> %>
-                Repair priority
-              <% _other -> %>
-                Queued
-            <% end %>
-          </span>
-        </div>
-        <p class="mt-3 text-xs text-slate-500">
-          Waiting {queue_age(@now, action.requested_at)} · {action.repository.github_name}
-        </p>
-        <button
-          type="button"
-          phx-click="cancel_queued_action"
-          phx-value-id={action.id}
-          data-confirm="Cancel this queued action?"
-          class="mt-3 rounded-lg border border-rose-400/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-400/10"
-        >
-          Cancel queued action
-        </button>
-      </article>
-
-      <article
-        :for={job <- @queued_jobs}
-        id={"queued-job-#{job.id}"}
-        class="rounded-xl border border-white/10 bg-black/20 p-4"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="text-sm font-semibold text-slate-100">
-              {job.repository.github_name} ##{job.issue.number}
-            </p>
-            <p class="mt-1 line-clamp-2 text-xs text-slate-400">{job.issue.title}</p>
-          </div>
-          <span class="rounded-full bg-sky-400/15 px-2.5 py-1 text-[10px] font-semibold text-sky-300 ring-1 ring-sky-400/20">
-            Implementation
-          </span>
-        </div>
-        <p class="mt-3 text-xs text-slate-500">
-          Waiting {queue_age(@now, job.inserted_at)} · {job_review_label(job)}
-        </p>
-        <button
-          type="button"
-          phx-click="cancel_queued_job"
-          phx-value-id={job.id}
-          data-confirm="Cancel this queued implementation job?"
-          class="mt-3 rounded-lg border border-rose-400/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-400/10"
-        >
-          Cancel queued job
-        </button>
-      </article>
-
-      <p
-        :if={@queued_actions == [] && @queued_jobs == []}
-        class="text-sm text-slate-500 lg:col-span-2"
-      >
-        No work is waiting for an agent.
-      </p>
-    </div>
-  </section>
-
-  <section
-    :if={@workspace_setups != []}
-    id="workspace-setup-history"
-    class="mt-8 rounded-2xl border border-white/10 bg-slate-900/60 p-5"
-  >
-    <div class="flex items-end justify-between gap-4">
-      <div>
-        <h2 class="text-lg font-semibold">Workspace preparation</h2>
-        <p class="mt-1 text-xs text-slate-500">
-          Herdr creates each worktree; the repository then prepares it before an agent starts.
-        </p>
-      </div>
-      <span class="text-xs text-slate-600">Latest {length(@workspace_setups)}</span>
-    </div>
-    <div class="mt-4 grid gap-3 lg:grid-cols-2">
-      <article
-        :for={allocation <- @workspace_setups}
-        id={"workspace-setup-#{allocation.id}"}
-        class="rounded-xl border border-white/10 bg-black/20 p-4"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="text-sm font-semibold text-slate-100">
-              {allocation.job.repository.github_name} ##{allocation.job.issue.number}
-            </p>
-            <p class="mt-1 break-all font-mono text-[11px] text-slate-500">
-              {allocation.workspace_setup_script || "Setup script unavailable"}
-            </p>
-          </div>
-          <span class={[
-            "rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",
-            allocation.workspace_setup_state == "passed" &&
-              "bg-teal-400/15 text-teal-300 ring-teal-400/20",
-            allocation.workspace_setup_state == "failed" &&
-              "bg-rose-400/15 text-rose-300 ring-rose-400/20"
-          ]}>
-            {allocation.workspace_setup_state}
-          </span>
-        </div>
-        <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
-          <span>Worktree {worktree_creation_duration(allocation)}</span>
-          <span>Setup {workspace_setup_duration(allocation)}</span>
-          <span :if={allocation.workspace_setup_exit_status != nil}>
-            Exit {allocation.workspace_setup_exit_status}
-          </span>
-          <span
-            :if={workspace_cache_label(allocation)}
-            class={[
-              "rounded-full px-2 py-0.5 font-medium",
-              allocation.workspace_setup_cache_state == "hit" &&
-                "bg-teal-400/10 text-teal-300",
-              allocation.workspace_setup_cache_state == "miss" &&
-                "bg-amber-400/10 text-amber-300",
-              allocation.workspace_setup_cache_state == "disabled" &&
-                "bg-slate-400/10 text-slate-400"
-            ]}
-          >
-            {workspace_cache_label(allocation)}
-          </span>
-        </div>
-        <div
-          :if={workspace_setup_phases(allocation) != []}
-          class="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-400"
-        >
-          <span
-            :for={{label, timing} <- workspace_setup_phases(allocation)}
-            class="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1"
-          >
-            {label} {timing}
-          </span>
-        </div>
-        <p
-          :if={allocation.last_error}
-          class="mt-3 rounded-lg bg-rose-400/[0.07] px-3 py-2 text-xs text-rose-200"
-        >
-          {allocation.last_error}
-        </p>
-        <details
-          :if={allocation.workspace_setup_output not in [nil, ""]}
-          id={"workspace-setup-output-#{allocation.id}"}
-          phx-update="ignore"
-          class="mt-3"
-        >
-          <summary class="cursor-pointer text-xs font-medium text-sky-300">Setup output</summary>
-          <pre class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/30 p-3 font-mono text-[11px] leading-5 text-slate-400">{allocation.workspace_setup_output}</pre>
-        </details>
-      </article>
-    </div>
-  </section>
-
-  <section class="mt-8 grid gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.65fr)]">
-    <div>
-      <div class="mb-4 flex items-end justify-between gap-4">
-        <div>
-          <h2 class="text-lg font-semibold">Agent timeline</h2>
-          <p class="mt-1 text-xs text-slate-500">Newest start first · latest 40 runs</p>
-        </div>
-        <span class="text-xs text-slate-600">
-          Updated {Calendar.strftime(@metrics.captured_at, "%H:%M:%S")}
-        </span>
-      </div>
-      <div
-        id="agent-timeline"
-        class="relative space-y-0 before:absolute before:bottom-6 before:left-[1.15rem] before:top-6 before:w-px before:bg-white/10"
-      >
-        <article
-          :for={run <- @timeline}
-          id={"timeline-run-#{run.id}"}
-          class="relative grid grid-cols-[2.3rem_minmax(0,1fr)] gap-3 pb-4"
-        >
-          <div class={[
-            "relative z-10 mt-5 size-3.5 place-self-center rounded-full ring-4 ring-slate-950",
-            run.state in ["working", "done"] && "bg-teal-400",
-            run.state in ["failed", "lost"] && "bg-rose-400",
-            run.state in ["blocked", "unknown"] && "bg-amber-400",
-            run.state == "waiting" && "bg-violet-400",
-            run.state not in [
-              "working",
-              "done",
-              "failed",
-              "lost",
-              "blocked",
-              "unknown",
-              "waiting"
-            ] &&
-              "bg-sky-400"
-          ]}>
-          </div>
-          <.link
-            patch={~p"/operations?agent=#{run.id}"}
-            aria-label={"View read-only terminal for #{run_name(run)}"}
-            class="group w-full rounded-2xl border border-white/10 bg-slate-900/70 p-4 text-left transition hover:border-teal-400/30 hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-400/50 sm:p-5"
-          >
-            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <p class="text-sm font-semibold text-slate-100 group-hover:text-teal-200">
-                  {run_name(run)} <span class="ml-1 text-xs text-slate-600">View output →</span>
-                </p>
-                <p class="mt-1 text-sm leading-6 text-slate-300">{run_task(run)}</p>
-              </div>
-              <.work_status state={run.state} label={run.state} />
-            </div>
-            <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-              <span>{run.worker.name}</span>
-              <span>Started {timestamp(run.started_at)}</span>
-              <span>{duration(@now, run.started_at, run.ended_at)}</span>
-              <span :if={run.ended_at}>Ended {timestamp(run.ended_at)}</span>
-              <span
-                :if={!run.ended_at && run.state != "waiting"}
-                class="inline-flex items-center gap-1.5 text-teal-300"
-              >
-                <.icon name="hero-arrow-path-mini" class="size-3.5 motion-safe:animate-spin" />
-                Running now
-              </span>
-              <span
-                :if={run.state == "waiting"}
-                class="inline-flex items-center gap-1.5 text-violet-300"
-              >
-                <.icon name="hero-pause-mini" class="size-3.5" /> Retained with open PR
-              </span>
-            </div>
-          </.link>
-        </article>
-        <div
-          :if={@timeline == []}
-          class="rounded-2xl border border-dashed border-white/10 p-10 text-center text-sm text-slate-500"
-        >
-          No agent runs have been recorded yet.
-        </div>
-      </div>
-    </div>
-
-    <aside>
-      <h2 class="mb-4 text-lg font-semibold">Workers</h2>
-      <div id="operations-workers" class="space-y-3 xl:sticky xl:top-24">
-        <article
-          :for={worker <- @workers}
-          class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <p class="text-sm font-semibold">{worker.name}</p>
-              <p class="mt-1 text-xs text-slate-500">
-                Last seen {if worker.last_heartbeat_at,
-                  do: timestamp(worker.last_heartbeat_at),
-                  else: "never"}
-              </p>
-            </div>
-            <span class={[
-              "rounded-full px-2.5 py-1 text-xs ring-1",
-              worker.status == "online" && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
-              worker.status != "online" && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
-            ]}>
-              {worker.status}
-            </span>
-          </div>
-          <dl class="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 text-xs">
-            <div>
-              <dt class="text-slate-600">Herdr runtime</dt>
-              <dd class="mt-1 text-slate-300">
-                {if worker.capabilities["herdr"], do: "available", else: "not reported"}
-              </dd>
-            </div>
-            <div>
-              <dt class="text-slate-600">Worktrees</dt>
-              <dd class="mt-1 text-slate-300">
-                {Enum.count(worker.worktree_allocations, &(&1.state != "removed"))}
-              </dd>
-            </div>
-          </dl>
-          <div
-            :if={worker.status == "degraded" && worker.worker_incarnation_id}
-            id={"worker-recovery-#{worker.id}"}
-            class="mt-4 rounded-xl border border-amber-400/20 bg-amber-400/[0.07] p-3 text-xs text-amber-100"
-          >
-            <p class="font-semibold">
-              Recovery check {min(worker.healthy_snapshot_count, 2)} of 2
-            </p>
-            <p class="mt-1 text-amber-100/80">
-              New work is paused while PtcManager confirms this worker is stable. Existing worktrees and task ownership stay retained.
-            </p>
-            <p :if={worker.restart_reason} class="mt-2 text-amber-200">
-              Restart reason: {worker.restart_reason}
-            </p>
-            <p class="mt-2 break-all text-amber-100/60">
-              Worker {worker.worker_incarnation_id} · Herdr {worker.herdr_incarnation_id}
-            </p>
-          </div>
-        </article>
-
-        <section :if={@waiting_runs != []} id="retained-agents" class="pt-3">
-          <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Retained / waiting
-            </h3>
-            <span class="text-xs text-slate-600">{length(@waiting_runs)}</span>
-          </div>
-          <div class="space-y-2">
-            <.link
-              :for={run <- @waiting_runs}
-              patch={~p"/operations?agent=#{run.id}"}
-              id={"waiting-run-#{run.id}"}
-              class="block rounded-xl border border-violet-400/15 bg-violet-400/[0.05] px-4 py-3 hover:border-violet-400/30"
-            >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <p class="truncate text-sm font-medium text-violet-200">{run_name(run)}</p>
-                  <p class="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
-                    {run_task(run)}
-                  </p>
-                </div>
-                <span class="shrink-0 text-xs text-violet-300">View →</span>
-              </div>
-            </.link>
-          </div>
-        </section>
-      </div>
-    </aside>
-  </section>
+  <%= case @live_action do %>
+    <% :agents -> %>
+      {agents_tab(assigns)}
+    <% :performance -> %>
+      {performance_tab(assigns)}
+    <% _index -> %>
+      {now_tab(assigns)}
+  <% end %>
 
   <div
     :if={@selected_run}
@@ -617,7 +58,7 @@
     class="fixed inset-0 z-50 flex justify-end"
   >
     <.link
-      patch={~p"/operations"}
+      patch={close_path(assigns)}
       aria-label="Close agent output"
       class="absolute inset-0 bg-slate-950/75 backdrop-blur-sm"
     >
@@ -636,7 +77,7 @@
           </div>
           <.link
             id="close-agent-detail"
-            patch={~p"/operations"}
+            patch={close_path(assigns)}
             class="rounded-lg border border-white/10 px-3 py-2 text-sm text-slate-300 hover:border-white/20 hover:text-white"
           >
             Close

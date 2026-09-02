@@ -21,6 +21,7 @@ defmodule PtcManager.Application do
       {DNSCluster, query: Application.get_env(:ptc_manager, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: PtcManager.PubSub},
       {Task.Supervisor, name: PtcManager.TaskSupervisor},
+      PtcManager.MachineUsage.Sampler,
       PtcManager.DeploymentCoordinator,
       PtcManager.ResourceOperationBroker,
       maintainer_action_supervisor(),

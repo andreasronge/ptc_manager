@@ -11,6 +11,7 @@ config :ptc_manager, Oban,
 
 config :ptc_manager,
   github_client: PtcManager.TestGitHubClient,
+  machine_usage_sampling_enabled: false,
   github_sync_interval_ms: 0,
   herdr_sync_interval_ms: 0,
   agent_actions_enabled: false,

@@ -1,0 +1,333 @@
+<section aria-label="Machine capacity" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+  <.metric_card
+    id="metric-cpu"
+    label="CPU now"
+    value={percent(@metrics.cpu_percent)}
+    detail={"#{@metrics.cores} cores · load #{load_text(@metrics.load_average)}"}
+    percent={@metrics.cpu_percent}
+    color="bg-teal-400"
+  />
+  <.metric_card
+    id="metric-memory"
+    label="Memory used"
+    value={percent(@metrics.memory_percent)}
+    detail={"#{bytes(@metrics.memory_used_bytes)} of #{bytes(@metrics.memory_total_bytes)}"}
+    percent={@metrics.memory_percent}
+    color="bg-sky-400"
+  />
+  <.metric_card
+    id="metric-application-memory"
+    label="PtcManager memory"
+    value={bytes(@metrics.application_memory_bytes)}
+    detail={"#{percent(@metrics.application_memory_percent)} of machine memory"}
+    percent={@metrics.application_memory_percent}
+    color="bg-cyan-400"
+  />
+  <.metric_card
+    id="metric-disk"
+    label="Build disk used"
+    value={percent(@metrics.disk_percent)}
+    detail={"#{bytes(@metrics.disk_used_bytes)} of #{bytes(@metrics.disk_total_bytes)}"}
+    percent={@metrics.disk_percent}
+    color="bg-violet-400"
+  />
+  <article id="metric-agents" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
+    <div class="flex items-center justify-between gap-3">
+      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Worker slots</p>
+      <span class={[
+        "rounded-full px-2 py-0.5 text-[11px] ring-1",
+        @herdr_online? && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
+        !@herdr_online? && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+      ]}>
+        {if @herdr_online?, do: "Herdr online", else: "Herdr offline"}
+      </span>
+    </div>
+    <div class="mt-3 grid grid-cols-3 gap-3">
+      <.slot_meter
+        id="light-agent-slots"
+        label="Light"
+        active={@active_light_slots}
+        capacity={@light_agent_capacity}
+        color="bg-sky-400"
+        herdr_online?={@herdr_online?}
+      />
+      <.slot_meter
+        id="heavy-agent-slots"
+        label="Heavy"
+        active={@active_heavy_slots}
+        capacity={@heavy_agent_capacity}
+        color="bg-teal-400"
+        herdr_online?={@herdr_online?}
+      />
+      <.slot_meter
+        id="operation-slots"
+        label="Operations"
+        active={@active_operation_slots}
+        capacity={@operation_capacity}
+        color="bg-violet-400"
+        herdr_online?={@herdr_online?}
+      />
+    </div>
+    <p class="mt-3 border-t border-white/10 pt-3 text-[11px] text-slate-500">
+      Agent sessions and expensive command process trees have separate limits · {length(
+        @waiting_runs
+      )} retained
+    </p>
+  </article>
+</section>
+
+<div class="mt-6">
+  <.usage_chart
+    :if={@usage}
+    id="machine-usage"
+    usage={@usage}
+    capacity={
+      %{
+        light: @light_agent_capacity,
+        heavy: @heavy_agent_capacity,
+        operations: @operation_capacity
+      }
+    }
+    range_path={&range_path/1}
+  />
+</div>
+
+<section class="mt-8 grid gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.65fr)]">
+  <div class="space-y-8">
+    <section id="running-now">
+      <div class="mb-4 flex items-end justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold">Running now</h2>
+          <p class="mt-1 text-xs text-slate-500">
+            Agent sessions and managed expensive commands using the machine at this moment.
+          </p>
+        </div>
+        <span class="text-xs text-slate-600">
+          Updated {Calendar.strftime(@metrics.captured_at, "%H:%M:%S")}
+        </span>
+      </div>
+      <div class="grid gap-3 lg:grid-cols-2">
+        <div :for={run <- @active_runs} id={"active-run-#{run.id}"}>
+          <.run_card run={run} now={@now} path={agent_path(assigns, run)} />
+        </div>
+        <article
+          :for={operation <- @resource_operations}
+          id={"resource-operation-#{operation.id}"}
+          class="rounded-2xl border border-violet-400/15 bg-violet-400/[0.05] p-4 sm:p-5"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-100">{operation.label}</p>
+              <p class="mt-1 text-xs text-slate-400">
+                {operation.repository.github_owner}/{operation.repository.github_name} · {operation_agent(
+                  operation
+                )}
+              </p>
+            </div>
+            <span class="rounded-full bg-violet-400/15 px-2.5 py-1 text-[10px] font-semibold text-violet-200 ring-1 ring-violet-400/20">
+              {operation_state(operation)}
+            </span>
+          </div>
+          <p class="mt-3 text-xs text-slate-500">
+            Expensive operation · {operation_slot(operation)} · queued {duration(
+              @now,
+              operation.queued_at,
+              nil
+            )}
+          </p>
+        </article>
+        <p
+          :if={@active_runs == [] && @resource_operations == []}
+          class="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500 lg:col-span-2"
+        >
+          Nothing is running. The machine is idle.
+        </p>
+      </div>
+    </section>
+
+    <section id="work-queue" class="rounded-2xl border border-white/10 bg-slate-900/60 p-5">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 class="text-lg font-semibold">Work queue</h2>
+          <p class="mt-1 text-xs text-slate-500">
+            Every job waiting for an agent. Fix-and-merge work is always selected first.
+          </p>
+        </div>
+        <span class="text-xs text-slate-500">
+          {length(@queued_actions) + length(@queued_jobs)} waiting
+        </span>
+      </div>
+
+      <div class="mt-4 grid gap-3 lg:grid-cols-2">
+        <article
+          :for={action <- @queued_actions}
+          id={"queued-action-#{action.id}"}
+          class="rounded-xl border border-white/10 bg-black/20 p-4"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-100">{action.target_label}</p>
+              <p class="mt-1 text-xs text-slate-400">
+                {queued_action_label(action)} · {queued_action_lane_label(action)}
+              </p>
+            </div>
+            <span class={[
+              "rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",
+              action.action_key == "repair_and_merge_pr" &&
+                "bg-teal-400/15 text-teal-300 ring-teal-400/20",
+              action.action_key == "repair_pr" &&
+                "bg-amber-400/15 text-amber-300 ring-amber-400/20",
+              action.action_key not in ["repair_and_merge_pr", "repair_pr"] &&
+                "bg-sky-400/15 text-sky-300 ring-sky-400/20"
+            ]}>
+              <%= case action.action_key do %>
+                <% "repair_and_merge_pr" -> %>
+                  Merge priority
+                <% "repair_pr" -> %>
+                  Repair priority
+                <% _other -> %>
+                  Queued
+              <% end %>
+            </span>
+          </div>
+          <p class="mt-3 text-xs text-slate-500">
+            Waiting {queue_age(@now, action.requested_at)} · {action.repository.github_name}
+          </p>
+          <button
+            type="button"
+            phx-click="cancel_queued_action"
+            phx-value-id={action.id}
+            data-confirm="Cancel this queued action?"
+            class="mt-3 rounded-lg border border-rose-400/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-400/10"
+          >
+            Cancel queued action
+          </button>
+        </article>
+
+        <article
+          :for={job <- @queued_jobs}
+          id={"queued-job-#{job.id}"}
+          class="rounded-xl border border-white/10 bg-black/20 p-4"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-100">
+                {job.repository.github_name} ##{job.issue.number}
+              </p>
+              <p class="mt-1 line-clamp-2 text-xs text-slate-400">{job.issue.title}</p>
+            </div>
+            <span class="rounded-full bg-sky-400/15 px-2.5 py-1 text-[10px] font-semibold text-sky-300 ring-1 ring-sky-400/20">
+              Implementation
+            </span>
+          </div>
+          <p class="mt-3 text-xs text-slate-500">
+            Waiting {queue_age(@now, job.inserted_at)} · {job_review_label(job)}
+          </p>
+          <button
+            type="button"
+            phx-click="cancel_queued_job"
+            phx-value-id={job.id}
+            data-confirm="Cancel this queued implementation job?"
+            class="mt-3 rounded-lg border border-rose-400/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-400/10"
+          >
+            Cancel queued job
+          </button>
+        </article>
+
+        <p
+          :if={@queued_actions == [] && @queued_jobs == []}
+          class="text-sm text-slate-500 lg:col-span-2"
+        >
+          No work is waiting for an agent.
+        </p>
+      </div>
+    </section>
+  </div>
+
+  <aside>
+    <h2 class="mb-4 text-lg font-semibold">Workers</h2>
+    <div id="operations-workers" class="space-y-3 xl:sticky xl:top-24">
+      <article
+        :for={worker <- @workers}
+        class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+      >
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="text-sm font-semibold">{worker.name}</p>
+            <p class="mt-1 text-xs text-slate-500">
+              Last seen {if worker.last_heartbeat_at,
+                do: timestamp(worker.last_heartbeat_at),
+                else: "never"}
+            </p>
+          </div>
+          <span class={[
+            "rounded-full px-2.5 py-1 text-xs ring-1",
+            worker.status == "online" && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
+            worker.status != "online" && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+          ]}>
+            {worker.status}
+          </span>
+        </div>
+        <dl class="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 text-xs">
+          <div>
+            <dt class="text-slate-600">Herdr runtime</dt>
+            <dd class="mt-1 text-slate-300">
+              {if worker.capabilities["herdr"], do: "available", else: "not reported"}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-slate-600">Worktrees</dt>
+            <dd class="mt-1 text-slate-300">
+              {Enum.count(worker.worktree_allocations, &(&1.state != "removed"))}
+            </dd>
+          </div>
+        </dl>
+        <div
+          :if={worker.status == "degraded" && worker.worker_incarnation_id}
+          id={"worker-recovery-#{worker.id}"}
+          class="mt-4 rounded-xl border border-amber-400/20 bg-amber-400/[0.07] p-3 text-xs text-amber-100"
+        >
+          <p class="font-semibold">
+            Recovery check {min(worker.healthy_snapshot_count, 2)} of 2
+          </p>
+          <p class="mt-1 text-amber-100/80">
+            New work is paused while PtcManager confirms this worker is stable. Existing worktrees and task ownership stay retained.
+          </p>
+          <p :if={worker.restart_reason} class="mt-2 text-amber-200">
+            Restart reason: {worker.restart_reason}
+          </p>
+          <p class="mt-2 break-all text-amber-100/60">
+            Worker {worker.worker_incarnation_id} · Herdr {worker.herdr_incarnation_id}
+          </p>
+        </div>
+      </article>
+
+      <section :if={@waiting_runs != []} id="retained-agents" class="pt-3">
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Retained / waiting
+          </h3>
+          <span class="text-xs text-slate-600">{length(@waiting_runs)}</span>
+        </div>
+        <div class="space-y-2">
+          <.link
+            :for={run <- @waiting_runs}
+            patch={agent_path(assigns, run)}
+            id={"waiting-run-#{run.id}"}
+            class="block rounded-xl border border-violet-400/15 bg-violet-400/[0.05] px-4 py-3 hover:border-violet-400/30"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <p class="truncate text-sm font-medium text-violet-200">{run_name(run)}</p>
+                <p class="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
+                  {run_task(run)}
+                </p>
+              </div>
+              <span class="shrink-0 text-xs text-violet-300">View →</span>
+            </div>
+          </.link>
+        </div>
+      </section>
+    </div>
+  </aside>
+</section>

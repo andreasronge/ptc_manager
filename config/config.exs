@@ -19,6 +19,8 @@ config :ptc_manager, Oban,
 
 config :ptc_manager,
   operational_mode: :active,
+  machine_usage_sampling_enabled: true,
+  machine_usage_sample_interval_ms: 30_000,
   ecto_repos: [PtcManager.Repo],
   checkout_probe: PtcManager.Repository.GitProbe,
   generators: [timestamp_type: :utc_datetime],

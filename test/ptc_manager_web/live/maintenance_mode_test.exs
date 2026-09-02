@@ -38,7 +38,7 @@ defmodule PtcManagerWeb.MaintenanceModeTest do
   test "keeps Operations readable", %{conn: conn} do
     {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/operations")
 
-    assert html =~ "Capacity and agent history"
+    assert html =~ "Capacity right now"
     assert has_element?(view, "#maintenance-mode-banner", "Read-only inspection is available")
   end
 

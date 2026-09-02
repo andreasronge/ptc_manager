@@ -278,6 +278,13 @@ defmodule PtcManager.ResourceOperations do
     |> Repo.all()
   end
 
+  @doc "Counts expensive operations that currently occupy an operation slot."
+  def count_active do
+    ResourceOperation
+    |> where([operation], operation.state in ^@leased_states)
+    |> Repo.aggregate(:count)
+  end
+
   def list_recent(limit \\ 20) do
     ResourceOperation
     |> where([operation], operation.state not in ^@visible_states)

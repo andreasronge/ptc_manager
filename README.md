@@ -84,6 +84,16 @@ publish only the fenced, verified job branch and one PR; it does **not** merge,
 close issues, edit issue text, or trust labels as commands. See
 [PLAN.md](PLAN.md).
 
+### Machine usage history
+
+PtcManager samples the host every 30 seconds and stores CPU, memory, build-disk
+and 1-minute load together with the light, heavy, and expensive-operation slots
+occupied at that moment. Samples older than 14 days are pruned. The Operations
+chart draws bucket averages (30 seconds for the last hour, 5 minutes for the
+last day, 1 hour for the last week) and leaves a visible gap wherever no sample
+exists, for example across a deploy restart. The chart is server-rendered SVG:
+no JavaScript chart library is bundled.
+
 ## Run locally
 
 Requirements: Elixir, Erlang/OTP, SQLite, `lsof`, and a C compiler toolchain.
@@ -168,10 +178,15 @@ The authenticated routes are:
 - `/` — Planning backlog and maintainer actions;
 - `/board` — active delivery Kanban;
 - `/updates` — easy-to-read daily briefings of merged pull requests and dated direct commits;
-- `/operations` — live CPU, memory, build-disk and slot signals, followed by
-  the latest 40 agent runs and their tasks. Select an agent to open a bounded,
-  read-only terminal panel; active panels refresh every five seconds and expose
-  no prompt or input controls;
+- `/operations` — three tabs. **Now** shows live CPU, memory, build-disk and
+  slot signals, a machine-usage chart for the last hour, day, or week, the
+  agents and expensive commands running at this moment, the work queue, and
+  the workers. **Agents** (`/operations/agents`) lists the latest 40 agent runs
+  grouped by day, with state filters and a switch for maintenance runs such as
+  deployment canaries. **Performance** (`/operations/performance`) shows
+  expensive-operation statistics and workspace-preparation timings. Select an
+  agent on either tab to open a bounded, read-only terminal panel; active
+  panels refresh every five seconds and expose no prompt or input controls;
 - `/automations` — repository-scoped, immutable action versions; one complete
   editable prompt with a runtime preview; Herdr-kind selectors; manual and scheduled
   triggers; Run now; cross-repository copying; and durable result history;
