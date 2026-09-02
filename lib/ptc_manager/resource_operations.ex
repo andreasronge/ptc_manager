@@ -17,7 +17,11 @@ defmodule PtcManager.ResourceOperations do
   @visible_states ["queued" | @leased_states]
 
   def request(attrs, now \\ now()) when is_map(attrs) do
-    attrs = attrs |> Map.new() |> Map.put_new(:queued_at, now)
+    attrs =
+      attrs
+      |> Map.new()
+      |> Map.put_new(:queued_at, now)
+      |> Map.put_new(:last_heartbeat_at, now)
 
     case %ResourceOperation{} |> ResourceOperation.changeset(attrs) |> Repo.insert() do
       {:ok, operation} ->
@@ -113,6 +117,41 @@ defmodule PtcManager.ResourceOperations do
     end)
   end
 
+  def heartbeat_queued(id, at \\ now()) do
+    result =
+      ResourceOperation
+      |> where([operation], operation.id == ^id and operation.state == "queued")
+      |> Repo.update_all(set: [last_heartbeat_at: at, updated_at: at])
+
+    case result do
+      {1, _rows} -> :ok
+      _other -> {:error, :operation_not_queued}
+    end
+  end
+
+  def expire_stale_queued(at \\ now(), stale_after_ms \\ 15_000) do
+    cutoff = DateTime.add(at, -stale_after_ms, :millisecond)
+
+    {count, _rows} =
+      ResourceOperation
+      |> where([operation], operation.state == "queued")
+      |> where(
+        [operation],
+        is_nil(operation.last_heartbeat_at) or operation.last_heartbeat_at < ^cutoff
+      )
+      |> Repo.update_all(
+        set: [
+          state: "cancelled",
+          cancellation_reason: "The waiting operation wrapper disappeared.",
+          finished_at: at,
+          updated_at: at
+        ]
+      )
+
+    if count > 0, do: notify()
+    count
+  end
+
   def mark_stale_recovery_pending(at \\ now(), stale_after_ms \\ 15_000) do
     cutoff = DateTime.add(at, -stale_after_ms, :millisecond)
 
@@ -133,6 +172,29 @@ defmodule PtcManager.ResourceOperations do
 
     if count > 0, do: notify()
     count
+  end
+
+  def list_recovery_pending do
+    ResourceOperation
+    |> where([operation], operation.state == "recovery_pending")
+    |> order_by([operation], asc: operation.last_heartbeat_at, asc: operation.id)
+    |> Repo.all()
+  end
+
+  def release_recovered(id, attempt_token, reason, at \\ now()) do
+    finish(
+      id,
+      attempt_token,
+      %{
+        state: "lost",
+        exit_status: 75,
+        last_error: reason,
+        wrapper_pid: nil,
+        cgroup_path: nil,
+        slot_number: nil
+      },
+      at
+    )
   end
 
   def finish(id, attempt_token, attrs \\ %{}, at \\ now()) do
@@ -235,7 +297,7 @@ defmodule PtcManager.ResourceOperations do
     operations =
       ResourceOperation
       |> where([operation], operation.finished_at >= ^from and operation.finished_at <= ^to)
-      |> where([operation], operation.state in ["completed", "failed", "cancelled"])
+      |> where([operation], operation.state in ["completed", "failed", "cancelled", "lost"])
       |> maybe_where(:worker_id, worker_id)
       |> maybe_where(:repository_id, repository_id)
       |> maybe_where(:label, label)

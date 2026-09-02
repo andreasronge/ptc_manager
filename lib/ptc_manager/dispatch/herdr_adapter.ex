@@ -87,25 +87,36 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          {:ok, workspace_id, pane_id} <- decode_worktree(created) do
       agent_name = pull_request_agent_name(action, publication)
 
-      case start_agent(agent_name, pane_id) do
-        {:ok, agent_key} ->
-          session = Application.get_env(:ptc_manager, :herdr_session, "default")
-
-          {:ok,
-           %{
-             workspace_id: workspace_id,
-             pane_id: pane_id,
-             session: session,
-             external_key: "#{session}:#{agent_key}",
-             agent_name: agent_name,
-             worktree_path: worktree_path,
-             worker_key: "herdr:#{session}"
-           }}
+      case PtcManager.ManagedOperationContext.prepare_action(Command, pane_id, action) do
+        {:ok, _context} ->
+          start_pull_request_agent(workspace_id, pane_id, agent_name, worktree_path)
 
         {:error, reason} ->
           _ = remove_action_workspace(workspace_id)
           {:error, reason}
       end
+    end
+  end
+
+  defp start_pull_request_agent(workspace_id, pane_id, agent_name, worktree_path) do
+    case start_agent(agent_name, pane_id) do
+      {:ok, agent_key} ->
+        session = Application.get_env(:ptc_manager, :herdr_session, "default")
+
+        {:ok,
+         %{
+           workspace_id: workspace_id,
+           pane_id: pane_id,
+           session: session,
+           external_key: "#{session}:#{agent_key}",
+           agent_name: agent_name,
+           worktree_path: worktree_path,
+           worker_key: "herdr:#{session}"
+         }}
+
+      {:error, reason} ->
+        _ = remove_action_workspace(workspace_id)
+        {:error, reason}
     end
   end
 

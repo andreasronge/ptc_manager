@@ -197,7 +197,22 @@ def managed_run(args, context):
         )
 
     attempt_token = response["attempt_token"]
-    slot_lock = acquire_slot_lock(context, response["slot_number"])
+    try:
+        slot_lock = acquire_slot_lock(context, response["slot_number"])
+    except Exception as error:
+        broker_request_with_retry(
+            context,
+            {
+                "operation": "finish",
+                "operation_id": operation_id,
+                "attempt_token": attempt_token,
+                "exit_status": 75,
+                "peak_memory_bytes": 0,
+                "last_error": f"slot lock acquisition failed: {error}",
+            },
+        )
+        raise
+
     cgroup_path = None
     try:
         cgroup_path = create_operation_cgroup(context, operation_id, attempt_token)
@@ -214,6 +229,36 @@ def managed_run(args, context):
             },
         )
         slot_lock.close()
+        raise
+
+    try:
+        broker_request_with_retry(
+            context,
+            {
+                "operation": "running",
+                "operation_id": operation_id,
+                "attempt_token": attempt_token,
+                "wrapper_pid": os.getpid(),
+                "cgroup_path": cgroup_path,
+            },
+        )
+    except Exception as error:
+        cleanup_cgroup(cgroup_path)
+        slot_lock.close()
+        try:
+            broker_request_with_retry(
+                context,
+                {
+                    "operation": "finish",
+                    "operation_id": operation_id,
+                    "attempt_token": attempt_token,
+                    "exit_status": 75,
+                    "peak_memory_bytes": 0,
+                    "last_error": f"running-state persistence failed: {error}",
+                },
+            )
+        except Exception:
+            pass
         raise
 
     child_environment = os.environ.copy()
@@ -258,17 +303,6 @@ def managed_run(args, context):
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, forward)
-
-    broker_request_with_retry(
-        context,
-        {
-            "operation": "running",
-            "operation_id": operation_id,
-            "attempt_token": attempt_token,
-            "wrapper_pid": os.getpid(),
-            "cgroup_path": cgroup_path,
-        },
-    )
 
     def heartbeat():
         interval = float(os.environ.get("PTC_OPERATION_HEARTBEAT_SECONDS", "5"))

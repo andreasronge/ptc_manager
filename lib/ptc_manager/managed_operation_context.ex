@@ -18,20 +18,15 @@ defmodule PtcManager.ManagedOperationContext do
   end
 
   def prepare_action(command, pane_id, action) do
-    run =
-      Repo.get_by!(AgentRun,
-        agent_action_id: action.id,
-        fencing_token: action.attempt_count
-      )
+    prepare(command, pane_id, action_attrs(action, pane_id))
+  end
 
-    prepare(command, pane_id, %{
-      owner_type: "agent_action",
-      owner_id: action.id,
-      repository_id: action.repository_id,
-      worker_id: run.worker_id,
-      pane_id: pane_id,
-      fencing_token: action.attempt_count
-    })
+  def rebind_action(pane_id, action) do
+    if enabled?() do
+      issue(action_attrs(action, pane_id), path: pane_context_path(pane_id))
+    else
+      {:ok, nil}
+    end
   end
 
   def enabled? do
@@ -61,13 +56,12 @@ defmodule PtcManager.ManagedOperationContext do
       })
 
     token = sign(payload)
-    path = Path.join(directory, "#{id}.json")
+    path = Keyword.get(opts, :path, Path.join(directory, "#{id}.json"))
     body = Jason.encode!(Map.put(payload, "token", token))
 
     with :ok <- File.mkdir_p(directory),
          :ok <- File.chmod(directory, 0o2750),
-         :ok <- File.write(path, body, [:exclusive]),
-         :ok <- File.chmod(path, 0o440) do
+         :ok <- write_context(path, body) do
       {:ok, %{path: path, token: token, payload: payload}}
     end
   end
@@ -162,7 +156,7 @@ defmodule PtcManager.ManagedOperationContext do
 
   defp prepare(command, pane_id, attrs) do
     if enabled?() do
-      with {:ok, context} <- issue(attrs),
+      with {:ok, context} <- issue(attrs, path: pane_context_path(pane_id)),
            marker = "PTC_OPERATION_CONTEXT_READY:#{context.payload["context_id"]}",
            {:ok, _output} <-
              command.run(["pane", "run", pane_id, shell_command(context.path, context.payload)]),
@@ -184,6 +178,42 @@ defmodule PtcManager.ManagedOperationContext do
       end
     else
       {:ok, nil}
+    end
+  end
+
+  defp action_attrs(action, pane_id) do
+    run =
+      Repo.get_by!(AgentRun,
+        agent_action_id: action.id,
+        fencing_token: action.attempt_count
+      )
+
+    %{
+      owner_type: "agent_action",
+      owner_id: action.id,
+      repository_id: action.repository_id,
+      worker_id: run.worker_id,
+      pane_id: pane_id,
+      fencing_token: action.attempt_count
+    }
+  end
+
+  defp pane_context_path(pane_id) do
+    digest = :crypto.hash(:sha256, pane_id) |> Base.url_encode64(padding: false)
+    Path.join(context_directory(), "pane-#{digest}.json")
+  end
+
+  defp write_context(path, body) do
+    temporary = path <> ".tmp.#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(temporary, body, [:binary, :exclusive]),
+         :ok <- File.chmod(temporary, 0o440),
+         :ok <- File.rename(temporary, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(temporary)
+        {:error, reason}
     end
   end
 

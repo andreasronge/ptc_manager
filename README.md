@@ -125,6 +125,13 @@ the memory and process controllers. Its launcher keeps the Herdr server in a
 separate leaf; each managed pane then receives an agent memory boundary and
 each coordinated command a child cgroup. That makes unwrapped agent commands
 remain bounded and lets PtcManager measure the complete command process tree.
+If a wrapper or worker disappears, the broker first fences the stale attempt,
+then the root-owned bounded recovery helper terminates that exact child cgroup
+before releasing its operation slot. Waiting wrappers send heartbeats and are
+cancelled when they disappear, so abandoned queue rows cannot consume capacity.
+When cgroup containment is disabled, crash recovery deliberately keeps the slot
+fenced for maintainer attention because wrapper disappearance cannot prove that
+its child process tree stopped.
 Enable this only after installing the versioned Herdr unit, launcher, and
 sourceable agent-context helper. It is never enabled on the Mac.
 
@@ -611,6 +618,11 @@ deployment:
 The command is extracted from the requested Git archive and receives only
 `PTC_DEPLOY_SHA`, `PTC_DEPLOY_SOURCE_ARCHIVE`, and `PTC_DEPLOYMENT_ID`. A
 repository without this section is never offered a deployment button.
+The command and timeout are read from `.ptc-manager.yml` at the requested Git
+SHA and frozen in the deployment record before draining begins. A stale or
+dirty server checkout therefore cannot change what the host runner executes.
+Startup and completion deadlines turn a missing unit/status handoff into a
+visible terminal failure rather than leaving deployment permanently blocked.
 
 The target defaults to the `herdr-box` SSH host from the local SSH config. Use
 `mix ptc.deploy --target another-host` to select a different SSH alias, or
@@ -723,6 +735,7 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/p
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
+sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0644 deploy/ptc-manager-agent-context /usr/local/libexec/ptc-manager-agent-context

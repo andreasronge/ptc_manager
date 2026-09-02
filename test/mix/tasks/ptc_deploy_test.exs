@@ -11,6 +11,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @self_deploy_command Path.join(@project_root, "scripts/ptc/deploy")
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
+  @operation_recovery Path.join(@project_root, "deploy/ptc-manager-operation-recover")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
   @environment_file_parser Path.join(
                              @project_root,
@@ -25,7 +26,8 @@ defmodule Mix.Tasks.PtcDeployTest do
           @worker_bootstrap,
           @failure_policy,
           @self_deploy_command,
-          @self_deploy_runner
+          @self_deploy_runner,
+          @operation_recovery
         ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
@@ -104,6 +106,18 @@ defmodule Mix.Tasks.PtcDeployTest do
     runner = File.read!(@self_deploy_runner)
     assert runner =~ "*) command_path=$command ;;"
     assert runner =~ ~s(tar -xOf "$archive" "$command_path")
+  end
+
+  test "remote deployment installs the fenced operation recovery helper" do
+    script = File.read!(@remote_script)
+    sudoers = File.read!(Path.join(@project_root, "deploy/ptc_manager.sudoers"))
+    helper = File.read!(@operation_recovery)
+
+    assert script =~ "deploy/ptc-manager-operation-recover"
+    assert script =~ "/usr/local/bin/ptc-manager-operation-recover"
+    assert sudoers =~ "/usr/local/bin/ptc-manager-operation-recover *"
+    assert helper =~ "operation cgroup does not match its fenced identity"
+    assert helper =~ "cgroup.kill"
   end
 
   test "deployment failure policy classifies the effect boundary" do

@@ -5,6 +5,7 @@ defmodule PtcManager.ResourceOperationsTest do
   alias PtcManager.Operations.ResourceOperation
   alias PtcManager.Repo
   alias PtcManager.ResourceOperations
+  alias PtcManager.ResourceOperationRecovery
 
   setup do
     setting = PtcManager.CapacitySettings.current()
@@ -129,6 +130,51 @@ defmodule PtcManager.ResourceOperationsTest do
     assert adopted.last_error == nil
   end
 
+  test "a queued wrapper heartbeat prevents expiry and an abandoned wrapper is cancelled" do
+    context = managed_run_fixture()
+    base = ~U[2026-09-01 12:00:00.000000Z]
+
+    {:ok, operation} = ResourceOperations.request(operation_attrs(context, "queued-live"), base)
+
+    assert :ok =
+             ResourceOperations.heartbeat_queued(operation.id, DateTime.add(base, 10, :second))
+
+    assert ResourceOperations.expire_stale_queued(DateTime.add(base, 20, :second), 15_000) == 0
+    assert ResourceOperations.expire_stale_queued(DateTime.add(base, 30, :second), 15_000) == 1
+    assert Repo.get!(ResourceOperation, operation.id).state == "cancelled"
+  end
+
+  test "a recovered process tree releases its fenced slot without accepting its old token again" do
+    set_operation_capacity(1)
+    context = managed_run_fixture()
+    base = ~U[2026-09-01 12:00:00.000000Z]
+
+    {:ok, _first} = ResourceOperations.request(operation_attrs(context, "abandoned"), base)
+    {:ok, second} = ResourceOperations.request(operation_attrs(context, "replacement"), base)
+    {:ok, first} = ResourceOperations.claim_next(context.worker.id, base)
+    {:ok, first} = ResourceOperations.mark_running(first.id, first.attempt_token, %{}, base)
+    assert ResourceOperations.mark_stale_recovery_pending(DateTime.add(base, 20, :second)) == 1
+
+    assert {:ok, released} =
+             ResourceOperations.release_recovered(
+               first.id,
+               first.attempt_token,
+               "recovered",
+               DateTime.add(base, 21, :second)
+             )
+
+    assert released.state == "lost"
+    assert is_nil(released.slot_number)
+    assert {:ok, replacement} = ResourceOperations.claim_next(context.worker.id)
+    assert replacement.id == second.id
+    assert {:ok, ^released} = ResourceOperations.finish(first.id, first.attempt_token)
+  end
+
+  test "recovery without cgroup containment fails closed" do
+    assert {:error, :operation_recovery_requires_cgroup_containment} =
+             ResourceOperationRecovery.recover(%ResourceOperation{wrapper_pid: 999_999})
+  end
+
   test "statistics use deterministic nearest-rank percentiles" do
     set_operation_capacity(1)
     context = managed_run_fixture()
@@ -175,6 +221,37 @@ defmodule PtcManager.ResourceOperationsTest do
     assert stats.average_wait_ms == 20
     assert stats.p80_peak_memory_bytes == 400_000
     assert stats.max_peak_memory_bytes == 500_000
+  end
+
+  test "lost recovered operations remain visible in statistics" do
+    set_operation_capacity(1)
+    context = managed_run_fixture()
+    base = ~U[2026-09-01 10:00:00.000000Z]
+
+    {:ok, _operation} = ResourceOperations.request(operation_attrs(context, "lost-stat"), base)
+    {:ok, operation} = ResourceOperations.claim_next(context.worker.id, base)
+
+    {:ok, operation} =
+      ResourceOperations.mark_running(operation.id, operation.attempt_token, %{}, base)
+
+    assert {:ok, _operation} =
+             ResourceOperations.release_recovered(
+               operation.id,
+               operation.attempt_token,
+               "wrapper disappeared",
+               DateTime.add(base, 1, :second)
+             )
+
+    stats =
+      ResourceOperations.statistics(
+        worker_id: context.worker.id,
+        from: DateTime.add(base, -1, :second),
+        to: DateTime.add(base, 2, :second)
+      )
+
+    assert stats.count == 1
+    assert stats.succeeded == 0
+    assert stats.success_rate == 0.0
   end
 
   defp managed_run_fixture do

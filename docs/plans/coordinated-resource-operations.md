@@ -1,7 +1,7 @@
 # Coordinated Resource Operations
 
-Status: implementation plan  
-Initial worker: `herdr-build-01`  
+Status: implementation plan
+Initial worker: `herdr-build-01`
 Initial repositories: `andreasronge/ptc_runner`, `andreasronge/ptc_manager`
 
 ## Purpose

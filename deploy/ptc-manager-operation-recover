@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+operation_id=${1:-}
+attempt_token=${2:-}
+requested_path=${3:-}
+wrapper_pid=${4:-}
+lock_path=${5:-}
+
+case "$operation_id" in *[!0-9]*|'') exit 2 ;; esac
+case "$attempt_token" in *[!A-Za-z0-9_-]*|'') exit 2 ;; esac
+case "$wrapper_pid" in *[!0-9]*|'') exit 2 ;; esac
+token_prefix=$(printf '%s' "$attempt_token" | cut -c1-12)
+
+case "$requested_path" in
+  -) ;;
+  /sys/fs/cgroup/*/ptc-agent-*/operation-"$operation_id"-"$token_prefix") ;;
+  *) echo "operation cgroup does not match its fenced identity" >&2; exit 2 ;;
+esac
+
+lock_directory=${lock_path%/*}
+lock_name=${lock_path##*/}
+[ "$lock_directory" = /var/lib/ptc_manager-worker/agent-results ] || {
+  echo "operation slot lock directory is invalid" >&2; exit 2;
+}
+lock_slot=${lock_name#operation-slot-}
+lock_slot=${lock_slot%.lock}
+case "$lock_slot" in *[!0-9]*|'') echo "operation slot lock name is invalid" >&2; exit 2 ;; esac
+[ "$lock_name" = "operation-slot-$lock_slot.lock" ] || {
+  echo "operation slot lock name is invalid" >&2; exit 2;
+}
+
+[ ! -L "$requested_path" ] || { echo "operation cgroup must not be a symlink" >&2; exit 2; }
+if [ "$requested_path" != - ] && [ -d "$requested_path" ]; then
+  canonical=$(readlink -f -- "$requested_path")
+  [ "$canonical" = "$requested_path" ] || { echo "operation cgroup path is not canonical" >&2; exit 2; }
+  printf '1\n' >"$requested_path/cgroup.kill"
+fi
+
+if [ "$wrapper_pid" != 0 ] && [ -d "/proc/$wrapper_pid" ]; then
+  expected_membership=${requested_path#/sys/fs/cgroup}
+  expected_membership=$(dirname "$expected_membership")/processes
+  actual_membership=$(awk -F: '$1 == "0" {print $3}' "/proc/$wrapper_pid/cgroup")
+  command_line=$(tr '\000' ' ' <"/proc/$wrapper_pid/cmdline")
+  [ "$actual_membership" = "$expected_membership" ] || {
+    echo "wrapper PID is not in the fenced agent cgroup" >&2; exit 75;
+  }
+  case "$command_line" in *ptc-operation*) ;; *) echo "wrapper PID identity is ambiguous" >&2; exit 75 ;; esac
+  kill -TERM "$wrapper_pid" 2>/dev/null || true
+  deadline=$(( $(date +%s) + 2 ))
+  while [ -d "/proc/$wrapper_pid" ] && [ "$(date +%s)" -le "$deadline" ]; do sleep 0.1; done
+  if [ -d "/proc/$wrapper_pid" ]; then kill -KILL "$wrapper_pid" 2>/dev/null || true; fi
+fi
+
+deadline=$(( $(date +%s) + 5 ))
+while [ "$(date +%s)" -le "$deadline" ]; do
+  cgroup_empty=true
+  if [ "$requested_path" != - ] && [ -d "$requested_path" ] && ! grep -q 'populated 0' "$requested_path/cgroup.events"; then
+    cgroup_empty=false
+  fi
+  if [ "$cgroup_empty" = true ] && ( exec 8>>"$lock_path"; flock -n 8 ); then
+    [ "$requested_path" = - ] || [ ! -d "$requested_path" ] || rmdir -- "$requested_path"
+    exit 0
+  fi
+  sleep 0.1
+done
+
+echo "operation cgroup or slot lock is still occupied" >&2
+exit 75

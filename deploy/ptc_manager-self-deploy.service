@@ -10,5 +10,5 @@ Group=agent
 SupplementaryGroups=ptc-manager-deploy
 EnvironmentFile=-/etc/ptc_manager/self-deploy.env
 ExecStart=/usr/local/bin/ptc-manager-self-deploy-runner
-TimeoutStartSec=30min
+TimeoutStartSec=25h
 PrivateTmp=false

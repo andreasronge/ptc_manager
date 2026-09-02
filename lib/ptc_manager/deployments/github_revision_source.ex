@@ -24,4 +24,25 @@ defmodule PtcManager.Deployments.GitHubRevisionSource do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @impl true
+  def contract(%Repository{} = repository, sha) when is_binary(sha) do
+    owner = URI.encode_www_form(repository.github_owner)
+    name = URI.encode_www_form(repository.github_name)
+    ref = URI.encode_www_form(sha)
+
+    with true <- Regex.match?(@sha, sha),
+         {:ok, %{"encoding" => "base64", "content" => encoded}} when is_binary(encoded) <-
+           Client.get_json(
+             "https://api.github.com/repos/#{owner}/#{name}/contents/.ptc-manager.yml?ref=#{ref}"
+           ),
+         {:ok, content} <- Base.decode64(String.replace(encoded, ~r/\s+/, "")) do
+      {:ok, content}
+    else
+      false -> {:error, :invalid_github_head_sha}
+      {:ok, _unexpected} -> {:error, :unexpected_github_response}
+      :error -> {:error, :invalid_repository_contract_encoding}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 end

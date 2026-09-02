@@ -4,10 +4,18 @@ defmodule PtcManager.DeploymentsTest do
   alias PtcManager.Deployments
   alias PtcManager.Deployments.Deployment
   alias PtcManager.Operations.AgentRun
+  alias PtcManager.Repository.GitProbe
   alias PtcManager.{OperationalMode, Repo}
 
   defmodule RevisionSource do
-    def latest(_repository), do: {:ok, Application.fetch_env!(:ptc_manager, :test_latest_sha)}
+    def latest(repository) do
+      {sha, 0} =
+        System.cmd("git", ["-C", repository.local_path, "rev-parse", "HEAD"],
+          stderr_to_stdout: true
+        )
+
+      {:ok, String.trim(sha)}
+    end
   end
 
   defmodule Runner do
@@ -19,12 +27,37 @@ defmodule PtcManager.DeploymentsTest do
 
       :ok
     end
+
+    def status(deployment) do
+      case Application.get_env(:ptc_manager, :deployment_test_runner_status, :inactive) do
+        callback when is_function(callback, 1) -> callback.(deployment)
+        status -> status
+      end
+    end
+
+    def cleanup(deployment) do
+      send(
+        Application.fetch_env!(:ptc_manager, :deployment_test_pid),
+        {:deployment_cleanup, deployment.id}
+      )
+
+      :ok
+    end
   end
 
   setup do
     previous =
       Map.new(
-        [:deployment_revision_source, :deployment_runner, :deployment_spool_path, :deployed_sha],
+        [
+          :deployment_revision_source,
+          :deployment_runner,
+          :deployment_spool_path,
+          :deployed_sha,
+          :checkout_probe,
+          :deployment_start_timeout_ms,
+          :deployment_completion_grace_ms,
+          :deployment_test_runner_status
+        ],
         &{&1, Application.get_env(:ptc_manager, &1)}
       )
 
@@ -38,8 +71,11 @@ defmodule PtcManager.DeploymentsTest do
     Application.put_env(:ptc_manager, :deployment_runner, Runner)
     Application.put_env(:ptc_manager, :deployment_test_pid, self())
     Application.put_env(:ptc_manager, :deployment_spool_path, spool)
-    Application.put_env(:ptc_manager, :test_latest_sha, String.duplicate("b", 40))
     Application.put_env(:ptc_manager, :deployed_sha, String.duplicate("a", 40))
+    Application.put_env(:ptc_manager, :checkout_probe, GitProbe)
+    Application.put_env(:ptc_manager, :deployment_start_timeout_ms, 60_000)
+    Application.put_env(:ptc_manager, :deployment_completion_grace_ms, 60_000)
+    Application.put_env(:ptc_manager, :deployment_test_runner_status, :inactive)
 
     on_exit(fn ->
       Enum.each(previous, fn
@@ -48,7 +84,6 @@ defmodule PtcManager.DeploymentsTest do
       end)
 
       Application.delete_env(:ptc_manager, :deployment_test_pid)
-      Application.delete_env(:ptc_manager, :test_latest_sha)
       if OperationalMode.mode() == :draining, do: OperationalMode.leave_draining()
       File.rm_rf!(spool)
     end)
@@ -86,7 +121,7 @@ defmodule PtcManager.DeploymentsTest do
 
     assert Deployments.advance() in [:ok, :idle]
     assert_receive {:deployment_started, started, contract}
-    assert started.requested_sha == String.duplicate("b", 40)
+    assert started.requested_sha == deployment.requested_sha
     assert contract.deployment_command == "./scripts/ptc/deploy"
     assert Repo.get!(Deployment, deployment.id).state == "running"
   end
@@ -139,6 +174,175 @@ defmodule PtcManager.DeploymentsTest do
     refute current.update_available?
   end
 
+  test "deployment freezes its command from the requested commit while waiting to drain" do
+    repository = deployable_repository()
+    worker = worker_fixture()
+    current = now()
+
+    %AgentRun{}
+    |> AgentRun.changeset(%{
+      worker_id: worker.id,
+      role: "implementer",
+      state: "working",
+      started_at: current,
+      last_heartbeat_at: current
+    })
+    |> Repo.insert!()
+
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+    assert deployment.deployment_command == "./scripts/ptc/deploy"
+    File.write!(Path.join(repository.local_path, ".ptc-manager.yml"), contract("./wrong-command"))
+
+    Repo.update_all(AgentRun, set: [state: "done", ended_at: current])
+    assert :ok = Deployments.advance()
+    assert_receive {:deployment_started, _, frozen}
+    assert frozen.deployment_command == "./scripts/ptc/deploy"
+  end
+
+  test "active deployment restores drain mode after a coordinator restart" do
+    repository = deployable_repository()
+    assert {:ok, _deployment} = Deployments.request(repository, "andreas")
+    assert :ok = Deployments.advance()
+    assert_receive {:deployment_started, _, _}
+
+    assert :ok = OperationalMode.leave_draining()
+    assert OperationalMode.mode() == :active
+    assert :ok = Deployments.advance()
+    assert OperationalMode.mode() == :draining
+  end
+
+  test "a deployment without a host status reaches a bounded terminal failure" do
+    repository = deployable_repository()
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+    assert :ok = Deployments.advance()
+    assert_receive {:deployment_started, _, _}
+
+    stale = DateTime.add(now(), -25, :minute)
+
+    deployment
+    |> Repo.reload!()
+    |> Deployment.changeset(%{started_at: stale})
+    |> Repo.update!()
+
+    Application.put_env(:ptc_manager, :deployment_completion_grace_ms, 0)
+    assert :idle = Deployments.advance()
+    failed = Repo.get!(Deployment, deployment.id)
+    assert failed.state == "failed"
+    assert failed.last_error =~ "deployment_status_timeout"
+    assert_receive {:deployment_cleanup, deployment_id}
+    assert deployment_id == deployment.id
+    assert OperationalMode.mode() == :active
+  end
+
+  test "an active host runner is not failed when its status handoff is late" do
+    repository = deployable_repository()
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+    assert :ok = Deployments.advance()
+    assert_receive {:deployment_started, _, _}
+
+    stale = DateTime.add(now(), -25, :minute)
+
+    deployment
+    |> Repo.reload!()
+    |> Deployment.changeset(%{started_at: stale})
+    |> Repo.update!()
+
+    Application.put_env(:ptc_manager, :deployment_completion_grace_ms, 0)
+    Application.put_env(:ptc_manager, :deployment_test_runner_status, :active)
+    assert :ok = Deployments.advance()
+    assert Repo.get!(Deployment, deployment.id).state == "running"
+    refute_receive {:deployment_cleanup, _}
+    assert OperationalMode.mode() == :draining
+  end
+
+  test "an inactive runner's newly written terminal status wins the timeout race", %{spool: spool} do
+    repository = deployable_repository()
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+    assert :ok = Deployments.advance()
+    assert_receive {:deployment_started, _, _}
+
+    stale = DateTime.add(now(), -25, :minute)
+
+    deployment
+    |> Repo.reload!()
+    |> Deployment.changeset(%{started_at: stale})
+    |> Repo.update!()
+
+    Application.put_env(:ptc_manager, :deployment_completion_grace_ms, 0)
+
+    Application.put_env(:ptc_manager, :deployment_test_runner_status, fn current ->
+      File.mkdir_p!(spool)
+
+      File.write!(
+        Path.join(spool, "deployment-#{current.id}.status.json"),
+        Jason.encode!(%{
+          "deployment_id" => current.id,
+          "requested_sha" => current.requested_sha,
+          "state" => "completed",
+          "release_id" => "race-complete",
+          "status_text" => "Completed while status was being reconciled.",
+          "error" => nil
+        })
+      )
+
+      :inactive
+    end)
+
+    assert :idle = Deployments.advance()
+    completed = Repo.get!(Deployment, deployment.id)
+    assert completed.state == "completed"
+    assert completed.release_id == "race-complete"
+    refute_receive {:deployment_cleanup, _}
+    assert OperationalMode.mode() == :active
+  end
+
+  test "a legacy active deployment without a frozen contract can ingest terminal status", %{
+    spool: spool
+  } do
+    repository = deployable_repository()
+    requested_sha = String.duplicate("b", 40)
+    current = now()
+
+    {1, [legacy]} =
+      Repo.insert_all(
+        Deployment,
+        [
+          %{
+            repository_id: repository.id,
+            requested_sha: requested_sha,
+            state: "running",
+            requested_by: "previous-release",
+            requested_at: current,
+            started_at: current,
+            inserted_at: current,
+            updated_at: current
+          }
+        ],
+        returning: true
+      )
+
+    File.mkdir_p!(spool)
+
+    File.write!(
+      Path.join(spool, "deployment-#{legacy.id}.status.json"),
+      Jason.encode!(%{
+        "deployment_id" => legacy.id,
+        "requested_sha" => requested_sha,
+        "state" => "completed",
+        "release_id" => "legacy-complete",
+        "status_text" => "Previous host runner completed.",
+        "error" => nil
+      })
+    )
+
+    assert :idle = Deployments.advance()
+    completed = Repo.get!(Deployment, legacy.id)
+    assert completed.state == "completed"
+    assert completed.release_id == "legacy-complete"
+    assert is_nil(completed.deployment_command)
+    assert OperationalMode.mode() == :active
+  end
+
   defp deployable_repository do
     suffix = System.unique_integer([:positive, :monotonic])
     owner = "deploy-owner-#{suffix}"
@@ -147,18 +351,7 @@ defmodule PtcManager.DeploymentsTest do
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf!(path) end)
 
-    File.write!(
-      Path.join(path, ".ptc-manager.yml"),
-      """
-      version: 1
-      bootstrap:
-        command: ./scripts/ptc/bootstrap
-        timeout_minutes: 10
-      deployment:
-        command: ./scripts/ptc/deploy
-        timeout_minutes: 20
-      """
-    )
+    File.write!(Path.join(path, ".ptc-manager.yml"), contract("./scripts/ptc/deploy"))
 
     git!(path, ["init", "-b", "main"])
     git!(path, ["config", "user.email", "test@example.com"])
@@ -168,6 +361,18 @@ defmodule PtcManager.DeploymentsTest do
     git!(path, ["commit", "-m", "add deployment contract"])
 
     repository_fixture(%{github_owner: owner, github_name: name, local_path: path, enabled: true})
+  end
+
+  defp contract(command) do
+    """
+    version: 1
+    bootstrap:
+      command: ./scripts/ptc/bootstrap
+      timeout_minutes: 10
+    deployment:
+      command: #{command}
+      timeout_minutes: 20
+    """
   end
 
   defp git!(path, args) do

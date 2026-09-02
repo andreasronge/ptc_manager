@@ -23,6 +23,8 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
          :ok <- retained_context_open(publication),
          %AgentRun{} = retained_run <- retained_run(publication.job),
          :ok <- retained_worktree_available(publication),
+         {:ok, _context} <-
+           PtcManager.ManagedOperationContext.rebind_action(retained_run.herdr_pane, action),
          {:ok, resumed_run} <- mark_resumed(retained_run, action),
          :ok <- retained_context_still_open(publication.id) do
       case prompt(resumed_run, action.prompt) do

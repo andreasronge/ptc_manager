@@ -193,6 +193,13 @@ config :ptc_manager,
       "PTC_OPERATION_AGENT_CONTEXT",
       "/usr/local/libexec/ptc-manager-agent-context"
     ),
+  resource_operation_recovery_command:
+    System.get_env("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo"),
+  resource_operation_recovery_helper:
+    System.get_env(
+      "PTC_OPERATION_RECOVERY_HELPER",
+      "/usr/local/bin/ptc-manager-operation-recover"
+    ),
   agent_memory_high_bytes:
     System.get_env("PTC_AGENT_MEMORY_HIGH_BYTES", "2684354560") |> String.to_integer(),
   agent_memory_max_bytes:
@@ -337,6 +344,12 @@ if deployment_spool_path = System.get_env("PTC_DEPLOYMENT_SPOOL_PATH") do
   config :ptc_manager, :deployment_spool_path, deployment_spool_path
 end
 
+config :ptc_manager,
+  deployment_start_timeout_ms:
+    System.get_env("PTC_DEPLOYMENT_START_TIMEOUT_MS", "60000") |> String.to_integer(),
+  deployment_completion_grace_ms:
+    System.get_env("PTC_DEPLOYMENT_COMPLETION_GRACE_MS", "60000") |> String.to_integer()
+
 if config_env() == :test do
   config :ptc_manager,
     dispatch_enabled: false,
@@ -349,6 +362,7 @@ end
 
 if config_env() == :prod do
   config :ptc_manager, :deployment_systemctl_command, "/usr/bin/sudo"
+  config :ptc_manager, :deployment_systemctl_status_command, "/bin/systemctl"
 
   raw_admin_password = System.get_env("PTC_MANAGER_PASSWORD")
 

@@ -15,6 +15,9 @@ defmodule PtcManager.Repository.Contract do
   @max_command_bytes 2_000
   @max_timeout_minutes 24 * 60
 
+  def max_command_bytes, do: @max_command_bytes
+  def max_timeout_minutes, do: @max_timeout_minutes
+
   @enforce_keys [
     :version,
     :bootstrap_command,

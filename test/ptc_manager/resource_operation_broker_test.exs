@@ -8,6 +8,17 @@ defmodule PtcManager.ResourceOperationBrokerTest do
   alias PtcManager.Repo
   alias PtcManager.ResourceOperationBroker
 
+  defmodule Recovery do
+    def recover(operation) do
+      send(
+        Application.fetch_env!(:ptc_manager, :operation_recovery_test_pid),
+        {:recover, operation}
+      )
+
+      :recovered
+    end
+  end
+
   test "signed context drives the generic broker protocol without parsing agent output" do
     context = managed_run_fixture()
 
@@ -146,6 +157,82 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     File.rm_rf!(directory)
   end
 
+  test "a pane context is atomically rebound from a job to a later repair action" do
+    previous_socket = Application.get_env(:ptc_manager, :resource_operation_socket_path)
+    previous_directory = Application.get_env(:ptc_manager, :resource_operation_context_dir)
+
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-pane-rebind-#{System.unique_integer([:positive])}")
+
+    Application.put_env(:ptc_manager, :resource_operation_socket_path, "/tmp/test.sock")
+    Application.put_env(:ptc_manager, :resource_operation_context_dir, directory)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :resource_operation_socket_path, previous_socket)
+      Application.put_env(:ptc_manager, :resource_operation_context_dir, previous_directory)
+      File.rm_rf!(directory)
+    end)
+
+    context = managed_run_fixture()
+
+    {:ok, queued} =
+      PtcManager.MaintainerActions.enqueue("prepare_issue", context.issue.id, "maintainer")
+
+    {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
+
+    assert {:ok, rebound} = ManagedOperationContext.rebind_action("pane-operation-test", action)
+    assert {:ok, repeated} = ManagedOperationContext.rebind_action("pane-operation-test", action)
+    assert repeated.path == rebound.path
+    assert {:ok, payload} = ManagedOperationContext.verify(rebound.token)
+    assert payload["owner_type"] == "agent_action"
+    assert payload["owner_id"] == action.id
+  end
+
+  test "the broker sweep terminates and releases stale leased operations" do
+    previous = Application.get_env(:ptc_manager, :resource_operation_recovery)
+    Application.put_env(:ptc_manager, :resource_operation_recovery, Recovery)
+    Application.put_env(:ptc_manager, :operation_recovery_test_pid, self())
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :resource_operation_recovery, previous)
+      Application.delete_env(:ptc_manager, :operation_recovery_test_pid)
+    end)
+
+    context = managed_run_fixture()
+    stale = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    {:ok, _operation} =
+      PtcManager.ResourceOperations.request(
+        %{
+          worker_id: context.worker.id,
+          repository_id: context.repository.id,
+          job_id: context.job.id,
+          agent_run_id: context.run.id,
+          invocation_id: "broker-stale-recovery",
+          label: "test",
+          priority: 300,
+          state: "queued"
+        },
+        stale
+      )
+
+    {:ok, operation} = PtcManager.ResourceOperations.claim_next(context.worker.id, stale)
+
+    {:ok, operation} =
+      PtcManager.ResourceOperations.mark_running(
+        operation.id,
+        operation.attempt_token,
+        %{},
+        stale
+      )
+
+    ResourceOperationBroker.sweep()
+
+    assert_receive {:recover, %{id: id}}
+    assert id == operation.id
+    assert Repo.get!(ResourceOperation, id).state == "lost"
+  end
+
   defp managed_run_fixture do
     repository = repository_fixture()
     issue = issue_fixture(repository)
@@ -167,6 +254,6 @@ defmodule PtcManager.ResourceOperationBrokerTest do
         fencing_token: 4
       })
 
-    %{repository: repository, job: job, worker: worker, run: run}
+    %{repository: repository, issue: issue, job: job, worker: worker, run: run}
   end
 end

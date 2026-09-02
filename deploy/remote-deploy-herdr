@@ -81,6 +81,7 @@ environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 operation_wrapper_candidate="/tmp/ptc-operation-${release_id}"
+operation_recovery_candidate="/tmp/ptc-manager-operation-recover-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
 herdr_launch_candidate="/tmp/ptc-manager-herdr-launch-${release_id}"
 sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
@@ -97,6 +98,7 @@ deployment_phase=pre_stop
 cleanup_remote() {
   rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$environment_file_parser" \
     "$worker_git_candidate" "$worker_bootstrap_candidate" "$operation_wrapper_candidate" \
+    "$operation_recovery_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
     "$self_deploy_access_candidate"
@@ -626,6 +628,7 @@ tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environm
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc-operation >"$operation_wrapper_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-operation-recover >"$operation_recovery_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-launch >"$herdr_launch_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
@@ -635,6 +638,7 @@ tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_de
 chmod 0755 "$worker_git_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$operation_wrapper_candidate"
+chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
 chmod 0755 "$herdr_launch_candidate"
 chmod 0440 "$sudoers_candidate"
@@ -810,6 +814,8 @@ sudo install -o root -g root -m 0755 "$worker_bootstrap_candidate" \
   /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 "$operation_wrapper_candidate" \
   /usr/local/bin/ptc-operation
+sudo install -o root -g root -m 0755 "$operation_recovery_candidate" \
+  /usr/local/bin/ptc-manager-operation-recover
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0644 "$agent_context_candidate" \
   /usr/local/libexec/ptc-manager-agent-context

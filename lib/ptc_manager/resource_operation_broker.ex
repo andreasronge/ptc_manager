@@ -57,7 +57,7 @@ defmodule PtcManager.ResourceOperationBroker do
 
   @impl true
   def handle_info(:sweep, state) do
-    ResourceOperations.mark_stale_recovery_pending()
+    sweep()
     ManagedOperationContext.cleanup_inactive(&owner_active?/1)
     schedule_sweep()
     {:noreply, state}
@@ -123,7 +123,8 @@ defmodule PtcManager.ResourceOperationBroker do
 
   defp handle_request(%{"operation" => "acquire", "operation_id" => id}, payload) do
     case active_owned_operation(id, payload) do
-      {:ok, _operation} ->
+      {:ok, operation} ->
+        _ = ResourceOperations.heartbeat_queued(operation.id)
         _ = ResourceOperations.claim_next(integer(payload, "worker_id"))
 
         case owned_operation(id, payload) do
@@ -326,6 +327,41 @@ defmodule PtcManager.ResourceOperationBroker do
 
   defp operation_priority(%AgentRun{job_id: job_id}) when is_integer(job_id), do: 300
   defp operation_priority(_run), do: 100
+
+  @doc false
+  def sweep do
+    ResourceOperations.expire_stale_queued()
+    ResourceOperations.mark_stale_recovery_pending()
+    recover_pending_operations()
+  end
+
+  defp recover_pending_operations do
+    recovery =
+      Application.get_env(
+        :ptc_manager,
+        :resource_operation_recovery,
+        PtcManager.ResourceOperationRecovery
+      )
+
+    Enum.each(ResourceOperations.list_recovery_pending(), fn operation ->
+      case recovery.recover(operation) do
+        :recovered ->
+          _ =
+            ResourceOperations.release_recovered(
+              operation.id,
+              operation.attempt_token,
+              "The abandoned operation process tree was terminated during recovery."
+            )
+
+        {:retry, reason} ->
+          _ = reason
+          :ok
+
+        {:error, _reason} ->
+          :ok
+      end
+    end)
+  end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
