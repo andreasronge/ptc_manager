@@ -36,8 +36,19 @@ defmodule PtcManager.AutomationsTest do
 
         Enum.take(args, 2) == ["agent", "prompt"] ->
           true = option_values(args, "--until") == ["working", "blocked"]
-          prepare_prompt_result(Enum.at(args, 3))
-          {:ok, ~s({"result":{"state":"working"}})}
+          prompt = Enum.at(args, 3)
+          prepare_prompt_result(prompt)
+
+          if String.starts_with?(prompt, "Read and follow the complete task") do
+            {:error,
+             {:herdr_exit, 1,
+              ~s({"error":{"code":"agent_prompt_stalled","message":"agent prompt produced no observed state change within 5000 ms; status is idle and state_change_seq remained 40"},"id":"cli:agent:prompt"})}}
+          else
+            {:ok, ~s({"result":{"state":"working"}})}
+          end
+
+        Enum.take(args, 2) == ["agent", "get"] ->
+          {:ok, ~s({"result":{"agent":{"agent_status":"working","state_change_seq":41}}})}
 
         Enum.take(args, 2) == ["agent", "wait"] ->
           true = option_values(args, "--until") == ["idle", "done", "blocked"]

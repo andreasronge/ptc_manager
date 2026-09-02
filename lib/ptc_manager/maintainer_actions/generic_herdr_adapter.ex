@@ -12,6 +12,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Repository.WorkerRepositoryTrust
 
   @command_grace_ms 5_000
+  @prompt_stall_recovery_ms 30_000
+  @prompt_stall_poll_ms 250
 
   @impl true
   def run(%AgentAction{automation_definition_version: version} = action)
@@ -225,32 +227,16 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   defp submit_and_wait(name, prompt, timeout) do
-    with {:ok, _started} <-
-           command().run(
-             [
-               "agent",
-               "prompt",
-               name,
-               prompt,
-               "--wait",
-               "--until",
-               "working",
-               "--until",
-               "blocked",
-               "--timeout",
-               Integer.to_string(timeout)
-             ],
-             timeout + @command_grace_ms
-           ) do
+    result =
       command().run(
         [
           "agent",
-          "wait",
+          "prompt",
           name,
+          prompt,
+          "--wait",
           "--until",
-          "idle",
-          "--until",
-          "done",
+          "working",
           "--until",
           "blocked",
           "--timeout",
@@ -258,7 +244,91 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         ],
         timeout + @command_grace_ms
       )
+
+    case result do
+      {:ok, _started} ->
+        wait_for_completion(name, timeout)
+
+      {:error, reason} = error ->
+        case prompt_stalled_sequence(reason) do
+          {:ok, sequence} -> recover_stalled_prompt(name, sequence, timeout, error)
+          :error -> error
+        end
     end
+  end
+
+  defp recover_stalled_prompt(name, baseline_sequence, timeout, original_error) do
+    recovery_ms = min(timeout, @prompt_stall_recovery_ms)
+    deadline = System.monotonic_time(:millisecond) + recovery_ms
+    poll_prompt_state(name, baseline_sequence, timeout, deadline, original_error)
+  end
+
+  defp poll_prompt_state(name, baseline_sequence, timeout, deadline, original_error) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      original_error
+    else
+      result = command().run(["agent", "get", name], min(remaining, 2_000))
+
+      case decode_agent_state(result) do
+        {:ok, sequence, state} when sequence > baseline_sequence and state == "working" ->
+          wait_for_completion(name, timeout)
+
+        {:ok, sequence, state}
+        when sequence > baseline_sequence and state in ["idle", "done", "blocked"] ->
+          result
+
+        _unchanged ->
+          Process.sleep(min(remaining, @prompt_stall_poll_ms))
+          poll_prompt_state(name, baseline_sequence, timeout, deadline, original_error)
+      end
+    end
+  end
+
+  defp decode_agent_state({:ok, output}) do
+    with {:ok, decoded} <- Jason.decode(output),
+         %{"state_change_seq" => sequence, "agent_status" => state}
+         when is_integer(sequence) and is_binary(state) <- get_in(decoded, ["result", "agent"]) do
+      {:ok, sequence, state}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp decode_agent_state(_result), do: :error
+
+  defp prompt_stalled_sequence({:herdr_exit, _status, output}) do
+    with {:ok, %{"error" => %{"code" => "agent_prompt_stalled", "message" => message}}} <-
+           Jason.decode(output),
+         [sequence] <-
+           Regex.run(~r/state_change_seq remained (\d+)/, message, capture: :all_but_first),
+         {sequence, ""} <- Integer.parse(sequence) do
+      {:ok, sequence}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp prompt_stalled_sequence(_reason), do: :error
+
+  defp wait_for_completion(name, timeout) do
+    command().run(
+      [
+        "agent",
+        "wait",
+        name,
+        "--until",
+        "idle",
+        "--until",
+        "done",
+        "--until",
+        "blocked",
+        "--timeout",
+        Integer.to_string(timeout)
+      ],
+      timeout + @command_grace_ms
+    )
   end
 
   defp write_prompt_file(action, prompt) do
