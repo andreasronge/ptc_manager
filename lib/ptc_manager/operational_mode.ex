@@ -8,7 +8,7 @@ defmodule PtcManager.OperationalMode do
   identifier; activation succeeds only after that exact claim is marked passed.
   """
 
-  @type mode :: :active | :maintenance | {:canary, String.t()}
+  @type mode :: :active | :draining | :maintenance | {:canary, String.t()}
 
   @mode_lock {__MODULE__, :mode}
 
@@ -20,6 +20,12 @@ defmodule PtcManager.OperationalMode do
 
       "active" ->
         :active
+
+      :draining ->
+        :draining
+
+      "draining" ->
+        :draining
 
       :maintenance ->
         :maintenance
@@ -52,11 +58,49 @@ defmodule PtcManager.OperationalMode do
 
   def active?, do: mode() == :active
   def maintenance?, do: not active?()
+  def reconciliation_allowed?, do: mode() in [:active, :draining]
   def canary?, do: match?({:canary, _invocation_id}, mode())
 
   @spec authorize_ordinary_work() :: :ok | {:error, :maintenance_mode}
   def authorize_ordinary_work do
-    if active?(), do: :ok, else: {:error, :maintenance_mode}
+    case mode() do
+      :active -> :ok
+      :draining -> {:error, :deployment_draining}
+      _restricted -> {:error, :maintenance_mode}
+    end
+  end
+
+  def enter_draining do
+    :global.trans(@mode_lock, fn ->
+      case mode() do
+        :active ->
+          Application.put_env(:ptc_manager, :operational_mode, :draining)
+          :ok
+
+        :draining ->
+          :ok
+
+        _restricted ->
+          {:error, :operational_mode_restricted}
+      end
+    end)
+  end
+
+  def leave_draining do
+    result =
+      :global.trans(@mode_lock, fn ->
+        case mode() do
+          :draining ->
+            Application.put_env(:ptc_manager, :operational_mode, :active)
+            :ok
+
+          _mode ->
+            {:error, :not_draining}
+        end
+      end)
+
+    if result == :ok, do: wake_after_draining()
+    result
   end
 
   @spec authorize_canary(String.t()) :: :ok | {:error, :canary_not_admitted}
@@ -168,6 +212,7 @@ defmodule PtcManager.OperationalMode do
   end
 
   def label(:active), do: "Active"
+  def label(:draining), do: "Deployment drain"
   def label(:maintenance), do: "Maintenance"
   def label({:canary, _invocation_id}), do: "Canary"
 
@@ -180,6 +225,15 @@ defmodule PtcManager.OperationalMode do
     PtcManager.ResultPoller.wake()
     PtcManager.PublisherPoller.wake()
     PtcManager.PublicationStatusPoller.wake()
+    PtcManager.DailyDigests.Scheduler.wake()
+  end
+
+  defp wake_after_draining do
+    # Reconciliation pollers continue running while draining. Only wake the
+    # producers that were deliberately paused from starting new work.
+    PtcManager.MaintainerActions.Poller.wake()
+    PtcManager.GitHub.Poller.wake()
+    PtcManager.Dispatch.Poller.wake()
     PtcManager.DailyDigests.Scheduler.wake()
   end
 end

@@ -87,6 +87,13 @@ defmodule PtcManagerWeb.Layouts do
               Automations
             </.nav_link>
             <.nav_link
+              href={~p"/deployments"}
+              active={@current_path == "/deployments"}
+              icon="hero-rocket-launch-mini"
+            >
+              Deploy
+            </.nav_link>
+            <.nav_link
               href={~p"/configuration"}
               active={@current_path == "/configuration"}
               icon="hero-cog-6-tooth-mini"
@@ -139,7 +146,7 @@ defmodule PtcManagerWeb.Layouts do
             <span class="font-semibold">
               {PtcManager.OperationalMode.label(PtcManager.OperationalMode.mode())} mode.
             </span>
-            Read-only inspection is available; agents, queues, synchronization, and configuration changes are paused.
+            {restricted_mode_message(PtcManager.OperationalMode.mode())}
           </p>
         </div>
       </div>
@@ -156,6 +163,13 @@ defmodule PtcManagerWeb.Layouts do
   end
 
   def repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
+
+  defp restricted_mode_message(:draining),
+    do: "New work is paused while existing agents finish and deployment waits for a safe window."
+
+  defp restricted_mode_message(_mode),
+    do:
+      "Read-only inspection is available; agents, queues, synchronization, and configuration changes are paused."
 
   attr :href, :string, required: true
   attr :active, :boolean, default: false

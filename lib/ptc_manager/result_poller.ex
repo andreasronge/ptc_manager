@@ -47,7 +47,7 @@ defmodule PtcManager.ResultPoller do
   def handle_cast(:wake, state), do: {:noreply, state}
 
   defp schedule do
-    case {PtcManager.OperationalMode.active?(), interval()} do
+    case {PtcManager.OperationalMode.reconciliation_allowed?(), interval()} do
       {false, _interval} -> :ok
       {true, interval} when interval > 0 -> Process.send_after(self(), :reconcile, interval)
       _ -> :ok
@@ -55,7 +55,7 @@ defmodule PtcManager.ResultPoller do
   end
 
   defp enabled? do
-    PtcManager.OperationalMode.active?() and interval() > 0
+    PtcManager.OperationalMode.reconciliation_allowed?() and interval() > 0
   end
 
   defp interval,

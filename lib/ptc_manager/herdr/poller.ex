@@ -43,6 +43,6 @@ defmodule PtcManager.Herdr.Poller do
   defp schedule_sync(state),
     do: PollerWake.schedule(state, enabled?(), :sync, interval())
 
-  defp enabled?, do: PtcManager.OperationalMode.active?() and interval() > 0
+  defp enabled?, do: PtcManager.OperationalMode.reconciliation_allowed?() and interval() > 0
   defp interval, do: Application.get_env(:ptc_manager, :herdr_sync_interval_ms, 0)
 end

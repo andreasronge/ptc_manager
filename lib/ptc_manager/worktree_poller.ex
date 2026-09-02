@@ -53,7 +53,7 @@ defmodule PtcManager.WorktreePoller do
   end
 
   defp enabled? do
-    PtcManager.OperationalMode.active?() and
+    PtcManager.OperationalMode.reconciliation_allowed?() and
       Application.get_env(:ptc_manager, :dispatch_enabled, false) and interval() > 0
   end
 

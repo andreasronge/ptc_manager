@@ -1,16 +1,17 @@
 defmodule PtcManager.Repository.Contract do
   @moduledoc """
-  Strict, versioned repository-owned setup and optional publication verification.
+  Strict, versioned repository-owned setup, publication verification, and deployment.
 
   Contract files are untrusted repository input. Unknown keys and malformed
   values fail closed so a typo cannot silently weaken a publication gate.
   """
 
   @filename ".ptc-manager.yml"
-  @top_keys MapSet.new(["version", "bootstrap", "verification"])
+  @top_keys MapSet.new(["version", "bootstrap", "verification", "deployment"])
   @required_top_keys MapSet.new(["version", "bootstrap"])
   @bootstrap_keys MapSet.new(["command", "timeout_minutes"])
   @verification_keys MapSet.new(["before_publish", "timeout_minutes"])
+  @deployment_keys MapSet.new(["command", "timeout_minutes"])
   @max_command_bytes 2_000
   @max_timeout_minutes 24 * 60
 
@@ -19,14 +20,22 @@ defmodule PtcManager.Repository.Contract do
     :bootstrap_command,
     :bootstrap_timeout_minutes
   ]
-  defstruct @enforce_keys ++ [before_publish_command: nil, verification_timeout_minutes: nil]
+  defstruct @enforce_keys ++
+              [
+                before_publish_command: nil,
+                verification_timeout_minutes: nil,
+                deployment_command: nil,
+                deployment_timeout_minutes: nil
+              ]
 
   @type t :: %__MODULE__{
           version: 1,
           bootstrap_command: binary(),
           bootstrap_timeout_minutes: pos_integer(),
           before_publish_command: binary() | nil,
-          verification_timeout_minutes: pos_integer() | nil
+          verification_timeout_minutes: pos_integer() | nil,
+          deployment_command: binary() | nil,
+          deployment_timeout_minutes: pos_integer() | nil
         }
 
   alias PtcManager.Operations.Job
@@ -56,24 +65,39 @@ defmodule PtcManager.Repository.Contract do
   @doc "Returns the bootstrap entrypoint as one contained relative executable path."
   @spec bootstrap_script(t()) :: {:ok, binary()} | {:error, term()}
   def bootstrap_script(%__MODULE__{bootstrap_command: command}) when is_binary(command) do
-    normalized = String.trim_leading(command, "./")
+    case contained_script(command, :bootstrap) do
+      {:ok, script} ->
+        {:ok, script}
 
-    cond do
-      command == "" or String.contains?(command, [" ", "\t", "\n", "\r", <<0>>]) ->
+      {:error, {:contract_script_must_be_one_path, :bootstrap}} ->
         {:error, :workspace_setup_must_be_one_script}
 
-      Path.type(command) == :absolute or Path.type(normalized) == :absolute ->
+      {:error, {:contract_script_must_be_relative, :bootstrap}} ->
         {:error, :workspace_setup_script_must_be_relative}
 
-      normalized in ["", "."] or Enum.any?(Path.split(normalized), &(&1 in ["", ".", ".."])) ->
+      {:error, {:contract_script_escapes_repository, :bootstrap}} ->
         {:error, :workspace_setup_script_escapes_worktree}
-
-      true ->
-        {:ok, normalized}
     end
   end
 
   def bootstrap_script(_contract), do: {:error, :workspace_setup_script_missing}
+
+  @doc "Returns the optional deployment entrypoint as one contained relative executable path."
+  @spec deployment_script(t()) :: {:ok, binary()} | {:error, term()}
+  def deployment_script(%__MODULE__{deployment_command: command}) when is_binary(command) do
+    contained_script(command, :deployment)
+  end
+
+  def deployment_script(_contract), do: {:error, :repository_deployment_not_configured}
+
+  @doc "Whether the repository opted into typed deployment."
+  @spec deployment_configured?(t()) :: boolean()
+  def deployment_configured?(%__MODULE__{
+        deployment_command: command,
+        deployment_timeout_minutes: timeout
+      }) do
+    is_binary(command) and command != "" and is_integer(timeout) and timeout > 0
+  end
 
   @doc "Whether the repository opted into the independent broker publication gate."
   @spec publication_verification_configured?(t()) :: boolean()
@@ -163,14 +187,18 @@ defmodule PtcManager.Repository.Contract do
          {:ok, bootstrap_command} <- command(bootstrap["command"], :bootstrap),
          {:ok, bootstrap_timeout} <- timeout(bootstrap["timeout_minutes"], :bootstrap),
          {:ok, before_publish_command, verification_timeout} <-
-           optional_verification(decoded["verification"]) do
+           optional_verification(decoded["verification"]),
+         {:ok, deployment_command, deployment_timeout} <-
+           optional_deployment(decoded["deployment"]) do
       {:ok,
        %__MODULE__{
          version: 1,
          bootstrap_command: bootstrap_command,
          bootstrap_timeout_minutes: bootstrap_timeout,
          before_publish_command: before_publish_command,
-         verification_timeout_minutes: verification_timeout
+         verification_timeout_minutes: verification_timeout,
+         deployment_command: deployment_command,
+         deployment_timeout_minutes: deployment_timeout
        }}
     else
       version when is_integer(version) -> {:error, {:unsupported_contract_version, version}}
@@ -266,6 +294,36 @@ defmodule PtcManager.Repository.Contract do
          {:ok, verification_timeout} <-
            timeout(verification["timeout_minutes"], :verification) do
       {:ok, before_publish_command, verification_timeout}
+    end
+  end
+
+  defp optional_deployment(nil), do: {:ok, nil, nil}
+
+  defp optional_deployment(value) do
+    with {:ok, deployment} <- mapping(value, :deployment),
+         :ok <- exact_keys(deployment, @deployment_keys, :deployment),
+         {:ok, deployment_command} <- command(deployment["command"], :deployment),
+         {:ok, deployment_timeout} <- timeout(deployment["timeout_minutes"], :deployment),
+         {:ok, _script} <- contained_script(deployment_command, :deployment) do
+      {:ok, deployment_command, deployment_timeout}
+    end
+  end
+
+  defp contained_script(command, field) do
+    normalized = String.trim_leading(command, "./")
+
+    cond do
+      command == "" or String.contains?(command, [" ", "\t", "\n", "\r", <<0>>]) ->
+        {:error, {:contract_script_must_be_one_path, field}}
+
+      Path.type(command) == :absolute or Path.type(normalized) == :absolute ->
+        {:error, {:contract_script_must_be_relative, field}}
+
+      normalized in ["", "."] or Enum.any?(Path.split(normalized), &(&1 in ["", ".", ".."])) ->
+        {:error, {:contract_script_escapes_repository, field}}
+
+      true ->
+        {:ok, normalized}
     end
   end
 

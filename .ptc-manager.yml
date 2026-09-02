@@ -5,3 +5,6 @@ bootstrap:
 verification:
   before_publish: ./scripts/ci/pre-publication
   timeout_minutes: 45
+deployment:
+  command: ./scripts/ptc/deploy
+  timeout_minutes: 20

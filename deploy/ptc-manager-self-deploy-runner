@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+spool=${PTC_DEPLOYMENT_SPOOL_PATH:-/var/lib/ptc_manager-deploy}
+request=$spool/request.json
+checkout=${PTC_SELF_DEPLOY_CHECKOUT:-/home/agent/src/ptc_manager-self-deploy}
+lock=/run/lock/ptc-manager-self-deploy.lock
+
+exec 9>"$lock"
+flock -n 9 || { echo "another self-deployment is already running" >&2; exit 1; }
+
+[ -f "$request" ] || { echo "deployment request is missing" >&2; exit 1; }
+
+deployment_id=$(jq -er '.deployment_id | select(type == "number" and . > 0) | floor' "$request")
+repository=$(jq -er '.repository | select(type == "string")' "$request")
+default_branch=$(jq -er '.default_branch | select(type == "string")' "$request")
+requested_sha=$(jq -er '.requested_sha | select(type == "string")' "$request")
+command=$(jq -er '.command | select(type == "string")' "$request")
+timeout_seconds=$(jq -er '.timeout_seconds | select(type == "number" and . > 0) | floor' "$request")
+status_path=$(jq -er '.status_path | select(type == "string")' "$request")
+
+case "$repository" in
+  */*) ;;
+  *) echo "invalid deployment repository" >&2; exit 2 ;;
+esac
+case "$default_branch" in
+  *[!A-Za-z0-9._/-]*|'') echo "invalid default branch" >&2; exit 2 ;;
+esac
+case "$requested_sha" in
+  *[!0-9a-f]*|'') echo "invalid deployment sha" >&2; exit 2 ;;
+esac
+case "$command" in
+  /*|*..*|*' '*|*"	"*|-*) echo "invalid deployment command" >&2; exit 2 ;;
+  ./*) command_path=${command#./} ;;
+  *) command_path=$command ;;
+esac
+[ -n "$command_path" ] || { echo "deployment command is missing" >&2; exit 2; }
+case "$status_path" in
+  "$spool"/deployment-"$deployment_id".status.json) ;;
+  *) echo "invalid deployment status path" >&2; exit 2 ;;
+esac
+
+status_tmp="${status_path}.tmp.$$"
+archive=
+command_copy=
+cleanup_files() {
+  [ -z "$command_copy" ] || rm -f -- "$command_copy"
+  [ -z "$archive" ] || rm -f -- "$archive"
+  rm -f -- "$status_tmp"
+}
+
+write_status() {
+  state=$1
+  release_id=${2:-}
+  status_text=${3:-}
+  error=${4:-}
+  jq -n \
+    --argjson deployment_id "$deployment_id" \
+    --arg requested_sha "$requested_sha" \
+    --arg state "$state" \
+    --arg release_id "$release_id" \
+    --arg status_text "$status_text" \
+    --arg error "$error" \
+    '{deployment_id: $deployment_id, requested_sha: $requested_sha, state: $state,
+      release_id: $release_id, status_text: $status_text,
+      error: (if $error == "" then null else $error end)}' >"$status_tmp"
+  chmod 0660 "$status_tmp"
+  mv "$status_tmp" "$status_path"
+}
+
+deployment_failed() {
+  status=$?
+  [ "$status" -ne 0 ] || status=1
+  trap - EXIT HUP INT TERM
+  write_status failed "" "Deployment stopped safely; inspect the retained service output." \
+    "repository deployment command exited with status $status"
+  cleanup_files
+  exit "$status"
+}
+trap deployment_failed EXIT HUP INT TERM
+
+mkdir -p "$(dirname "$checkout")"
+if [ ! -d "$checkout/.git" ]; then
+  gh repo clone "$repository" "$checkout" -- --no-checkout
+fi
+
+origin=$(git -C "$checkout" remote get-url origin)
+case "$origin" in
+  "https://github.com/$repository"|"https://github.com/$repository.git"|"git@github.com:$repository.git") ;;
+  *) echo "self-deploy checkout origin does not match $repository" >&2; exit 1 ;;
+esac
+
+git -C "$checkout" fetch --quiet --prune origin \
+  "+refs/heads/$default_branch:refs/remotes/origin/$default_branch"
+remote_sha=$(git -C "$checkout" rev-parse "refs/remotes/origin/$default_branch^{commit}")
+[ "$remote_sha" = "$requested_sha" ] || {
+  echo "requested revision is no longer the default-branch head" >&2
+  exit 1
+}
+
+archive="/tmp/ptc-manager-self-${deployment_id}-${requested_sha}.tar"
+command_copy="/tmp/ptc-manager-self-command-${deployment_id}"
+git -C "$checkout" archive --format=tar --output="$archive" "$requested_sha"
+tar -xOf "$archive" "$command_path" >"$command_copy"
+chmod 0700 "$command_copy"
+
+PTC_DEPLOY_SHA=$requested_sha \
+PTC_DEPLOY_SOURCE_ARCHIVE=$archive \
+PTC_DEPLOYMENT_ID=$deployment_id \
+  timeout "$timeout_seconds" "$command_copy"
+
+release_id=$(printf '%s' "$requested_sha" | cut -c1-12)
+write_status completed "$release_id" "Deployment completed and the new release passed its health checks." ""
+rm -f -- "$request"
+cleanup_files
+trap - EXIT HUP INT TERM

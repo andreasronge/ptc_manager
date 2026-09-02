@@ -9,6 +9,8 @@ defmodule Mix.Tasks.PtcDeployTest do
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
+  @self_deploy_command Path.join(@project_root, "scripts/ptc/deploy")
+  @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
   @environment_file_parser Path.join(
                              @project_root,
@@ -21,10 +23,55 @@ defmodule Mix.Tasks.PtcDeployTest do
           @remote_script,
           @worker_git,
           @worker_bootstrap,
-          @failure_policy
+          @failure_policy,
+          @self_deploy_command,
+          @self_deploy_runner
         ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
+  end
+
+  test "self-deploy command runs from its immutable archive without a Git checkout" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-self-deploy-command-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    source = Path.join(root, "source")
+
+    archive = "/tmp/ptc-manager-self-command-#{System.unique_integer([:positive])}.tar"
+
+    File.mkdir_p!(Path.join(source, "deploy"))
+
+    File.write!(
+      Path.join(source, "deploy/remote-deploy-herdr"),
+      "#!/bin/sh\nprintf '%s\\n' \"$1|$2|$3|$4\"\n"
+    )
+
+    File.write!(Path.join(source, "deploy/deployment-failure-policy"), "#!/bin/sh\nexit 0\n")
+    assert {"", 0} = System.cmd("tar", ["-cf", archive, "-C", source, "."])
+
+    sha = String.duplicate("a", 40)
+
+    on_exit(fn ->
+      File.rm_rf!(root)
+      File.rm(archive)
+    end)
+
+    assert {output, 0} =
+             System.cmd(@self_deploy_command, [],
+               cd: root,
+               env: [
+                 {"PTC_DEPLOY_SHA", sha},
+                 {"PTC_DEPLOY_SOURCE_ARCHIVE", archive},
+                 {"PTC_DEPLOYMENT_ID", "42"}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert output =~ "|#{archive}|/tmp/ptc-manager-failure-policy-"
+    assert output =~ "|#{sha}"
   end
 
   test "remote deployment installs the bounded worker bootstrap bridge" do
@@ -38,6 +85,25 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert wrapper =~ "worktree_root=/srv/ptc_manager-worktrees"
     assert wrapper =~ "worktree is outside the managed root"
     assert wrapper =~ "script is outside the worktree"
+  end
+
+  test "remote deployment installs the out-of-process self-deploy bridge" do
+    script = File.read!(@remote_script)
+    sudoers = File.read!(Path.join(@project_root, "deploy/ptc_manager.sudoers"))
+    unit = File.read!(Path.join(@project_root, "deploy/ptc_manager-self-deploy.service"))
+
+    assert script =~ "deploy/ptc-manager-self-deploy-runner"
+    assert script =~ "/usr/local/bin/ptc-manager-self-deploy-runner"
+    assert script =~ "/etc/systemd/system/ptc-manager-self-deploy.service"
+    assert script =~ "printf '%s\\n' \"$source_commit_sha\" >\"$new_release/RELEASE_SHA\""
+    assert script =~ "PtcManager.OperationalMode.enter_draining()"
+    assert sudoers =~ "/bin/systemctl start --no-block ptc-manager-self-deploy.service"
+    assert unit =~ "Type=oneshot"
+    assert unit =~ "User=agent"
+
+    runner = File.read!(@self_deploy_runner)
+    assert runner =~ "*) command_path=$command ;;"
+    assert runner =~ ~s(tar -xOf "$archive" "$command_path")
   end
 
   test "deployment failure policy classifies the effect boundary" do

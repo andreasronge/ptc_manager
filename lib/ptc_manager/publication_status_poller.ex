@@ -65,7 +65,7 @@ defmodule PtcManager.PublicationStatusPoller do
   def next_delay(_result), do: interval()
 
   defp enabled? do
-    PtcManager.OperationalMode.active?() and
+    PtcManager.OperationalMode.reconciliation_allowed?() and
       (Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
          PtcManager.Publications.agent_reconciliation_needed?())
   end

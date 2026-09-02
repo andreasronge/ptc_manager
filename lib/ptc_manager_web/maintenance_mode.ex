@@ -26,6 +26,14 @@ defmodule PtcManagerWeb.MaintenanceMode do
            :error,
            "PtcManager is in maintenance mode. Read-only pages remain available, but new work is paused."
          )}
+
+      {:error, :deployment_draining} ->
+        {:halt,
+         put_flash(
+           socket,
+           :error,
+           "PtcManager is waiting to deploy. Existing work may finish, but new work is paused."
+         )}
     end
   end
 end

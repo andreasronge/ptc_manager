@@ -23,6 +23,13 @@ defmodule PtcManager.Repository.ContractTest do
     timeout_minutes: 10
   """
 
+  @deployable @valid <>
+                """
+                deployment:
+                  command: ./scripts/ptc/deploy
+                  timeout_minutes: 20
+                """
+
   test "parses the complete versioned contract" do
     assert {:ok, contract} = Contract.parse(@valid)
     assert contract.version == 1
@@ -43,6 +50,22 @@ defmodule PtcManager.Repository.ContractTest do
 
     assert {:error, :repository_publication_verification_missing} =
              Contract.require_publication_verification(contract)
+  end
+
+  test "parses an optional contained deployment entrypoint" do
+    assert {:ok, contract} = Contract.parse(@deployable)
+    assert contract.deployment_command == "./scripts/ptc/deploy"
+    assert contract.deployment_timeout_minutes == 20
+    assert Contract.deployment_configured?(contract)
+    assert {:ok, "scripts/ptc/deploy"} = Contract.deployment_script(contract)
+
+    refute Contract.deployment_configured?(elem(Contract.parse(@valid), 1))
+
+    assert {:error, {:contract_script_escapes_repository, :deployment}} =
+             Contract.parse(
+               @valid <>
+                 "deployment:\n  command: ../deploy\n  timeout_minutes: 20\n"
+             )
   end
 
   test "recomputes the frozen job digest and rejects changed gate fields" do
@@ -141,7 +164,11 @@ defmodule PtcManager.Repository.ContractTest do
 
     assert {:ok, contract} = Contract.load(repository)
 
-    for command <- [contract.bootstrap_command, contract.before_publish_command] do
+    for command <- [
+          contract.bootstrap_command,
+          contract.before_publish_command,
+          contract.deployment_command
+        ] do
       [relative_path] = String.split(command, " ", trim: true)
       path = Path.join(repository, relative_path)
       assert File.regular?(path)

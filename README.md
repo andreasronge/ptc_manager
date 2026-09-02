@@ -575,6 +575,43 @@ clean Git commit with:
 mix ptc.deploy
 ```
 
+That command is also the one-time bootstrap for deployment from PtcManager
+itself. It installs the host-owned runner and an immutable release revision
+marker. After that release is running:
+
+1. add `andreasronge/ptc_manager` as an enabled repository in Configuration;
+2. point it at the trusted server checkout containing its checked-in
+   `.ptc-manager.yml`;
+3. open **Deploy** in PtcManager.
+
+The Deploy page compares the SHA recorded in the running release with the
+latest SHA on the repository's default branch. It shows **Update available**
+when they differ, and **Up to date** when they match. **Check for updates**
+refreshes the comparison. The private repository is read using the existing
+`GITHUB_READ_TOKEN`; no separate GitHub account is introduced.
+
+**Deploy when safe** records an audited request and enters drain mode: existing
+managed work may finish, but no new work starts. When the managed-agent count
+reaches zero, PtcManager hands the exact default-branch SHA to a narrowly
+authorized systemd service. That service survives the application restart,
+rechecks that the SHA is still the branch head, builds and installs it, and
+reports completion back through a bounded status file. The new release remains
+drained until that completion is recorded. A failure is shown in deployment
+history and follows the same fail-closed maintenance behavior as `mix
+ptc.deploy`.
+
+Repository deployment is opt-in. Its strict repository-owned contract is:
+
+```yaml
+deployment:
+  command: ./scripts/ptc/deploy
+  timeout_minutes: 20
+```
+
+The command is extracted from the requested Git archive and receives only
+`PTC_DEPLOY_SHA`, `PTC_DEPLOY_SOURCE_ARCHIVE`, and `PTC_DEPLOYMENT_ID`. A
+repository without this section is never offered a deployment button.
+
 The target defaults to the `herdr-box` SSH host from the local SSH config. Use
 `mix ptc.deploy --target another-host` to select a different SSH alias, or
 `mix ptc.deploy --dry-run` to show the resolved commit and release identifier

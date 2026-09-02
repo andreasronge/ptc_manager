@@ -1,0 +1,157 @@
+<Layouts.app flash={@flash} current_path="/deployments">
+  <div class="space-y-8">
+    <section class="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+      <div>
+        <p class="text-sm font-semibold uppercase tracking-[0.2em] text-teal-300">Releases</p>
+        <h1 class="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">Deployments</h1>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-slate-400">
+          See whether the running PtcManager release is behind its default branch. A deployment pauses new work, lets active agents finish, and then continues in a host service that survives the application restart.
+        </p>
+      </div>
+      <button
+        phx-click="refresh-revisions"
+        class="inline-flex w-fit items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-white/10"
+      >
+        <.icon name="hero-arrow-path-mini" class="size-4" /> Check for updates
+      </button>
+    </section>
+
+    <section
+      :if={@deployment_statuses == []}
+      id="no-deployments-configured"
+      class="rounded-2xl border border-dashed border-white/15 bg-slate-900/50 p-6"
+    >
+      <h2 class="font-semibold text-white">No repository has deployment enabled</h2>
+      <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
+        Add the PtcManager repository under Configuration and include a deployment command in its checked-in <code class="text-slate-300">.ptc-manager.yml</code>. It remains disabled until both are present.
+      </p>
+    </section>
+
+    <section id="deployment-availability" class="grid gap-5 lg:grid-cols-2">
+      <article
+        :for={status <- @deployment_statuses}
+        id={"deployment-repository-#{status.repository.id}"}
+        class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Repository
+            </p>
+            <h2 class="mt-1 text-lg font-semibold text-white">
+              {status.repository.github_owner}/{status.repository.github_name}
+            </h2>
+          </div>
+          <span
+            :if={status.update_available?}
+            id={"update-available-#{status.repository.id}"}
+            class="rounded-full bg-teal-400/15 px-3 py-1 text-xs font-semibold text-teal-200"
+          >
+            Update available
+          </span>
+          <span
+            :if={status.current?}
+            class="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300"
+          >
+            Up to date
+          </span>
+        </div>
+
+        <dl class="mt-5 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-xl bg-white/[0.035] p-3">
+            <dt class="text-xs text-slate-500">Running release</dt>
+            <dd class="mt-1 font-mono text-sm text-slate-200">
+              {short_sha(status.deployed_sha)}
+            </dd>
+          </div>
+          <div class="rounded-xl bg-white/[0.035] p-3">
+            <dt class="text-xs text-slate-500">Latest {status.repository.default_branch}</dt>
+            <dd class="mt-1 font-mono text-sm text-slate-200">
+              <span :if={status.revision_result == :loading}>Checking…</span>
+              <span :if={match?({:ok, _sha}, status.revision_result)}>
+                {short_sha(status.latest_sha)}
+              </span>
+              <span
+                :if={match?({:error, _reason}, status.revision_result)}
+                class="font-sans text-amber-200"
+              >
+                Check failed
+              </span>
+            </dd>
+          </div>
+        </dl>
+
+        <div
+          :if={status.active_deployment}
+          class="mt-4 rounded-xl border border-amber-400/20 bg-amber-400/[0.07] p-4"
+        >
+          <div class="flex items-center gap-2 text-sm font-semibold text-amber-100">
+            <.icon name="hero-arrow-path-mini" class="size-4 motion-safe:animate-spin" />
+            {state_label(status.active_deployment.state)}
+          </div>
+          <p class="mt-1 text-xs leading-5 text-amber-100/70">
+            {status.active_deployment.status_text}
+          </p>
+        </div>
+
+        <button
+          :if={!status.active_deployment}
+          id={"deploy-when-safe-#{status.repository.id}"}
+          phx-click="deploy"
+          phx-value-repository-id={status.repository.id}
+          disabled={!match?({:ok, _sha}, status.revision_result) or status.current?}
+          class="mt-5 inline-flex items-center gap-2 rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+        >
+          <.icon name="hero-rocket-launch-mini" class="size-4" /> Deploy when safe
+        </button>
+        <p :if={is_nil(status.deployed_sha)} class="mt-3 text-xs leading-5 text-amber-200/80">
+          The current release predates revision markers. The first typed deployment will establish one.
+        </p>
+      </article>
+    </section>
+
+    <section id="deployment-history">
+      <div class="mb-4">
+        <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Audit trail</p>
+        <h2 class="mt-1 text-2xl font-semibold">Recent deployments</h2>
+      </div>
+      <div class="space-y-3">
+        <article
+          :if={@recent_deployments == []}
+          class="rounded-xl bg-white/[0.035] p-4 text-sm text-slate-500"
+        >
+          No deployment has been requested yet.
+        </article>
+        <article
+          :for={deployment <- @recent_deployments}
+          id={"deployment-#{deployment.id}"}
+          class="rounded-xl border border-white/10 bg-slate-900/60 p-4"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p class="font-semibold text-white">
+                {deployment.repository.github_owner}/{deployment.repository.github_name}
+                <span class="font-mono text-slate-400">
+                  @ {short_sha(deployment.requested_sha)}
+                </span>
+              </p>
+              <p class="mt-1 text-xs text-slate-500">Requested by {deployment.requested_by}</p>
+            </div>
+            <span class={[
+              "rounded-full px-2.5 py-1 text-xs font-semibold",
+              state_classes(deployment.state)
+            ]}>
+              {state_label(deployment.state)}
+            </span>
+          </div>
+          <p :if={deployment.status_text} class="mt-3 text-sm text-slate-300">
+            {deployment.status_text}
+          </p>
+          <p :if={deployment.last_error} class="mt-2 break-words font-mono text-xs text-rose-200">
+            {deployment.last_error}
+          </p>
+        </article>
+      </div>
+    </section>
+  </div>
+</Layouts.app>

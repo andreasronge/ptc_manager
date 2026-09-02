@@ -54,7 +54,7 @@ defmodule PtcManager.PublisherPoller do
   defp cancel_timer(reference), do: Process.cancel_timer(reference, async: true, info: false)
 
   defp enabled? do
-    PtcManager.OperationalMode.active?() and
+    PtcManager.OperationalMode.reconciliation_allowed?() and
       Application.get_env(:ptc_manager, :publication_enabled, false)
   end
 

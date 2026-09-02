@@ -1,0 +1,14 @@
+[Unit]
+Description=PtcManager exact-revision self-deployment
+After=network-online.target ptc_manager-herdr.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+SupplementaryGroups=ptc-manager-deploy
+EnvironmentFile=-/etc/ptc_manager/self-deploy.env
+ExecStart=/usr/local/bin/ptc-manager-self-deploy-runner
+TimeoutStartSec=30min
+PrivateTmp=false

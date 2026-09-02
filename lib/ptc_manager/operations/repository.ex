@@ -19,6 +19,7 @@ defmodule PtcManager.Operations.Repository do
     has_many :resource_operations, PtcManager.Operations.ResourceOperation
     has_many :pr_publications, PtcManager.Operations.PrPublication
     has_many :automation_definitions, PtcManager.Automations.Definition
+    has_many :deployments, PtcManager.Deployments.Deployment
 
     timestamps(type: :utc_datetime_usec)
   end

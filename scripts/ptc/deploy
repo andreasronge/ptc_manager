@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+requested_sha=${PTC_DEPLOY_SHA:-}
+source_archive=${PTC_DEPLOY_SOURCE_ARCHIVE:-}
+deployment_id=${PTC_DEPLOYMENT_ID:-}
+
+case "$requested_sha" in
+  *[!0-9a-f]*|'') echo "PTC_DEPLOY_SHA is invalid" >&2; exit 2 ;;
+esac
+
+case "$source_archive" in
+  /tmp/ptc-manager-*.tar) ;;
+  *) echo "PTC_DEPLOY_SOURCE_ARCHIVE is invalid" >&2; exit 2 ;;
+esac
+
+case "$deployment_id" in
+  *[!0-9]*|'') echo "PTC_DEPLOYMENT_ID is invalid" >&2; exit 2 ;;
+esac
+
+# This command is deliberately extracted from the immutable source archive and
+# run outside a checkout by the host service. It must therefore use only the
+# exact revision and archive supplied by that service.
+
+short_sha=$(printf '%s' "$requested_sha" | cut -c1-12)
+timestamp=$(date -u +%Y%m%d%H%M%S)
+release_id="${short_sha}-${timestamp}-d${deployment_id}"
+remote_script="/tmp/ptc-manager-deploy-${release_id}"
+failure_policy="/tmp/ptc-manager-failure-policy-${release_id}"
+
+tar -xOf "$source_archive" deploy/remote-deploy-herdr >"$remote_script"
+tar -xOf "$source_archive" deploy/deployment-failure-policy >"$failure_policy"
+chmod 0700 "$remote_script" "$failure_policy"
+
+exec "$remote_script" "$release_id" "$source_archive" "$failure_policy" "$requested_sha"

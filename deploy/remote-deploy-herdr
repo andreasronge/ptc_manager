@@ -4,6 +4,7 @@ set -eu
 release_id=${1:-}
 source_archive=${2:-}
 failure_policy=${3:-}
+source_commit_sha=${4:-}
 
 case "$release_id" in
   *[!A-Za-z0-9.-]*|'')
@@ -27,6 +28,18 @@ case "$failure_policy" in
     exit 2
     ;;
 esac
+
+case "$source_commit_sha" in
+  *[!0-9a-f]*|'')
+    echo "invalid source commit sha" >&2
+    exit 2
+    ;;
+esac
+
+if [ "${#source_commit_sha}" -ne 40 ] && [ "${#source_commit_sha}" -ne 64 ]; then
+  echo "invalid source commit sha length" >&2
+  exit 2
+fi
 
 service_name=ptc_manager
 application_dir=/opt/ptc_manager
@@ -71,6 +84,9 @@ operation_wrapper_candidate="/tmp/ptc-operation-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
 herdr_launch_candidate="/tmp/ptc-manager-herdr-launch-${release_id}"
 sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
+self_deploy_runner_candidate="/tmp/ptc-manager-self-deploy-runner-${release_id}"
+self_deploy_service_candidate="/tmp/ptc-manager-self-deploy-service-${release_id}"
+self_deploy_access_candidate="/tmp/ptc-manager-self-deploy-access-${release_id}"
 coordinator_environment_files=
 coordinator_session=
 worker_session=
@@ -81,7 +97,9 @@ deployment_phase=pre_stop
 cleanup_remote() {
   rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$environment_file_parser" \
     "$worker_git_candidate" "$worker_bootstrap_candidate" "$operation_wrapper_candidate" \
-    "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate"
+    "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
+    "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
+    "$self_deploy_access_candidate"
   sudo rm -f -- "$maintenance_override_backup"
 
   case "$build_dir" in
@@ -611,12 +629,17 @@ tar -xOf "$source_archive" deploy/ptc-operation >"$operation_wrapper_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-launch >"$herdr_launch_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-self-deploy-runner >"$self_deploy_runner_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-self-deploy.service >"$self_deploy_service_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_deploy_access_candidate"
 chmod 0755 "$worker_git_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$operation_wrapper_candidate"
 chmod 0644 "$agent_context_candidate"
 chmod 0755 "$herdr_launch_candidate"
 chmod 0440 "$sudoers_candidate"
+chmod 0755 "$self_deploy_runner_candidate"
+chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
 
 coordinator_environment_files=$(
@@ -794,6 +817,20 @@ sudo install -o root -g root -m 0755 "$herdr_launch_candidate" \
   /usr/local/bin/ptc-manager-herdr-launch
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
   /etc/sudoers.d/ptc_manager
+if ! getent group ptc-manager-deploy >/dev/null; then
+  sudo groupadd --system ptc-manager-deploy
+fi
+sudo usermod -a -G ptc-manager-deploy ptc-manager
+sudo usermod -a -G ptc-manager-deploy agent
+sudo install -d -o ptc-manager -g ptc-manager-deploy -m 2770 /var/lib/ptc_manager-deploy
+sudo install -o root -g root -m 0755 "$self_deploy_runner_candidate" \
+  /usr/local/bin/ptc-manager-self-deploy-runner
+sudo install -o root -g root -m 0644 "$self_deploy_service_candidate" \
+  /etc/systemd/system/ptc-manager-self-deploy.service
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager.service.d
+sudo install -o root -g root -m 0644 "$self_deploy_access_candidate" \
+  /etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-self-deploy-access.conf
+sudo systemctl daemon-reload
 sudo rm -f -- /etc/sudoers.d/ptc_manager-codex
 mkdir -p "$build_dir"
 tar -xf "$source_archive" -C "$build_dir"
@@ -810,6 +847,8 @@ echo "Building production release..."
 "$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
   env MIX_ENV=prod mix release
 install_gate_beam_toolchain
+
+printf '%s\n' "$source_commit_sha" >"$new_release/RELEASE_SHA"
 
 [ -x "$new_release/bin/ptc_manager" ]
 ensure_no_busy_herdr_agents
@@ -846,8 +885,10 @@ remove_maintenance_override
 
 sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
   "case PtcManager.DeploymentCanary.activate(\"deploy-${release_id}\") do :ok -> :ok; {:error, reason} -> raise \"deployment activation failed: #{inspect(reason)}\" end"
+sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
+  'PtcManager.OperationalMode.enter_draining()' >/dev/null
 deployment_phase=complete
-echo "Service is healthy and ordinary work is active."
+echo "Service is healthy. Ordinary work remains drained until the host runner records completion."
 echo "Release backup: $release_backup"
 echo "Database backup: $database_backup"
 prune_successful_backups

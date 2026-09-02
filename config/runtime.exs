@@ -29,11 +29,18 @@ end
 
 demo_mode = System.get_env("PTC_DEMO_MODE") == "true"
 
+if demo_mode do
+  config :ptc_manager,
+    deployment_revision_source: PtcManager.Deployments.LocalRevisionSource,
+    deployment_poll_interval_ms: 0
+end
+
 operational_mode =
   case System.get_env("PTC_OPERATIONAL_MODE", "active") do
     "active" -> :active
+    "draining" -> :draining
     "maintenance" -> :maintenance
-    _invalid -> raise "PTC_OPERATIONAL_MODE must be active or maintenance"
+    _invalid -> raise "PTC_OPERATIONAL_MODE must be active, draining, or maintenance"
   end
 
 github_sync_interval_ms =
@@ -318,6 +325,18 @@ if worktree_root = System.get_env("PTC_WORKTREE_ROOT") do
   config :ptc_manager, :worktree_root, worktree_root
 end
 
+if deployed_sha = System.get_env("PTC_DEPLOYED_SHA") do
+  config :ptc_manager, :deployed_sha, deployed_sha
+end
+
+if deployed_sha_path = System.get_env("PTC_DEPLOYED_SHA_PATH") do
+  config :ptc_manager, :deployed_sha_path, deployed_sha_path
+end
+
+if deployment_spool_path = System.get_env("PTC_DEPLOYMENT_SPOOL_PATH") do
+  config :ptc_manager, :deployment_spool_path, deployment_spool_path
+end
+
 if config_env() == :test do
   config :ptc_manager,
     dispatch_enabled: false,
@@ -329,6 +348,8 @@ if config_env() == :test do
 end
 
 if config_env() == :prod do
+  config :ptc_manager, :deployment_systemctl_command, "/usr/bin/sudo"
+
   raw_admin_password = System.get_env("PTC_MANAGER_PASSWORD")
 
   admin_password =

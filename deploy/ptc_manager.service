@@ -7,7 +7,7 @@ After=network-online.target tailscaled.service
 Type=simple
 User=ptc-manager
 Group=ptc-manager
-SupplementaryGroups=ptc-manager-output ptc-manager-repo ptc-manager-publish ptc-manager-external
+SupplementaryGroups=ptc-manager-output ptc-manager-repo ptc-manager-publish ptc-manager-external ptc-manager-deploy
 UMask=0027
 WorkingDirectory=/opt/ptc_manager
 Environment=PHX_SERVER=true
@@ -22,7 +22,7 @@ ProtectSystem=strict
 # Linked worktrees keep fetched objects and per-worktree state in the source
 # repository's Git directory, while their checked-out files live under the
 # worktree root.
-ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-worker /var/lib/ptc_manager-external /var/lib/ptc_manager-output /var/lib/ptc_manager-publish /srv/ptc_runner/.git /srv/ptc_manager-worktrees /srv/ptc_manager-external
+ReadWritePaths=/var/lib/ptc_manager /var/lib/ptc_manager-worker /var/lib/ptc_manager-external /var/lib/ptc_manager-output /var/lib/ptc_manager-publish /var/lib/ptc_manager-deploy /srv/ptc_runner/.git /srv/ptc_manager-worktrees /srv/ptc_manager-external
 
 [Install]
 WantedBy=multi-user.target

@@ -60,6 +60,7 @@ defmodule PtcManager.Operations do
     do: Worker |> order_by([worker], asc: worker.id) |> Repo.all()
 
   def get_repository!(id), do: Repo.get!(Repository, id)
+  def get_repository(id), do: Repo.get(Repository, id)
 
   def get_issue!(id), do: Issue |> preload(:repository) |> Repo.get!(id)
 

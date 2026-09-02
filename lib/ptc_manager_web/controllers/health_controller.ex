@@ -11,6 +11,7 @@ defmodule PtcManagerWeb.HealthController do
   end
 
   defp mode_name(:active), do: "active"
+  defp mode_name(:draining), do: "draining"
   defp mode_name(:maintenance), do: "maintenance"
   defp mode_name({:canary, _invocation_id}), do: "canary"
 end

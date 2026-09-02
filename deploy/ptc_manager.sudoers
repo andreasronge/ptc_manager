@@ -6,3 +6,4 @@ ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-exte
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-external-push
 ptc-manager ALL=(ptc-manager-verifier) NOPASSWD: /usr/bin/env
 ptc-manager ALL=(ptc-manager-gate) NOPASSWD: /usr/bin/env
+ptc-manager ALL=(root) NOPASSWD: /bin/systemctl start --no-block ptc-manager-self-deploy.service
