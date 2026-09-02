@@ -2,6 +2,7 @@ defmodule PtcManager.ManagedOperationContext do
   @moduledoc false
 
   @max_age_seconds 7 * 24 * 60 * 60
+  @pane_handshake_attempts 2
 
   alias PtcManager.Operations.AgentRun
   alias PtcManager.Repo
@@ -157,29 +158,65 @@ defmodule PtcManager.ManagedOperationContext do
   defp prepare(command, pane_id, attrs) do
     if enabled?() do
       with {:ok, context} <- issue(attrs, path: pane_context_path(pane_id)),
-           marker = "PTC_OPERATION_CONTEXT_READY:#{context.payload["context_id"]}",
            {:ok, _output} <-
-             command.run(["pane", "run", pane_id, shell_command(context.path, context.payload)]),
-           {:ok, _output} <-
-             command.run([
-               "pane",
-               "wait-output",
-               pane_id,
-               "--match",
-               marker,
-               "--source",
-               "recent",
-               "--lines",
-               "20",
-               "--timeout",
-               "10000"
-             ]) do
+             establish_pane_context(command, pane_id, context, @pane_handshake_attempts) do
         {:ok, context}
       end
     else
       {:ok, nil}
     end
   end
+
+  defp establish_pane_context(command, pane_id, context, attempts_left) do
+    marker = "PTC_OPERATION_CONTEXT_READY:#{context.payload["context_id"]}"
+
+    with {:ok, _output} <-
+           command.run(["pane", "run", pane_id, shell_command(context.path, context.payload)]) do
+      case command.run(pane_wait_args(pane_id, marker)) do
+        {:error, reason} when attempts_left > 1 ->
+          if pane_wait_timeout?(reason) do
+            establish_pane_context(command, pane_id, context, attempts_left - 1)
+          else
+            {:error, reason}
+          end
+
+        result ->
+          result
+      end
+    end
+  end
+
+  defp pane_wait_args(pane_id, marker) do
+    [
+      "pane",
+      "wait-output",
+      pane_id,
+      "--match",
+      marker,
+      "--source",
+      "recent",
+      "--lines",
+      "20",
+      "--timeout",
+      "10000"
+    ]
+  end
+
+  defp pane_wait_timeout?({:herdr_exit, 1, output}) when is_binary(output) do
+    case Jason.decode(output) do
+      {:ok,
+       %{
+         "id" => "cli:pane:wait-output",
+         "error" => %{"code" => "timeout"}
+       }} ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp pane_wait_timeout?(_reason), do: false
 
   defp action_attrs(action, pane_id) do
     run =
