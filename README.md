@@ -842,6 +842,21 @@ The deployment links `claude` from the worker Node directory and copies the
 pinned Cursor CLI from `/home/agent/.local/share/cursor-agent/versions/` into
 `/opt/ptc-manager-cursor-agent/` so both are on the worker's service `PATH`.
 
+Node, npm, corepack, and pnpm are provisioned the same way: mise installs the
+version this repository pins, the deployment copies it into a root-owned
+`/opt/ptc-manager-<tool>-<version>` directory, checks the version it actually
+got, and links it onto the worker's `PATH`. An agent therefore cannot rewrite
+its own toolchain, and the version in use is whatever the deployed revision
+says. Updating one is a change to `deploy/remote-deploy-herdr` and a deployment,
+not a command run on the host, so the running toolchain always matches a commit.
+
+pnpm earns its place for repositories that use it: it links a worktree's
+`node_modules` into a shared content-addressed store instead of copying a tree
+into each one, which is the only way a package cache can be shared while no
+agent writes into another's workspace. The store lives in the worker's home,
+which is on the same filesystem as the worktree root, so the links are hard
+links rather than copies.
+
 Each agent kind has its own way past interactive start-up questions. Codex
 receives a per-process `-c projects=...` trust override, the Cursor CLI takes
 `--force --trust`, and Claude Code, which asks "Do you trust this folder?" per

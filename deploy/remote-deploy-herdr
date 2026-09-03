@@ -70,10 +70,13 @@ mise_binary=/home/agent/.local/bin/mise
 worker_mise=/usr/local/bin/mise
 node_version=22.23.2
 worker_node_dir="/opt/ptc-manager-node-${node_version}"
+pnpm_version=10.34.5
+worker_pnpm_dir="/opt/ptc-manager-pnpm-${pnpm_version}"
 cursor_agent_version=2026.08.25-3e8eec8
 cursor_agent_source="/home/agent/.local/share/cursor-agent/versions/${cursor_agent_version}"
 cursor_agent_root=/opt/ptc-manager-cursor-agent
 worker_node_staging=
+worker_pnpm_staging=
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 erlang_version=29.0.3
 elixir_version=1.20.2-otp-29
@@ -136,6 +139,10 @@ cleanup_remote() {
 
   case "$worker_node_staging" in
     /opt/ptc-manager-node-*) sudo rm -rf -- "$worker_node_staging" ;;
+  esac
+
+  case "$worker_pnpm_staging" in
+    /opt/ptc-manager-pnpm-*) sudo rm -rf -- "$worker_pnpm_staging" ;;
   esac
 
   case "$gate_tool_home" in
@@ -618,6 +625,52 @@ install_worker_node() {
   sudo -u ptc-manager-worker -H /usr/local/bin/corepack --version >/dev/null
 }
 
+# pnpm links a worktree's node_modules into a shared content-addressed store
+# rather than copying a tree into each one, which is the only way a package cache
+# can be shared while no agent writes into another's workspace. The worker gets
+# it the way it gets Node: installed by mise as the deploying user, copied to a
+# root-owned directory, version-checked, and linked, so an agent cannot rewrite
+# its own toolchain.
+install_worker_pnpm() {
+  "$mise_binary" install "pnpm@${pnpm_version}"
+  pnpm_source=$("$mise_binary" where "pnpm@${pnpm_version}")
+
+  case "$pnpm_source" in
+    /home/agent/.local/share/mise/installs/pnpm/*) ;;
+    *)
+      echo "mise returned an unexpected pnpm installation path: $pnpm_source" >&2
+      return 1
+      ;;
+  esac
+
+  if [ ! -x "$pnpm_source/bin/pnpm" ]; then
+    echo "mise-managed pnpm executable is missing: $pnpm_source/bin/pnpm" >&2
+    return 1
+  fi
+
+  if ! sudo test -e "$worker_pnpm_dir"; then
+    worker_pnpm_staging=$(sudo mktemp -d "/opt/ptc-manager-pnpm-${pnpm_version}.XXXXXX")
+    sudo cp -a "$pnpm_source/." "$worker_pnpm_staging/"
+    sudo chown -R root:root "$worker_pnpm_staging"
+
+    if [ "$(sudo "$worker_pnpm_staging/bin/pnpm" --version)" != "$pnpm_version" ]; then
+      echo "staged worker pnpm has an unexpected version" >&2
+      return 1
+    fi
+
+    sudo mv "$worker_pnpm_staging" "$worker_pnpm_dir"
+    worker_pnpm_staging=
+  fi
+
+  if [ "$(sudo "$worker_pnpm_dir/bin/pnpm" --version)" != "$pnpm_version" ]; then
+    echo "installed worker pnpm has an unexpected version" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$worker_pnpm_dir/bin/pnpm" /usr/local/bin/pnpm
+  sudo -u ptc-manager-worker -H /usr/local/bin/pnpm --version >/dev/null
+}
+
 install_worker_mise() {
   sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise"
   sudo -u ptc-manager-worker -H "$worker_mise" --version >/dev/null
@@ -1018,6 +1071,7 @@ sudo rm -f -- \
 sudo systemctl daemon-reload
 install_worker_mise
 install_worker_node
+install_worker_pnpm
 install_worker_agents
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
