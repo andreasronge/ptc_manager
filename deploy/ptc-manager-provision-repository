@@ -36,6 +36,22 @@ flock -n 9 || fail "another repository provisioning run is already active"
 # Every path under /srv belongs to the worker identity with a group the
 # deployment user is not in, so a bare test would report an existing checkout as
 # missing. Ask through sudo, as every other access to these paths does.
+# The generated content is the same on most deployments. Installing it anyway
+# would move its modification time past every service start, which is the signal
+# repository health reads to tell a pending grant from one already in force.
+# Leave an unchanged file alone so that time keeps meaning "the grants changed".
+install_dropin_when_changed() {
+  candidate=$1
+  target=$2
+
+  if sudo cmp -s "$candidate" "$target"; then
+    echo "Repository access unchanged: $target"
+  else
+    sudo install -o root -g root -m 0644 "$candidate" "$target"
+    echo "Repository access updated: $target"
+  fi
+}
+
 checkout_prepared() { sudo test -d "$1/.git"; }
 checkout_occupied() { sudo test -e "$1"; }
 
@@ -95,9 +111,9 @@ chmod 0644 "$manager_dropin" "$worker_dropin"
 
 sudo install -d -o root -g root -m 0755 "$unit_root/ptc_manager.service.d"
 sudo install -d -o root -g root -m 0755 "$unit_root/ptc_manager-herdr.service.d"
-sudo install -o root -g root -m 0644 "$manager_dropin" \
+install_dropin_when_changed "$manager_dropin" \
   "$unit_root/ptc_manager.service.d/zz-ptc-manager-repositories.conf"
-sudo install -o root -g root -m 0644 "$worker_dropin" \
+install_dropin_when_changed "$worker_dropin" \
   "$unit_root/ptc_manager-herdr.service.d/zz-ptc-manager-repositories.conf"
 sudo systemctl daemon-reload
 

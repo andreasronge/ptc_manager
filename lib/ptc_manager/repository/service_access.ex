@@ -145,9 +145,10 @@ defmodule PtcManager.Repository.ServiceAccess do
     end
   end
 
-  # A repository granted by the base unit rather than the generated drop-in has
-  # no drop-in to be newer than the running service, so its grant is already in
-  # every namespace that matters.
+  # The drop-in is only written when its grants change, so its modification time
+  # marks when this repository's access last became available rather than when a
+  # deployment last ran. A repository granted by the base unit has no drop-in to
+  # be newer than the running service at all.
   defp started_after_dropin?(properties, unit) do
     with {:ok, %{mtime: written_at}} <- File.stat(dropin_path(unit), time: :posix),
          {:ok, started_at} <- started_at(properties) do

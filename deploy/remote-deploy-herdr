@@ -303,6 +303,22 @@ ensure_no_managed_runs() {
 checkout_prepared() { sudo test -d "$1/.git"; }
 checkout_occupied() { sudo test -e "$1"; }
 
+# The generated content is the same on most deployments. Installing it anyway
+# would move its modification time past every service start, which is the signal
+# repository health reads to tell a pending grant from one already in force.
+# Leave an unchanged file alone so that time keeps meaning "the grants changed".
+install_dropin_when_changed() {
+  candidate=$1
+  target=$2
+
+  if sudo cmp -s "$candidate" "$target"; then
+    echo "Repository access unchanged: $target"
+  else
+    sudo install -o root -g root -m 0644 "$candidate" "$target"
+    echo "Repository access updated: $target"
+  fi
+}
+
 ensure_repository_checkouts_writable() {
   probe_pid=$1
   probe_service=$2
@@ -1054,9 +1070,9 @@ write_repository_access_dropin "" "$worker_access_dropin"
 "$access_dropin_check" "$worker_access_dropin"
 chmod 0644 "$manager_access_dropin" "$worker_access_dropin"
 sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager-herdr.service.d
-sudo install -o root -g root -m 0644 "$manager_access_dropin" \
+install_dropin_when_changed "$manager_access_dropin" \
   /etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-repositories.conf
-sudo install -o root -g root -m 0644 "$worker_access_dropin" \
+install_dropin_when_changed "$worker_access_dropin" \
   /etc/systemd/system/ptc_manager-herdr.service.d/zz-ptc-manager-repositories.conf
 sudo systemctl daemon-reload
 sudo rm -f -- /etc/sudoers.d/ptc_manager-codex
