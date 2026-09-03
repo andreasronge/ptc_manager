@@ -54,6 +54,30 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
+  def handle_event("prepare-repositories", _params, socket) do
+    case PtcManager.Repository.Provisioning.start() do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "Preparing every configured checkout on the host. Reload in a moment; each repository's service access shows what is still outstanding."
+         )
+         |> load_configuration()}
+
+      {:error, :repository_provisioning_not_configured} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "This host has no repository provisioning unit installed. Deploy once to install it."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The host could not start repository provisioning.")}
+    end
+  end
+
   def handle_event("confirm-remove-repository", %{"id" => id}, socket) do
     {:noreply,
      assign(socket, :remove_repository, Operations.get_repository(String.to_integer(id)))}

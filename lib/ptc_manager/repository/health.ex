@@ -2,7 +2,7 @@ defmodule PtcManager.Repository.Health do
   @moduledoc "Builds a read-only configuration health summary for one repository."
 
   alias PtcManager.Operations.Repository
-  alias PtcManager.Repository.{Checkout, Contract, GitProbe}
+  alias PtcManager.Repository.{Checkout, Contract, GitProbe, ServiceAccess}
 
   def summarize(%Repository{} = repository) do
     summarize(repository, Checkout.available_path(repository))
@@ -15,7 +15,8 @@ defmodule PtcManager.Repository.Health do
       repository: repository,
       checkout: checkout,
       gate: gate_health(repository, checkout),
-      github: github_health(repository)
+      github: github_health(repository),
+      service_access: ServiceAccess.summarize(repository)
     }
   end
 

@@ -11,6 +11,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
   @dropin_check Path.join(@project_root, "deploy/ptc-manager-check-access-dropin")
+  @provision Path.join(@project_root, "deploy/ptc-manager-provision-repository")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @self_deploy_command Path.join(@project_root, "scripts/ptc/deploy")
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
@@ -30,6 +31,7 @@ defmodule Mix.Tasks.PtcDeployTest do
           @claude_trust,
           @codex_arm,
           @dropin_check,
+          @provision,
           @failure_policy,
           @self_deploy_command,
           @self_deploy_runner,

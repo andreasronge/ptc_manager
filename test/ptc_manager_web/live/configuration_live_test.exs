@@ -119,6 +119,26 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     refute Repo.get_by(Repository, github_name: "offline")
   end
 
+  # Onboarding derives a checkout path it cannot create, so the page has to offer
+  # the host the work and say plainly when the host cannot take it.
+  test "preparing checkouts reports when the host has no provisioning unit", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :provision_systemctl_command)
+    Application.delete_env(:ptc_manager, :provision_systemctl_command)
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:ptc_manager, :provision_systemctl_command)
+        value -> Application.put_env(:ptc_manager, :provision_systemctl_command, value)
+      end
+    end)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    html = view |> element("#prepare-repositories") |> render_click()
+
+    assert html =~ "no repository provisioning unit installed"
+  end
+
   test "rejects names that cannot produce a safe checkout component without persistence" do
     before_count = Repo.aggregate(Repository, :count)
 

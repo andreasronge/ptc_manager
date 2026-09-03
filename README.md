@@ -513,9 +513,10 @@ To onboard another public or private repository:
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
    GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
    and creates the repository disabled;
-3. deploy. The deployment clones any configured checkout that does not exist
-   yet, gives it to the worker identity, and regenerates the drop-in that grants
-   every configured checkout to both services;
+3. press **Prepare checkouts** on Configuration, or deploy. Either clones any
+   configured checkout that does not exist yet, gives it to the worker identity,
+   and regenerates the drop-in that grants every configured checkout to both
+   services; the button does it without building a release;
 4. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
 5. enable only the definitions and schedules that repository needs, then test a
@@ -528,12 +529,12 @@ The deployment runs outside that namespace and already restarts the coordinator,
 so it is the one place that can do this; onboarding is therefore add, deploy,
 enable rather than a hand-run clone and a hand-edited unit.
 
-One step remains manual. A deployment never restarts `ptc_manager-herdr`,
-because that service holds the retained agent sessions. Its generated drop-in is
-installed with everything else, but a newly added checkout only becomes writable
-for the worker after that service restarts, which is worth doing when no session
-is retained. Until then the repository can be registered and read, and
-implementation dispatch for it will report the checkout as not writable.
+Restarting stays a maintainer's decision. A grant only enters a service's mount
+namespace when that service starts, and restarting `ptc_manager-herdr` ends
+every retained agent session, so neither the deployment nor the button restarts
+it. Each repository's **service access** health names exactly what is
+outstanding: a grant that is missing, a grant that is loaded but waiting for a
+service to start, or access that is already in force.
 
 The Configuration page displays the derived checkout path. A repository can be
 removed there after explicit confirmation, but only when all managed jobs,

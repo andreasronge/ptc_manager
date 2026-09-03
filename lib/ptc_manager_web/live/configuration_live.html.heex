@@ -104,9 +104,18 @@
     <section id="repository-health" aria-labelledby="repository-health-title">
       <div class="mb-4">
         <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Repositories</p>
-        <h2 id="repository-health-title" class="mt-1 text-2xl font-semibold">
-          Configuration health
-        </h2>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h2 id="repository-health-title" class="mt-1 text-2xl font-semibold">
+            Configuration health
+          </h2>
+          <button
+            id="prepare-repositories"
+            phx-click="prepare-repositories"
+            class="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-white/10"
+          >
+            <.icon name="hero-wrench-screwdriver-mini" class="size-4" /> Prepare checkouts
+          </button>
+        </div>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
           Each repository needs its own verified checkout, readable GitHub data, and a checked-in setup contract. Independent publication verification is optional and only needed when PtcManager publishes through its GitHub App broker.
         </p>
@@ -188,7 +197,7 @@
 
           <dl class="mt-5 space-y-3">
             <div
-              :for={check <- [health.checkout, health.github, health.gate]}
+              :for={check <- [health.checkout, health.github, health.gate, health.service_access]}
               class="rounded-xl bg-white/[0.035] p-3"
             >
               <div class="flex flex-wrap items-center justify-between gap-2">

@@ -93,6 +93,8 @@ active_runs_query="/tmp/ptc-manager-active-runs-${release_id}.sql"
 repositories_query="/tmp/ptc-manager-repositories-${release_id}.sql"
 manager_access_dropin="/tmp/ptc-manager-access-${release_id}.conf"
 access_dropin_check="/tmp/ptc-manager-check-access-dropin-${release_id}"
+provision_runner_candidate="/tmp/ptc-manager-provision-${release_id}"
+provision_service_candidate="/tmp/ptc-manager-provision-service-${release_id}"
 worker_access_dropin="/tmp/ptc-manager-worker-access-${release_id}.conf"
 environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
@@ -118,6 +120,7 @@ deployment_phase=pre_stop
 cleanup_remote() {
   rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$active_runs_query" "$repositories_query" \
   "$manager_access_dropin" "$worker_access_dropin" "$access_dropin_check" \
+  "$provision_runner_candidate" "$provision_service_candidate" \
   "$environment_file_parser" \
     "$worker_git_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
     "$operation_wrapper_candidate" \
@@ -770,6 +773,8 @@ tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
 tar -xOf "$source_archive" deploy/ptc-manager-active-managed-runs.sql >"$active_runs_query"
 tar -xOf "$source_archive" deploy/ptc-manager-configured-repositories.sql >"$repositories_query"
 tar -xOf "$source_archive" deploy/ptc-manager-check-access-dropin >"$access_dropin_check"
+tar -xOf "$source_archive" deploy/ptc-manager-provision-repository >"$provision_runner_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-provision-repository.service >"$provision_service_candidate"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
@@ -788,6 +793,8 @@ chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$claude_trust_candidate"
 chmod 0755 "$codex_arm_candidate"
 chmod 0755 "$access_dropin_check"
+chmod 0755 "$provision_runner_candidate"
+chmod 0644 "$provision_service_candidate"
 chmod 0755 "$operation_wrapper_candidate"
 chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
@@ -981,6 +988,14 @@ sudo install -o root -g root -m 0644 "$agent_context_candidate" \
   /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 "$herdr_launch_candidate" \
   /usr/local/bin/ptc-manager-herdr-launch
+sudo install -o root -g root -m 0755 "$access_dropin_check" \
+  /usr/local/bin/ptc-manager-check-access-dropin
+sudo install -o root -g root -m 0755 "$provision_runner_candidate" \
+  /usr/local/bin/ptc-manager-provision-repository
+sudo install -o root -g root -m 0644 "$provision_service_candidate" \
+  /etc/systemd/system/ptc_manager-provision-repository.service
+sudo install -o root -g root -m 0644 "$repositories_query" \
+  /usr/local/libexec/ptc-manager-configured-repositories.sql
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
   /etc/sudoers.d/ptc_manager
 if ! getent group ptc-manager-deploy >/dev/null; then

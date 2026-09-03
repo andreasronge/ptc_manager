@@ -1,0 +1,12 @@
+[Unit]
+Description=PtcManager repository checkout provisioning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+ExecStart=/usr/local/bin/ptc-manager-provision-repository
+TimeoutStartSec=30min
+PrivateTmp=false
