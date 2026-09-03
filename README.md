@@ -989,6 +989,13 @@ that exact PR. PtcManager keeps the action durable, reserves repository priority
 records the Herdr identity for read-only output, and independently confirms the
 GitHub result before releasing the repository and cleaning the worktree.
 
+A managed pull request is repaired by resuming its retained implementation
+session, so preflight asks the adapter whether that session still exists before
+it reserves the repair worktree. A repair that could never start now stops with
+the missing agent as its reason instead of taking a reservation nothing returns,
+which previously left the worktree held with no live attempt and stopped every
+later repair on that pull request at preflight.
+
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:
 

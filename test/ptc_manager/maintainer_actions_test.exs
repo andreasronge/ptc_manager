@@ -1894,6 +1894,47 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
   end
 
+  # A repair resumes the retained implementation session. When that session is
+  # gone, preflight used to reserve the worktree anyway; the adapter then failed,
+  # nothing returned the reservation, and every later repair on the pull request
+  # stopped at preflight with an opaque worktree error instead of reporting the
+  # missing agent. The reservation must not be taken at all.
+  test "a repair whose retained agent is gone reports it without holding the worktree" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_repair_worktree(publication)
+
+    publication
+    |> PrPublication.changeset(%{checks_state: "failure", mergeability: "conflicting"})
+    |> Repo.update!()
+
+    status =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "failure", mergeability: "conflicting"})
+
+    Process.put(:merge_decision_statuses, [status])
+    Process.put(:repair_status, status)
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    assert {:ok, stopped} =
+             MaintainerActions.run_once(adapter: ActionAdapter, sync: RepairSync)
+
+    assert stopped.id == queued.id
+    assert stopped.state == "failed"
+    assert stopped.last_error =~ "retained_herdr_agent_unavailable"
+
+    # The worktree is exactly as preflight found it, so the next attempt can run.
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
+  end
+
   test "a failed repair never releases a dirty worktree as reusable" do
     previous_client = Application.get_env(:ptc_manager, :pull_request_client)
     Application.put_env(:ptc_manager, :pull_request_client, RepairClient)

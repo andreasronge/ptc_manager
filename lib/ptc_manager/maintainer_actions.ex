@@ -197,7 +197,7 @@ defmodule PtcManager.MaintainerActions do
         {:ok, :empty}
 
       candidate ->
-        case prepare_and_claim(candidate, sync) do
+        case prepare_and_claim(candidate, adapter, sync) do
           {:ok, {action, token}} -> execute_claimed(adapter, sync, action, token)
           {:skip, :no_longer_queued} -> {:ok, :empty}
           {:deferred, action} -> {:ok, action}
@@ -207,7 +207,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_and_claim(candidate, sync) do
+  defp prepare_and_claim(candidate, adapter, sync) do
     lock_id = {{__MODULE__, :agent_action_preflight, candidate.id}, self()}
 
     case :global.trans(lock_id, fn ->
@@ -220,7 +220,7 @@ defmodule PtcManager.MaintainerActions do
              end
 
            if match?(%AgentAction{state: "queued"}, current) do
-             with {:ok, prepared} <- prepare_for_execution(current, sync),
+             with {:ok, prepared} <- prepare_for_execution(current, adapter, sync),
                   {:ok, {_action, _token}} = claimed <-
                     Operations.claim_agent_action(prepared.id) do
                claimed
@@ -268,7 +268,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+  defp prepare_for_execution(%{action_key: action_key} = action, _adapter, sync)
        when action_key in ["pr_retrospective", "create_retrospective_issue"] do
     case call_sync(sync, action) do
       {:ok, _summary} ->
@@ -290,7 +290,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "resolve_issue_decision"} = action, sync) do
+  defp prepare_for_execution(%{action_key: "resolve_issue_decision"} = action, _adapter, sync) do
     case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
@@ -314,7 +314,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+  defp prepare_for_execution(%{action_key: action_key} = action, _adapter, sync)
        when action_key in ["private_issue_analysis", "prepare_issue", "review_issue"] do
     case call_sync(sync, action) do
       {:ok, _summary} ->
@@ -336,7 +336,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "daily_digest"} = action, _sync) do
+  defp prepare_for_execution(%{action_key: "daily_digest"} = action, _adapter, _sync) do
     case DailyDigests.get_digest(action.target_id) do
       %{agent_action_id: action_id, published_at: nil} = digest when action_id == action.id ->
         prepare_daily_digest_source_snapshot(action, digest)
@@ -357,6 +357,7 @@ defmodule PtcManager.MaintainerActions do
            target_type: "repository",
            automation_definition_version: %{execution_profile: "generic_ephemeral"}
          } = action,
+         _adapter,
          sync
        ) do
     case call_sync(sync, action) do
@@ -366,7 +367,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, sync) do
+  defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, _adapter, sync) do
     publication = Repo.get!(PrPublication, action.target_id)
 
     if PrPublication.external?(publication) do
@@ -397,7 +398,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+  defp prepare_for_execution(%{action_key: action_key} = action, adapter, sync)
        when action_key in ["repair_pr", "repair_and_merge_pr"] do
     case call_sync(sync, action) do
       {:ok, %{pull_request: status}} ->
@@ -408,7 +409,7 @@ defmodule PtcManager.MaintainerActions do
                    MergeDecisions.snapshot(status),
                    action.prompt
                  ) do
-            case reserve_repair_worktree(action) do
+            case ready_and_reserved(adapter, action) do
               {:ok, _allocation} ->
                 {:ok, prepared}
 
@@ -439,7 +440,31 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(action, _sync), do: {:ok, action}
+  defp prepare_for_execution(action, _adapter, _sync), do: {:ok, action}
+
+  # Reserving the repair worktree commits an execution slot, so ask the adapter
+  # that will run whether it can run at all before taking it.
+  defp ready_and_reserved(adapter, action) do
+    with :ok <- ensure_adapter_ready(adapter, action) do
+      reserve_repair_worktree(action)
+    end
+  end
+
+  defp ensure_adapter_ready(adapter, action) do
+    if ready_check_supported?(adapter),
+      do: Gateway.call(adapter, :ensure_ready, [action]),
+      else: :ok
+  end
+
+  # A stateful scenario adapter receives itself as the first argument, exactly
+  # as PtcManager.Gateway calls it, so its readiness callback is one arity wider.
+  defp ready_check_supported?(adapter) when is_atom(adapter),
+    do: Code.ensure_loaded?(adapter) and function_exported?(adapter, :ensure_ready, 1)
+
+  defp ready_check_supported?(%module{}),
+    do: Code.ensure_loaded?(module) and function_exported?(module, :ensure_ready, 2)
+
+  defp ready_check_supported?(_adapter), do: false
 
   defp prepare_repository_source_snapshot(action) do
     source_snapshot =

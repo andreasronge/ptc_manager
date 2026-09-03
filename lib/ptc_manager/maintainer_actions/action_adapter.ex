@@ -9,22 +9,15 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   alias PtcManager.Repo
   alias PtcManager.MaintainerActions.GenericHerdrAdapter
 
+  @repair_action_keys ~w(repair_pr repair_and_merge_pr)
+
   @impl true
   def run(%AgentAction{action_key: "daily_digest"} = action),
     do: GenericHerdrAdapter.run(action)
 
   def run(%AgentAction{action_key: action_key} = action)
-      when action_key in ["repair_pr", "repair_and_merge_pr"] do
-    publication = Repo.get!(PrPublication, action.target_id)
-
-    default_adapter =
-      if PrPublication.external?(publication),
-        do: ExternalPrRepairAdapter,
-        else: RetainedHerdrAdapter
-
-    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, default_adapter)
-    adapter.run(action)
-  end
+      when action_key in @repair_action_keys,
+      do: action |> repair_adapter() |> then(& &1.run(action))
 
   def run(
         %AgentAction{
@@ -35,6 +28,29 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   end
 
   def run(%AgentAction{}), do: {:error, :unsupported_agent_action_profile}
+
+  @impl true
+  def ensure_ready(%AgentAction{action_key: action_key} = action)
+      when action_key in @repair_action_keys do
+    adapter = repair_adapter(action)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :ensure_ready, 1),
+      do: adapter.ensure_ready(action),
+      else: :ok
+  end
+
+  def ensure_ready(%AgentAction{}), do: :ok
+
+  defp repair_adapter(%AgentAction{target_id: publication_id}) do
+    publication = Repo.get!(PrPublication, publication_id)
+
+    default_adapter =
+      if PrPublication.external?(publication),
+        do: ExternalPrRepairAdapter,
+        else: RetainedHerdrAdapter
+
+    Application.get_env(:ptc_manager, :repair_agent_adapter, default_adapter)
+  end
 
   @doc false
   def validate_result(result, "daily_digest") when is_map(result) do
