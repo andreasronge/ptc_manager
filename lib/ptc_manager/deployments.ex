@@ -14,6 +14,7 @@ defmodule PtcManager.Deployments do
   @active_action_states ~w(queued running sync_pending)
   @driven_job_states ~w(starting working idle blocked reconciling)
   @active_deployment_states ~w(queued draining starting running)
+  @finished_deployment_states ~w(completed failed cancelled)
   @cancellable_states ~w(queued draining)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
@@ -66,6 +67,27 @@ defmodule PtcManager.Deployments do
     |> Repo.one()
   end
 
+  @doc """
+  The most recent deployment of one repository that already reached an outcome.
+
+  A deployment refused by the host guard finishes seconds after it is requested,
+  so the page that requested it would otherwise only show the button coming
+  back. Reporting the outcome beside the button is the only place a maintainer
+  is looking when it happens.
+  """
+  def last_finished_for_repository(repository_id) do
+    Deployment
+    |> where(
+      [deployment],
+      deployment.repository_id == ^repository_id and
+        deployment.state in ^@finished_deployment_states
+    )
+    |> order_by([deployment], desc: deployment.requested_at, desc: deployment.id)
+    |> limit(1)
+    |> preload(:repository)
+    |> Repo.one()
+  end
+
   def configured_repositories do
     Operations.list_repositories()
     |> Enum.filter(& &1.enabled)
@@ -84,7 +106,8 @@ defmodule PtcManager.Deployments do
       latest_sha: latest_sha,
       update_available?: is_binary(deployed) and is_binary(latest_sha) and deployed != latest_sha,
       current?: is_binary(deployed) and deployed == latest_sha,
-      active_deployment: active_for_repository(repository.id)
+      active_deployment: active_for_repository(repository.id),
+      last_deployment: last_finished_for_repository(repository.id)
     }
   end
 

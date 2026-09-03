@@ -169,6 +169,13 @@ defmodule PtcManagerWeb.DeploymentsLive do
   def state_label("cancelled"), do: "Cancelled"
   def state_label(state), do: state
 
+  def outcome_classes("completed"), do: "border-teal-400/20 bg-teal-400/[0.07] text-teal-100"
+
+  def outcome_classes(state) when state in ~w(failed cancelled),
+    do: "border-rose-400/25 bg-rose-400/[0.07] text-rose-100"
+
+  def outcome_classes(_state), do: "border-white/10 bg-white/[0.035] text-slate-200"
+
   def state_classes(state) when state in ~w(completed), do: "bg-teal-400/15 text-teal-200"
   def state_classes(state) when state in ~w(failed cancelled), do: "bg-rose-400/15 text-rose-200"
   def state_classes(_state), do: "bg-amber-400/15 text-amber-200"

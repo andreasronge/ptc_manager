@@ -956,6 +956,10 @@ PtcManager never touches Herdr agents. The host runner reads the same database
 before it installs anything, through the identical rule kept in
 `deploy/ptc-manager-active-managed-runs.sql`; a run one guard counts and the
 other does not would refuse every deployment the instant it is handed over.
+A deployment the host guard does refuse finishes seconds after it is requested,
+so the Deployments page reports the last outcome, its exact instant, and the
+host's own reason beside the button that asked for it rather than only in the
+history below.
 
 Every run also carries a derived health, because a Herdr snapshot refreshes each
 agent every few seconds: a live heartbeat proves only that the pane still

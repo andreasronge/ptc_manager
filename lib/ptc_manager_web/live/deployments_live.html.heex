@@ -120,6 +120,41 @@
         >
           <.icon name="hero-rocket-launch-mini" class="size-4" /> Deploy when safe
         </button>
+        <div
+          :if={!status.active_deployment && status.last_deployment}
+          id={"last-deployment-#{status.repository.id}"}
+          class={[
+            "mt-4 rounded-xl border p-4",
+            outcome_classes(status.last_deployment.state)
+          ]}
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-sm font-semibold">
+              Last attempt · {state_label(status.last_deployment.state)}
+              <span class="font-mono text-xs opacity-70">
+                @ {short_sha(status.last_deployment.requested_sha)}
+              </span>
+            </p>
+            <p class="text-xs opacity-60">
+              {timestamp(
+                status.last_deployment.finished_at || status.last_deployment.requested_at
+              )} · {since(
+                @now,
+                status.last_deployment.finished_at || status.last_deployment.requested_at
+              )}
+            </p>
+          </div>
+          <p :if={status.last_deployment.status_text} class="mt-2 text-xs leading-5 opacity-80">
+            {status.last_deployment.status_text}
+          </p>
+          <p
+            :if={status.last_deployment.last_error}
+            class="mt-2 break-words font-mono text-xs opacity-90"
+          >
+            {status.last_deployment.last_error}
+          </p>
+        </div>
+
         <p :if={is_nil(status.deployed_sha)} class="mt-3 text-xs leading-5 text-amber-200/80">
           The current release predates revision markers. The first typed deployment will establish one.
         </p>

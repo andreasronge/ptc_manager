@@ -1,6 +1,9 @@
 defmodule PtcManagerWeb.DeploymentsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
+  alias PtcManager.Deployments.Deployment
+  alias PtcManager.Repo
+
   defmodule RevisionSource do
     def latest(_repository), do: {:ok, String.duplicate("b", 40)}
   end
@@ -25,6 +28,45 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
     assert has_element?(view, "#deployment-repository-#{repository.id}", "aaaaaaaaaaaa")
     assert has_element?(view, "#deployment-repository-#{repository.id}", "bbbbbbbbbbbb")
     assert has_element?(view, "#deploy-when-safe-#{repository.id}:not([disabled])")
+  end
+
+  # A deployment the host guard refuses finishes seconds after it is requested,
+  # so the banner for an active deployment is gone before anyone can read it and
+  # the button simply comes back. The outcome has to appear where it was asked
+  # for, with the instant it happened.
+  test "reports the last deployment outcome beside the deploy button", %{conn: conn} do
+    previous_source = Application.get_env(:ptc_manager, :deployment_revision_source)
+    Application.put_env(:ptc_manager, :deployment_revision_source, RevisionSource)
+    on_exit(fn -> restore(:deployment_revision_source, previous_source) end)
+
+    repository = deployable_repository()
+    requested_at = ~U[2026-09-03 16:48:51.393524Z]
+
+    %Deployment{}
+    |> Deployment.changeset(%{
+      repository_id: repository.id,
+      requested_sha: String.duplicate("c", 40),
+      state: "failed",
+      requested_by: "maintainer",
+      requested_at: requested_at,
+      started_at: requested_at,
+      finished_at: DateTime.add(requested_at, 2, :second),
+      status_text: "Deployment stopped safely; inspect the retained service output.",
+      last_error: "refusing to deploy while 1 managed agent run(s) are active",
+      deployment_command: "./scripts/ptc/deploy",
+      deployment_timeout_minutes: 20
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    render_async(view, 1_000)
+
+    card = "#last-deployment-#{repository.id}"
+
+    assert has_element?(view, card, "Last attempt · Failed")
+    assert has_element?(view, card, "refusing to deploy while 1 managed agent run(s) are active")
+    assert has_element?(view, card, "03 Sep 2026 · 16:48:53 UTC")
+    assert has_element?(view, "#deployment-#{Repo.one!(Deployment).id}", "Took 2s")
   end
 
   test "explains how to enable deployment when no repository opted in", %{conn: conn} do
