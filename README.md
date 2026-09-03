@@ -748,6 +748,7 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/p
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-claude-trust /usr/local/bin/ptc-manager-worker-claude-trust
+sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-codex-arm /usr/local/bin/ptc-manager-worker-codex-arm
 sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
@@ -825,6 +826,32 @@ Managed Codex agents trust their repository checkout and worktree through a
 per-process configuration override, so no checkout needs a persistent trust
 entry in the worker's Codex configuration and no agent waits on Codex's
 interactive trust question.
+
+Approval and sandbox policy cannot stay per-process. A Herdr server restart
+restores an agent's pane by running `codex resume <session-id>` with no
+arguments, which drops the `--dangerously-bypass-approvals-and-sandbox` that
+PtcManager passes at `herdr agent start`. The resumed agent then stops at an
+approval prompt that no maintainer is watching for, and every action on its
+pull request fails until someone answers it by hand. Before starting a Codex
+agent the coordinator therefore records the same policy in the worker's
+`~/.codex/config.toml` through the root-owned `ptc-manager-worker-codex-arm`
+helper, inside a delimited managed block:
+
+```toml
+# BEGIN ptc-manager managed agent policy
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+# END ptc-manager managed agent policy
+```
+
+Codex honours these keys only at the top level, so the block sits above every
+table and the helper refuses to run when the file already sets either key
+outside it. Arming is idempotent, and
+`sudo -u ptc-manager-worker /usr/local/bin/ptc-manager-worker-codex-arm disarm`
+removes the block again. The worker account runs managed agents only and
+already receives the same arguments on every start, so the recorded policy
+widens nothing that was previously narrower; it only stops a resumed agent
+from being less capable than the one it replaces.
 
 Each checkout persisted as a repository's `local_path` is owned and writable
 only by the worker. Both services run with `ProtectSystem=strict`, so every

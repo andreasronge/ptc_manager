@@ -9,6 +9,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.CommandEnvironment
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerClaudeTrust
+  alias PtcManager.Repository.WorkerCodexArming
   alias PtcManager.Repository.WorkspaceSetup
   alias PtcManager.ReviewPolicy
   alias PtcManager.WorktreeSecurity
@@ -585,7 +586,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp start_agent(command, name, pane_id, repository_path, workspace_path) do
     kind = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
 
-    with :ok <- WorkerClaudeTrust.prepare(kind, workspace_path) do
+    with :ok <- WorkerClaudeTrust.prepare(kind, workspace_path),
+         :ok <- WorkerCodexArming.prepare(kind) do
       run_agent_start(command, name, pane_id, kind, [repository_path, workspace_path])
     end
   end

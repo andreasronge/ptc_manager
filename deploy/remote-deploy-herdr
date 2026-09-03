@@ -93,6 +93,7 @@ environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 claude_trust_candidate="/tmp/ptc-manager-worker-claude-trust-${release_id}"
+codex_arm_candidate="/tmp/ptc-manager-worker-codex-arm-${release_id}"
 operation_wrapper_candidate="/tmp/ptc-operation-${release_id}"
 operation_recovery_candidate="/tmp/ptc-manager-operation-recover-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
@@ -700,6 +701,7 @@ tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environm
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-claude-trust >"$claude_trust_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-codex-arm >"$codex_arm_candidate"
 tar -xOf "$source_archive" deploy/ptc-operation >"$operation_wrapper_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-operation-recover >"$operation_recovery_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
@@ -711,6 +713,7 @@ tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_de
 chmod 0755 "$worker_git_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$claude_trust_candidate"
+chmod 0755 "$codex_arm_candidate"
 chmod 0755 "$operation_wrapper_candidate"
 chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
@@ -893,6 +896,8 @@ sudo install -o root -g root -m 0755 "$worker_bootstrap_candidate" \
   /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 "$claude_trust_candidate" \
   /usr/local/bin/ptc-manager-worker-claude-trust
+sudo install -o root -g root -m 0755 "$codex_arm_candidate" \
+  /usr/local/bin/ptc-manager-worker-codex-arm
 sudo install -o root -g root -m 0755 "$operation_wrapper_candidate" \
   /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 "$operation_recovery_candidate" \

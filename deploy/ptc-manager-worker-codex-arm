@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+# PtcManager invokes this root-owned wrapper through its narrowly scoped sudo
+# rule so the Herdr worker's own Codex configuration keeps the approval and
+# sandbox policy that managed agents are started with.
+#
+# PtcManager starts Codex with --dangerously-bypass-approvals-and-sandbox so an
+# unattended agent never stops at an approval prompt. Those arguments belong to
+# that one process. When the Herdr server restarts it restores a pane by running
+# `codex resume <session-id>` with no arguments, and the agent comes back asking
+# permission before every command, with nobody watching to answer. Codex reads
+# the same policy from config.toml, so recording it there survives the restore.
+# Only this worker account runs managed agents and it already receives the flags
+# on every start, so the recorded policy widens nothing that was narrower.
+
+fail() {
+  echo "ptc-manager-worker-codex-arm: $1" >&2
+  exit 2
+}
+
+[ "$#" -eq 1 ] || fail "expected arm or disarm"
+
+mode=$1
+
+case "$mode" in
+  arm|disarm) ;;
+  *) fail "mode must be arm or disarm" ;;
+esac
+
+exec /usr/bin/python3 - "$mode" <<'PY'
+import fcntl
+import os
+import sys
+import tempfile
+
+
+
+def fail(message):
+    sys.stderr.write("ptc-manager-worker-codex-arm: " + message + "\n")
+    raise SystemExit(2)
+
+
+mode = sys.argv[1]
+home = os.path.expanduser("~")
+codex_home = os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
+config = os.path.join(codex_home, "config.toml")
+
+BEGIN = "# BEGIN ptc-manager managed agent policy"
+END = "# END ptc-manager managed agent policy"
+MANAGED_KEYS = ("approval_policy", "sandbox_mode")
+BLOCK = [
+    BEGIN,
+    'approval_policy = "never"',
+    'sandbox_mode = "danger-full-access"',
+    END,
+]
+
+os.makedirs(codex_home, mode=0o700, exist_ok=True)
+
+with open(os.path.join(codex_home, "config.toml.ptc-lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    existing = []
+    if os.path.exists(config):
+        with open(config) as handle:
+            existing = handle.read().splitlines()
+
+    kept = []
+    inside = False
+
+    for line in existing:
+        if not inside and line.strip() == BEGIN:
+            inside = True
+        elif inside:
+            if line.strip() == END:
+                inside = False
+        else:
+            kept.append(line)
+
+    if inside:
+        fail("config.toml has an unterminated managed block")
+
+    # Codex applies approval_policy and sandbox_mode only at the top level, so a
+    # maintainer's own value there would collide with the managed block instead
+    # of layering under it. Stop rather than silently take it over.
+    for line in kept:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if "=" in stripped and stripped.split("=", 1)[0].strip() in MANAGED_KEYS:
+            fail(
+                "config.toml already sets "
+                + stripped.split("=", 1)[0].strip()
+                + " outside the managed block"
+            )
+
+    if mode == "arm":
+        kept = BLOCK + kept
+
+    descriptor, temporary = tempfile.mkstemp(prefix="config.toml.", dir=codex_home)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write("".join(line + "\n" for line in kept))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, config)
+PY

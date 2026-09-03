@@ -9,6 +9,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
+  @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @self_deploy_command Path.join(@project_root, "scripts/ptc/deploy")
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
@@ -26,6 +27,7 @@ defmodule Mix.Tasks.PtcDeployTest do
           @worker_git,
           @worker_bootstrap,
           @claude_trust,
+          @codex_arm,
           @failure_policy,
           @self_deploy_command,
           @self_deploy_runner,
@@ -78,6 +80,54 @@ defmodule Mix.Tasks.PtcDeployTest do
 
   defp helper(home, args) do
     System.cmd("sh", [@claude_trust | args], env: [{"HOME", home}], stderr_to_stdout: true)
+  end
+
+  # Herdr restores a pane after a server restart by running `codex resume` with
+  # no arguments, so the approval bypass PtcManager passes at `herdr agent start`
+  # is gone and the resumed agent stops at a prompt nobody answers. The same
+  # policy recorded in config.toml survives that restore.
+  test "the worker Codex arming helper records and removes the managed policy" do
+    home =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-codex-arm-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(Path.join(home, ".codex"))
+    on_exit(fn -> File.rm_rf!(home) end)
+    config = Path.join(home, ".codex/config.toml")
+
+    original =
+      "[features]\nhooks = true\n\n[projects.\"/srv/ptc_runner\"]\ntrust_level = \"trusted\"\n"
+
+    File.write!(config, original)
+
+    assert {_output, 0} = arming(home, ["arm"])
+    armed = File.read!(config)
+    assert armed =~ ~s(approval_policy = "never")
+    assert armed =~ ~s(sandbox_mode = "danger-full-access")
+    assert armed =~ ~s([projects."/srv/ptc_runner"])
+
+    assert {_output, 0} = arming(home, ["arm"])
+    assert File.read!(config) == armed
+
+    assert {_output, 0} = arming(home, ["disarm"])
+    assert File.read!(config) == original
+
+    assert {output, 2} = arming(home, ["forget"])
+    assert output =~ "arm or disarm"
+
+    File.write!(config, ~s(approval_policy = "on-request"\n))
+    assert {output, 2} = arming(home, ["arm"])
+    assert output =~ "already sets approval_policy"
+    assert File.read!(config) == ~s(approval_policy = "on-request"\n)
+  end
+
+  defp arming(home, args) do
+    System.cmd("sh", [@codex_arm | args],
+      env: [{"HOME", home}, {"CODEX_HOME", nil}],
+      stderr_to_stdout: true
+    )
   end
 
   test "self-deploy command runs from its immutable archive without a Git checkout" do
