@@ -77,6 +77,48 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc """
+  Turns one repository's participation on or off, recording who decided.
+
+  A repository is registered disabled so a maintainer can verify its checkout,
+  contract, and access before any agent work or synchronization reaches it.
+  Enabling is that decision, and disabling is how it is withdrawn: neither
+  touches GitHub, the checkout, or work already in flight.
+  """
+  def set_repository_enabled(repository_id, enabled, actor)
+      when is_integer(repository_id) and is_boolean(enabled) and is_binary(actor) and actor != "" do
+    case Repo.get(Repository, repository_id) do
+      nil ->
+        {:error, :repository_not_found}
+
+      repository ->
+        outcome =
+          RepoTransaction.immediate(fn ->
+            updated =
+              repository
+              |> Repository.changeset(%{enabled: enabled})
+              |> Repo.update!()
+
+            insert_audit!(%{
+              actor: actor,
+              action: if(enabled, do: "repository.enabled", else: "repository.disabled"),
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}"
+              }
+            })
+
+            updated
+          end)
+
+        case outcome do
+          {:ok, updated} -> notify_and_return({:ok, updated})
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
   def with_repository_lifecycle_lock(repository_id, fun)
       when is_integer(repository_id) and is_function(fun, 0) do
     :global.trans({{PtcManager.RepositoryLifecycle, repository_id}, self()}, fun)

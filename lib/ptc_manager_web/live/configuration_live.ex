@@ -54,6 +54,31 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
+  def handle_event("set-repository-enabled", %{"id" => id, "enabled" => enabled}, socket) do
+    with {repository_id, ""} <- Integer.parse(id),
+         {:ok, repository} <-
+           Operations.set_repository_enabled(
+             repository_id,
+             enabled == "true",
+             socket.assigns.actor
+           ) do
+      message =
+        if repository.enabled,
+          do:
+            "#{repository.github_owner}/#{repository.github_name} is enabled. Synchronization now covers it; review its automations before approving agent work.",
+          else:
+            "#{repository.github_owner}/#{repository.github_name} is disabled. No new synchronization or agent work will start for it."
+
+      {:noreply, socket |> put_flash(:info, message) |> load_configuration()}
+    else
+      {:error, :repository_not_found} ->
+        {:noreply, put_flash(socket, :error, "That repository is no longer configured.")}
+
+      _invalid ->
+        {:noreply, put_flash(socket, :error, "The repository could not be updated.")}
+    end
+  end
+
   def handle_event("prepare-repositories", _params, socket) do
     case PtcManager.Repository.Provisioning.start() do
       :ok ->

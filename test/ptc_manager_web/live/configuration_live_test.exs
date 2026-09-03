@@ -3,7 +3,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
 
   import Plug.Conn
 
-  alias PtcManager.Operations.Repository
+  alias PtcManager.Operations.{AuditEvent, Repository}
   alias PtcManager.{CapacitySettings, Operations, Repo}
 
   test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
@@ -137,6 +137,37 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     html = view |> element("#prepare-repositories") |> render_click()
 
     assert html =~ "no repository provisioning unit installed"
+  end
+
+  # Onboarding registers a repository disabled so a maintainer can verify it
+  # first, and synchronization only covers enabled repositories. Without a way to
+  # enable one, a newly added repository could never be used and its GitHub check
+  # could never go green.
+  test "a maintainer can enable and disable a repository", %{conn: conn} do
+    repository = repository_fixture(%{github_name: "toggle-me", enabled: false})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(view, "#toggle-repository-#{repository.id}", "Enable")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{repository.id}",
+             "turns green once it is enabled"
+           )
+
+    html = view |> element("#toggle-repository-#{repository.id}") |> render_click()
+
+    assert html =~ "is enabled"
+    assert Repo.get!(Repository, repository.id).enabled
+    assert has_element?(view, "#toggle-repository-#{repository.id}", "Disable")
+
+    assert Repo.get_by!(AuditEvent, action: "repository.enabled", target_id: repository.id)
+
+    html = view |> element("#toggle-repository-#{repository.id}") |> render_click()
+
+    assert html =~ "is disabled"
+    refute Repo.get!(Repository, repository.id).enabled
   end
 
   test "rejects names that cannot produce a safe checkout component without persistence" do

@@ -94,6 +94,16 @@ defmodule PtcManager.Repository.Health do
     }
   end
 
+  defp github_health(%Repository{enabled: false}) do
+    %{
+      status: :unchecked,
+      label: "GitHub read access not synchronized",
+      detail:
+        "Access was verified when this repository was added. Synchronization covers enabled " <>
+          "repositories, so this turns green once it is enabled."
+    }
+  end
+
   defp github_health(_repository) do
     %{
       status: :unchecked,

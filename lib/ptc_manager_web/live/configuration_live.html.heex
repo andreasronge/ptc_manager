@@ -214,6 +214,27 @@
               </dd>
             </div>
           </dl>
+          <button
+            id={"toggle-repository-#{health.repository.id}"}
+            phx-click="set-repository-enabled"
+            phx-value-id={health.repository.id}
+            phx-value-enabled={to_string(!health.repository.enabled)}
+            data-confirm={
+              if health.repository.enabled,
+                do: nil,
+                else:
+                  "Enable #{health.repository.github_owner}/#{health.repository.github_name}? Synchronization will cover it and its automations become available."
+            }
+            class={[
+              "rounded-lg px-3 py-2 text-xs font-semibold",
+              if(health.repository.enabled,
+                do: "bg-white/10 text-slate-200 hover:bg-white/15",
+                else: "bg-teal-400 text-slate-950 hover:bg-teal-300"
+              )
+            ]}
+          >
+            {if health.repository.enabled, do: "Disable", else: "Enable"}
+          </button>
           <.link
             navigate={"/automations?repo=" <> URI.encode_www_form("#{health.repository.github_owner}/#{health.repository.github_name}")}
             class="mt-4 inline-flex rounded-lg border border-teal-400/25 px-3 py-2 text-xs font-semibold text-teal-200 hover:border-teal-400/40"

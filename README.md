@@ -519,8 +519,16 @@ To onboard another public or private repository:
    services; the button does it without building a release;
 4. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
-5. enable only the definitions and schedules that repository needs, then test a
-   read-only action before approving implementation work.
+5. enable the repository on **Configuration**, then enable only the definitions
+   and schedules it needs and test a read-only action before approving
+   implementation work.
+
+A repository is registered disabled so its checkout, contract, and access can be
+verified before anything reaches it. Synchronization covers enabled repositories
+only, so its GitHub check stays unsynchronized until that step; access itself was
+already proven when the repository was added. Enabling and disabling are recorded
+in the audit trail and change nothing on GitHub, in the checkout, or in work
+already in flight.
 
 PtcManager cannot prepare a checkout itself. The coordinator runs with
 `ProtectSystem=strict`, so `/srv` is read-only inside its mount namespace even
