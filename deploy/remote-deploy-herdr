@@ -668,7 +668,12 @@ install_worker_pnpm() {
   fi
 
   sudo ln -sfn "$worker_pnpm_dir/pnpm" /usr/local/bin/pnpm
-  sudo -u ptc-manager-worker -H /usr/local/bin/pnpm --version >/dev/null
+
+  # pnpm walks upward from the working directory looking for workspace and
+  # config files. The deployment runs from the deploying user's home, which the
+  # worker cannot read, so prove the command from a directory it can: an agent
+  # only ever runs pnpm inside its own worktree.
+  sudo -u ptc-manager-worker -H sh -c 'cd / && /usr/local/bin/pnpm --version' >/dev/null
 }
 
 install_worker_mise() {
