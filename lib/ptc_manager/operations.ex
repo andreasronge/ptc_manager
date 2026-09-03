@@ -123,9 +123,9 @@ defmodule PtcManager.Operations do
   end
 
   defp prepare_repository(attrs) do
-    owner = Map.get(attrs, :github_owner) || Map.get(attrs, "github_owner")
-    name = Map.get(attrs, :github_name) || Map.get(attrs, "github_name")
-    default_branch = Map.get(attrs, :default_branch) || Map.get(attrs, "default_branch")
+    owner = onboarding_value(attrs, :github_owner)
+    name = onboarding_value(attrs, :github_name)
+    default_branch = onboarding_value(attrs, :default_branch)
 
     if safe_github_component?(owner) and safe_github_component?(name) do
       {:ok,
@@ -138,6 +138,15 @@ defmodule PtcManager.Operations do
        }}
     else
       {:error, :unsafe_repository_name}
+    end
+  end
+
+  # A maintainer pastes these fields, and a paste routinely carries a leading or
+  # trailing space or newline. That is not a name to reject; it is one to trim.
+  defp onboarding_value(attrs, key) do
+    case Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key)) do
+      value when is_binary(value) -> String.trim(value)
+      value -> value
     end
   end
 

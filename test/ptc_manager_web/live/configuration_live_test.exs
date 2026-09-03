@@ -133,6 +133,23 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert Repo.aggregate(Repository, :count) == before_count
   end
 
+  # A maintainer pastes an owner and a repository name, and a paste routinely
+  # carries a leading or trailing space. Rejecting that with a message about
+  # /srv path components says nothing about what is actually wrong.
+  test "accepts an owner and name pasted with surrounding whitespace" do
+    assert {:ok, repository} =
+             Operations.onboard_repository(%{
+               github_owner: " andreasronge ",
+               github_name: "ptc-fs-mcp\n",
+               default_branch: " main "
+             })
+
+    assert repository.github_owner == "andreasronge"
+    assert repository.github_name == "ptc-fs-mcp"
+    assert repository.default_branch == "main"
+    assert repository.local_path == "/srv/ptc-fs-mcp"
+  end
+
   test "normalizes string-keyed onboarding attributes and keeps repositories disabled" do
     assert {:ok, repository} =
              Operations.onboard_repository(%{

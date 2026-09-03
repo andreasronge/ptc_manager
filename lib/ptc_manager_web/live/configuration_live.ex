@@ -160,7 +160,7 @@ defmodule PtcManagerWeb.ConfigurationLive do
 
   defp repository_error(:unsafe_repository_name),
     do:
-      "Use a valid GitHub owner and repository name that can safely form a single /srv path component."
+      "Enter the owner and the repository name in their own fields, using only letters, digits, dots, underscores and hyphens. A pasted URL, or an owner/name pair in one field, cannot form a single /srv checkout path."
 
   defp repository_error(%Ecto.Changeset{errors: errors}) do
     if Keyword.has_key?(errors, :local_path),
