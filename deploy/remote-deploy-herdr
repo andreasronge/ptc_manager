@@ -643,8 +643,8 @@ install_worker_pnpm() {
       ;;
   esac
 
-  if [ ! -x "$pnpm_source/bin/pnpm" ]; then
-    echo "mise-managed pnpm executable is missing: $pnpm_source/bin/pnpm" >&2
+  if [ ! -x "$pnpm_source/pnpm" ]; then
+    echo "mise-managed pnpm executable is missing: $pnpm_source/pnpm" >&2
     return 1
   fi
 
@@ -653,7 +653,7 @@ install_worker_pnpm() {
     sudo cp -a "$pnpm_source/." "$worker_pnpm_staging/"
     sudo chown -R root:root "$worker_pnpm_staging"
 
-    if [ "$(sudo "$worker_pnpm_staging/bin/pnpm" --version)" != "$pnpm_version" ]; then
+    if [ "$(sudo "$worker_pnpm_staging/pnpm" --version)" != "$pnpm_version" ]; then
       echo "staged worker pnpm has an unexpected version" >&2
       return 1
     fi
@@ -662,12 +662,12 @@ install_worker_pnpm() {
     worker_pnpm_staging=
   fi
 
-  if [ "$(sudo "$worker_pnpm_dir/bin/pnpm" --version)" != "$pnpm_version" ]; then
+  if [ "$(sudo "$worker_pnpm_dir/pnpm" --version)" != "$pnpm_version" ]; then
     echo "installed worker pnpm has an unexpected version" >&2
     return 1
   fi
 
-  sudo ln -sfn "$worker_pnpm_dir/bin/pnpm" /usr/local/bin/pnpm
+  sudo ln -sfn "$worker_pnpm_dir/pnpm" /usr/local/bin/pnpm
   sudo -u ptc-manager-worker -H /usr/local/bin/pnpm --version >/dev/null
 }
 
