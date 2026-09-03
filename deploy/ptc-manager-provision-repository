@@ -33,6 +33,13 @@ flock -n 9 || fail "another repository provisioning run is already active"
 [ -r "$repositories_query" ] || fail "repositories query not found: $repositories_query"
 [ -x "$dropin_check" ] || fail "drop-in check not found: $dropin_check"
 
+# Every path under /srv belongs to the worker identity with a group the
+# deployment user is not in, so a bare test would report an existing checkout as
+# missing. Ask through sudo, as every other access to these paths does.
+checkout_prepared() { sudo test -d "$1/.git"; }
+checkout_occupied() { sudo test -e "$1"; }
+
+
 configured=$(sudo sqlite3 -readonly "$database_path" <"$repositories_query")
 
 printf '%s\n' "$configured" | while IFS='|' read -r owner name checkout; do
@@ -49,9 +56,9 @@ printf '%s\n' "$configured" | while IFS='|' read -r owner name checkout; do
     *..*) fail "configured checkout path is not normalized: $checkout" ;;
   esac
 
-  [ -d "$checkout/.git" ] && continue
+  checkout_prepared "$checkout" && continue
 
-  if [ -e "$checkout" ]; then
+  if checkout_occupied "$checkout"; then
     fail "configured checkout path exists but is not a Git repository: $checkout"
   fi
 
