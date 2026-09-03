@@ -529,12 +529,15 @@ The deployment runs outside that namespace and already restarts the coordinator,
 so it is the one place that can do this; onboarding is therefore add, deploy,
 enable rather than a hand-run clone and a hand-edited unit.
 
-Restarting stays a maintainer's decision. A grant only enters a service's mount
-namespace when that service starts, and restarting `ptc_manager-herdr` ends
-every retained agent session, so neither the deployment nor the button restarts
-it. Each repository's **service access** health names exactly what is
-outstanding: a grant that is missing, a grant that is loaded but waiting for a
-service to start, or access that is already in force.
+A grant only enters a service's mount namespace when that service starts. The
+deployment restarts the coordinator anyway, and it restarts `ptc_manager-herdr`
+too when PtcManager records no live agent run and Herdr reports no live agent:
+that restart ends every retained session, so it is taken only when there is
+nothing to end. While a session is held the deployment says so and leaves the
+service alone, and the **Prepare checkouts** button never restarts anything,
+because nothing is drained around it. Each repository's **service access**
+health names what is outstanding: a grant that is missing, a grant loaded but
+waiting for a service to start, or access already in force.
 
 The Configuration page displays the derived checkout path. A repository can be
 removed there after explicit confirmation, but only when all managed jobs,

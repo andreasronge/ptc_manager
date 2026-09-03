@@ -428,6 +428,35 @@ ensure_no_busy_herdr_agents() {
   fi
 }
 
+# A newly granted checkout stays unwritable for the worker until
+# ptc_manager-herdr starts again, because ReadWritePaths enters a mount
+# namespace only at start. That restart ends every retained agent session, which
+# is why a deployment never takes it blindly. When PtcManager records no live
+# run and Herdr reports no live agent there is nothing to end, so take it then
+# and leave the maintainer only the case where something would actually be lost.
+restart_worker_when_nothing_retained() {
+  live_runs=$(
+    sudo sqlite3 -readonly "$database_path" \
+      "select count(*) from agent_runs where state not in ('done', 'failed', 'lost');"
+  )
+
+  if [ -n "$worker_session" ]; then
+    live_agents=$(
+      sudo -u ptc-manager-worker -H "$worker_herdr" --session "$worker_session" agent list |
+        jq '[.result.agents[]? | select(.agent_status != "done")] | length'
+    )
+  else
+    live_agents=0
+  fi
+
+  if [ "$live_runs" -eq 0 ] && [ "$live_agents" -eq 0 ]; then
+    echo "No agent session is retained; restarting ptc_manager-herdr so granted checkouts become writable"
+    sudo systemctl restart ptc_manager-herdr
+  else
+    echo "Leaving ptc_manager-herdr running: $live_runs live run(s) and $live_agents live agent(s) would be lost. Restart it when none is retained so newly granted checkouts become writable for the worker."
+  fi
+}
+
 ensure_private_worktree_root() {
   root=$1
 
@@ -1056,6 +1085,7 @@ echo "Stopping service and backing up SQLite..."
 deployment_phase=service_stopped
 sudo systemctl stop "$service_name"
 ensure_no_managed_runs
+restart_worker_when_nothing_retained
 sudo sqlite3 "$database_path" ".backup '$database_backup'"
 sudo chown ptc-manager:ptc-manager "$database_backup"
 sudo chmod 0600 "$database_backup"

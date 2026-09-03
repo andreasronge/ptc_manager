@@ -74,7 +74,7 @@ defmodule PtcManager.Repository.ServiceAccessTest do
 
     assert %{status: :attention, detail: detail} = ServiceAccess.summarize(repository())
     assert detail =~ "ptc_manager-herdr.service has not started since"
-    assert detail =~ "retained agent session"
+    assert detail =~ "restarts ptc_manager-herdr.service for you"
   end
 
   # Regenerating the drop-in must not report the repositories the base unit

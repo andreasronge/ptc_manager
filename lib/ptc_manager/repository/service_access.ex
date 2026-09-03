@@ -79,8 +79,9 @@ defmodule PtcManager.Repository.ServiceAccess do
       label: "Service access waiting for a restart",
       detail:
         "#{subject} the grant was written, and a checkout only becomes writable when the " <>
-          "service starts. Restarting #{worker_unit()} ends every retained agent session, so " <>
-          "do it when none is held."
+          "service starts. A deployment restarts #{worker_unit()} for you when no agent " <>
+          "session is retained; while one is held it leaves it alone, so restart it yourself " <>
+          "once the board is quiet."
     }
   end
 
