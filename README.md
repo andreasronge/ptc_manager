@@ -506,18 +506,34 @@ memory.
 
 To onboard another public or private repository:
 
-1. create a dedicated clone on the worker and authenticate the existing `gh`
-   CLI identity for it;
-2. commit a `.ptc-manager.yml` contract whose bootstrap command prepares that
-   repository; add broker verification only if PtcManager will publish for the agent;
-3. use **Configuration → Add another GitHub repository** to register its exact
+1. commit a `.ptc-manager.yml` contract to that repository whose bootstrap
+   command prepares it, and an `AGENTS.md` describing its own conventions; add
+   broker verification only if PtcManager will publish for the agent;
+2. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
    GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
    and creates the repository disabled;
+3. deploy. The deployment clones any configured checkout that does not exist
+   yet, gives it to the worker identity, and regenerates the drop-in that grants
+   every configured checkout to both services;
 4. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
 5. enable only the definitions and schedules that repository needs, then test a
    read-only action before approving implementation work.
+
+PtcManager cannot prepare a checkout itself. The coordinator runs with
+`ProtectSystem=strict`, so `/srv` is read-only inside its mount namespace even
+for root, and a new path only enters a namespace when the service restarts.
+The deployment runs outside that namespace and already restarts the coordinator,
+so it is the one place that can do this; onboarding is therefore add, deploy,
+enable rather than a hand-run clone and a hand-edited unit.
+
+One step remains manual. A deployment never restarts `ptc_manager-herdr`,
+because that service holds the retained agent sessions. Its generated drop-in is
+installed with everything else, but a newly added checkout only becomes writable
+for the worker after that service restarts, which is worth doing when no session
+is retained. Until then the repository can be registered and read, and
+implementation dispatch for it will report the checkout as not writable.
 
 The Configuration page displays the derived checkout path. A repository can be
 removed there after explicit confirmation, but only when all managed jobs,
@@ -735,6 +751,8 @@ sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 /var/lib/ptc_man
 sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
 sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2750 /srv/ptc_manager-worktrees
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 2770 /srv/ptc_manager-external
+# The two bootstrap checkouts; every repository added later is prepared by the
+# deployment instead.
 sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner /srv/ptc_manager
 sudo chmod -R g-w,g+rX,o-rwx /srv/ptc_runner /srv/ptc_manager
 sudo find /srv/ptc_runner /srv/ptc_manager -type d -exec chmod g+s {} +

@@ -440,6 +440,31 @@ defmodule PtcManager.DeploymentsTest do
     repository_fixture(%{github_owner: owner, github_name: name, local_path: path, enabled: true})
   end
 
+  # The deployment prepares a checkout and grants it to both services from this
+  # query, so a repository the maintainer has added but not yet enabled has to
+  # appear in it: that is exactly the state onboarding leaves them in.
+  test "the host repository query names every configured repository, enabled or not" do
+    enabled = repository_fixture(%{github_owner: "acme", github_name: "one", enabled: true})
+    disabled = repository_fixture(%{github_owner: "acme", github_name: "two", enabled: false})
+
+    for {repository, path} <- [{enabled, "/srv/one"}, {disabled, "/srv/two"}] do
+      repository |> Ecto.Changeset.change(local_path: path) |> Repo.update!()
+    end
+
+    repository_fixture(%{github_owner: "acme", github_name: "three"})
+
+    assert host_configured_repositories() == ["acme|one|/srv/one", "acme|two|/srv/two"]
+  end
+
+  defp host_configured_repositories do
+    sql =
+      Path.expand("../../deploy/ptc-manager-configured-repositories.sql", __DIR__)
+      |> File.read!()
+
+    %{rows: rows} = Repo.query!(sql)
+    Enum.map(rows, fn [value] -> value end)
+  end
+
   defp host_active_run_count do
     sql =
       Path.expand("../../deploy/ptc-manager-active-managed-runs.sql", __DIR__)
