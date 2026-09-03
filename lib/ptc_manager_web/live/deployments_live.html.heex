@@ -92,6 +92,12 @@
           <p class="mt-1 text-xs leading-5 text-amber-100/70">
             {status.active_deployment.status_text}
           </p>
+          <p class="mt-1 text-xs text-amber-100/50">
+            Requested {timestamp(status.active_deployment.requested_at)} · {since(
+              @now,
+              status.active_deployment.requested_at
+            )}
+          </p>
           <button
             :if={status.active_deployment.state in ~w(queued draining)}
             id={"cancel-deployment-#{status.active_deployment.id}"}
@@ -145,7 +151,21 @@
                   @ {short_sha(deployment.requested_sha)}
                 </span>
               </p>
-              <p class="mt-1 text-xs text-slate-500">Requested by {deployment.requested_by}</p>
+              <p class="mt-1 text-xs text-slate-500">
+                Requested by {deployment.requested_by} · {timestamp(deployment.requested_at)}
+                <span class="text-slate-600">({since(@now, deployment.requested_at)})</span>
+              </p>
+              <p class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-slate-600">
+                <span :if={deployment.started_at}>
+                  Started {timestamp(deployment.started_at)}
+                </span>
+                <span :if={deployment.finished_at}>
+                  {state_label(deployment.state)} {timestamp(deployment.finished_at)}
+                </span>
+                <span :if={duration = deployment_duration(@now, deployment)}>
+                  Took {duration}
+                </span>
+              </p>
             </div>
             <span class={[
               "rounded-full px-2.5 py-1 text-xs font-semibold",

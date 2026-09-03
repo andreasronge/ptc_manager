@@ -89,6 +89,7 @@ gate_tool_home=
 manual_herdr=/home/agent/.local/bin/herdr
 worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
+active_runs_query="/tmp/ptc-manager-active-runs-${release_id}.sql"
 environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
@@ -111,7 +112,7 @@ remote_script=$0
 deployment_phase=pre_stop
 
 cleanup_remote() {
-  rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$environment_file_parser" \
+  rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$active_runs_query" "$environment_file_parser" \
     "$worker_git_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
     "$operation_wrapper_candidate" \
     "$operation_recovery_candidate" \
@@ -269,8 +270,7 @@ read_environment_setting() {
 }
 
 active_managed_runs() {
-  sudo sqlite3 -readonly "$database_path" \
-    "select count(*) from agent_runs where state in ('queued','starting','working','blocked','unknown');"
+  sudo sqlite3 -readonly "$database_path" <"$active_runs_query"
 }
 
 ensure_no_managed_runs() {
@@ -697,6 +697,7 @@ command -v nsenter >/dev/null
 [ ! -e "$release_backup" ]
 sudo -n true
 tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
+tar -xOf "$source_archive" deploy/ptc-manager-active-managed-runs.sql >"$active_runs_query"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"

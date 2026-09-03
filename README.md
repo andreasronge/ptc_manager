@@ -948,8 +948,14 @@ managed PR is open, its named Herdr session and worktree move to a
 passive `waiting` state: they remain available for CI repairs or review feedback
 without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
-Deployments may proceed while agents are only `waiting`; the deploy guard still
-stops for queued, starting, working, blocked, or unknown runs.
+Deployments may proceed while agents are only `waiting`. A deployment waits for
+every run the coordinator is driving, and for a blocked or unknown run only
+while its agent action or its job is still in flight: a retained agent sitting
+on a prompt for an open pull request holds nothing, because restarting
+PtcManager never touches Herdr agents. The host runner reads the same database
+before it installs anything, through the identical rule kept in
+`deploy/ptc-manager-active-managed-runs.sql`; a run one guard counts and the
+other does not would refuse every deployment the instant it is handed over.
 
 Every run also carries a derived health, because a Herdr snapshot refreshes each
 agent every few seconds: a live heartbeat proves only that the pane still
