@@ -2,6 +2,7 @@ defmodule PtcManager.OperationsTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Operations
+  alias PtcManager.Operations.AgentHealth
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -422,6 +423,98 @@ defmodule PtcManager.OperationsTest do
                })
 
       assert "is required when the run has ended" in errors_on(changeset).ended_at
+    end
+  end
+
+  describe "AgentHealth.assess/2" do
+    @now ~U[2026-09-03 15:00:00.000000Z]
+
+    defp health_run(attrs) do
+      struct!(
+        %AgentRun{
+          role: "implementer",
+          state: "working",
+          started_at: @now,
+          last_heartbeat_at: @now,
+          state_changed_at: @now
+        },
+        attrs
+      )
+    end
+
+    defp health_minutes_ago(count), do: DateTime.add(@now, -count * 60, :second)
+
+    test "a working agent with a fresh Herdr signal is healthy" do
+      assert %{status: :healthy, label: "Working"} =
+               AgentHealth.assess(health_run(%{state_changed_at: health_minutes_ago(3)}), @now)
+    end
+
+    test "a retained agent held with its pull request is healthy" do
+      assert %{status: :healthy, label: "Retained"} =
+               AgentHealth.assess(
+                 health_run(%{state: "waiting", state_changed_at: health_minutes_ago(600)}),
+                 @now
+               )
+    end
+
+    test "a briefly blocked agent is healthy because a turn may pause for input" do
+      assert %{status: :healthy, label: "Asking for input"} =
+               AgentHealth.assess(
+                 health_run(%{state: "blocked", state_changed_at: health_minutes_ago(2)}),
+                 @now
+               )
+    end
+
+    # Herdr restores a pane after a server restart by running the agent without
+    # its approval bypass, so it stops at a question and keeps a live heartbeat
+    # while its pull request goes nowhere. Only the time spent in that one state
+    # tells the two apart.
+    test "an agent blocked past the grace period needs attention" do
+      assert %{status: :attention, label: "Waiting for a person", detail: detail} =
+               AgentHealth.assess(
+                 health_run(%{state: "blocked", state_changed_at: health_minutes_ago(1_740)}),
+                 @now
+               )
+
+      assert detail =~ "1d 5h"
+      assert detail =~ "answers it in Herdr"
+    end
+
+    test "a live heartbeat does not hide an agent Herdr stopped reporting" do
+      assert %{status: :attention, label: "Out of contact"} =
+               AgentHealth.assess(
+                 health_run(%{state: "working", last_heartbeat_at: health_minutes_ago(45)}),
+                 @now
+               )
+    end
+
+    test "runs that ended badly need attention and a finished run does not" do
+      assert %{status: :attention, label: "Ended without finishing"} =
+               AgentHealth.assess(health_run(%{state: "failed"}), @now)
+
+      assert %{status: :attention, label: "Lost from Herdr"} =
+               AgentHealth.assess(health_run(%{state: "lost"}), @now)
+
+      assert %{status: :ended} = AgentHealth.assess(health_run(%{state: "done"}), @now)
+    end
+
+    test "a run without a recorded state change falls back to when it started" do
+      assert %{status: :attention, label: "Waiting for a person"} =
+               AgentHealth.assess(
+                 health_run(%{
+                   state: "blocked",
+                   state_changed_at: nil,
+                   started_at: health_minutes_ago(120)
+                 }),
+                 @now
+               )
+    end
+
+    test "needing_attention keeps only the runs a person has to look at" do
+      healthy = health_run(%{state: "working"})
+      blocked = health_run(%{state: "blocked", state_changed_at: health_minutes_ago(120)})
+
+      assert AgentHealth.needing_attention([healthy, blocked], @now) == [blocked]
     end
   end
 

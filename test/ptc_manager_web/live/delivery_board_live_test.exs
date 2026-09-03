@@ -3,7 +3,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
   alias PtcManager.Operations
 
-  alias PtcManager.Operations.{AgentAction, Job, PrAnalysis, PrPublication}
+  alias PtcManager.Operations.{AgentAction, AgentRun, Job, PrAnalysis, PrPublication}
   alias PtcManager.Publications
   alias PtcManager.Repo
   alias PtcManager.TestScenario
@@ -306,12 +306,53 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
              "queued"
   end
 
+  # A retained agent parked at a question keeps a live Herdr heartbeat, so the
+  # card used to blame the pull request for standing still while every action
+  # queued against it failed a second later.
+  test "names the stalled agent holding a pull request instead of blaming the PR", %{conn: conn} do
+    job = approved_job("Repair the conflicted pull request") |> set_job_state("pr_open")
+    publication = publication_fixture(job, "failure", "conflicting")
+    blocked_agent_run(job, "impl_j#{job.id}_f1")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#lane-stuck #board-job-#{job.id}"
+
+    assert has_element?(view, card, "Waiting for a person")
+    assert has_element?(view, "#agent-attention-board-job-#{job.id}", "impl_j#{job.id}_f1")
+    assert has_element?(view, card, "answers it in Herdr")
+    assert has_element?(view, card, "fail until it can run again")
+    refute has_element?(view, card, "Merge conflicts must be resolved")
+
+    assert has_element?(view, "#repair-and-merge-pr-#{publication.id}", "Fix and merge")
+  end
+
   defp approved_job(title) do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: title})
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
     job
+  end
+
+  defp blocked_agent_run(job, agent_name) do
+    worker = worker_fixture()
+    stalled = DateTime.add(DateTime.utc_now(), -3 * 3600, :second)
+
+    %AgentRun{}
+    |> AgentRun.changeset(%{
+      worker_id: worker.id,
+      job_id: job.id,
+      role: "implementer",
+      state: "blocked",
+      agent_name: agent_name,
+      herdr_pane: "w1:p1",
+      fencing_token: 1,
+      started_at: stalled,
+      last_heartbeat_at: DateTime.utc_now(),
+      state_changed_at: stalled
+    })
+    |> Repo.insert!()
   end
 
   defp set_job_state(job, state) do

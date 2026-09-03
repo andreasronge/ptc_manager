@@ -260,6 +260,10 @@ config :ptc_manager,
   dispatch_lease_ms: System.get_env("PTC_DISPATCH_LEASE_MS", "1800000") |> String.to_integer(),
   implementation_idle_timeout_ms:
     System.get_env("PTC_IMPLEMENTATION_IDLE_TIMEOUT_MS", "300000") |> String.to_integer(),
+  agent_blocked_attention_ms:
+    System.get_env("PTC_AGENT_BLOCKED_ATTENTION_MS", "600000") |> String.to_integer(),
+  agent_silent_attention_ms:
+    System.get_env("PTC_AGENT_SILENT_ATTENTION_MS", "600000") |> String.to_integer(),
   dispatch_reconcile_after_ms:
     System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
   worktree_reconcile_interval_ms:

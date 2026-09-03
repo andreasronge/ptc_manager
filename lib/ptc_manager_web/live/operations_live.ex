@@ -9,6 +9,7 @@ defmodule PtcManagerWeb.OperationsLive do
   alias PtcManager.Herdr.Transcript
   alias PtcManager.MachineUsage
   alias PtcManager.Operations
+  alias PtcManager.Operations.AgentHealth
   alias PtcManager.ReviewPolicy
   alias PtcManagerWeb.TimeFormat
 
@@ -54,6 +55,7 @@ defmodule PtcManagerWeb.OperationsLive do
        workers: [],
        active_runs: [],
        waiting_runs: [],
+       attention_runs: [],
        queued_jobs: [],
        queued_actions: [],
        resource_operations: [],
@@ -270,7 +272,10 @@ defmodule PtcManagerWeb.OperationsLive do
           </p>
           <p class="mt-1 text-sm leading-6 text-slate-300">{run_task(@run)}</p>
         </div>
-        <.work_status state={@run.state} label={@run.state} />
+        <div class="flex shrink-0 flex-wrap items-center gap-1.5">
+          <.agent_health_badge run={@run} now={@now} />
+          <.work_status state={@run.state} label={@run.state} />
+        </div>
       </div>
       <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
         <span>{@run.worker.name}</span>
@@ -290,6 +295,35 @@ defmodule PtcManagerWeb.OperationsLive do
     </.link>
     """
   end
+
+  attr :run, :map, required: true
+  attr :now, :any, required: true
+
+  def agent_health_badge(assigns) do
+    assigns = assign(assigns, :health, AgentHealth.assess(assigns.run, assigns.now))
+
+    ~H"""
+    <span
+      :if={@health.status != :ended}
+      title={@health.detail}
+      class={[
+        "inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold ring-1",
+        health_classes(@health.status)
+      ]}
+    >
+      <.icon name={health_icon(@health.status)} class="size-3" />
+      {@health.label}
+    </span>
+    """
+  end
+
+  def health_classes(:attention), do: "bg-amber-400/15 text-amber-200 ring-amber-400/25"
+  def health_classes(_status), do: "bg-teal-400/10 text-teal-300 ring-teal-400/20"
+
+  def health_icon(:attention), do: "hero-exclamation-triangle-mini"
+  def health_icon(_status), do: "hero-check-circle-mini"
+
+  def agent_health(run, now), do: AgentHealth.assess(run, now)
 
   def bytes(0), do: "Unavailable"
 
@@ -551,6 +585,7 @@ defmodule PtcManagerWeb.OperationsLive do
       workers: workers,
       active_runs: active_runs,
       waiting_runs: waiting_runs,
+      attention_runs: AgentHealth.needing_attention(active_runs ++ waiting_runs, now),
       active_light_slots: usage.light,
       active_heavy_slots: usage.heavy,
       light_agent_capacity: capacity_setting.light_agent_capacity,

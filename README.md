@@ -950,6 +950,19 @@ without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
 Deployments may proceed while agents are only `waiting`; the deploy guard still
 stops for queued, starting, working, blocked, or unknown runs.
+
+Every run also carries a derived health, because a Herdr snapshot refreshes each
+agent every few seconds: a live heartbeat proves only that the pane still
+exists. An agent parked at a question nobody is watching for keeps that
+heartbeat while its pull request stops moving. PtcManager therefore records when
+a run last changed state and judges health from the state it holds and how long
+it has held it. A run blocked past `PTC_AGENT_BLOCKED_ATTENTION_MS` (ten minutes
+by default), or silent past `PTC_AGENT_SILENT_ATTENTION_MS`, or ended as failed,
+lost, or unknown, needs a person. Operations lists those under **Needs a
+person** on the Agents tab and badges every run card, and the delivery board
+names the stalled agent on the pull request it holds instead of blaming the pull
+request for standing still. The health is derived on read from the run
+PtcManager already reconciled, so no stored copy can disagree with Herdr.
 When GitHub reports the PR merged or closed, the job becomes terminal and the
 cleanup worker removes the Herdr worktree and session idempotently. This final
 cleanup is authorized to discard a dirty checkout because GitHub has already

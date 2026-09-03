@@ -5,6 +5,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
+  alias PtcManager.Operations.AgentHealth
 
   @lane_definitions [
     %{
@@ -198,6 +199,24 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       _value -> "#{run.role} agent"
     end
   end
+
+  @doc """
+  Returns the health of this card's agent when a person has to look at it.
+
+  A retained agent keeps a live Herdr heartbeat while it sits at a question no
+  maintainer is watching for, so the card would otherwise blame the pull request
+  for standing still and every action queued against it fails a second later.
+  """
+  def agent_attention(%{agent_run: nil}, _now), do: nil
+
+  def agent_attention(%{agent_run: run}, now) do
+    case AgentHealth.assess(run, now) do
+      %{status: :attention} = health -> health
+      _healthy -> nil
+    end
+  end
+
+  def agent_attention(_item, _now), do: nil
 
   def repair_action(%{publication: nil}), do: nil
 
@@ -436,6 +455,9 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
       work_state(item) == "sync_pending" ->
         "The repair finished; PtcManager is verifying the new PR head against GitHub."
+
+      health = agent_attention(item, DateTime.utc_now()) ->
+        health.detail
 
       match?(%{publication: %{mergeability: "conflicting"}}, item) ->
         "Merge conflicts must be resolved by the implementation agent."
