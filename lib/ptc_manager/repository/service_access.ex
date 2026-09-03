@@ -89,6 +89,7 @@ defmodule PtcManager.Repository.ServiceAccess do
       {:ok, properties} ->
         cond do
           not granted?(properties, path) -> :missing
+          granted_outside_dropin?(unit, path) -> :effective
           started_after_dropin?(properties, unit) -> :effective
           true -> :restart_pending
         end
@@ -104,6 +105,43 @@ defmodule PtcManager.Repository.ServiceAccess do
     |> String.split(" ", trim: true)
     |> Enum.map(&String.trim_leading(&1, "-"))
     |> Enum.member?(path)
+  end
+
+  # A path some other source already grants is in force whatever the generated
+  # drop-in says. Without this, regenerating the drop-in would report every
+  # repository the base unit covers as waiting for a restart it does not need.
+  defp granted_outside_dropin?(unit, path) do
+    [Path.join(dropin_root(), unit) | sibling_dropins(unit)]
+    |> Enum.flat_map(&grants_in/1)
+    |> Enum.member?(path)
+  end
+
+  defp sibling_dropins(unit) do
+    directory = Path.join(dropin_root(), "#{unit}.d")
+
+    case File.ls(directory) do
+      {:ok, entries} ->
+        entries |> Enum.reject(&(&1 == @dropin)) |> Enum.map(&Path.join(directory, &1))
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp grants_in(path) do
+    case File.read(path) do
+      {:ok, content} ->
+        content
+        |> String.split("\n")
+        |> Enum.filter(&String.starts_with?(&1, "ReadWritePaths="))
+        |> Enum.flat_map(fn line ->
+          line |> String.replace_prefix("ReadWritePaths=", "") |> String.split(" ", trim: true)
+        end)
+        |> Enum.map(&String.trim_leading(&1, "-"))
+
+      {:error, _reason} ->
+        []
+    end
   end
 
   # A repository granted by the base unit rather than the generated drop-in has

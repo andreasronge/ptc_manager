@@ -77,6 +77,25 @@ defmodule PtcManager.Repository.ServiceAccessTest do
     assert detail =~ "retained agent session"
   end
 
+  # Regenerating the drop-in must not report the repositories the base unit
+  # already covers as waiting for a restart they do not need.
+  test "a base unit grant stays in force when the drop-in is newer", %{root: root} do
+    File.write!(
+      Path.join(root, "ptc_manager-herdr.service"),
+      "[Service]\nReadWritePaths=/var/lib/ptc_manager-worker /srv/demo\n"
+    )
+
+    write_dropin(root, "ptc_manager.service", 100)
+    write_dropin(root, "ptc_manager-herdr.service", 300)
+
+    Application.put_env(:ptc_manager, :service_access_test_properties, %{
+      "ptc_manager.service" => properties("-/srv/demo/.git", 200),
+      "ptc_manager-herdr.service" => properties("/srv/demo -/srv/demo", 200)
+    })
+
+    assert %{status: :ready} = ServiceAccess.summarize(repository())
+  end
+
   test "a repository no unit grants needs preparing" do
     Application.put_env(:ptc_manager, :service_access_test_properties, %{
       "ptc_manager.service" => properties("-/srv/other/.git", 200),
