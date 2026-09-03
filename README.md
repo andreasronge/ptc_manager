@@ -989,12 +989,21 @@ that exact PR. PtcManager keeps the action durable, reserves repository priority
 records the Herdr identity for read-only output, and independently confirms the
 GitHub result before releasing the repository and cleaning the worktree.
 
-A managed pull request is repaired by resuming its retained implementation
-session, so preflight asks the adapter whether that session still exists before
-it reserves the repair worktree. A repair that could never start now stops with
-the missing agent as its reason instead of taking a reservation nothing returns,
-which previously left the worktree held with no live attempt and stopped every
-later repair on that pull request at preflight.
+A managed pull request is normally repaired by resuming its retained
+implementation session. When Herdr no longer reports that session, the repair
+still runs: preflight falls back to the way an imported pull request is always
+repaired, in a fresh worktree at the exact head GitHub reports. Preflight
+decides once and freezes the answer as `repair_mode` in the action's target
+snapshot, so the adapter that runs and the postflight that judges the result
+cannot disagree about which evidence applies.
+
+The two modes carry different evidence. A retained session produced its commit
+in the worktree being inspected, so PtcManager verifies the commit range,
+ancestry, and cleanliness locally before recording a repaired status. A fresh
+worktree has no local history worth trusting, so the only evidence is the head
+that agent pushed matching what GitHub reports — the same guarantee imported
+pull requests have always had, including for an authorized merge, which still
+waits for GitHub itself to report the pull request merged.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

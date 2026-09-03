@@ -143,6 +143,17 @@ defmodule PtcManager.Operations.PrPublication do
   def external?(%__MODULE__{source: "external", job_id: nil}), do: true
   def external?(%__MODULE__{}), do: false
 
+  @doc """
+  The repository this pull request belongs to, from whichever side carries it.
+
+  An imported pull request is linked to its repository directly. One PtcManager
+  published for an agent may reach it only through the job that produced it, so
+  a caller must have preloaded whichever association it has.
+  """
+  def repository(%__MODULE__{repository: %{} = repository}), do: repository
+  def repository(%__MODULE__{job: %{repository: %{} = repository}}), do: repository
+  def repository(%__MODULE__{}), do: nil
+
   defp validate_publication_identity(changeset) do
     if get_field(changeset, :source) == "external" do
       validate_required(changeset, [

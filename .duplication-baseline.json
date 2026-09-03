@@ -1,7 +1,7 @@
 {
   "clones": {
     "0323d1ae813b5dc5f2007d4cdb204a6ef5918269d84f66aa7daffd1604b0dc97": {
-      "describe": "type_i mass=44 test/ptc_manager/maintainer_actions_test.exs:1461 <-> test/ptc_manager/maintainer_actions_test.exs:1509",
+      "describe": "type_i mass=44 test/ptc_manager/maintainer_actions_test.exs:1619 <-> test/ptc_manager/maintainer_actions_test.exs:1667",
       "files": [
         "test/ptc_manager/maintainer_actions_test.exs"
       ],
@@ -56,7 +56,7 @@
       "type": "type_i"
     },
     "37b225a59d1e865ca4ba6418d8bc247bfea1942a544391f48a3bec5719f7186e": {
-      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:262 <-> lib/ptc_manager/publications.ex:695",
+      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:263 <-> lib/ptc_manager/publications.ex:696",
       "files": [
         "lib/ptc_manager/publications.ex"
       ],
@@ -73,27 +73,8 @@
       ],
       "type": "type_ii"
     },
-    "3ef6a16c9aa8c08df4aa31fe5006288af98613f27917573275d50358f37cad97": {
-      "describe": "type_i mass=38 lib/ptc_manager/github/pull_request_client.ex:193 <-> lib/ptc_manager/maintainer_actions.ex:725",
-      "files": [
-        "lib/ptc_manager/github/pull_request_client.ex",
-        "lib/ptc_manager/maintainer_actions.ex"
-      ],
-      "mass": 38,
-      "occurrences": [
-        {
-          "file": "lib/ptc_manager/github/pull_request_client.ex",
-          "snippet": "ac9799367f4effdfb11a83e9d6f368548aed305f83c5d5d0d56dcaf9f4111f3b"
-        },
-        {
-          "file": "lib/ptc_manager/maintainer_actions.ex",
-          "snippet": "ac9799367f4effdfb11a83e9d6f368548aed305f83c5d5d0d56dcaf9f4111f3b"
-        }
-      ],
-      "type": "type_i"
-    },
     "783b496d5d795552c0ca880578926d416175869c26d3fcd820b3e399fc2b1cef": {
-      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:1179 <-> lib/ptc_manager/operations.ex:1280",
+      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:1546 <-> lib/ptc_manager/operations.ex:1647",
       "files": [
         "lib/ptc_manager/operations.ex"
       ],
@@ -111,7 +92,7 @@
       "type": "type_i"
     },
     "fbc70885d4484ad6437957b435937ea1d958995333e2a602d5e0453a627d00c7": {
-      "describe": "type_i mass=93 test/ptc_manager/maintainer_actions_test.exs:777 <-> test/ptc_manager/maintainer_actions_test.exs:825",
+      "describe": "type_i mass=93 test/ptc_manager/maintainer_actions_test.exs:951 <-> test/ptc_manager/maintainer_actions_test.exs:999",
       "files": [
         "test/ptc_manager/maintainer_actions_test.exs"
       ],

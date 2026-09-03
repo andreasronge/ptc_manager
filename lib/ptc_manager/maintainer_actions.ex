@@ -63,7 +63,7 @@ defmodule PtcManager.MaintainerActions do
                  :repository,
                  job: [:issue, :repository, :worktree_allocation]
                ]),
-             repository when not is_nil(repository) <- publication_repository(publication),
+             repository when not is_nil(repository) <- PrPublication.repository(publication),
              {:ok, attrs} <-
                Catalog.build(action_key, %{
                  publication: publication,
@@ -403,13 +403,15 @@ defmodule PtcManager.MaintainerActions do
     case call_sync(sync, action) do
       {:ok, %{pull_request: status}} ->
         if action_key == "repair_and_merge_pr" or repair_needed?(status) do
+          mode = repair_mode(adapter, action)
+
           with {:ok, prepared} <-
                  Operations.record_agent_action_target_snapshot(
                    action.id,
-                   MergeDecisions.snapshot(status),
+                   status |> MergeDecisions.snapshot() |> Map.put("repair_mode", mode),
                    action.prompt
                  ) do
-            case ready_and_reserved(adapter, action) do
+            case reserve_repair_worktree(prepared, mode) do
               {:ok, _allocation} ->
                 {:ok, prepared}
 
@@ -442,13 +444,25 @@ defmodule PtcManager.MaintainerActions do
 
   defp prepare_for_execution(action, _adapter, _sync), do: {:ok, action}
 
-  # Reserving the repair worktree commits an execution slot, so ask the adapter
-  # that will run whether it can run at all before taking it.
-  defp ready_and_reserved(adapter, action) do
-    with :ok <- ensure_adapter_ready(adapter, action) do
-      reserve_repair_worktree(action)
+  @doc false
+  # A managed pull request is repaired by resuming its retained implementation
+  # session. When that session is gone the repair still has to be possible, so it
+  # runs the way an imported pull request always has: a fresh worktree at the
+  # exact head GitHub reports. Preflight decides once and records the answer, so
+  # the adapter that runs and the postflight that judges the result cannot
+  # disagree about which evidence applies.
+  defp repair_mode(adapter, action) do
+    publication = Repo.get!(PrPublication, action.target_id)
+
+    cond do
+      PrPublication.external?(publication) -> "fresh"
+      retained_session_available?(adapter, action) -> "retained"
+      true -> "fresh"
     end
   end
+
+  defp retained_session_available?(adapter, action),
+    do: ensure_adapter_ready(adapter, action) == :ok
 
   defp ensure_adapter_ready(adapter, action) do
     if ready_check_supported?(adapter),
@@ -752,26 +766,20 @@ defmodule PtcManager.MaintainerActions do
 
   defp settle_repair_result(_action, result, _summary), do: result
 
-  defp reserve_repair_worktree(action) do
+  defp reserve_repair_worktree(action, "retained") do
+    publication = Repo.get!(PrPublication, action.target_id)
+    Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+  end
+
+  # A fresh repair takes no reservation: the adapter creates its own worktree, so
+  # only the root it will be created under has to be sound.
+  defp reserve_repair_worktree(action, "fresh") do
     publication = PrPublication |> Repo.get!(action.target_id) |> Repo.preload(:repository)
 
-    if PrPublication.external?(publication),
-      do: preflight_external_repair_worktree(publication),
-      else: Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
-  end
-
-  defp preflight_external_repair_worktree(publication) do
     with :ok <- HerdrAdapter.validate_pull_request_worktree_root(publication.repository) do
-      {:ok, :external_workspace_created_by_adapter}
+      {:ok, :workspace_created_by_adapter}
     end
   end
-
-  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
-
-  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
-    do: repository
-
-  defp publication_repository(_publication), do: nil
 
   defp fail_preflight(action_id, reason) do
     case Operations.fail_agent_action_preflight(action_id, reason) do

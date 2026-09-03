@@ -253,5 +253,5 @@ defmodule PtcManager.Worktrees do
     do: Application.fetch_env!(:ptc_manager, :dispatch_adapter)
 
   defp configured_external_adapter,
-    do: Application.get_env(:ptc_manager, :external_pr_herdr_adapter, HerdrAdapter)
+    do: Application.get_env(:ptc_manager, :pull_request_herdr_adapter, HerdrAdapter)
 end

@@ -2,7 +2,7 @@ defmodule PtcManager.ExternalPullRequestsTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.MaintainerActions.Catalog
-  alias PtcManager.MaintainerActions.ExternalPrRepairAdapter
+  alias PtcManager.MaintainerActions.FreshWorktreeRepairAdapter
   alias PtcManager.MaintainerActions
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, Job, PrPublication}
@@ -322,16 +322,16 @@ defmodule PtcManager.ExternalPullRequestsTest do
 
     {:ok, {action, _token}} = Operations.claim_agent_action(action.id)
 
-    previous_adapter = Application.get_env(:ptc_manager, :external_pr_herdr_adapter)
-    Application.put_env(:ptc_manager, :external_pr_herdr_adapter, FakeRepairHerdr)
+    previous_adapter = Application.get_env(:ptc_manager, :pull_request_herdr_adapter)
+    Application.put_env(:ptc_manager, :pull_request_herdr_adapter, FakeRepairHerdr)
     Process.put(:external_repair_test_pid, self())
     Process.put(:external_repair_head, String.duplicate("e", 40))
 
     on_exit(fn ->
-      restore_env(:external_pr_herdr_adapter, previous_adapter)
+      restore_env(:pull_request_herdr_adapter, previous_adapter)
     end)
 
-    assert {:ok, %{"outcome" => "repaired"}} = ExternalPrRepairAdapter.run(action)
+    assert {:ok, %{"outcome" => "repaired"}} = FreshWorktreeRepairAdapter.run(action)
     assert_receive {:herdr_started, action_id, publication_id}
     assert action_id == action.id
     assert publication_id == publication.id

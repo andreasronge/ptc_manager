@@ -94,6 +94,28 @@ defmodule PtcManager.MaintainerActionsTest do
     def release(_repository, _action_id, _snapshot), do: :ok
   end
 
+  defmodule FallbackRepairHerdr do
+    def start_pull_request_action(action, publication, _repository) do
+      send(Process.get(:fallback_repair_test_pid), {:fresh_worktree_started, action.id})
+
+      {:ok,
+       %{
+         workspace_id: "fallback-workspace",
+         pane_id: "fallback-pane",
+         session: "test",
+         external_key: "test:fallback-agent",
+         agent_name: "merge_pr#{publication.pr_number}_a#{action.id}_f#{action.attempt_count}",
+         worktree_path: "/tmp/fallback-worktree",
+         worker_key: Process.get(:fallback_worker_key)
+       }}
+    end
+
+    def prompt_pull_request_action(_agent_name, _prompt),
+      do: {:ok, Jason.encode!(%{"agent_status" => "idle"})}
+
+    def pull_request_action_head(_path), do: {:ok, Process.get(:fallback_repair_head)}
+  end
+
   defmodule FakeAdapter do
     @behaviour PtcManager.MaintainerActions.Adapter
 
@@ -1257,7 +1279,10 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert completed.id == queued.id
     assert completed.state == "done"
-    assert completed.target_snapshot == MergeDecisions.snapshot(failing_status)
+
+    assert completed.target_snapshot ==
+             failing_status |> MergeDecisions.snapshot() |> Map.put("repair_mode", "retained")
+
     assert Repo.get_by!(AgentRun, agent_action_id: completed.id).state == "done"
     assert_receive {:ran_agent_action, executed}
     assert executed.prompt =~ "instructions captured when this repair was queued"
@@ -1894,17 +1919,16 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
   end
 
-  # A repair resumes the retained implementation session. When that session is
-  # gone, preflight used to reserve the worktree anyway; the adapter then failed,
-  # nothing returned the reservation, and every later repair on the pull request
-  # stopped at preflight with an opaque worktree error instead of reporting the
-  # missing agent. The reservation must not be taken at all.
-  test "a repair whose retained agent is gone reports it without holding the worktree" do
+  # A managed pull request whose retained session is gone is still repairable: it
+  # runs the way an imported pull request always has, in a fresh worktree at the
+  # exact head GitHub reports. Preflight must record that, and must not reserve
+  # the retained worktree it is not going to use.
+  test "a repair whose retained agent is gone falls back to a fresh worktree" do
     previous_client = Application.get_env(:ptc_manager, :pull_request_client)
     Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
     on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
 
-    repository = repository_fixture()
+    repository = repository_fixture(%{local_path: System.tmp_dir!()})
     issue = issue_fixture(repository)
     publication = open_publication_fixture(issue)
     allocation = retain_repair_worktree(publication)
@@ -1918,20 +1942,35 @@ defmodule PtcManager.MaintainerActionsTest do
       |> merge_status(repository)
       |> Map.merge(%{checks_state: "failure", mergeability: "conflicting"})
 
-    Process.put(:merge_decision_statuses, [status])
+    repaired_head = String.duplicate("f", 40)
+    Process.put(:merge_decision_statuses, [status, Map.put(status, :head_sha, repaired_head)])
     Process.put(:repair_status, status)
+    Process.put(:fallback_repair_test_pid, self())
+    Process.put(:agent_action_test_pid, self())
+    Process.put(:fallback_repair_head, repaired_head)
+
+    Process.put(:fallback_worker_key, "repair-worker-#{publication.id}")
+
+    previous_herdr = Application.get_env(:ptc_manager, :pull_request_herdr_adapter)
+    Application.put_env(:ptc_manager, :pull_request_herdr_adapter, FallbackRepairHerdr)
+
+    on_exit(fn ->
+      case previous_herdr do
+        nil -> Application.delete_env(:ptc_manager, :pull_request_herdr_adapter)
+        value -> Application.put_env(:ptc_manager, :pull_request_herdr_adapter, value)
+      end
+    end)
 
     assert {:ok, queued} =
              MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
 
-    assert {:ok, stopped} =
-             MaintainerActions.run_once(adapter: ActionAdapter, sync: RepairSync)
+    assert {:ok, _outcome} = MaintainerActions.run_once(adapter: ActionAdapter, sync: RepairSync)
 
-    assert stopped.id == queued.id
-    assert stopped.state == "failed"
-    assert stopped.last_error =~ "retained_herdr_agent_unavailable"
+    assert_receive {:fresh_worktree_started, action_id}
+    assert action_id == queued.id
+    assert Repo.get!(AgentAction, queued.id).target_snapshot["repair_mode"] == "fresh"
 
-    # The worktree is exactly as preflight found it, so the next attempt can run.
+    # The retained worktree is untouched: the repair does not run there.
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "reclaimable"
   end
 

@@ -3,7 +3,7 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
-  alias PtcManager.MaintainerActions.{ExternalPrRepairAdapter, RetainedHerdrAdapter}
+  alias PtcManager.MaintainerActions.{FreshWorktreeRepairAdapter, RetainedHerdrAdapter}
   alias PtcManager.IssueDecision
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
@@ -32,7 +32,7 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   @impl true
   def ensure_ready(%AgentAction{action_key: action_key} = action)
       when action_key in @repair_action_keys do
-    adapter = repair_adapter(action)
+    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, RetainedHerdrAdapter)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :ensure_ready, 1),
       do: adapter.ensure_ready(action),
@@ -41,15 +41,23 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   def ensure_ready(%AgentAction{}), do: :ok
 
-  defp repair_adapter(%AgentAction{target_id: publication_id}) do
-    publication = Repo.get!(PrPublication, publication_id)
+  # Preflight recorded which worktree this repair runs in, so routing follows that
+  # decision rather than deriving its own and risking a different answer.
+  defp repair_adapter(%AgentAction{} = action) do
+    Application.get_env(:ptc_manager, :repair_agent_adapter, default_repair_adapter(action))
+  end
 
-    default_adapter =
-      if PrPublication.external?(publication),
-        do: ExternalPrRepairAdapter,
-        else: RetainedHerdrAdapter
+  defp default_repair_adapter(%AgentAction{target_snapshot: %{"repair_mode" => "fresh"}}),
+    do: FreshWorktreeRepairAdapter
 
-    Application.get_env(:ptc_manager, :repair_agent_adapter, default_adapter)
+  defp default_repair_adapter(%AgentAction{target_snapshot: %{"repair_mode" => "retained"}}),
+    do: RetainedHerdrAdapter
+
+  # Actions recorded before repair mode existed keep the routing they ran under.
+  defp default_repair_adapter(%AgentAction{target_id: publication_id}) do
+    if PrPublication.external?(Repo.get!(PrPublication, publication_id)),
+      do: FreshWorktreeRepairAdapter,
+      else: RetainedHerdrAdapter
   end
 
   @doc false

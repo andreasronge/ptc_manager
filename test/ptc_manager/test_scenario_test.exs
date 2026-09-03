@@ -1,7 +1,7 @@
 defmodule PtcManager.TestScenarioTest do
   use PtcManager.DataCase, async: false
 
-  alias PtcManager.MaintainerActions.ExternalPrRepairAdapter
+  alias PtcManager.MaintainerActions.FreshWorktreeRepairAdapter
   alias PtcManager.MaintainerActions
   alias PtcManager.Operations
 
@@ -710,7 +710,7 @@ defmodule PtcManager.TestScenarioTest do
     :ok =
       TestScenario.operation_outcome(scenario, :start_pull_request_action, :pause_after_effect)
 
-    task = Task.async(fn -> ExternalPrRepairAdapter.run(claimed, scenario) end)
+    task = Task.async(fn -> FreshWorktreeRepairAdapter.run(claimed, scenario) end)
 
     assert_receive {:scenario_paused_after_effect, reference, :start_pull_request_action,
                     action_id}

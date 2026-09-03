@@ -16,7 +16,7 @@ defmodule PtcManager.GitHub.PullRequestClient do
 
   @impl true
   def status(%PrPublication{pr_number: number} = publication) when is_integer(number) do
-    repository = publication_repository(publication)
+    repository = PrPublication.repository(publication)
 
     if is_nil(repository) do
       {:blocked, :pull_request_repository_missing}
@@ -189,13 +189,6 @@ defmodule PtcManager.GitHub.PullRequestClient do
       error -> error
     end
   end
-
-  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
-
-  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
-    do: repository
-
-  defp publication_repository(_publication), do: nil
 
   @doc false
   def health_from_responses(pull, combined_status, check_runs) do
