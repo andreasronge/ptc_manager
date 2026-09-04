@@ -9,13 +9,15 @@ set -eu
 # revision checked out here against whatever the machine currently has. Nothing
 # it does changes the machine, so it needs no deployment of its own.
 
+# Prints only. The caller picks the stream and the status, so asking for help
+# succeeds on stdout while a usage error fails on stderr, as `mix ptc.deploy`
+# already does.
 usage() {
-  cat >&2 <<'USAGE'
+  cat <<'USAGE'
 Usage: mix ptc.agents [--target SSH_TARGET]
 
   --target  SSH host to inspect, default $PTC_DEPLOY_TARGET or herdr-box
 USAGE
-  exit 2
 }
 
 target=${PTC_DEPLOY_TARGET:-herdr-box}
@@ -29,10 +31,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     -h | --help)
       usage
+      exit 0
       ;;
     *)
       echo "unknown argument: $1" >&2
-      usage
+      usage >&2
+      exit 2
       ;;
   esac
 done

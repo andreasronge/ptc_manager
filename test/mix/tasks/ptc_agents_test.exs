@@ -16,6 +16,25 @@ defmodule Mix.Tasks.Ptc.AgentsTest do
     end
   end
 
+  # Asking for help is not a failure. `mix ptc.deploy` already prints its usage
+  # on stdout and succeeds, and a Mix task that raises over `--help` reports the
+  # answer as an error.
+  test "asking for help succeeds and a usage error does not" do
+    assert {help, 0} = System.cmd("sh", [@report, "--help"], stderr_to_stdout: true)
+    assert help =~ "Usage: mix ptc.agents"
+
+    assert {refused, 2} = System.cmd("sh", [@report, "--nope"], stderr_to_stdout: true)
+    assert refused =~ "unknown argument: --nope"
+  end
+
+  # The target reaches ssh as an argument, so it is checked before it is used.
+  test "a target carrying anything but host characters is refused" do
+    assert {output, 2} =
+             System.cmd("sh", [@report, "--target", "evil;rm -rf /"], stderr_to_stdout: true)
+
+    assert output =~ "invalid SSH target"
+  end
+
   test "a record's trailing fields survive parsing" do
     assert [{"agent", "codex", ["codex-cli 1.2.3", "Logged in", "/opt/x"]}] =
              Agents.parse("agent\tcodex\tcodex-cli 1.2.3\tLogged in\t/opt/x\n")
