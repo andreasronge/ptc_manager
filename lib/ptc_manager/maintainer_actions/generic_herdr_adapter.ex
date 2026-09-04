@@ -12,6 +12,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerRepositoryTrust
   alias PtcManager.Repository.WorkerClaudeTrust
+  alias PtcManager.Repository.WorkerAgentLogin
   alias PtcManager.Repository.WorkerCodexArming
 
   @command_grace_ms 5_000
@@ -116,7 +117,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   defp start_agent(name, pane, profile, workspace_path) do
-    with :ok <- trust_agent_workspace(profile.kind, workspace_path),
+    with :ok <- WorkerAgentLogin.verify(profile.kind),
+         :ok <- trust_agent_workspace(profile.kind, workspace_path),
          :ok <- WorkerCodexArming.prepare(profile.kind) do
       run_agent_start(name, pane, profile, workspace_path)
     end

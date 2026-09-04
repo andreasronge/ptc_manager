@@ -1127,6 +1127,18 @@ implementation agent is given, by name. The report is read-only and pipes its
 probe over SSH rather than installing it, so it needs no deployment of its own
 and always runs the revision checked out locally.
 
+PtcManager refuses to start a pane with an agent kind whose worker identity is
+signed out, rather than letting the CLI print its login prompt and wait for
+nobody until the run times out. The check runs immediately before the pane, in
+the same place the workspace trust and the Codex policy are recorded, so an
+implementation job and a maintainer action refuse alike; the wrapper answers in
+its exit status and its output is never parsed. Sign the identity back in with
+the commands above, as `ptc-manager-worker`. The Herdr server also runs its
+panes with `DISABLE_AUTOUPDATER=1`, because Claude Code updates itself by
+default and the root-owned tree it is installed into exists precisely so an
+agent cannot rewrite the CLI it runs: the attempt can only fail, and versions
+come from the manifest.
+
 What pinning ends is drift, not the deploying account. A deployment runs as the
 `agent` user with passwordless `sudo`, so everything on this machine is
 downstream of that account: the toolchain trees mise installed before the

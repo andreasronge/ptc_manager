@@ -3,6 +3,7 @@ ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-bootstrap
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-claude-trust
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-codex-arm
+ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-agent-login
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-gh-label
 ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-external-git
 ptc-manager ALL=(ptc-manager-external) NOPASSWD: /usr/local/bin/ptc-manager-external-cleanup

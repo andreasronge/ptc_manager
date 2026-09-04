@@ -10,6 +10,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Operations.StopReport
   alias PtcManager.CommandEnvironment
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.WorkerAgentLogin
   alias PtcManager.Repository.WorkerClaudeTrust
   alias PtcManager.Repository.WorkerCodexArming
   alias PtcManager.Repository.WorkspaceSetup
@@ -623,7 +624,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   defp start_agent(command, name, pane_id, kind, repository_path, workspace_path)
        when is_binary(kind) do
-    with :ok <- WorkerClaudeTrust.prepare(kind, workspace_path),
+    with :ok <- WorkerAgentLogin.verify(kind),
+         :ok <- WorkerClaudeTrust.prepare(kind, workspace_path),
          :ok <- WorkerCodexArming.prepare(kind) do
       trusted_paths = [repository_path, workspace_path]
       run_agent_start(command, name, pane_id, kind, workspace_path, trusted_paths)
