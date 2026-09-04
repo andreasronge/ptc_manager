@@ -95,6 +95,7 @@ worker_pnpm_staging=
 worker_tool_staging=
 worker_opt_staging=
 herdr_link_backup=
+herdr_link_backup_retained=false
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
@@ -174,7 +175,13 @@ cleanup_remote() {
   esac
 
   case "$herdr_link_backup" in
-    /opt/ptc-manager-herdr-previous-*) sudo rm -rf -- "$herdr_link_backup" ;;
+    /opt/ptc-manager-herdr-previous-*)
+      # A restoration that failed leaves this as the only copy of the Herdr the
+      # running release expects, and the link it came from may already be gone.
+      if [ "$herdr_link_backup_retained" != true ]; then
+        sudo rm -rf -- "$herdr_link_backup"
+      fi
+      ;;
   esac
 
   case "$gate_tool_home" in
@@ -1108,6 +1115,11 @@ restore_worker_herdr() {
   sudo rm -f -- "$worker_herdr" || restore_status=1
   sudo cp -a "$herdr_link_backup" "$worker_herdr" || restore_status=1
   sudo systemctl restart ptc_manager-herdr || restore_status=1
+
+  if [ "$restore_status" -ne 0 ]; then
+    herdr_link_backup_retained=true
+    echo "The Herdr this release was deployed against is kept at $herdr_link_backup; put it back at $worker_herdr by hand." >&2
+  fi
 
   return "$restore_status"
 }

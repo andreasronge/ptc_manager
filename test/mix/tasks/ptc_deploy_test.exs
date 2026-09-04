@@ -182,6 +182,11 @@ defmodule Mix.Tasks.PtcDeployTest do
     # covered by a final command that cannot fail.
     assert script =~ "return \"$restore_status\""
     refute script =~ "sudo systemctl restart ptc_manager-herdr || true"
+
+    # A restoration that failed leaves the backup as the only copy of the Herdr
+    # the running release expects, so cleanup must not take it away.
+    assert script =~ "herdr_link_backup_retained=true"
+    assert script =~ ~s|if [ "$herdr_link_backup_retained" != true ]; then|
   end
 
   # A version written twice drifts. The manifest is the only place one belongs,

@@ -153,6 +153,22 @@ defmodule PtcManager.ToolchainTest do
     assert linked == pinned("node")
   end
 
+  # The deployment installs every program root-owned and world-executable, so a
+  # mode only root can run means the worker's agents cannot start it.
+  test "a target only root can execute is not a match", context do
+    install_pinned_programs(context)
+
+    File.chmod!(
+      Path.join(
+        context.install_root,
+        "ptc-manager-cursor-agent-#{pinned("cursor_agent")}/cursor-agent"
+      ),
+      0o700
+    )
+
+    assert %{status: :drifted} = Toolchain.report() |> program(:cursor_agent)
+  end
+
   test "the manifest pins every digest the deployment verifies a download against" do
     pinned = Toolchain.pinned()
 

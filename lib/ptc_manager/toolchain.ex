@@ -168,8 +168,10 @@ defmodule PtcManager.Toolchain do
 
   defp entry_point?(target, command) do
     case File.stat(target) do
+      # The deployment installs every program root-owned and world-executable,
+      # so a mode only root can run is not a program the worker reaches.
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        Bitwise.band(mode, 0o111) != 0 and Path.basename(target) == command
+        Bitwise.band(mode, 0o001) != 0 and Path.basename(target) == command
 
       _unreadable ->
         false
