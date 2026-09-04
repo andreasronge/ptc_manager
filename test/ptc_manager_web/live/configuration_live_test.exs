@@ -4,6 +4,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
   import Plug.Conn
 
   alias PtcManager.Operations.{AuditEvent, Repository}
+  alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.{CapacitySettings, Operations, Repo}
 
   test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
@@ -55,6 +56,42 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
              "#repository-health-#{repository.id} a[href*='/automations?repo=']",
              "Edit prompts and automations"
            )
+  end
+
+  test "adds, replaces, and deletes write-only implementation-agent variables", %{conn: conn} do
+    repository = repository_fixture()
+    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    refute html =~ "browser-secret"
+
+    view
+    |> form("#agent-environment-#{repository.id} form", %{
+      "repository-id" => repository.id,
+      "variable" => %{"name" => "OPENROUTER_API_KEY", "secret" => "browser-secret"}
+    })
+    |> render_submit()
+
+    [variable] = AgentEnvironmentVariables.list(repository.id)
+    assert variable.value == "browser-secret"
+    assert has_element?(view, "#agent-environment-variable-#{variable.id}", "OPENROUTER_API_KEY")
+    refute render(view) =~ "browser-secret"
+
+    view
+    |> form("#agent-environment-#{repository.id} form", %{
+      "repository-id" => repository.id,
+      "variable" => %{"name" => "OPENROUTER_API_KEY", "secret" => "rotated-secret"}
+    })
+    |> render_submit()
+
+    assert [%{id: id, value: "rotated-secret"}] = AgentEnvironmentVariables.list(repository.id)
+    assert id == variable.id
+    refute render(view) =~ "rotated-secret"
+
+    view
+    |> element("#agent-environment-variable-#{variable.id} button", "Delete")
+    |> render_click()
+
+    assert AgentEnvironmentVariables.list(repository.id) == []
   end
 
   test "registers another repository disabled with its own automation defaults", %{conn: conn} do

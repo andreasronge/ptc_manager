@@ -26,6 +26,7 @@ defmodule PtcManager.Operations.Repository do
     has_many :pr_publications, PtcManager.Operations.PrPublication
     has_many :automation_definitions, PtcManager.Automations.Definition
     has_many :deployments, PtcManager.Deployments.Deployment
+    has_many :agent_environment_variables, PtcManager.Operations.AgentEnvironmentVariable
 
     timestamps(type: :utc_datetime_usec)
   end

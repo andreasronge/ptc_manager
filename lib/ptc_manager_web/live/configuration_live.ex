@@ -3,6 +3,8 @@ defmodule PtcManagerWeb.ConfigurationLive do
 
   alias PtcManager.MaintainerActions
   alias PtcManager.Operations
+  alias PtcManager.AgentEnvironmentVariables
+  alias PtcManager.Operations.AgentEnvironmentVariable
   alias PtcManager.Operations.Repository
   alias PtcManager.Publications
   alias PtcManager.Repository.Health
@@ -25,7 +27,13 @@ defmodule PtcManagerWeb.ConfigurationLive do
 
   @impl true
   def handle_info({:operations_changed, source}, socket)
-      when source in [Repository, Operations, PtcManager.GitHub.Sync, CapacitySettings],
+      when source in [
+             Repository,
+             Operations,
+             AgentEnvironmentVariable,
+             PtcManager.GitHub.Sync,
+             CapacitySettings
+           ],
       do: {:noreply, load_configuration(socket)}
 
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
@@ -181,6 +189,53 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
+  def handle_event(
+        "save-agent-environment-variable",
+        %{"repository-id" => repository_id, "variable" => params},
+        socket
+      ) do
+    attrs = %{"name" => params["name"], "value" => params["secret"]}
+
+    case AgentEnvironmentVariables.put(repository_id, attrs, socket.assigns.actor) do
+      {:ok, _variable} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Implementation-agent variable saved.")
+         |> load_configuration()}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        message =
+          if changeset.errors[:name],
+            do: "Use an allowed uppercase variable name.",
+            else: "Provide a non-empty value."
+
+        {:noreply, put_flash(socket, :error, message)}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The variable could not be saved. Try again.")}
+    end
+  end
+
+  def handle_event(
+        "delete-agent-environment-variable",
+        %{"repository-id" => repository_id, "id" => id},
+        socket
+      ) do
+    case AgentEnvironmentVariables.delete(repository_id, id, socket.assigns.actor) do
+      {:ok, _variable} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Implementation-agent variable deleted.")
+         |> load_configuration()}
+
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "The variable no longer exists.")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The variable could not be deleted. Try again.")}
+    end
+  end
+
   defp remove_confirmed_repository(socket, confirmed_id) do
     case Operations.remove_repository(confirmed_id) do
       {:ok, repository} ->
@@ -235,6 +290,10 @@ defmodule PtcManagerWeb.ConfigurationLive do
       pr_reconcile_enabled:
         Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
           Publications.agent_reconciliation_needed?(),
+      agent_environment_variables:
+        Map.new(repositories, fn repository ->
+          {repository.id, AgentEnvironmentVariables.list_metadata(repository.id)}
+        end),
       repository_health:
         Enum.map(repositories, &Health.summarize(&1, Map.fetch!(availability, &1.id)))
     )
@@ -294,4 +353,6 @@ defmodule PtcManagerWeb.ConfigurationLive do
   end
 
   defp repository_error(_reason), do: "The repository configuration is invalid or already exists."
+
+  def variable_set_at(%DateTime{} = value), do: Calendar.strftime(value, "%d %b %Y · %H:%M")
 end
