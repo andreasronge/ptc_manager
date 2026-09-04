@@ -687,7 +687,13 @@ expression), a time, and a time zone, and shows its next three runs in that
 zone with the UTC equivalent. Issue and pull-request automations get contextual
 buttons on the Planning or Delivery surface instead. The agent kind selector
 offers the kinds reported by online workers and the configured agent profiles,
-marking profiles no online worker currently reports as offline. Built-in
+marking profiles no online worker currently reports as offline. Every
+automation starts the kind its selector resolves to with that profile's
+arguments, the implementation job and pull-request repairs included; a job
+records the kind when it is leased, and a job whose required kind has no
+enabled profile is cancelled with `no_healthy_agent_profile` instead of
+starting a different agent. `PTC_IMPLEMENTATION_AGENT_KIND` is only the kind
+tried first when an automation accepts any capable agent. Built-in
 triggers can be paused but not removed, because the bootstrap would recreate
 them. Custom automations run in a read-only snapshot of the default branch; a
 writable workspace that can open a pull request is a planned follow-up.
@@ -1230,11 +1236,13 @@ socket or CLI path with which to prompt or control the observed session. Keep
 Ordinary Herdr CLI calls are bounded by `PTC_HERDR_TIMEOUT_MS`. Agent startup
 instead uses Herdr's `PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS` readiness
 limit plus five seconds for the outer command to return its result; the generic
-timeout must not cut that longer startup wait short. Codex implementation agents
-default to the current unattended CLI flag
-`--dangerously-bypass-approvals-and-sandbox`; override
-`PTC_IMPLEMENTATION_AGENT_ARGS` only when the installed agent CLI requires a
-different supported mode. After
+timeout must not cut that longer startup wait short. Every agent starts with
+the arguments of its profile in `PTC_AGENT_PROFILES_JSON`; without that
+setting the only profile is `PTC_IMPLEMENTATION_AGENT_KIND` started with
+`PTC_IMPLEMENTATION_AGENT_ARGS`, which default to Codex and its current
+unattended CLI flag `--dangerously-bypass-approvals-and-sandbox`. Override the
+arguments only when the installed agent CLI requires a different supported
+mode. After
 `PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
 shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After

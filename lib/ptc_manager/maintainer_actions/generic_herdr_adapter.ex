@@ -3,6 +3,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
+  alias PtcManager.AgentProfiles
   alias PtcManager.Automations
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.MaintainerActions.ActionAdapter, as: ResultValidator
@@ -22,7 +23,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       when not is_nil(version) do
     try do
       with {:ok, path} <- action_path(action),
-           {:ok, profile} <- select_profile(version.agent_selector),
+           {:ok, profile} <- AgentProfiles.select(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
            :ok <- trust_workspace(path),
            {:ok, workspace, pane} <- open_workspace(action, path),
@@ -54,30 +55,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
        do: {:ok, Path.expand(path)}
 
   defp action_path(%AgentAction{repository: repository}), do: Checkout.available_path(repository)
-
-  defp select_profile(selector) do
-    profiles = Application.get_env(:ptc_manager, :agent_profiles, %{})
-    preferred = selector["preferred_kind"]
-    mode = selector["mode"] || "any"
-    fallback = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
-
-    candidates =
-      case {mode, preferred} do
-        {"require", value} when is_binary(value) ->
-          [value]
-
-        {"prefer", value} when is_binary(value) ->
-          Enum.uniq([value, fallback] ++ Map.keys(profiles))
-
-        _other ->
-          Enum.uniq([fallback] ++ Map.keys(profiles))
-      end
-
-    case Enum.find(candidates, &(get_in(profiles, [&1, "enabled"]) == true)) do
-      nil -> {:error, :no_healthy_agent_profile}
-      kind -> {:ok, %{kind: kind, args: get_in(profiles, [kind, "args"]) || []}}
-    end
-  end
 
   defp prepare_output(action) do
     directory =
@@ -176,24 +153,12 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         "--timeout",
         Integer.to_string(timeout),
         "--"
-      ] ++ expand_agent_args(profile.args, workspace_path)
+      ] ++ AgentProfiles.expand_args(profile.args, workspace_path)
 
     case command().run(args, timeout + @command_grace_ms) do
       {:ok, output} -> {:ok, decode_agent_key(output, pane)}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  @doc false
-  def expand_agent_args(args, workspace_path) when is_list(args) and is_binary(workspace_path) do
-    expanded_path = Path.expand(workspace_path)
-    toml_path = PtcManager.CodexTrust.toml_basic_string(expanded_path)
-
-    Enum.map(args, fn argument ->
-      argument
-      |> String.replace("{{workspace_path_toml}}", toml_path)
-      |> String.replace("{{workspace_path}}", expanded_path)
-    end)
   end
 
   defp prompt_and_wait(name, action, output_path, schema_path) do

@@ -1,4 +1,5 @@
 defmodule PtcManager.OperationsFixtures do
+  alias PtcManager.Automations.DefinitionForm
   alias PtcManager.Operations
   alias PtcManager.Operations.IssueDependency
   alias PtcManager.Repo
@@ -18,6 +19,40 @@ defmodule PtcManager.OperationsFixtures do
       end)
 
     repository
+  end
+
+  @doc "Configures the agent profiles for one test and restores the previous ones after it."
+  def put_agent_profiles(profiles) when is_map(profiles) do
+    previous = Application.get_env(:ptc_manager, :agent_profiles)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ptc_manager, :agent_profiles, previous),
+        else: Application.delete_env(:ptc_manager, :agent_profiles)
+    end)
+
+    Application.put_env(:ptc_manager, :agent_profiles, profiles)
+  end
+
+  @doc "Publishes a version of one automation that requires an exact agent kind."
+  def require_agent_kind!(repository, key, kind) do
+    :ok = PtcManager.Automations.ensure_defaults(repository)
+    definition = PtcManager.Automations.get_definition(repository, key)
+
+    changeset =
+      definition
+      |> DefinitionForm.params()
+      |> Map.merge(%{"agent_mode" => "require", "agent_kind" => kind})
+      |> DefinitionForm.changeset()
+
+    {:ok, version} =
+      PtcManager.Automations.create_version(
+        definition,
+        DefinitionForm.version_attrs(changeset, definition.current_version),
+        "fixture"
+      )
+
+    version
   end
 
   def issue_fixture(repository, attrs \\ %{}) do
