@@ -616,6 +616,17 @@ read_pinned_versions() {
   gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
 }
 
+# Take ownership of a staged /opt tree and make it traversable before it is
+# moved into place. `sudo mktemp -d` creates the staging root 0700 and `cp -a`
+# preserves the modes of what it copies rather than the root it copies into, so
+# without this the pinned tree is reachable by root alone: the worker cannot run
+# the program linked inside it, and the deploying user's own version check globs
+# nothing and reports the package as malformed.
+root_own_pinned_tree() {
+  sudo chown -R root:root "$1"
+  sudo chmod 0755 "$1"
+}
+
 # Codex and Claude Code both ship as an npm package whose platform dependency
 # carries the native binary. Install the pinned version with the pinned Node as
 # the deploying user, then copy it into a root-owned directory, the same way the
@@ -643,7 +654,7 @@ install_worker_npm_tool() {
 
   worker_opt_staging=$(sudo mktemp -d "${target}.XXXXXX")
   sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
-  sudo chown -R root:root "$worker_opt_staging"
+  root_own_pinned_tree "$worker_opt_staging"
   sudo mv "$worker_opt_staging" "$target"
   worker_opt_staging=
   rm -rf -- "$worker_tool_staging"
@@ -723,7 +734,7 @@ install_worker_cursor_agent() {
 
     worker_opt_staging=$(sudo mktemp -d "${worker_cursor_agent_dir}.XXXXXX")
     sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
-    sudo chown -R root:root "$worker_opt_staging"
+    root_own_pinned_tree "$worker_opt_staging"
     sudo rm -rf -- "$worker_cursor_agent_dir"
     sudo mv "$worker_opt_staging" "$worker_cursor_agent_dir"
     worker_opt_staging=
@@ -806,7 +817,7 @@ install_worker_node() {
   if ! sudo test -e "$worker_node_dir"; then
     worker_node_staging=$(sudo mktemp -d "/opt/ptc-manager-node-${node_version}.XXXXXX")
     sudo cp -a "$node_source/." "$worker_node_staging/"
-    sudo chown -R root:root "$worker_node_staging"
+    root_own_pinned_tree "$worker_node_staging"
 
     if [ "$(sudo "$worker_node_staging/bin/node" --version)" != "v${node_version}" ]; then
       echo "staged worker Node runtime has an unexpected version" >&2
@@ -870,7 +881,7 @@ install_worker_pnpm() {
   if ! sudo test -e "$worker_pnpm_dir"; then
     worker_pnpm_staging=$(sudo mktemp -d "/opt/ptc-manager-pnpm-${pnpm_version}.XXXXXX")
     sudo cp -a "$pnpm_source/." "$worker_pnpm_staging/"
-    sudo chown -R root:root "$worker_pnpm_staging"
+    root_own_pinned_tree "$worker_pnpm_staging"
 
     if [ "$(sudo "$worker_pnpm_staging/pnpm" --version)" != "$pnpm_version" ]; then
       echo "staged worker pnpm has an unexpected version" >&2

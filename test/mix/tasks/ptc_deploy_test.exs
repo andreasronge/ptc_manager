@@ -217,6 +217,38 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "read_pinned_versions"
   end
 
+  # `sudo mktemp -d` creates the staging root 0700 and `cp -a` preserves the
+  # modes of what it copies, not of the root it copies into. A pinned tree left
+  # 0700 belongs to root alone: the worker cannot run the program linked inside
+  # it, and the deploying user's own glob over the tree expands to nothing, which
+  # the deployment then reports as a malformed package rather than as the
+  # permission problem it is. Every staged tree therefore goes through the one
+  # helper that both owns and opens it.
+  test "every staged /opt tree is made traversable before it is moved into place" do
+    script = File.read!(@remote_script)
+
+    staged =
+      ~r/\$\(sudo mktemp -d "\$?\{?(?:\/opt\/)?[^"]*"\)/
+      |> Regex.scan(script)
+      |> length()
+
+    claimed =
+      ~r/^ *root_own_pinned_tree "\$[a-z_]+"$/m
+      |> Regex.scan(script)
+      |> length()
+
+    assert staged > 0
+
+    assert claimed == staged,
+           "#{staged} staged /opt trees but #{claimed} go through root_own_pinned_tree"
+
+    refute script =~ ~r/^ *sudo chown -R root:root "\$[a-z_]*staging"/m,
+           "a staging tree is owned without being made traversable"
+
+    assert script =~
+             ~r/root_own_pinned_tree\(\) \{\n  sudo chown -R root:root "\$1"\n  sudo chmod 0755 "\$1"\n\}/
+  end
+
   defp reader(args) do
     System.cmd("sh", [@toolchain_reader | args], stderr_to_stdout: true)
   end
