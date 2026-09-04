@@ -48,7 +48,8 @@ defmodule PtcManager.Toolchain do
       pin: "herdr",
       link: "herdr",
       prefix: "ptc-manager-herdr-",
-      deferred: true
+      deferred: true,
+      entry: "herdr"
     },
     %{key: :node, name: "Node", pin: "node", link: "node", prefix: "ptc-manager-node-"},
     %{key: :pnpm, name: "pnpm", pin: "pnpm", link: "pnpm", prefix: "ptc-manager-pnpm-"},
@@ -128,7 +129,8 @@ defmodule PtcManager.Toolchain do
   defp describe(program) do
     pinned = Map.fetch!(@pinned, program.pin)
     prefix = install_root() <> "/" <> program.prefix
-    target = canonical_target(Path.join(link_dir(), program.link))
+    link = Path.join(link_dir(), program.link)
+    target = canonical_target(link)
 
     described = %{
       key: program.key,
@@ -137,6 +139,10 @@ defmodule PtcManager.Toolchain do
       linked: linked_version(target, prefix),
       target: target,
       installed?: File.dir?(prefix <> pinned),
+      # Only a pinned program that would actually run once linked is waiting on
+      # a deployment; anything else at that path is drift no deployment step is
+      # pending for.
+      staged?: stageable?(program, prefix <> pinned),
       # A link is not a program: File.read_link/1 reads the text a symlink
       # holds without following it, so a link naming the pinned version can
       # still point at nothing, at a directory, or at something nobody can run.
@@ -146,7 +152,7 @@ defmodule PtcManager.Toolchain do
 
     described
     |> Map.put(:status, status(described))
-    |> Map.drop([:installed?, :runnable?, :deferred?])
+    |> Map.drop([:installed?, :runnable?, :staged?, :deferred?])
   end
 
   # A name on the PATH that is not a symlink was put there by hand: the
@@ -155,7 +161,9 @@ defmodule PtcManager.Toolchain do
   # directory cannot be read as the version it starts with.
   defp canonical_target(link) do
     case File.read_link(link) do
-      {:ok, target} -> Path.expand(target)
+      # A relative target resolves against the directory holding the link, not
+      # against whatever directory this process happens to be running in.
+      {:ok, target} -> Path.expand(target, Path.dirname(link))
       {:error, :enoent} -> nil
       {:error, _not_a_link} -> link
     end
@@ -191,8 +199,13 @@ defmodule PtcManager.Toolchain do
     end
   end
 
+  defp stageable?(%{deferred: true, entry: entry, link: link}, directory),
+    do: entry_point?(Path.join(directory, entry), link)
+
+  defp stageable?(_program, _directory), do: false
+
   defp status(%{pinned: version, linked: version, runnable?: true}), do: :matched
-  defp status(%{deferred?: true, installed?: true}), do: :staged
+  defp status(%{staged?: true}), do: :staged
   defp status(%{target: nil, installed?: false}), do: :absent
   defp status(_program), do: :drifted
 

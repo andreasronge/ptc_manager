@@ -519,7 +519,7 @@ restart_worker_when_nothing_retained() {
     sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"
     sudo systemctl restart ptc_manager-herdr
   else
-    echo "Leaving ptc_manager-herdr running: $live_runs live run(s) and $live_agents live agent(s) would be lost. Restart it when none is retained so newly granted checkouts become writable for the worker and the pinned Herdr $herdr_version takes effect."
+    echo "Leaving ptc_manager-herdr running: $live_runs live run(s) and $live_agents live agent(s) would be lost. Deploy again when none is retained: a deployment is what moves the link, so restarting the service by hand starts the same Herdr again rather than the pinned $herdr_version, and newly granted checkouts stay unwritable until then."
   fi
 }
 

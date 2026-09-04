@@ -198,7 +198,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
 
   def toolchain_note(:staged),
     do:
-      "A pinned program is installed but not linked yet. Herdr takes effect when ptc_manager-herdr restarts with no agent session retained."
+      "A pinned program is installed but not linked yet. A deployment is what moves Herdr's link, and only one that finds no agent session retained, so deploy again when none is rather than restarting the service by hand."
 
   def toolchain_note(:drifted),
     do:

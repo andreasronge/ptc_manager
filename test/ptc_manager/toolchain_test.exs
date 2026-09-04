@@ -132,9 +132,10 @@ defmodule PtcManager.ToolchainTest do
     report = Toolchain.report()
 
     assert %{status: :drifted} = program(report, :codex)
-    # Herdr is installed, so a link that leads nowhere runnable is still the
-    # staged state rather than a claim that the pinned version runs.
-    assert %{status: :staged} = program(report, :herdr)
+
+    # A pinned Herdr that would not run once linked is not waiting on a
+    # deployment either: no deployment step repairs it.
+    assert %{status: :drifted} = program(report, :herdr)
   end
 
   # Every other executable in a pinned tree sits under the same versioned
@@ -208,6 +209,21 @@ defmodule PtcManager.ToolchainTest do
     for key <- ~w(cursor_agent_sha256 herdr_sha256 mise_sha256 hex rebar3_sha512) do
       assert key in Toolchain.required_pins(), key
     end
+  end
+
+  # Unix resolves a relative link against the directory holding the link, not
+  # against whatever directory the console happens to be running in.
+  test "a relative link resolves against the directory holding it", context do
+    install_pinned_programs(context)
+    File.rm!(Path.join(context.link_dir, "pnpm"))
+
+    File.ln_s!(
+      "../opt/ptc-manager-pnpm-#{pinned("pnpm")}/pnpm",
+      Path.join(context.link_dir, "pnpm")
+    )
+
+    assert %{linked: linked, status: :matched} = Toolchain.report() |> program(:pnpm)
+    assert linked == pinned("pnpm")
   end
 
   test "the manifest pins every digest the deployment verifies a download against" do

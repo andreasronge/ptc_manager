@@ -541,6 +541,11 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~
              ~s|sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"\n    sudo systemctl restart ptc_manager-herdr|
 
+    # A deployment is the only thing that moves the link, so the deferred branch
+    # must not tell a maintainer that restarting the service by hand will do it.
+    assert script =~ "a deployment is what moves the link"
+    refute script =~ "Restart it when none is retained"
+
     assert String.split(script, ~s|"$worker_herdr_dir/herdr" "$worker_herdr"|) |> length() == 2
   end
 
