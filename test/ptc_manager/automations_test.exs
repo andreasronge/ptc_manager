@@ -12,6 +12,12 @@ defmodule PtcManager.AutomationsTest do
     def git_command(_args), do: {"", 0}
   end
 
+  # Every managed pane now asks whether the kind it is about to start is still
+  # signed in. The real wrapper is only on the worker machine.
+  defmodule AgentLoginCommand do
+    def login_command(_args), do: {"", 0}
+  end
+
   defmodule ClaudeTrustCommand do
     def trust_command(args) do
       send(
@@ -455,7 +461,8 @@ defmodule PtcManager.AutomationsTest do
       :worktree_root,
       :worker_repository_trust_command,
       :worker_claude_trust_command,
-      :worker_claude_trust_test_pid
+      :worker_claude_trust_test_pid,
+      :worker_agent_login_command
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
@@ -474,6 +481,7 @@ defmodule PtcManager.AutomationsTest do
 
     Application.put_env(:ptc_manager, :worker_claude_trust_command, ClaudeTrustCommand)
     Application.put_env(:ptc_manager, :worker_claude_trust_test_pid, self())
+    Application.put_env(:ptc_manager, :worker_agent_login_command, AgentLoginCommand)
 
     Application.put_env(:ptc_manager, :agent_profiles, %{
       "claude" => %{

@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+# PtcManager invokes this root-owned wrapper through its narrowly scoped sudo
+# rule to find out whether the Herdr worker's identity for one agent kind is
+# still signed in, before it starts a pane with that kind.
+#
+# A signed-out agent does not fail. It starts, prints its login prompt, and
+# waits for a person who is not watching, until PtcManager times the run out
+# with nothing to show for it. The linked binary and its version are correct the
+# whole time, so nothing the Deployments page inspects can see it.
+#
+# The answer is the exit status, never the output: 0 signed in, 3 signed out.
+# Terminal output is not an instruction here any more than it is anywhere else,
+# so what each CLI prints is forwarded for a person to read and is never parsed
+# to decide anything.
+
+fail() {
+  echo "ptc-manager-worker-agent-login: $1" >&2
+  exit 2
+}
+
+[ "$#" -eq 1 ] || fail "expected one agent kind"
+
+kind=$1
+
+# Each CLI reports its identity differently, so each one names the question that
+# answers for it. Cursor and Codex say so in their exit status; Claude Code
+# always succeeds and answers in JSON, so its answer is read with jq.
+case "$kind" in
+  codex)
+    codex login status >/dev/null 2>&1 || exit 3
+    ;;
+  claude)
+    answer=$(claude auth status 2>/dev/null) || exit 3
+    printf '%s' "$answer" | jq -e '.loggedIn == true' >/dev/null 2>&1 || exit 3
+    ;;
+  cursor)
+    cursor-agent status >/dev/null 2>&1 || exit 3
+    ;;
+  *)
+    fail "unknown agent kind: $kind"
+    ;;
+esac
+
+exit 0

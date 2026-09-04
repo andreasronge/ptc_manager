@@ -18,6 +18,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
   @operation_recovery Path.join(@project_root, "deploy/ptc-manager-operation-recover")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
+  @sudoers Path.join(@project_root, "deploy/ptc_manager.sudoers")
   @toolchain_manifest Path.join(@project_root, "deploy/toolchain-versions")
   @toolchain_reader Path.join(@project_root, "deploy/ptc-manager-toolchain-version")
   @environment_file_parser Path.join(
@@ -206,6 +207,35 @@ defmodule Mix.Tasks.PtcDeployTest do
 
   # A version written twice drifts. The manifest is the only place one belongs,
   # and the release reads the same file the deployment does.
+  # A wrapper PtcManager calls through sudo is useless unless the deployment
+  # installs it and the policy authorizes it, and neither failure shows up until
+  # a managed pane tries to start on the machine.
+  test "every worker wrapper the policy authorizes is installed by the deployment" do
+    script = File.read!(@remote_script)
+
+    ~r{/usr/local/bin/(ptc-manager-worker-[a-z-]+)}
+    |> Regex.scan(File.read!(@sudoers))
+    |> Enum.map(fn [_line, wrapper] -> wrapper end)
+    |> Enum.uniq()
+    |> Enum.each(fn wrapper ->
+      assert String.contains?(script, "deploy/#{wrapper}"),
+             "deploy/remote-deploy-herdr never reads deploy/#{wrapper}"
+
+      assert String.contains?(script, "/usr/local/bin/#{wrapper}"),
+             "deploy/remote-deploy-herdr never installs /usr/local/bin/#{wrapper}"
+    end)
+  end
+
+  # Claude Code updates itself by default. The deployment installs it into a
+  # root-owned tree so an agent cannot rewrite the CLI it runs, which makes the
+  # attempt fail every time, in the process holding the agent's credentials.
+  test "the Herdr server disables the Claude Code auto-updater for its panes" do
+    launch = File.read!(Path.join(@project_root, "deploy/ptc-manager-herdr-launch"))
+
+    assert launch =~ ~r/^DISABLE_AUTOUPDATER=1$/m
+    assert launch =~ ~r/^export DISABLE_AUTOUPDATER$/m
+  end
+
   test "the deployment script writes no version of its own" do
     script = File.read!(@remote_script)
 
