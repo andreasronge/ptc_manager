@@ -552,12 +552,94 @@ defmodule PtcManager.OperationsTest do
     test "refuses a phase that is still moving or that already published" do
       %{job: job} = running_job_fixture("working")
 
-      for state <- ~w(queued starting working idle blocked ready_for_pr publishing_pr pr_open) do
+      # `reconciling` stays out: it can mean an agent whose remote state is
+      # unknown, so freeing the slot could run beside an agent still writing.
+      for state <-
+            ~w(queued starting working idle blocked reconciling ready_for_pr publishing_pr pr_open) do
         Job |> Repo.get!(job.id) |> Job.changeset(%{state: state}) |> Repo.update!()
 
         assert {:error, :job_not_abandonable} = Operations.abandon_stuck_job(job.id, "andreas")
         assert Repo.get!(Job, job.id).state == state
       end
+    end
+
+    test "refuses a blocked publication that already has a pull request" do
+      %{job: job} = running_job_fixture("working")
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      head_sha = String.duplicate("b", 40)
+
+      job =
+        job
+        |> Job.changeset(%{
+          state: "publish_blocked",
+          last_error: "GitHub reports a different pull-request head commit.",
+          result_base_sha: String.duplicate("a", 40),
+          result_head_sha: head_sha,
+          result_diff_digest: String.duplicate("c", 64),
+          result_commit_count: 1,
+          result_verified_at: now
+        })
+        |> Repo.update!()
+
+      # No publication yet: nothing is orphaned by ending it.
+      assert {:ok, _job} = Operations.abandon_stuck_job(job.id, "andreas")
+
+      %{job: second} = running_job_fixture("working")
+
+      second =
+        second
+        |> Job.changeset(%{
+          state: "publish_blocked",
+          result_base_sha: String.duplicate("a", 40),
+          result_head_sha: head_sha,
+          result_diff_digest: String.duplicate("c", 64),
+          result_commit_count: 1,
+          result_verified_at: now
+        })
+        |> Repo.update!()
+
+      %PtcManager.Operations.PrPublication{}
+      |> PtcManager.Operations.PrPublication.changeset(%{
+        job_id: second.id,
+        state: "published",
+        idempotency_key: String.duplicate("7", 64),
+        fencing_token: second.fencing_token,
+        branch_name: "ptc-manager/issue-job-#{second.id}",
+        base_sha: String.duplicate("a", 40),
+        head_sha: head_sha,
+        diff_digest: String.duplicate("c", 64),
+        attempt_count: 1,
+        pr_number: 4242,
+        pr_url: "https://github.com/example/repo/pull/4242",
+        remote_head_sha: head_sha,
+        remote_base_sha: String.duplicate("a", 40),
+        published_at: now,
+        pr_state: "open",
+        pr_checked_at: now,
+        source: "agent"
+      })
+      |> Repo.insert!()
+
+      # An open pull request would be orphaned, and the issue freed for a
+      # second approval while that PR still stands.
+      assert {:error, :pull_request_open} = Operations.abandon_stuck_job(second.id, "andreas")
+      assert Repo.get!(Job, second.id).state == "publish_blocked"
+    end
+
+    test "abandons a job whose stored error already fills the column" do
+      %{job: job} = running_job_fixture("working")
+
+      job =
+        job
+        |> Job.changeset(%{
+          state: "awaiting_reconciliation",
+          last_error: String.duplicate("x", 500)
+        })
+        |> Repo.update!()
+
+      assert {:ok, abandoned} = Operations.abandon_stuck_job(job.id, "andreas")
+      assert String.length(abandoned.last_error) <= 500
+      assert abandoned.last_error =~ "Abandoned by andreas"
     end
 
     test "refuses while a verifier still holds a live claim" do
@@ -1379,7 +1461,8 @@ defmodule PtcManager.OperationsTest do
     issue = issue_fixture(repository)
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
-    worker = worker_fixture(%{worker_key: "herdr:cancel"})
+    # Unique, so one test can build more than one running job.
+    worker = worker_fixture(%{worker_key: "herdr:cancel-#{System.unique_integer([:positive])}"})
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     job =

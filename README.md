@@ -469,12 +469,15 @@ catalog contains:
   exact synchronized issue version, so an edit requires a fresh analysis;
 - **Abandon**, on a Delivery board card whose job is stuck in a phase
   PtcManager owns — checking a committed branch, verifying it, or a blocked
-  publication. **Cancel agent** deliberately refuses those, because there is no
-  agent to cancel; without this the card could repeat the same failure forever.
+  publication with no pull request yet. **Cancel agent** deliberately refuses
+  those, because there is no agent to cancel; without this the card could repeat
+  the same failure forever.
   An agent that committed nothing, for example, leaves `:no_commits` and the
   check can never pass. The card shows that reason in PtcManager's own words,
   takes two clicks to abandon, keeps the worktree for attention, and refuses
-  while a verifier still holds a live claim or once a pull request exists;
+  while a verifier still holds a live claim, once a pull request exists, or
+  while the agent's remote state is merely unknown — **Cancel agent** closes the
+  pane in that case, which abandoning would not;
 - **Cancel agent**, on the Delivery board's **In progress** and **Needs
   attention** cards and next to a running agent on Operations. It ends one
   implementation agent the maintainer no longer wants to wait for: the job ends

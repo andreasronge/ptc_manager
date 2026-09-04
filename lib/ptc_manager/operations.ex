@@ -40,7 +40,11 @@ defmodule PtcManager.Operations do
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @capacity_run_states ~w(queued starting working idle unknown)
   @cancellable_job_states ~w(starting working idle blocked)
-  @abandonable_job_states ~w(reconciling awaiting_reconciliation verifying_result publish_blocked)
+  # Deliberately excludes `reconciling`: that state can mean an agent whose
+  # remote state is unknown rather than an agent-free phase, so ending the job
+  # would free its slot while the agent may still be writing to the worktree.
+  # Cancel agent, which closes the Herdr pane, is the right tool there.
+  @abandonable_job_states ~w(awaiting_reconciliation verifying_result publish_blocked)
   @live_agent_run_states ~w(queued starting working idle blocked waiting unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @merge_action_key "repair_and_merge_pr"
@@ -964,22 +968,43 @@ defmodule PtcManager.Operations do
         # underneath it would race its result write.
         if verification_claim_live?(job, now), do: Repo.rollback(:verification_in_progress)
 
+        # A blocked publication can already have an open pull request. Ending
+        # the job would orphan it: status reconciliation keeps selecting it and
+        # then refuses it for a cancelled job, while the issue becomes free for
+        # a second approval beside a pull request that still stands.
+        if publication_open?(job_id), do: Repo.rollback(:pull_request_open)
+
         stuck_state = job.state
         stuck_error = job.last_error
 
         message =
-          "Abandoned by #{actor} while #{stuck_state}" <>
-            if(stuck_error, do: " (#{stuck_error})", else: "") <>
-            "; the partial worktree was preserved."
+          bounded_error(
+            "Abandoned by #{actor} while #{stuck_state}" <>
+              if(stuck_error, do: " (#{stuck_error})", else: "") <>
+              "; the partial worktree was preserved."
+          )
 
-        job
-        |> Job.changeset(%{
-          state: "cancelled",
-          lease_expires_at: nil,
-          ended_at: now,
-          last_error: message
-        })
-        |> Repo.update!()
+        # Guarded by the same state and claim the read saw, so a verifier claim
+        # or a publication retry landing in between loses rather than colliding
+        # with an unconditional write.
+        {updated, _rows} =
+          Job
+          |> where([item], item.id == ^job_id and item.state == ^stuck_state)
+          |> where(
+            [item],
+            is_nil(item.result_attempt_expires_at) or item.result_attempt_expires_at <= ^now
+          )
+          |> Repo.update_all(
+            set: [
+              state: "cancelled",
+              lease_expires_at: nil,
+              ended_at: now,
+              last_error: message,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:verification_in_progress)
 
         end_live_run!(job, message, now)
 
@@ -1005,6 +1030,13 @@ defmodule PtcManager.Operations do
       {:ok, job} -> notify_and_return({:ok, job})
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp publication_open?(job_id) do
+    Repo.exists?(
+      from publication in PrPublication,
+        where: publication.job_id == ^job_id and not is_nil(publication.pr_number)
+    )
   end
 
   defp verification_claim_live?(%Job{result_attempt_expires_at: %DateTime{} = expires_at}, now),

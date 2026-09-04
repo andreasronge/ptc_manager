@@ -165,6 +165,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
          |> put_flash(:info, "A check is running right now. Try again when it finishes.")
          |> load_board()}
 
+      {:error, :pull_request_open} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :error,
+           "This job already has a pull request. Close or merge it on GitHub instead."
+         )
+         |> load_board()}
+
       {:error, :job_not_abandonable} ->
         {:noreply, socket |> put_flash(:info, "That job has already moved on.") |> load_board()}
 
@@ -260,10 +269,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   These are the phases Cancel agent refuses, because there is no agent to
   cancel. Without a way out they can repeat the same failure forever.
+
+  `reconciling` is not one of them: it can mean an agent whose remote state is
+  unknown, and Cancel agent, which closes the pane, is the right tool there. Nor
+  is any card that already has a pull request, which abandoning would orphan.
   """
   def abandonable?(%{managed?: true, active_job: %{state: state}} = item)
-      when state in ~w(reconciling awaiting_reconciliation verifying_result publish_blocked),
-      do: not verification_running?(item)
+      when state in ~w(awaiting_reconciliation verifying_result publish_blocked),
+      do: not verification_running?(item) and is_nil(item.publication)
 
   def abandonable?(_item), do: false
 
