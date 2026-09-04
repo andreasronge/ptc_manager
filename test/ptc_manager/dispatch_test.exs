@@ -472,6 +472,40 @@ defmodule PtcManager.DispatchTest do
     assert Repo.get!(Job, job.id).state == "queued"
   end
 
+  test "a lease records the agent kind the implement-issue automation requires" do
+    put_agent_profiles(%{
+      "codex" => %{"enabled" => true, "args" => []},
+      "cursor" => %{"enabled" => true, "args" => ["--force", "--trust"]}
+    })
+
+    repository = repository_fixture(%{local_path: "/tmp/repository"})
+    require_agent_kind!(repository, "implement_issue", "cursor")
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture(repository)
+    canonical = IssueSnapshot.normalize!(remote, repository.id)
+
+    assert {:ok, leased} = Operations.lease_job(job.id, "herdr:default", canonical, 60_000)
+    assert leased.worktree_allocation.agent_kind == "cursor"
+
+    audit = Repo.get_by!(AuditEvent, action: "job.leased", target_type: "job", target_id: job.id)
+    assert audit.details["agent_kind"] == "cursor"
+  end
+
+  test "a lease cancels a job whose required agent kind has no enabled profile" do
+    put_agent_profiles(%{"codex" => %{"enabled" => true, "args" => []}})
+
+    repository = repository_fixture(%{local_path: "/tmp/repository"})
+    require_agent_kind!(repository, "implement_issue", "cursor")
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture(repository)
+    canonical = IssueSnapshot.normalize!(remote, repository.id)
+
+    assert {:error, :no_healthy_agent_profile} =
+             Operations.lease_job(job.id, "herdr:default", canonical, 60_000)
+
+    cancelled = Repo.get!(Job, job.id)
+    assert cancelled.state == "cancelled"
+    assert cancelled.last_error == "no_healthy_agent_profile"
+  end
+
   test "decodes the documented Herdr worktree response" do
     output =
       Jason.encode!(%{
@@ -712,10 +746,9 @@ defmodule PtcManager.DispatchTest do
     refute commands =~ "agent start"
   end
 
-  test "Codex implementation agents use the currently supported unattended flag" do
-    assert Application.fetch_env!(:ptc_manager, :implementation_agent_args) == [
-             "--dangerously-bypass-approvals-and-sandbox"
-           ]
+  test "the default Codex profile uses the currently supported unattended flag" do
+    assert ["--dangerously-bypass-approvals-and-sandbox" | _trust] =
+             PtcManager.AgentProfiles.args("codex")
   end
 
   test "builds repository-owned validation, provider-neutral review, and broker contract" do
@@ -799,8 +832,7 @@ defmodule PtcManager.DispatchTest do
     refute prompt =~ "result="
   end
 
-  defp approved_job_fixture do
-    repository = repository_fixture(%{local_path: "/tmp/repository"})
+  defp approved_job_fixture(repository \\ repository_fixture(%{local_path: "/tmp/repository"})) do
     remote = remote_issue(System.unique_integer([:positive]))
     attrs = IssueSnapshot.normalize!(remote, repository.id)
     issue = issue_fixture(repository, attrs)

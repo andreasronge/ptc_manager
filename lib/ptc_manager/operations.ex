@@ -1695,14 +1695,17 @@ defmodule PtcManager.Operations do
     lease_now = Keyword.get_lazy(opts, :now, &utc_now/0)
     lifecycle_now = Keyword.get_lazy(opts, :lifecycle_now, &utc_now/0)
     capacity = Keyword.get(opts, :capacity, configured_agent_capacity())
-    agent_kind = Keyword.get(opts, :agent_kind, configured_agent_kind())
     publication_source = configured_publication_source()
 
     result =
       Repo.transaction(fn ->
-        job = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job_id)
+        job =
+          Job
+          |> preload([:approval, :issue, :repository, :automation_definition_version])
+          |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             {:ok, %{kind: agent_kind}} <- implementation_profile(job),
              :ok <- heavy_delivery_priority_unlocked(),
              :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
@@ -4349,8 +4352,12 @@ defmodule PtcManager.Operations do
   defp configured_agent_capacity,
     do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1)
 
-  defp configured_agent_kind,
-    do: Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
+  # The automation version captured at approval chooses the agent kind, so
+  # editing the selector later cannot change work that is already queued.
+  defp implementation_profile(%Job{automation_definition_version: %{agent_selector: selector}}),
+    do: PtcManager.AgentProfiles.select(selector)
+
+  defp implementation_profile(%Job{}), do: PtcManager.AgentProfiles.select(%{})
 
   defp notify_and_return(result) do
     notify_changed(__MODULE__)

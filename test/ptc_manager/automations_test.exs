@@ -551,7 +551,7 @@ defmodule PtcManager.AutomationsTest do
 
   test "agent profile workspace placeholders preserve one argument and quote TOML paths" do
     assert ["--cwd=/tmp/a b", ~s(projects={"/tmp/a b"={trust_level="trusted"}})] ==
-             PtcManager.MaintainerActions.GenericHerdrAdapter.expand_agent_args(
+             PtcManager.AgentProfiles.expand_args(
                [
                  "--cwd={{workspace_path}}",
                  ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})

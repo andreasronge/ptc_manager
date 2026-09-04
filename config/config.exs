@@ -127,7 +127,6 @@ config :ptc_manager,
   git_memory_limit_binary: nil,
   git_memory_limit_bytes: 268_435_456,
   implementation_agent_kind: "codex",
-  implementation_agent_args: ["--dangerously-bypass-approvals-and-sandbox"],
   agent_profiles: %{
     "codex" => %{
       "enabled" => true,
