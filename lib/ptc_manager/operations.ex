@@ -396,31 +396,6 @@ defmodule PtcManager.Operations do
     end
   end
 
-  @restamp_fields [
-    :title,
-    :body_digest,
-    :state,
-    :github_state_reason,
-    :workflow_label,
-    :workflow_label_conflict,
-    :github_assignees,
-    :dependencies_projected,
-    :dependency_overflow,
-    :dependency_unknown_count
-  ]
-
-  @doc """
-  Everything about an issue that a maintainer label write must not change.
-
-  Taken before the write and compared after the re-sync, so PtcManager can tell
-  a label-only difference from a real edit somebody else made in between.
-  """
-  def issue_restamp_snapshot(%Issue{} = issue) do
-    issue
-    |> Map.take(@restamp_fields)
-    |> Map.put(:dependencies, dependency_projection(issue.id))
-  end
-
   @doc "Records that a maintainer added or removed one label on GitHub."
   def record_issue_label_change(%Issue{} = issue, operation, name, actor)
       when operation in [:add, :remove] and is_binary(name) and is_binary(actor) do
@@ -438,55 +413,6 @@ defmodule PtcManager.Operations do
 
     notify_changed(__MODULE__)
     :ok
-  end
-
-  @doc """
-  Restores the latest proposal's freshness after a label-only GitHub write.
-
-  Writing a label moves GitHub's `updated_at`, which is part of the content
-  digest, so the Approve button would otherwise disappear for a change the
-  maintainer just made deliberately. A comment posted in the seconds between the
-  write and the re-sync would be missed by this comparison; the README records
-  that trade-off.
-  """
-  def restamp_proposal_after_label_change(issue_id, before, actor)
-      when is_integer(issue_id) and is_map(before) and is_binary(actor) do
-    issue = Repo.get!(Issue, issue_id)
-
-    with true <- issue_restamp_snapshot(issue) == before,
-         %Proposal{} = proposal <- latest_proposal(Repo, issue_id) do
-      proposal
-      |> Proposal.changeset(%{
-        source_digest: issue.content_digest,
-        source_updated_at: issue.github_updated_at
-      })
-      |> Repo.update!()
-
-      insert_audit!(%{
-        actor: actor,
-        action: "proposal.restamped_after_label_change",
-        target_type: "proposal",
-        target_id: proposal.id,
-        details: %{"issue_id" => issue.id, "source_digest" => issue.content_digest}
-      })
-
-      notify_changed(__MODULE__)
-      {:ok, :restamped}
-    else
-      _unchanged -> {:ok, :not_restamped}
-    end
-  end
-
-  defp dependency_projection(issue_id) do
-    IssueDependency
-    |> where([dependency], dependency.issue_id == ^issue_id)
-    |> select(
-      [dependency],
-      {dependency.blocking_repository_full_name, dependency.blocking_issue_number,
-       dependency.blocking_state, dependency.blocking_state_reason, dependency.lookup_state}
-    )
-    |> Repo.all()
-    |> Enum.sort()
   end
 
   def create_issue(attrs),

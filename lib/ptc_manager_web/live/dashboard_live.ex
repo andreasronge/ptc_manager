@@ -422,9 +422,22 @@ defmodule PtcManagerWeb.DashboardLive do
       |> load_dashboard()
 
     case result do
-      {:ok, :added} -> {:noreply, put_flash(socket, :info, "Added #{name} on GitHub.")}
-      {:ok, :removed} -> {:noreply, put_flash(socket, :info, "Removed #{name} on GitHub.")}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, label_error(reason))}
+      {:ok, :added} ->
+        {:noreply, put_flash(socket, :info, "Added #{name} on GitHub.")}
+
+      {:ok, :removed} ->
+        {:noreply, put_flash(socket, :info, "Removed #{name} on GitHub.")}
+
+      {:ok, operation, {:sync_failed, _reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "GitHub #{operation} #{name}, but PtcManager could not read the issue back. Synchronize GitHub."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, label_error(reason))}
     end
   end
 

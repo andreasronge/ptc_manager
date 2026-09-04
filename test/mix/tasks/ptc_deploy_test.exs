@@ -540,6 +540,8 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     assert {_output, 64} = run.(["owner/repo", "1701", "merge", "wait"])
     assert {_output, 64} = run.(["owner/repo", "1701", "add", "ptc:ready"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "add", "PTC:ready"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "remove", "Ptc:Blocked"])
     assert {_output, 64} = run.(["owner/repo; rm -rf /", "1701", "add", "wait"])
     assert {_output, 64} = run.(["owner/repo", "not-a-number", "add", "wait"])
     assert {_output, 64} = run.(["owner/repo", "1701", "add", "$(whoami)"])

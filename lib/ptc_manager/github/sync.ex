@@ -171,12 +171,29 @@ defmodule PtcManager.GitHub.Sync do
     error -> {:error, error}
   end
 
+  # Fields GitHub reports that are deliberately outside the content digest, so
+  # they can never make a stored proposal stale.
+  @projection_fields [:github_created_at, :github_author_login, :github_labels]
+
   defp upsert_issue(nil, attrs) do
     %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
     :changed
   end
 
-  defp upsert_issue(
+  defp upsert_issue(%Issue{} = issue, attrs) do
+    if canonical_unchanged?(issue, attrs) do
+      # No content change, so this is not a change a maintainer has to look at.
+      # The projection still has to land, or a row written before those columns
+      # existed would keep its defaults until GitHub happened to touch it.
+      persist_projection(issue, attrs)
+      :unchanged
+    else
+      issue |> Issue.changeset(attrs) |> Repo.update!()
+      :changed
+    end
+  end
+
+  defp canonical_unchanged?(
          %Issue{
            content_digest: digest,
            dependency_overflow: overflow,
@@ -192,11 +209,18 @@ defmodule PtcManager.GitHub.Sync do
            github_assignment_projected: true
          }
        ),
-       do: :unchanged
+       do: true
 
-  defp upsert_issue(%Issue{} = issue, attrs) do
-    issue |> Issue.changeset(attrs) |> Repo.update!()
-    :changed
+  defp canonical_unchanged?(_issue, _attrs), do: false
+
+  defp persist_projection(issue, attrs) do
+    projection = Map.take(attrs, @projection_fields)
+
+    if Enum.any?(projection, fn {field, value} -> Map.fetch!(issue, field) != value end) do
+      issue |> Issue.changeset(projection) |> Repo.update!()
+    end
+
+    :ok
   end
 
   defp replace_dependencies(issue, blockers, context) do

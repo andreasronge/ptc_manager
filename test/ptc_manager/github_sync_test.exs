@@ -125,6 +125,42 @@ defmodule PtcManager.GitHubSyncTest do
     assert issue.content_digest == only_managed.content_digest
   end
 
+  test "backfills projection fields onto an issue whose canonical content is unchanged" do
+    repository = repository_fixture()
+    remote = remote_issue(60, "Already synchronized")
+
+    Process.put(:github_result, {:ok, [remote]})
+    Process.put(:github_viewer_login, {:ok, "andreasronge"})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    # Simulate a row written before this release: identical canonical content,
+    # but none of the new out-of-digest projection fields.
+    Repo.get_by!(Issue, repository_id: repository.id, number: 60)
+    |> Ecto.Changeset.change(%{
+      github_created_at: nil,
+      github_author_login: nil,
+      github_labels: %{"names" => []}
+    })
+    |> Repo.update!()
+
+    enriched =
+      remote
+      |> Map.put("created_at", "2026-07-04T10:00:00Z")
+      |> Map.put("author_login", "a-stranger")
+      |> Map.put("labels", [%{"name" => "wait"}])
+
+    Process.put(:github_result, {:ok, [enriched]})
+
+    # Nothing canonical changed, so this is not a content change...
+    assert {:ok, %{changed_count: 0}} = Sync.sync_repository(repository, client: FakeClient)
+
+    # ...but the projection GitHub reports must still land locally.
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 60)
+    assert issue.github_created_at == ~U[2026-07-04 10:00:00.000000Z]
+    assert issue.github_author_login == "a-stranger"
+    assert issue.github_labels == %{"names" => ["wait"]}
+  end
+
   test "synchronizes the canonical managed workflow label" do
     repository = repository_fixture()
 

@@ -21,8 +21,14 @@ case "$number" in
 esac
 
 case "$label" in
-  ptc:*) echo "reserved label" >&2; exit 64 ;;
   *[!A-Za-z0-9\ ._/:-]*|"") echo "invalid label" >&2; exit 64 ;;
+esac
+
+# GitHub matches label names case-insensitively, so the reserved-prefix check
+# must too; otherwise PTC:ready reaches the protected ptc:ready label.
+lowered=$(printf '%s' "$label" | /usr/bin/tr '[:upper:]' '[:lower:]')
+case "$lowered" in
+  ptc:*) echo "reserved label" >&2; exit 64 ;;
 esac
 
 if [ "${#label}" -gt 50 ]; then

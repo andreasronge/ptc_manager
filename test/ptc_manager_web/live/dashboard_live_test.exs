@@ -43,6 +43,17 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     end
   end
 
+  defmodule PlanningLabelGitHubClient do
+    @behaviour PtcManager.GitHub
+
+    @impl true
+    def list_open_issues(_repository), do: {:ok, []}
+
+    @impl true
+    def get_issue(_repository, _number),
+      do: Application.fetch_env!(:ptc_manager, :dashboard_label_remote_issue)
+  end
+
   test "filters Planning by repository from the URL" do
     first = repository_fixture(%{github_owner: "andreas", github_name: "first"})
     second = repository_fixture(%{github_owner: "andreas", github_name: "second"})
@@ -1383,13 +1394,73 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   end
 
   test "toggles one configured label straight from a Planning card", %{conn: conn} do
-    previous = Application.get_env(:ptc_manager, :issue_label_writer)
+    previous_writer = Application.get_env(:ptc_manager, :issue_label_writer)
+    previous_client = Application.get_env(:ptc_manager, :github_client)
     Application.put_env(:ptc_manager, :dashboard_label_test_pid, self())
     Application.put_env(:ptc_manager, :issue_label_writer, PlanningLabelWriter)
+    Application.put_env(:ptc_manager, :github_client, PlanningLabelGitHubClient)
 
     on_exit(fn ->
-      Application.put_env(:ptc_manager, :issue_label_writer, previous)
-      Application.delete_env(:ptc_manager, :dashboard_label_test_pid)
+      Application.put_env(:ptc_manager, :issue_label_writer, previous_writer)
+      Application.put_env(:ptc_manager, :github_client, previous_client)
+
+      for key <- [:dashboard_label_test_pid, :dashboard_label_remote_issue],
+          do: Application.delete_env(:ptc_manager, key)
+    end)
+
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+      })
+
+    issue = issue_fixture(repository, %{title: "Park this one"})
+    proposal_fixture(issue)
+
+    Application.put_env(
+      :ptc_manager,
+      :dashboard_label_remote_issue,
+      {:ok,
+       %{
+         "number" => issue.number,
+         "title" => issue.title,
+         "html_url" => issue.html_url,
+         "body" => "",
+         "state" => "open",
+         "labels" => [%{"name" => "wait"}],
+         "updated_at" =>
+           issue.github_updated_at |> DateTime.add(5, :second) |> DateTime.to_iso8601()
+       }}
+    )
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=false]", "wait")
+
+    view |> element("#toggle-label-#{issue.id}-wait") |> render_click()
+
+    assert_receive {:label_written, :add, "wait"}
+    assert render_async(view) =~ "Added wait on GitHub"
+
+    # The issue is now parked, so it leaves the decision queue for Waiting.
+    assert has_element?(view, "#planning-group-waiting")
+  end
+
+  test "says the local copy is behind when GitHub took the label but the re-read failed", %{
+    conn: conn
+  } do
+    previous_writer = Application.get_env(:ptc_manager, :issue_label_writer)
+    previous_client = Application.get_env(:ptc_manager, :github_client)
+    Application.put_env(:ptc_manager, :dashboard_label_test_pid, self())
+    Application.put_env(:ptc_manager, :issue_label_writer, PlanningLabelWriter)
+    Application.put_env(:ptc_manager, :github_client, PlanningLabelGitHubClient)
+    Application.put_env(:ptc_manager, :dashboard_label_remote_issue, {:error, :github_timeout})
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :issue_label_writer, previous_writer)
+      Application.put_env(:ptc_manager, :github_client, previous_client)
+
+      for key <- [:dashboard_label_test_pid, :dashboard_label_remote_issue],
+          do: Application.delete_env(:ptc_manager, key)
     end)
 
     repository =
@@ -1401,13 +1472,12 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     proposal_fixture(issue)
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
-
-    assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=false]", "wait")
-
     view |> element("#toggle-label-#{issue.id}-wait") |> render_click()
 
     assert_receive {:label_written, :add, "wait"}
-    assert render_async(view) =~ "Added wait on GitHub"
+    html = render_async(view)
+    assert html =~ "could not read the issue back"
+    refute html =~ "github_timeout"
   end
 
   test "reports a refused label write without echoing the wrapper output", %{conn: conn} do

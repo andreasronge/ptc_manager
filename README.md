@@ -415,13 +415,17 @@ and no new credential. A host without that wrapper reports that it cannot write
 labels and changes nothing.
 
 Writing a label moves GitHub's `updated_at`, which is part of the issue content
-digest, so the latest analysis would otherwise go stale and **Approve and
-start** would disappear for a change you just made deliberately. After the
-re-synchronization PtcManager therefore re-stamps that analysis, but only when
-the title, body, state, close reason, workflow label, assignees, and dependency
-projection are all unchanged. A comment posted in the few seconds between the
-label write and the re-synchronization is missed by that comparison and leaves
-the analysis fresh; synchronize GitHub again if that matters.
+digest, so the latest analysis goes stale and **Approve and start** disappears —
+exactly as it would after a comment. PtcManager deliberately does not paper over
+that: a comment posted in the same second is indistinguishable from the label
+write, and treating the analysis as current would let implementation start on a
+question nobody had read. Run **Prepare issue** again, or use **Fix directly**,
+which needs no analysis.
+
+Label names are matched case-insensitively everywhere, as GitHub matches them.
+`PTC:ready` is refused for the same reason `ptc:ready` is: it would reach the
+same GitHub label, and the workflow labels must keep coming only from
+synchronization.
 
 #### Suggested follow-ups
 

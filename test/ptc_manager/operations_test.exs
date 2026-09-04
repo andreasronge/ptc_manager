@@ -614,7 +614,7 @@ defmodule PtcManager.OperationsTest do
       :ok
     end
 
-    test "adds a configured label, audits it, and keeps the analysis fresh" do
+    test "adds a configured label, audits it, and re-reads the issue from GitHub" do
       %{repository: repository, issue: issue, proposal: proposal} = labelled_issue()
       remote_answers(repository, issue, ["wait"])
 
@@ -631,10 +631,43 @@ defmodule PtcManager.OperationsTest do
       assert synced.github_labels == %{"names" => ["wait"]}
       refute synced.content_digest == issue.content_digest
 
-      restamped = Repo.get!(Proposal, proposal.id)
-      assert restamped.source_digest == synced.content_digest
-      assert restamped.source_updated_at == synced.github_updated_at
-      assert Repo.get_by(AuditEvent, action: "proposal.restamped_after_label_change")
+      # A label write is GitHub activity like any other, and PtcManager cannot
+      # tell it apart from a comment posted in the same second. The analysis
+      # therefore goes stale rather than being blessed as still current.
+      untouched = Repo.get!(Proposal, proposal.id)
+      assert untouched.source_digest == proposal.source_digest
+      assert untouched.source_updated_at == proposal.source_updated_at
+      refute Repo.get_by(AuditEvent, action: "proposal.restamped_after_label_change")
+    end
+
+    test "refuses a reserved workflow label whatever its casing" do
+      %{repository: repository, issue: issue} = labelled_issue()
+
+      for name <- ["ptc:ready", "PTC:ready", "Ptc:Blocked"] do
+        assert {:error, reason} = IssueLabels.toggle(repository, issue, name, "andreas")
+        assert reason in [:reserved_label_name, :label_not_configured]
+      end
+
+      refute_receive {:label_written, _repository, _number, _operation, _label}
+    end
+
+    test "matches the configured label against GitHub casing when deciding add or remove" do
+      %{repository: repository, issue: issue} = labelled_issue(github_labels: ["Wait"])
+      remote_answers(repository, issue, [])
+
+      assert {:ok, :removed} = IssueLabels.toggle(repository, issue, "wait", "andreas")
+      assert_receive {:label_written, _full_name, _number, :remove, "wait"}
+    end
+
+    test "says so when the label reached GitHub but the re-read did not" do
+      %{repository: repository, issue: issue} = labelled_issue()
+      Application.put_env(:ptc_manager, :operations_label_remote_issue, {:error, :github_timeout})
+
+      assert {:ok, :added, {:sync_failed, _reason}} =
+               IssueLabels.toggle(repository, issue, "wait", "andreas")
+
+      assert_receive {:label_written, _full_name, _number, :add, "wait"}
+      assert Repo.get_by!(AuditEvent, action: "issue.label_added")
     end
 
     test "removes a label that GitHub already reports" do
@@ -644,17 +677,6 @@ defmodule PtcManager.OperationsTest do
       assert {:ok, :removed} = IssueLabels.toggle(repository, issue, "wait", "andreas")
       assert_receive {:label_written, _full_name, _number, :remove, "wait"}
       assert Repo.get_by!(AuditEvent, action: "issue.label_removed")
-    end
-
-    test "a real edit during the write leaves the analysis stale" do
-      %{repository: repository, issue: issue, proposal: proposal} = labelled_issue()
-      remote_answers(repository, issue, ["wait"], title: "Somebody retitled it")
-
-      assert {:ok, :added} = IssueLabels.toggle(repository, issue, "wait", "andreas")
-
-      assert Repo.get!(Issue, issue.id).title == "Somebody retitled it"
-      assert Repo.get!(Proposal, proposal.id).source_digest == proposal.source_digest
-      refute Repo.get_by(AuditEvent, action: "proposal.restamped_after_label_change")
     end
 
     test "refuses anything the maintainer did not configure" do
@@ -710,6 +732,40 @@ defmodule PtcManager.OperationsTest do
 
       assert group(item) == :ready
       assert group(item, parked_labels: ["wait"]) == :waiting
+    end
+
+    test "parking matches GitHub casing" do
+      item = planning_item(issue: %{github_labels: %{"names" => ["Wait"]}})
+
+      assert group(item, parked_labels: ["wait"]) == :waiting
+
+      assert group(planning_item(issue: %{github_labels: %{"names" => ["wait"]}}),
+               parked_labels: ["WAIT"]
+             ) == :waiting
+    end
+
+    test "a question for the maintainer is never hidden by parking" do
+      parked = %{"names" => ["wait"]}
+
+      assert group(
+               planning_item(
+                 issue: %{github_labels: parked, workflow_label: "ptc:needs-decision"}
+               ),
+               parked_labels: ["wait"]
+             ) == :needs_decision
+
+      assert group(
+               planning_item(issue: %{github_labels: parked, workflow_label_conflict: true}),
+               parked_labels: ["wait"]
+             ) == :needs_decision
+
+      assert group(
+               planning_item(
+                 issue: %{github_labels: parked},
+                 issue_agent_action: %{state: "failed"}
+               ),
+               parked_labels: ["wait"]
+             ) == :needs_decision
     end
 
     test "anything asking a question of the maintainer needs a decision" do

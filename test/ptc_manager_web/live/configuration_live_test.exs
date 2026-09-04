@@ -666,17 +666,36 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
              "labels" => [%{"name" => "wait", "role" => "park"}]
            }
 
+    for reserved <- ["ptc:ready", "PTC:ready", "Ptc:Blocked"] do
+      view
+      |> form("#add-maintainer-label-#{repository.id}", %{
+        "label" => %{
+          "repository_id" => Integer.to_string(repository.id),
+          "name" => reserved,
+          "role" => "badge"
+        }
+      })
+      |> render_submit()
+
+      assert render(view) =~ "belong to PtcManager"
+    end
+
+    # GitHub label names are case-insensitive, so neither is a second label.
     view
     |> form("#add-maintainer-label-#{repository.id}", %{
       "label" => %{
         "repository_id" => Integer.to_string(repository.id),
-        "name" => "ptc:ready",
+        "name" => "WAIT",
         "role" => "badge"
       }
     })
     |> render_submit()
 
-    assert render(view) =~ "belong to PtcManager"
+    assert render(view) =~ "already configured"
+
+    assert Repo.get!(Repository, repository.id).maintainer_labels == %{
+             "labels" => [%{"name" => "wait", "role" => "park"}]
+           }
 
     view
     |> element("#maintainer-labels-#{repository.id} button[phx-value-name='wait']")
