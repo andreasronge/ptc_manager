@@ -529,11 +529,14 @@ Recording one takes the same fencing token and result-attempt token as any other
 result write, so a stale verifier cannot overwrite a newer result or an
 already-published job. Reading one is bounded and deadlined, so an oversized or
 endless file cannot exhaust or stall the coordinator. **Ask on the issue**
-delivers the text as fenced JSON with its delimiter characters stripped, framed
-as a claim to verify, and the action it queues records the outcomes it may
-return — enforced when the result comes back, not merely requested in the
-prompt — so that recovery can only leave the issue blocked or needing a
-decision, never mark it ready or close it.
+queues a dedicated **Report implementation blocker** action rather than ordinary
+issue preparation. That distinction matters: preparation's prompt tells the
+agent it may mark the issue ready or close it, and a check on the returned
+result would arrive after the agent had already used its `gh` session. The
+blocker action's own prompt permits only a comment and a blocked or
+needs-decision label, and the same set is persisted on the action and checked
+again on the result. The stop text reaches it as fenced JSON with its delimiter
+characters stripped, framed as a claim to verify.
 
 One limit is worth stating plainly: the report's file name carries a random
 per-attempt token, but that is defence in depth and not a capability. Every

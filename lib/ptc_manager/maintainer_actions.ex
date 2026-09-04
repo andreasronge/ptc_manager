@@ -91,9 +91,12 @@ defmodule PtcManager.MaintainerActions do
   Puts a stopped implementation's blocker onto its GitHub issue for a decision.
 
   The agent could not resolve something and no one was watching to answer it.
-  This queues the ordinary issue preparation with that report as evidence, so
-  the question lands on GitHub and the issue returns through Planning's existing
-  decision flow rather than through a second, parallel one.
+  This queues a dedicated action whose own prompt permits only a comment and a
+  blocked or needs-decision label, so the issue returns through Planning's
+  existing decision flow. It deliberately does not reuse issue preparation:
+  that prompt tells the agent it may mark the issue ready or close it, and by
+  the time a result could be rejected the agent has already used its `gh`
+  session. A restriction that arrives after the write is not a restriction.
   """
   def enqueue_blocked_issue_review(job_id, actor)
       when is_integer(job_id) and is_binary(actor) and actor != "" do
@@ -107,12 +110,13 @@ defmodule PtcManager.MaintainerActions do
       RepoTransaction.immediate(fn ->
         with {:ok, _job} <- Operations.acknowledge_job_stop(job_id, actor),
              {:ok, attrs} <-
-               Catalog.build("prepare_issue", %{
+               Catalog.build("report_issue_blocker", %{
                  issue: job.issue,
                  repository: job.repository,
                  blocker: report
                }),
-             {:ok, action} <- enqueue_versioned(job.repository, "prepare_issue", attrs, actor) do
+             {:ok, action} <-
+               enqueue_versioned(job.repository, "report_issue_blocker", attrs, actor) do
           action
         else
           {:error, reason} -> Repo.rollback(reason)

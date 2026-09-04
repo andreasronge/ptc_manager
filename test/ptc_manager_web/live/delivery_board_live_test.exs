@@ -449,10 +449,17 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert render(view) =~ "put the blocker on the GitHub issue"
 
-    queued = Repo.get_by!(AgentAction, action_key: "prepare_issue", state: "queued")
+    # A dedicated action, not issue preparation: its own prompt permits only a
+    # comment and a blocked or needs-decision label, so the restriction binds
+    # before the agent touches GitHub rather than after.
+    queued = Repo.get_by!(AgentAction, action_key: "report_issue_blocker", state: "queued")
     assert queued.target_id == stopped.issue_id
     assert queued.prompt =~ "blocked_implementation"
     assert queued.prompt =~ "The issue does not say which export shape to use."
+    assert queued.prompt =~ ~s(allowed_outcomes="blocked,needs-decision")
+    refute queued.prompt =~ "reject"
+    assert queued.target_snapshot == %{"allowed_outcomes" => ["blocked", "needs-decision"]}
+    refute Repo.get_by(AgentAction, action_key: "prepare_issue")
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 

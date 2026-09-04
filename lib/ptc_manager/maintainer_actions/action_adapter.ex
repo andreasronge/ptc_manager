@@ -197,6 +197,12 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
 
+  # This action may only report a blocker. It cannot mark an issue ready or
+  # close it, whatever the model-written evidence it was given asks for.
+  defp validate_outcome("report_issue_blocker", outcome)
+       when outcome in ["blocked", "needs-decision"],
+       do: :ok
+
   defp validate_outcome("review_issue", outcome)
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
@@ -291,6 +297,7 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   defp validate_created_issue_numbers("private_issue_analysis", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("report_issue_blocker", _outcome, []), do: :ok
   defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("resolve_issue_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok

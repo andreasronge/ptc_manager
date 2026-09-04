@@ -155,7 +155,7 @@ defmodule PtcManager.AutomationsTest do
     repository = repository_fixture()
 
     definitions = Automations.list_definitions(repository)
-    assert length(definitions) == 11
+    assert length(definitions) == 12
     assert Enum.all?(definitions, &match?(%DefinitionVersion{version: 1}, &1.current_version))
 
     assert Enum.all?(definitions, fn definition ->
@@ -164,7 +164,7 @@ defmodule PtcManager.AutomationsTest do
            end)
 
     assert :ok = Automations.ensure_defaults(repository)
-    assert length(Automations.list_definitions(repository)) == 11
+    assert length(Automations.list_definitions(repository)) == 12
   end
 
   test "editing an action creates an immutable version used only by future actions" do

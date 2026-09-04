@@ -2632,7 +2632,7 @@ defmodule PtcManager.MaintainerActionsTest do
       }
 
       assert {:ok, attrs} =
-               Catalog.build("prepare_issue", %{
+               Catalog.build("report_issue_blocker", %{
                  issue: issue,
                  repository: repository,
                  blocker: hostile
@@ -2661,7 +2661,7 @@ defmodule PtcManager.MaintainerActionsTest do
       issue = issue_fixture(repository)
 
       assert {:ok, attrs} =
-               Catalog.build("prepare_issue", %{
+               Catalog.build("report_issue_blocker", %{
                  issue: issue,
                  repository: repository,
                  blocker: %{
@@ -2672,21 +2672,44 @@ defmodule PtcManager.MaintainerActionsTest do
                  }
                })
 
-      # Saying so in the prompt is not a restriction; the action carries it.
+      # The restriction is in the prompt the agent reads, so it binds before any
+      # GitHub write, and on the action, so the result is checked against it too.
+      assert attrs.prompt =~ ~s(allowed_outcomes="blocked,needs-decision")
       assert attrs.target_snapshot == %{"allowed_outcomes" => ["blocked", "needs-decision"]}
 
       blocked = prepare_issue_result("blocked")
-      assert :ok = ActionAdapter.validate_result(blocked, "prepare_issue", attrs.target_snapshot)
+
+      assert :ok =
+               ActionAdapter.validate_result(
+                 blocked,
+                 "report_issue_blocker",
+                 attrs.target_snapshot
+               )
 
       for refused <- ["ready", "reject"] do
         result = prepare_issue_result(refused)
 
-        # The key alone still allows it; this action does not.
-        assert :ok = ActionAdapter.validate_result(result, "prepare_issue")
+        # The action key itself refuses these; there is no second chance where
+        # a wider key would have allowed the write.
+        assert {:error, _reason} = ActionAdapter.validate_result(result, "report_issue_blocker")
 
-        assert {:error, :outcome_not_permitted_for_action} =
-                 ActionAdapter.validate_result(result, "prepare_issue", attrs.target_snapshot)
+        assert {:error, _reason} =
+                 ActionAdapter.validate_result(
+                   result,
+                   "report_issue_blocker",
+                   attrs.target_snapshot
+                 )
       end
+    end
+
+    test "issue preparation never carries a blocker at all" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+
+      # The recovery has its own action now: preparation cannot be widened or
+      # narrowed by a model-written report.
+      assert {:error, :invalid_blocker} =
+               Catalog.build("report_issue_blocker", %{issue: issue, repository: repository})
     end
 
     test "ordinary preparation keeps its full outcome set" do
@@ -2698,11 +2721,10 @@ defmodule PtcManager.MaintainerActionsTest do
 
       assert attrs.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
       refute attrs.prompt =~ "blocked_implementation"
-      assert attrs.target_snapshot == %{}
+      refute Map.has_key?(attrs, :target_snapshot)
 
       for outcome <- ["ready", "blocked", "needs-decision", "reject"] do
-        result = prepare_issue_result(outcome)
-        assert :ok = ActionAdapter.validate_result(result, "prepare_issue", attrs.target_snapshot)
+        assert :ok = ActionAdapter.validate_result(prepare_issue_result(outcome), "prepare_issue")
       end
     end
 

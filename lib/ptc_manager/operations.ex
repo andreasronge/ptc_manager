@@ -46,6 +46,7 @@ defmodule PtcManager.Operations do
   @planning_action_keys ~w(
     daily_digest
     prepare_issue
+    report_issue_blocker
     review_issue
     resolve_issue_decision
   )

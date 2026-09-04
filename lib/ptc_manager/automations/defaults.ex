@@ -54,6 +54,21 @@ defmodule PtcManager.Automations.Defaults do
         "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Do not implement it, and explain the result simply."
     },
     %{
+      key: "report_issue_blocker",
+      name: "Report implementation blocker",
+      description: "Put an agent's reason for stopping on the issue for a maintainer decision.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 900,
+      result_type: "issue_maintenance",
+      prompt:
+        "An implementation agent stopped on this issue and reported why. Verify that claim against the issue and the code, then write one comment saying what a person has to settle before implementation can start again, and leave the issue blocked (`ptc:blocked`) or needing a decision (`ptc:needs-decision`). Do not implement anything, do not mark the issue ready, and do not close it."
+    },
+    %{
       key: "review_issue",
       name: "Review issue",
       description: "Challenge and improve issue readiness without implementing it.",
