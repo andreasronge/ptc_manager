@@ -128,8 +128,8 @@ defmodule PtcManager.Toolchain do
       installed?: File.dir?(prefix <> pinned),
       # A link is not a program: File.read_link/1 reads the text a symlink
       # holds without following it, so a link naming the pinned version can
-      # still point at nothing.
-      runnable?: target != nil and File.exists?(target),
+      # still point at nothing, at a directory, or at something nobody can run.
+      runnable?: executable?(target),
       deferred?: Map.get(program, :deferred, false)
     }
 
@@ -157,6 +157,17 @@ defmodule PtcManager.Toolchain do
       version
     else
       _unmanaged -> nil
+    end
+  end
+
+  # Inspecting the target answers this; running it would hand a program the
+  # deployment has not vouched for the console's own process.
+  defp executable?(nil), do: false
+
+  defp executable?(target) do
+    case File.stat(target) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _unreadable -> false
     end
   end
 

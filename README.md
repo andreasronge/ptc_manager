@@ -1095,6 +1095,14 @@ installed beside the running one. The interactive client in the `agent` account
 belongs to the person rather than to the deployment, which reports when it has
 drifted instead of replacing it.
 
+What pinning ends is drift, not the deploying account. A deployment runs as the
+`agent` user with passwordless `sudo`, so everything on this machine is
+downstream of that account: the toolchain trees mise installed before the
+deployment used a pinned mise of its own keep whatever provenance that account
+gave them, and they are recreated only when their pinned version changes. The
+pins say which version runs and prove each download against a digest; they do
+not make the machine safe from the person deploying to it.
+
 The Deployments page reports, for each program, the version this release pins
 beside the version `/usr/local/bin` links, so something installed by hand is
 visible without logging in to the machine. It reads link targets rather than

@@ -94,6 +94,7 @@ worker_node_staging=
 worker_pnpm_staging=
 worker_tool_staging=
 worker_opt_staging=
+herdr_link_backup=
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
@@ -170,6 +171,10 @@ cleanup_remote() {
 
   case "$worker_tool_staging" in
     /tmp/ptc-manager-*) rm -rf -- "$worker_tool_staging" ;;
+  esac
+
+  case "$herdr_link_backup" in
+    /opt/ptc-manager-herdr-previous-*) sudo rm -rf -- "$herdr_link_backup" ;;
   esac
 
   case "$gate_tool_home" in
@@ -501,6 +506,9 @@ restart_worker_when_nothing_retained() {
 
   if [ "$live_runs" -eq 0 ] && [ "$live_agents" -eq 0 ]; then
     echo "No agent session is retained; linking Herdr $herdr_version and restarting ptc_manager-herdr so granted checkouts become writable"
+    herdr_link_backup="/opt/ptc-manager-herdr-previous-${release_id}"
+    sudo rm -rf -- "$herdr_link_backup"
+    sudo cp -a "$worker_herdr" "$herdr_link_backup"
     sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"
     sudo systemctl restart ptc_manager-herdr
   else
@@ -677,7 +685,12 @@ install_worker_claude_code() {
 # version directly, so the deployment no longer depends on a per-user
 # installation someone populated by hand.
 install_worker_cursor_agent() {
-  if ! sudo test -d "$worker_cursor_agent_dir"; then
+  cursor_marker="$worker_cursor_agent_dir/.ptc-manager-archive-sha256"
+
+  # An unpacked tree cannot be hashed back into the archive it came from, so the
+  # digest that proved it is kept beside it. A tree left by an earlier
+  # deployment that did not check one is replaced rather than trusted.
+  if [ "$(sudo cat "$cursor_marker" 2>/dev/null)" != "$cursor_agent_sha256" ]; then
     worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-cursor-agent-${release_id}.XXXXXX")
     cursor_archive="$worker_tool_staging/agent-cli-package.tar.gz"
 
@@ -699,9 +712,12 @@ install_worker_cursor_agent() {
       return 1
     fi
 
+    printf '%s\n' "$cursor_agent_sha256" >"$worker_tool_staging/.ptc-manager-archive-sha256"
+
     worker_opt_staging=$(sudo mktemp -d "${worker_cursor_agent_dir}.XXXXXX")
     sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
     sudo chown -R root:root "$worker_opt_staging"
+    sudo rm -rf -- "$worker_cursor_agent_dir"
     sudo mv "$worker_opt_staging" "$worker_cursor_agent_dir"
     worker_opt_staging=
     rm -rf -- "$worker_tool_staging"
@@ -1070,6 +1086,24 @@ prune_successful_backups() {
     done
 }
 
+# A deployment that goes back to the previous release has to go back to the
+# Herdr that release was built against. The coordinator reaches the server
+# through this link, so leaving a newer one behind pairs an old coordinator with
+# a protocol it does not expect, which is the mismatch the deferred link exists
+# to prevent.
+restore_worker_herdr() {
+  [ -n "$herdr_link_backup" ] || return 0
+
+  if ! sudo test -L "$herdr_link_backup" && ! sudo test -e "$herdr_link_backup"; then
+    return 0
+  fi
+
+  echo "Restoring the Herdr this release was deployed against." >&2
+  sudo rm -f -- "$worker_herdr"
+  sudo cp -a "$herdr_link_backup" "$worker_herdr"
+  sudo systemctl restart ptc_manager-herdr || true
+}
+
 rollback() {
   deployment_phase=handling_failure
   rollback_status=0
@@ -1100,6 +1134,7 @@ rollback() {
 
   sudo install -o ptc-manager -g ptc-manager -m 0600 "$database_backup" "$database_path" ||
     rollback_status=1
+  restore_worker_herdr || rollback_status=1
   restore_preexisting_maintenance_override || rollback_status=1
   sudo systemctl start "$service_name" || rollback_status=1
 
@@ -1132,6 +1167,7 @@ finish() {
     restart_existing)
       deployment_phase=handling_failure
       echo "Deployment stopped before the release swap; restarting the existing release." >&2
+      restore_worker_herdr || true
       restore_preexisting_maintenance_override || true
       sudo systemctl start "$service_name" || true
       ;;

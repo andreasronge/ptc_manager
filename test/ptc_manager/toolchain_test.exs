@@ -117,6 +117,26 @@ defmodule PtcManager.ToolchainTest do
     assert %{status: :matched} = program(report, :node)
   end
 
+  # The console reads the machine rather than running it, so what it finds at
+  # the end of a link has to look like a program before it says one is there.
+  test "a link to something that is not an executable file is not a match", context do
+    install_pinned_programs(context)
+
+    codex = Path.join(context.install_root, "ptc-manager-codex-#{pinned("codex")}")
+    File.chmod!(Path.join(codex, "lib/node_modules/@openai/codex/bin/codex"), 0o644)
+
+    herdr = Path.join(context.install_root, "ptc-manager-herdr-#{pinned("herdr")}/herdr")
+    File.rm!(herdr)
+    File.mkdir_p!(herdr)
+
+    report = Toolchain.report()
+
+    assert %{status: :drifted} = program(report, :codex)
+    # Herdr is installed, so a link that leads nowhere runnable is still the
+    # staged state rather than a claim that the pinned version runs.
+    assert %{status: :staged} = program(report, :herdr)
+  end
+
   test "the manifest pins every digest the deployment verifies a download against" do
     pinned = Toolchain.pinned()
 
@@ -178,6 +198,7 @@ defmodule PtcManager.ToolchainTest do
         entry = Path.join(context.install_root, directory <> entry_point)
         File.mkdir_p!(Path.dirname(entry))
         File.write!(entry, "the installed program")
+        File.chmod!(entry, 0o755)
         link(context, link_name, directory <> entry_point)
       end
     )

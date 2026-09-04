@@ -153,6 +153,30 @@ defmodule Mix.Tasks.PtcDeployTest do
     # run that downloaded it.
     assert script =~ ~s|sudo sha256sum "$worker_herdr_dir/herdr"|
     assert script =~ ~s|sudo sha256sum "$worker_mise_dir/mise"|
+
+    # An unpacked tree cannot be hashed back into its archive, so the digest
+    # that proved it stays beside it and a tree without one is replaced.
+    assert script =~ ~s|.ptc-manager-archive-sha256|
+    assert script =~ ~s|sudo rm -rf -- "$worker_cursor_agent_dir"|
+  end
+
+  # The Herdr link moves during the stopped window, before the release swap. A
+  # deployment that then goes back to the previous release has to go back to the
+  # Herdr that release was built against, or an old coordinator is left speaking
+  # to a server whose protocol it does not expect.
+  test "a deployment that restores the previous release restores its Herdr" do
+    script = File.read!(@remote_script)
+
+    assert script =~ ~s|sudo cp -a "$worker_herdr" "$herdr_link_backup"|
+    assert script =~ "restore_worker_herdr"
+
+    # Both failure paths that bring the previous release back call it, and the
+    # one that keeps the new release in maintenance does not.
+    assert byte_index(script, "restore_worker_herdr || rollback_status=1") <
+             byte_index(script, "restore_preexisting_maintenance_override || rollback_status=1")
+
+    assert script =~ "restore_worker_herdr || true"
+    assert length(String.split(script, "restore_worker_herdr")) == 4
   end
 
   # A version written twice drifts. The manifest is the only place one belongs,
