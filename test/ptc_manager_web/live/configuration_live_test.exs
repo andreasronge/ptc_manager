@@ -704,11 +704,61 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert Repo.get!(Repository, repository.id).maintainer_labels == %{"labels" => []}
   end
 
+  test "names the GitHub labels a repository is still missing", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "unlabelled"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{repository.id}",
+             "GitHub labels not checked"
+           )
+
+    repository
+    |> Repository.changeset(%{
+      github_label_names: %{"names" => ["PTC:Ready", "ptc:blocked", "bug"]},
+      github_labels_checked_at: DateTime.utc_now(),
+      maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+    })
+    |> Repo.update!()
+
+    {:ok, partial, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    detail = render(view_health(partial, repository))
+    assert detail =~ "GitHub labels missing"
+    assert detail =~ "ptc:needs-decision"
+    assert detail =~ "ptc:follow-up"
+    assert detail =~ "wait"
+    # Casing is GitHub's, not ours: PTC:Ready already covers ptc:ready.
+    refute detail =~ "ptc:ready,"
+
+    repository
+    |> Repository.changeset(%{
+      github_label_names: %{
+        "names" => ["ptc:ready", "ptc:blocked", "ptc:needs-decision", "ptc:follow-up", "wait"]
+      }
+    })
+    |> Repo.update!()
+
+    {:ok, complete, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(
+             complete,
+             "#repository-health-#{repository.id}",
+             "GitHub labels present"
+           )
+  end
+
   defp authenticated_conn(conn) do
     conn
     |> init_test_session(%{})
     |> put_session(:authenticated, true)
     |> put_session(:actor, "maintainer")
+  end
+
+  defp view_health(view, repository) do
+    element(view, "#repository-health-#{repository.id}")
   end
 
   defp git!(path, args) do

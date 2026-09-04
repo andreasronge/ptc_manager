@@ -49,7 +49,13 @@ defmodule PtcManager.GitHub.Sync do
 
     with {:ok, remote_issues} <- Gateway.call(client, :list_open_issues, [syncing_repository]),
          {:ok, missing_issues} <- fetch_missing_issues(syncing_repository, remote_issues, client) do
-      persist_snapshot(syncing_repository, remote_issues, missing_issues, viewer_login(client))
+      persist_snapshot(
+        syncing_repository,
+        remote_issues,
+        missing_issues,
+        viewer_login(client),
+        Operations.read_repository_labels(client, syncing_repository)
+      )
     else
       {:error, reason} -> mark_failed(syncing_repository, reason)
     end
@@ -68,7 +74,7 @@ defmodule PtcManager.GitHub.Sync do
     end
   end
 
-  defp persist_snapshot(repository, remote_issues, missing_issues, viewer_login) do
+  defp persist_snapshot(repository, remote_issues, missing_issues, viewer_login, label_names) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
@@ -108,12 +114,15 @@ defmodule PtcManager.GitHub.Sync do
 
         synced_repository =
           repository
-          |> Repository.changeset(%{
-            sync_status: "ok",
-            last_synced_at: now,
-            last_sync_error: nil,
-            github_viewer_login: viewer_login || repository.github_viewer_login
-          })
+          |> Repository.changeset(
+            %{
+              sync_status: "ok",
+              last_synced_at: now,
+              last_sync_error: nil,
+              github_viewer_login: viewer_login || repository.github_viewer_login
+            }
+            |> put_label_names(label_names, now)
+          )
           |> Repo.update!()
 
         %{
@@ -134,6 +143,12 @@ defmodule PtcManager.GitHub.Sync do
     end
   rescue
     error -> mark_failed(repository, error)
+  end
+
+  defp put_label_names(attrs, nil, _now), do: attrs
+
+  defp put_label_names(attrs, names, now) do
+    Map.merge(attrs, %{github_label_names: %{"names" => names}, github_labels_checked_at: now})
   end
 
   defp persist_issue(repository, remote_issue) do

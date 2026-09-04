@@ -15,6 +15,8 @@ defmodule PtcManager.Operations.Repository do
     field :last_sync_error, :string
     field :github_viewer_login, :string
     field :maintainer_labels, :map, default: %{"labels" => []}
+    field :github_label_names, :map, default: %{"names" => []}
+    field :github_labels_checked_at, :utc_datetime_usec
     field :required_pre_pr_reviews, :integer, default: 2
 
     has_many :issues, PtcManager.Operations.Issue
@@ -41,6 +43,8 @@ defmodule PtcManager.Operations.Repository do
       :last_sync_error,
       :github_viewer_login,
       :maintainer_labels,
+      :github_label_names,
+      :github_labels_checked_at,
       :required_pre_pr_reviews
     ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])

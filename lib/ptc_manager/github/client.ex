@@ -68,6 +68,24 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
+  @impl true
+  def list_labels(%Repository{} = repository) do
+    url =
+      "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}" <>
+        "/labels?per_page=#{@per_page}"
+
+    case get_json(url) do
+      {:ok, labels} when is_list(labels) ->
+        {:ok, for(%{"name" => name} <- labels, is_binary(name), do: name)}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_github_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @doc false
   def get_json(url) when is_binary(url) do
     with {:ok, body} <- get(url),

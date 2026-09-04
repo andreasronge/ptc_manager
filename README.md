@@ -435,21 +435,10 @@ The implementation prompt asks every pull-request description for a
 `## Retrospective` section, and asks the agent to add the label `ptc:follow-up`
 to its own pull request when that section lists untracked follow-up work.
 
-**Create that label in each repository before enabling this.** `gh` fails when a
-label does not exist, so without it the agent's labelling step fails and no pull
-request ever reaches the group. PtcManager never creates a label:
-
-```sh
-gh label create 'ptc:follow-up' --repo '<owner>/<name>' --color 5319E7 \
-  --description 'The pull-request retrospective lists untracked follow-up work'
-```
-
-The same applies to the three workflow labels `ptc:ready`, `ptc:blocked`, and
-`ptc:needs-decision`: **Prepare issue** and **Review issue** ask an agent to
-leave exactly one of them on the issue, and that write fails against a
-repository where the label was never created. Every `ptc:` label is written by
-an agent or the label wrapper and read back by synchronization; none is created
-by PtcManager.
+That label has to exist in the repository already, like every other `ptc:`
+label; `gh` fails against one that does not, and no pull request ever reaches
+this group. Creating them is step 2 of
+[onboarding a repository](#generic-automations-and-additional-repositories).
 
 A labelled pull request appears in the **Suggested follow-ups** group, before
 and after merge, with two buttons: **Run retrospective** queues a read-only
@@ -640,17 +629,39 @@ To onboard another public or private repository:
 1. commit a `.ptc-manager.yml` contract to that repository whose bootstrap
    command prepares it, and an `AGENTS.md` describing its own conventions; add
    broker verification only if PtcManager will publish for the agent;
-2. use **Configuration → Add another GitHub repository** to register its exact
+2. create the four `ptc:` labels on GitHub. PtcManager never creates a label, and
+   `gh` fails against one that does not exist, so a missing label makes the agent
+   step that writes it fail:
+
+   ```sh
+   repo='<owner>/<name>'
+   gh label create 'ptc:ready' --repo "$repo" --color 0E8A16 \
+     --description 'Maintainer decision is resolved and the issue is ready for implementation'
+   gh label create 'ptc:blocked' --repo "$repo" --color B60205 \
+     --description 'Implementation is blocked by an unresolved dependency or external condition'
+   gh label create 'ptc:needs-decision' --repo "$repo" --color D93F0B \
+     --description 'A specific maintainer decision is required before implementation'
+   gh label create 'ptc:follow-up' --repo "$repo" --color 5319E7 \
+     --description 'The pull-request retrospective lists untracked follow-up work'
+   ```
+
+   The first three are what **Prepare issue** and **Review issue** leave on an
+   issue; the fourth is how an implementation agent marks its own pull request as
+   having left work behind. Any triage label configured under **Your triage
+   labels** has to exist on GitHub for the same reason. Configuration health
+   names whichever are still missing, so this can be done after registering the
+   repository and checked before enabling it;
+3. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
    GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
    and creates the repository disabled;
-3. press **Prepare checkouts** on Configuration, or deploy. Either clones any
+4. press **Prepare checkouts** on Configuration, or deploy. Either clones any
    configured checkout that does not exist yet, gives it to the worker identity,
    and regenerates the drop-in that grants every configured checkout to both
    services; the button does it without building a release;
-4. verify checkout, GitHub, and gate health, then review or copy the desired
+5. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
-5. enable the repository on **Configuration**, then enable only the definitions
+6. enable the repository on **Configuration**, then enable only the definitions
    and schedules it needs and test a read-only action before approving
    implementation work.
 

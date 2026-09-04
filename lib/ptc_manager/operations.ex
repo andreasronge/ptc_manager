@@ -79,7 +79,10 @@ defmodule PtcManager.Operations do
   def onboard_repository(attrs) do
     with {:ok, attrs} <- prepare_repository(attrs),
          :ok <- verify_repository(attrs) do
-      insert_repository(attrs)
+      # Synchronization covers enabled repositories only, and a repository is
+      # added disabled, so the label snapshet Configuration checks against has
+      # to be taken here or it would stay empty until after enabling.
+      attrs |> Map.merge(onboarding_labels(attrs)) |> insert_repository()
     end
   end
 
@@ -215,6 +218,33 @@ defmodule PtcManager.Operations do
       {:ok, _repository} -> :ok
       {:error, :repository_not_found} -> {:error, :repository_not_found}
       {:error, _reason} -> {:error, :github_unavailable}
+    end
+  end
+
+  defp onboarding_labels(attrs) do
+    client = Application.fetch_env!(:ptc_manager, :github_client)
+    repository = %Repository{github_owner: attrs.github_owner, github_name: attrs.github_name}
+
+    case read_repository_labels(client, repository) do
+      nil -> %{}
+      names -> %{github_label_names: %{"names" => names}, github_labels_checked_at: utc_now()}
+    end
+  end
+
+  @doc """
+  The label names GitHub reports for one repository, or nil when unavailable.
+
+  A failure is never fatal: the caller records nothing and Configuration keeps
+  saying the labels have not been checked.
+  """
+  def read_repository_labels(client, %Repository{} = repository) do
+    {module, arity} = if is_atom(client), do: {client, 1}, else: {client.__struct__, 2}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :list_labels, arity) do
+      case Gateway.call(client, :list_labels, [repository]) do
+        {:ok, names} when is_list(names) -> names
+        _unavailable -> nil
+      end
     end
   end
 

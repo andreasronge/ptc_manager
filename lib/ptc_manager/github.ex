@@ -21,5 +21,14 @@ defmodule PtcManager.GitHub do
   """
   @callback viewer_login() :: {:ok, String.t()} | {:error, term()}
 
-  @optional_callbacks get_repository: 2, viewer_login: 0
+  @doc """
+  The label names that exist in one repository.
+
+  PtcManager never creates a label, and `gh` fails against one that does not
+  exist, so Configuration reads them to say which are missing before a
+  maintainer enables the repository.
+  """
+  @callback list_labels(Repository.t()) :: {:ok, [String.t()]} | {:error, term()}
+
+  @optional_callbacks get_repository: 2, viewer_login: 0, list_labels: 1
 end

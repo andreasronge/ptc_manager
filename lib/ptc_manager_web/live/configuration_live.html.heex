@@ -117,7 +117,9 @@
           </button>
         </div>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-          Each repository needs its own verified checkout, readable GitHub data, and a checked-in setup contract. Independent publication verification is optional and only needed when PtcManager publishes through its GitHub App broker.
+          Each repository needs its own verified checkout, readable GitHub data, the
+          <code>ptc:</code>
+          labels its agents are told to write, and a checked-in setup contract. Independent publication verification is optional and only needed when PtcManager publishes through its GitHub App broker.
         </p>
       </div>
 
@@ -197,7 +199,15 @@
 
           <dl class="mt-5 space-y-3">
             <div
-              :for={check <- [health.checkout, health.github, health.gate, health.service_access]}
+              :for={
+                check <- [
+                  health.checkout,
+                  health.github,
+                  health.labels,
+                  health.gate,
+                  health.service_access
+                ]
+              }
               class="rounded-xl bg-white/[0.035] p-3"
             >
               <div class="flex flex-wrap items-center justify-between gap-2">
