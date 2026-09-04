@@ -35,6 +35,18 @@ defmodule PtcManager.MaintainerActions.Catalog do
         "prepare_issue" ->
           configured_preview(prepare_issue_prompt(repository, issue), instructions)
 
+        "report_issue_blocker" ->
+          configured_preview(
+            report_issue_blocker_prompt(repository, issue) <>
+              blocker_section(%{
+                "reason_code" => "ambiguous_requirement",
+                "summary" => "The issue does not say which export shape to use.",
+                "detail" => "Two incompatible readings, and no test distinguishes them.",
+                "progress" => "none"
+              }),
+            instructions
+          )
+
         "review_issue" ->
           configured_preview(review_issue_prompt(repository, issue), instructions)
 

@@ -262,7 +262,12 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   end
 
   defp validate_decision(action_key, "needs-decision", question, options)
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+       when action_key in [
+              "prepare_issue",
+              "report_issue_blocker",
+              "review_issue",
+              "resolve_issue_decision"
+            ] do
     case IssueDecision.from_result(%{
            "outcome" => "needs-decision",
            "decision_question" => question,

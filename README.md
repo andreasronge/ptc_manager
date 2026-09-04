@@ -510,9 +510,10 @@ technical branch error, until you answer it with one of three buttons:
 - **Try again** queues a fresh attempt on the same approval, with the same
   frozen prompt and review count. The decision to implement the issue has not
   changed; only the environment did;
-- **Ask on the issue** queues **Prepare issue** with the blocker as evidence, so
-  the question is written onto GitHub and the issue comes back through
-  Planning's **Needs your decision** group and its existing decision form;
+- **Ask on the issue** queues **Report implementation blocker** with the stop
+  report as evidence, so the question is written onto GitHub and the issue comes
+  back through Planning's **Needs your decision** group and its existing
+  decision form;
 - **Stop** sets the card aside. The worktree stays on Operations until you
   discard it.
 

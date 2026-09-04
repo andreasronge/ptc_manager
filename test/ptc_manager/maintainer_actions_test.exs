@@ -2702,6 +2702,40 @@ defmodule PtcManager.MaintainerActionsTest do
       end
     end
 
+    test "a needs-decision result completes the recovery it exists for" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+
+      decision =
+        prepare_issue_result("needs-decision")
+        |> Map.put("private_summary", "A person has to choose the export shape.")
+
+      # The point of this action is to reach Planning's decision form, so a
+      # proper decision result has to be accepted, not rejected after the
+      # agent already wrote to GitHub.
+      assert :ok = ActionAdapter.validate_result(decision, "report_issue_blocker")
+
+      assert :ok =
+               ActionAdapter.validate_result(decision, "report_issue_blocker", %{
+                 "allowed_outcomes" => ["blocked", "needs-decision"]
+               })
+
+      # And the structured choices survive into the decision the page renders.
+      assert {:ok, parsed} = PtcManager.IssueDecision.from_result(decision)
+      assert parsed.question == "Which export shape should users get?"
+      assert length(parsed.options) == 2
+      assert issue.id
+    end
+
+    test "the configuration preview shows the real blocker restriction" do
+      preview = Catalog.preview("report_issue_blocker")
+
+      assert preview =~ ~s(action="report_issue_blocker")
+      assert preview =~ ~s(allowed_outcomes="blocked,needs-decision")
+      refute preview =~ "completed,no-changes"
+      assert preview =~ "blocked_implementation"
+    end
+
     test "issue preparation never carries a blocker at all" do
       repository = repository_fixture()
       issue = issue_fixture(repository)

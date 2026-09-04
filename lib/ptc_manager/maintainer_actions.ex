@@ -1063,7 +1063,12 @@ defmodule PtcManager.MaintainerActions do
     do: {:error, :issue_decision_not_current}
 
   defp record_decision_source(action_id, action_key, issue, %{"outcome" => "needs-decision"})
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+       when action_key in [
+              "prepare_issue",
+              "report_issue_blocker",
+              "review_issue",
+              "resolve_issue_decision"
+            ] do
     case Operations.record_agent_action_decision_digest(action_id, issue.content_digest) do
       {:ok, _action} -> :ok
       {:error, reason} -> {:error, reason}
