@@ -92,6 +92,60 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     end
   end
 
+  # A pull request merged long before the window, whose merge commit GitHub no
+  # longer reports. The digest has no reason to look at it at all.
+  defmodule StalePullClient do
+    def get_json(url) do
+      cond do
+        String.ends_with?(url, "/commits/main") -> {:ok, %{"sha" => String.duplicate("f", 40)}}
+        String.contains?(url, "/commits/") and String.contains?(url, "/pulls?") -> {:ok, []}
+        String.contains?(url, "/commits?") -> {:ok, []}
+        String.contains?(url, "/pulls?") -> {:ok, [stale_pull()]}
+        true -> {:error, {:unexpected_url, url}}
+      end
+    end
+
+    defp stale_pull do
+      %{
+        "number" => 21,
+        "title" => "Merged months before this window",
+        "body" => "",
+        "html_url" => "https://github.com/a/r/pull/21",
+        "merged_at" => "2026-01-04T09:00:00Z",
+        "updated_at" => "2026-08-30T12:00:00Z",
+        "merge_commit_sha" => nil,
+        "base" => %{"ref" => "main"}
+      }
+    end
+  end
+
+  # A pull request merged seconds before the scan. GitHub computes the merge
+  # commit asynchronously, so it is briefly absent on one that is in the window.
+  defmodule FreshMergeClient do
+    def get_json(url) do
+      cond do
+        String.ends_with?(url, "/commits/main") -> {:ok, %{"sha" => String.duplicate("f", 40)}}
+        String.contains?(url, "/commits/") and String.contains?(url, "/pulls?") -> {:ok, []}
+        String.contains?(url, "/commits?") -> {:ok, []}
+        String.contains?(url, "/pulls?") -> {:ok, [fresh_pull()]}
+        true -> {:error, {:unexpected_url, url}}
+      end
+    end
+
+    defp fresh_pull do
+      %{
+        "number" => 1759,
+        "title" => "Merged as the scan started",
+        "body" => "",
+        "html_url" => "https://github.com/a/r/pull/1759",
+        "merged_at" => "2026-08-30T21:59:30Z",
+        "updated_at" => "2026-08-30T21:59:30Z",
+        "merge_commit_sha" => nil,
+        "base" => %{"ref" => "main"}
+      }
+    end
+  end
+
   defmodule LargeFakeClient do
     def get_json(url) do
       cond do
@@ -258,6 +312,43 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     end)
 
     :ok
+  end
+
+  # The scan reads up to three pages ordered by mutable updated_at, so it sees
+  # pull requests merged long before the window. Validating one of those failed
+  # the whole digest, and the error is terminal, so a single unhealthy row in
+  # the repository's history stopped every future digest for that day.
+  test "a pull request outside the window is skipped without validating it" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, StalePullClient)
+
+    repository = repository_fixture(%{github_owner: "a", github_name: "r"})
+
+    digest = %DailyDigest{
+      window_started_at: ~U[2026-08-29 22:00:00Z],
+      window_ended_at: ~U[2026-08-30 22:00:00Z]
+    }
+
+    assert {:ok, evidence} = Evidence.fetch(repository, digest)
+    assert evidence["pull_request_numbers"] == []
+    assert evidence["change_count"] == 0
+  end
+
+  # In the window the merge commit is evidence the digest cannot do without, so
+  # it still stops. It must not stop permanently: GitHub fills the sha in within
+  # seconds, and the next scheduled run would succeed.
+  test "a pull request merged as the scan started is retryable, not terminal" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, FreshMergeClient)
+
+    repository = repository_fixture(%{github_owner: "a", github_name: "r"})
+
+    digest = %DailyDigest{
+      window_started_at: ~U[2026-08-29 22:00:00Z],
+      window_ended_at: ~U[2026-08-30 22:00:00Z]
+    }
+
+    assert {:error, :github_pull_request_merge_pending} = Evidence.fetch(repository, digest)
+
+    refute :github_pull_request_merge_pending in PtcManager.MaintainerActions.terminal_daily_digest_evidence_errors()
   end
 
   test "uses merge time, labels direct-commit time, and fences every query to one head" do
