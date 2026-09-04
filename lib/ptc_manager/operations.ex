@@ -728,10 +728,12 @@ defmodule PtcManager.Operations do
   defp close_cancelled_pane(job, _run), do: {:ok, job}
 
   @doc """
-  Issues this attempt's stop-report capability and returns the reloaded job.
+  Issues this attempt's stop-report identifier and returns the reloaded job.
 
-  Every managed agent can write the shared results directory, so the file name
-  carries a fresh unguessable token: an agent learns only the name of its own.
+  The token keeps two attempts from colliding and makes the file name
+  impractical to guess. It is not a capability: every managed agent runs as the
+  same worker identity and can list the shared results directory. See
+  `PtcManager.Operations.StopReport` for what a forged report is bounded to.
   """
   def issue_stop_report_token(%Job{} = job) do
     job

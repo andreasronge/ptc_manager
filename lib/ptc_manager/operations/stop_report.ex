@@ -41,7 +41,13 @@ defmodule PtcManager.Operations.StopReport do
   @doc "Every reason an agent may give for stopping."
   def reason_codes, do: @reason_codes
 
-  @doc "A fresh capability token naming one attempt's report file."
+  @doc """
+  A fresh random identifier naming one attempt's report file.
+
+  Defence in depth, not a capability: it separates attempts and makes the name
+  impractical to guess, but every agent shares one worker identity and can list
+  the directory. See the note on the module.
+  """
   def new_token, do: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
 
   @doc """
