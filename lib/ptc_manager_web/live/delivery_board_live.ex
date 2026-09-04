@@ -276,9 +276,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   """
   def abandonable?(%{managed?: true, active_job: %{state: state}} = item)
       when state in ~w(awaiting_reconciliation verifying_result publish_blocked),
-      do: not verification_running?(item) and is_nil(item.publication)
+      do: not verification_running?(item) and not published?(item)
 
   def abandonable?(_item), do: false
+
+  # A blocked publication normally has a row with no pull request yet; only an
+  # actual PR number means there is something abandoning would orphan.
+  defp published?(%{publication: %{pr_number: number}}) when is_integer(number), do: true
+  defp published?(_item), do: false
 
   defp verification_running?(%{active_job: %{result_attempt_expires_at: %DateTime{} = at}}),
     do: DateTime.compare(at, DateTime.utc_now()) == :gt

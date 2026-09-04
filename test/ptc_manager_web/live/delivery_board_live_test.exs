@@ -521,6 +521,52 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, card)
   end
 
+  test "a blocked publication with no pull request can still be abandoned", %{conn: conn} do
+    job = approved_job("Blocked before publishing") |> set_job_state("working")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    head_sha = String.duplicate("b", 40)
+
+    blocked =
+      job
+      |> Job.changeset(%{
+        state: "publish_blocked",
+        last_error: ":github_app_not_configured",
+        result_base_sha: String.duplicate("a", 40),
+        result_head_sha: head_sha,
+        result_diff_digest: String.duplicate("c", 64),
+        result_commit_count: 1,
+        result_verified_at: now
+      })
+      |> Repo.update!()
+
+    # The ordinary shape of this state: a publication row exists, but nothing
+    # was ever published, so there is no pull request to orphan.
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      job_id: blocked.id,
+      state: "blocked",
+      idempotency_key: String.duplicate("8", 64),
+      fencing_token: blocked.fencing_token,
+      branch_name: "ptc-manager/issue-job-#{blocked.id}",
+      base_sha: String.duplicate("a", 40),
+      head_sha: head_sha,
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      last_error: ":github_app_not_configured"
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#abandon-job-#{blocked.id}", "Abandon")
+
+    view |> element("#abandon-job-#{blocked.id}") |> render_click()
+    view |> element("#confirm-abandon-#{blocked.id}") |> render_click()
+
+    assert render(view) =~ "Abandoned."
+    assert Repo.get!(Job, blocked.id).state == "cancelled"
+  end
+
   test "a job whose verifier is still working offers no abandon", %{conn: conn} do
     job = approved_job("Still being checked") |> set_job_state("working")
 
