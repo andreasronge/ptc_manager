@@ -898,8 +898,10 @@ uploads a Git archive rather than uncommitted files, and builds the production
 release on the server with its mise-managed
 Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
 checks both managed runs and the manual and worker Herdr sessions. Non-idle
-agents make deployment stop safely; idle Herdr sessions continue running and
-are not restarted. Immediately before the release swap, the task stops the
+agents make deployment stop safely, and a retained agent session keeps
+`ptc_manager-herdr` running even when it is idle. When no run and no agent is
+retained there is nothing to lose, so the deployment restarts it, which is also
+the moment a pinned Herdr takes effect. Immediately before the release swap, the task stops the
 coordinator and checks the database again so no new managed work can race the
 deployment. The new release always starts in maintenance mode: the web UI and
 `/health` remain readable, while pollers, button-triggered mutations, agents,
@@ -1062,17 +1064,56 @@ ssh -t herdr-box sudo -u ptc-manager-worker -H claude auth login
 ssh -t herdr-box sudo -u ptc-manager-worker -H env NO_OPEN_BROWSER=1 cursor-agent login
 ```
 
-The deployment links `claude` from the worker Node directory and copies the
-pinned Cursor CLI from `/home/agent/.local/share/cursor-agent/versions/` into
-`/opt/ptc-manager-cursor-agent/` so both are on the worker's service `PATH`.
+Every program the deployment installs on the machine is pinned in
+`deploy/toolchain-versions`, and that file is the only place one of their
+versions is written. The asset build tools, esbuild and Tailwind, are the
+exception: `config/config.exs` pins them the way Phoenix does and the release
+build installs them, so they match a commit too, just not in this file. The
+deployment installs
+exactly what it names into a root-owned `/opt/ptc-manager-<program>-<version>`
+directory, checks the version it actually got, and links the entry point onto
+the worker's service `PATH`. Codex and Claude Code are installed from their npm
+packages with the pinned Node, and Codex is linked to the native binary its
+platform package carries rather than to the Node shim in front of it. Node, npm,
+corepack, pnpm, Erlang, and Elixir come through mise, and the worker's own mise
+is itself a pinned download rather than a copy of whatever the deploying user
+has. An agent therefore cannot rewrite the CLI it runs, and updating any of them
+is a change to `deploy/toolchain-versions` and a deployment, never a command run
+on the host, so the running program always matches a commit.
 
-Node, npm, corepack, and pnpm are provisioned the same way: mise installs the
-version this repository pins, the deployment copies it into a root-owned
-`/opt/ptc-manager-<tool>-<version>` directory, checks the version it actually
-got, and links it onto the worker's `PATH`. An agent therefore cannot rewrite
-its own toolchain, and the version in use is whatever the deployed revision
-says. Updating one is a change to `deploy/remote-deploy-herdr` and a deployment,
-not a command run on the host, so the running toolchain always matches a commit.
+A version a program reports is that program's own claim, so every download that
+does not come from npm carries a pinned sha256 that is checked before anything
+is unpacked or installed: the Cursor CLI archive, the Herdr release asset named
+by `https://herdr.dev/latest.json`, and the mise release binary. Herdr and mise
+are single files, so the deployment re-checks the digest of what stands at the
+pinned path on every run rather than trusting the run that installed it. The
+pre-publication gate pins its build tools the same way: Hex by version, and
+Rebar by the sha512 of the script Hex's CDN serves, hashed after installation
+because `mix local.rebar` accepts a mismatched `--sha512` once `--force` is
+given.
+
+Herdr is the one program that does not take effect at once. A client whose
+protocol does not match the running server breaks the coordinator's view of
+every agent, so the deployment installs the pinned build but moves
+`/usr/local/bin/herdr` only where it already restarts `ptc_manager-herdr`
+because nothing is retained. Until that restart happens the pinned build sits
+installed beside the running one. The interactive client in the `agent` account
+belongs to the person rather than to the deployment, which reports when it has
+drifted instead of replacing it.
+
+What pinning ends is drift, not the deploying account. A deployment runs as the
+`agent` user with passwordless `sudo`, so everything on this machine is
+downstream of that account: the toolchain trees mise installed before the
+deployment used a pinned mise of its own keep whatever provenance that account
+gave them, and they are recreated only when their pinned version changes. The
+pins say which version runs and prove each download against a digest; they do
+not make the machine safe from the person deploying to it.
+
+The Deployments page reports, for each program, the version this release pins
+beside the version `/usr/local/bin` links, so something installed by hand is
+visible without logging in to the machine. It reads link targets rather than
+running any of these programs, and it never changes them: the fix for drift is a
+commit and a deployment, which the same page offers.
 
 pnpm earns its place for repositories that use it: it links a worktree's
 `node_modules` into a shared content-addressed store instead of copying a tree

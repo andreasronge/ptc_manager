@@ -138,6 +138,8 @@ config :ptc_manager,
       ]
     }
   },
+  toolchain_link_dir: "/usr/local/bin",
+  toolchain_install_root: "/opt",
   implementation_agent_start_timeout_ms: 120_000,
   implementation_agent_publishes_pr: false,
   required_pre_pr_reviews_default: 2

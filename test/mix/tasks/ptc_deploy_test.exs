@@ -18,6 +18,8 @@ defmodule Mix.Tasks.PtcDeployTest do
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
   @operation_recovery Path.join(@project_root, "deploy/ptc-manager-operation-recover")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
+  @toolchain_manifest Path.join(@project_root, "deploy/toolchain-versions")
+  @toolchain_reader Path.join(@project_root, "deploy/ptc-manager-toolchain-version")
   @environment_file_parser Path.join(
                              @project_root,
                              "deploy/systemd-environment-file-paths.awk"
@@ -37,7 +39,8 @@ defmodule Mix.Tasks.PtcDeployTest do
           @failure_policy,
           @self_deploy_command,
           @self_deploy_runner,
-          @operation_recovery
+          @operation_recovery,
+          @toolchain_reader
         ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
@@ -82,6 +85,140 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert {output, 2} = helper(home, ["forget", path])
     assert output =~ "allow or revoke"
     assert Jason.decode!(File.read!(config)) == revoked
+  end
+
+  # The deployment builds installation paths out of what the reader prints, so
+  # anything it cannot read exactly has to stop the deployment rather than yield
+  # an empty version and link a path like /opt/ptc-manager-codex- into place.
+  test "the toolchain reader prints one pinned version and refuses anything else" do
+    assert {version, 0} = reader([@toolchain_manifest, "codex"])
+    assert String.trim(version) == Map.fetch!(PtcManager.Toolchain.pinned(), "codex")
+
+    assert {output, 2} = reader([@toolchain_manifest, "vim"])
+    assert output =~ "pins no version for vim"
+
+    assert {output, 2} = reader([@toolchain_manifest, "Codex"])
+    assert output =~ "not a lowercase word"
+
+    assert {output, 2} = reader(["/nonexistent/toolchain-versions", "codex"])
+    assert output =~ "manifest is missing"
+
+    manifest =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-toolchain-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(manifest) end)
+
+    File.write!(manifest, "codex=0.1.0\ncodex=0.2.0\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "pins codex more than once"
+
+    # A line the reader cannot read stops the deployment even when the key it
+    # was asked for is pinned elsewhere in the file. Skipping it would leave the
+    # previous version installed while the edit looks applied.
+    File.write!(manifest, "codex=0.1.0\ncodex=\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "line 2 is not a pinned version"
+
+    File.write!(manifest, "codex = 0.1.0\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "line 1 is not a pinned version"
+
+    File.write!(manifest, "codex=$(id -u)\nherdr=0.8.2\n")
+    assert {output, 2} = reader([manifest, "herdr"])
+    assert output =~ "line 1 is not a pinned version"
+
+    File.write!(manifest, "# only a comment\n\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "pins no version for codex"
+  end
+
+  # The version a program reports is the program's own claim, so a download
+  # nobody hashed can pass a version check by printing the expected string.
+  test "the deployment verifies a pinned digest for every download it does not take from npm" do
+    script = File.read!(@remote_script)
+
+    for digest <- ~w(cursor_agent_sha256 herdr_sha256 mise_sha256) do
+      assert script =~ ~s|!= "$#{digest}"|, digest
+    end
+
+    # Cursor's archive is proven before anything is unpacked from it.
+    assert byte_index(script, ~s|!= "$cursor_agent_sha256"|) <
+             byte_index(script, ~s|tar --strip-components=1 -xzf "$cursor_archive"|)
+
+    # An executable an interrupted deployment left at the pinned path is what a
+    # later restart would link, so it is proven on every run, not only on the
+    # run that downloaded it.
+    assert script =~ ~s|sudo sha256sum "$worker_herdr_dir/herdr"|
+    assert script =~ ~s|sudo sha256sum "$worker_mise_dir/mise"|
+
+    # An unpacked tree cannot be hashed back into its archive, so the digest
+    # that proved it stays beside it and a tree without one is replaced.
+    assert script =~ ~s|.ptc-manager-archive-sha256|
+    assert script =~ ~s|sudo rm -rf -- "$worker_cursor_agent_dir"|
+  end
+
+  # The Herdr link moves during the stopped window, before the release swap. A
+  # deployment that then goes back to the previous release has to go back to the
+  # Herdr that release was built against, or an old coordinator is left speaking
+  # to a server whose protocol it does not expect.
+  test "a deployment that restores the previous release restores its Herdr" do
+    script = File.read!(@remote_script)
+
+    assert script =~ ~s|sudo cp -a "$worker_herdr" "$herdr_link_backup"|
+    assert script =~ "restore_worker_herdr"
+
+    # Both failure paths that bring the previous release back call it, and the
+    # one that keeps the new release in maintenance does not.
+    assert byte_index(script, "restore_worker_herdr || rollback_status=1") <
+             byte_index(script, "restore_preexisting_maintenance_override || rollback_status=1")
+
+    assert length(String.split(script, "restore_worker_herdr")) == 4
+
+    # The function is always called where its result is tested, which switches
+    # set -e off for its body, so a failed step has to be reported rather than
+    # covered by a final command that cannot fail.
+    assert script =~ "return \"$restore_status\""
+    refute script =~ "sudo systemctl restart ptc_manager-herdr || true"
+
+    # A restoration that failed leaves the backup as the only copy of the Herdr
+    # the running release expects, so cleanup must not take it away.
+    assert script =~ "herdr_link_backup_retained=true"
+    assert script =~ ~s|if [ "$herdr_link_backup_retained" != true ]; then|
+  end
+
+  # The deployment and the release read the same manifest, so a pin one of them
+  # needs and the other does not know about is a deployment that fails on the
+  # machine or a release that compiled against a manifest it cannot use.
+  test "the deployment reads exactly the pins the release requires" do
+    script = File.read!(@remote_script)
+
+    read =
+      ~r/"\$toolchain_reader" "\$toolchain_manifest" ([a-z0-9_]+)/
+      |> Regex.scan(script)
+      |> Enum.map(fn [_line, key] -> key end)
+      |> Enum.sort()
+
+    assert read == Enum.sort(PtcManager.Toolchain.required_pins())
+  end
+
+  # A version written twice drifts. The manifest is the only place one belongs,
+  # and the release reads the same file the deployment does.
+  test "the deployment script writes no version of its own" do
+    script = File.read!(@remote_script)
+
+    for {program, version} <- PtcManager.Toolchain.pinned() do
+      refute String.contains?(script, version),
+             "deploy/remote-deploy-herdr repeats the #{program} version #{version}"
+    end
+
+    assert script =~ "read_pinned_versions"
+  end
+
+  defp reader(args) do
+    System.cmd("sh", [@toolchain_reader | args], stderr_to_stdout: true)
   end
 
   defp helper(home, args) do
@@ -369,7 +506,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   test "remote deployment exposes the pinned Node runtime to managed agents" do
     script = File.read!(@remote_script)
 
-    assert script =~ "node_version=22.23.2"
+    assert script =~ ~s|node_version=$("$toolchain_reader" "$toolchain_manifest" node)|
     assert script =~ "install_worker_node"
     assert script =~ "/opt/ptc-manager-node-${node_version}"
     assert script =~ "lib/node_modules/npm/bin/npm-cli.js"
@@ -379,13 +516,54 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
   end
 
+  test "remote deployment installs every agent CLI at the version it pins" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "install_worker_codex"
+    assert script =~ "install_worker_claude_code"
+    assert script =~ "install_worker_cursor_agent"
+    assert script =~ "install_worker_herdr"
+
+    # An unverified download never becomes the program on the worker's PATH.
+    assert script =~ ~s|!= "codex-cli $codex_version"|
+    assert script =~ ~s|!= "$claude_code_version (Claude Code)"|
+    assert script =~ ~s|!= "$cursor_agent_version"|
+    assert script =~ ~s|!= "$herdr_sha256"|
+    assert script =~ ~s|!= "herdr $herdr_version"|
+
+    # The Cursor CLI no longer comes from a per-user installation, and the
+    # hand-placed trees the pinned ones replace are removed.
+    refute script =~ "/home/agent/.local/share/cursor-agent"
+    assert script =~ "sudo rm -rf -- /opt/codex /opt/ptc-manager-cursor-agent"
+
+    # A client whose protocol does not match the running server breaks the
+    # coordinator, so Herdr's link moves in the one step that restarts it.
+    assert script =~
+             ~s|sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"\n    sudo systemctl restart ptc_manager-herdr|
+
+    # A deployment is the only thing that moves the link, so the deferred branch
+    # must not tell a maintainer that restarting the service by hand will do it.
+    assert script =~ "a deployment is what moves the link"
+    refute script =~ "Restart it when none is retained"
+
+    assert String.split(script, ~s|"$worker_herdr_dir/herdr" "$worker_herdr"|) |> length() == 2
+  end
+
   test "remote deployment exposes mise for repository-owned worker setup" do
     script = File.read!(@remote_script)
 
     assert script =~ "worker_mise=/usr/local/bin/mise"
     assert script =~ "install_worker_mise"
-    assert script =~ ~s(sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise")
+    assert script =~ ~s|sudo ln -sfn "$worker_mise_dir/mise" "$worker_mise"|
     assert script =~ ~s(sudo -u ptc-manager-worker -H "$worker_mise" --version)
+
+    # The worker's mise is a pinned program, not a copy of whatever the
+    # deploying user happens to have installed, and it is the only mise the
+    # deployment runs: the user-owned one was executed through sudo to provision
+    # the gate, which made an unverified binary root on this machine.
+    refute script =~ "mise_binary"
+    refute script =~ "/home/agent/.local/bin/mise"
+    assert script =~ ~s|"$worker_mise" install "node@${node_version}"|
 
     assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
              byte_index(script, "echo \"Building production release...\"")
@@ -425,8 +603,21 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~
              "/bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix help hex'"
 
-    assert script =~ "local.hex --force --if-missing"
-    assert script =~ "local.rebar --force --if-missing"
+    # Mix installs a mismatched --sha512 once --force is given, so the gate
+    # hashes the Rebar it received instead of asking mix to check it.
+    assert script =~ ~s|gate_mix local.hex "$hex_version" --force|
+    assert script =~ "gate_mix local.rebar --force"
+    assert script =~ ~s|!= "$rebar3_sha512"|
+    assert script =~ "gate_rebar_digest"
+
+    # Mix keeps one Rebar per Elixir series, so the digest names the series this
+    # revision pins and copies from older ones are removed rather than left to
+    # answer for a series that has none.
+    assert script =~ "gate_rebar_series"
+    assert script =~ ~s|! -name "$rebar_series"|
+    refute script =~ "local.hex --force --if-missing"
+    refute script =~ "local.rebar --force --if-missing"
+    refute script =~ "local.rebar --force --sha512"
     assert script =~ "gate toolchain symlink escapes its root-owned prefix"
     refute script =~ "verify_gate_contract"
     refute script =~ "./scripts/ci/pre-publication"
