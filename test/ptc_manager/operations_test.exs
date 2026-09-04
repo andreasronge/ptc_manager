@@ -43,6 +43,7 @@ defmodule PtcManager.OperationsTest do
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.GitHub.IssueLabels
+  alias PtcManager.MaintainerActions
   alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PlanningGroup
   alias PtcManager.Operations.StopReport
@@ -536,9 +537,10 @@ defmodule PtcManager.OperationsTest do
     end
 
     test "reads a valid report and refuses anything else" do
-      %{job: job} = running_job_fixture("working")
+      job = stoppable_job_fixture()
 
       assert StopReport.read(job) == :none
+      assert StopReport.path_for(job) =~ job.stop_report_token
 
       write_stop_report(job, %{
         "reason_code" => "missing_prerequisite",
@@ -560,21 +562,58 @@ defmodule PtcManager.OperationsTest do
 
       File.write!(StopReport.path_for(job), "not json at all")
       assert {:error, :invalid_stop_report} = StopReport.read(job)
+
+      # Oversized, and anything that is not a plain file, is refused unread.
+      File.write!(StopReport.path_for(job), String.duplicate("x", 40_000))
+      assert {:error, :invalid_stop_report} = StopReport.read(job)
+
+      File.rm!(StopReport.path_for(job))
+      decoy = Path.join(System.tmp_dir!(), "ptc-stop-decoy-#{System.unique_integer([:positive])}")
+      File.write!(decoy, Jason.encode!(stop_report_attrs()))
+      File.ln_s!(decoy, StopReport.path_for(job))
+      assert {:error, :invalid_stop_report} = StopReport.read(job)
+      File.rm!(decoy)
     end
 
-    test "the reason decides which recovery is offered first" do
+    test "a job with no issued token has no readable path at all" do
+      %{job: job} = running_job_fixture("working")
+
+      assert is_nil(job.stop_report_token)
+      assert is_nil(StopReport.path_for(job))
+      assert StopReport.read(job) == :none
+    end
+
+    test "the reason decides which recoveries exist and which comes first" do
       assert StopReport.primary_action("missing_prerequisite") == :retry
       assert StopReport.primary_action("environment_broken") == :retry
       assert StopReport.primary_action("ambiguous_requirement") == :ask_on_issue
-      # An agent calling something unsafe must not be one click from doing it.
-      assert StopReport.primary_action("unsafe_to_proceed") == :none
+
+      # An agent calling something unsafe offers no recovery at all: restarting
+      # it and rewording it are both ways of proceeding anyway.
+      unsafe = %{"reason_code" => "unsafe_to_proceed"}
+      assert StopReport.primary_action(unsafe) == :none
+      assert StopReport.recoveries(unsafe) == []
+      refute StopReport.allows?(unsafe, :retry)
+      refute StopReport.allows?(unsafe, :ask_on_issue)
+
+      assert StopReport.allows?(%{"reason_code" => "missing_prerequisite"}, :retry)
+      assert StopReport.allows?(%{"reason_code" => "ambiguous_requirement"}, :retry)
     end
 
     test "recording a stop ends the attempt and frees the heavy slot" do
-      %{job: job, run: run, allocation: allocation} = running_job_fixture("working")
+      %{run: run, allocation: allocation} = context = running_job_fixture("working")
+      job = stoppable_job_fixture(context)
       report = stop_report_attrs()
 
-      assert {:ok, stopped} = Operations.record_job_stop_report(job.id, report, "coordinator")
+      assert {:ok, stopped} =
+               Operations.record_job_stop_report(
+                 job.id,
+                 job.fencing_token,
+                 job.result_attempt_token,
+                 report,
+                 "coordinator"
+               )
+
       assert stopped.state == "failed"
       assert stopped.ended_at
       assert stopped.stop_reported_at
@@ -593,9 +632,43 @@ defmodule PtcManager.OperationsTest do
       assert audit.details["reason_code"] == "missing_prerequisite"
     end
 
+    test "a stale verifier cannot overwrite a newer result or a published job" do
+      job = stoppable_job_fixture()
+      report = stop_report_attrs()
+
+      assert {:error, :stale_result_attempt} =
+               Operations.record_job_stop_report(
+                 job.id,
+                 job.fencing_token,
+                 "not-my-token",
+                 report
+               )
+
+      assert {:error, :stale_result_attempt} =
+               Operations.record_job_stop_report(
+                 job.id,
+                 job.fencing_token + 1,
+                 job.result_attempt_token,
+                 report
+               )
+
+      # A job that already published is past the point a verifier may end it.
+      published =
+        job |> Job.changeset(%{state: "pr_open"}) |> Repo.update!()
+
+      assert {:error, :stale_result_attempt} =
+               Operations.record_job_stop_report(
+                 published.id,
+                 published.fencing_token,
+                 published.result_attempt_token,
+                 report
+               )
+
+      assert Repo.get!(Job, job.id).state == "pr_open"
+    end
+
     test "a stopped job stays on the delivery board until it is answered" do
-      %{job: job} = running_job_fixture("working")
-      assert {:ok, stopped} = Operations.record_job_stop_report(job.id, stop_report_attrs())
+      assert {:ok, stopped} = stop_job()
 
       assert [item] = Enum.filter(Operations.delivery_board_items(), & &1[:stopped?])
       assert item.active_job.id == stopped.id
@@ -607,8 +680,7 @@ defmodule PtcManager.OperationsTest do
     end
 
     test "trying again reuses the approval and cannot run twice" do
-      %{job: job} = running_job_fixture("working")
-      assert {:ok, stopped} = Operations.record_job_stop_report(job.id, stop_report_attrs())
+      assert {:ok, stopped} = stop_job()
 
       assert {:ok, retry} = Operations.retry_stopped_job(stopped.id, "andreas")
       assert retry.id != stopped.id
@@ -629,6 +701,25 @@ defmodule PtcManager.OperationsTest do
 
       assert {:error, :job_not_stopped} = Operations.retry_stopped_job(job.id, "andreas")
       assert {:error, :job_not_stopped} = Operations.acknowledge_job_stop(job.id, "andreas")
+    end
+
+    test "an unsafe stop refuses a retry even when the event is crafted by hand" do
+      assert {:ok, stopped} =
+               stop_job(%{
+                 "reason_code" => "unsafe_to_proceed",
+                 "summary" => "The change would delete data with no backup path.",
+                 "detail" => "The issue asks for a destructive migration with no rollback.",
+                 "progress" => "none"
+               })
+
+      assert {:error, :recovery_not_offered} =
+               Operations.retry_stopped_job(stopped.id, "andreas")
+
+      assert {:error, :recovery_not_offered} =
+               MaintainerActions.enqueue_blocked_issue_review(stopped.id, "andreas")
+
+      # Setting it aside is still allowed: that decides nothing.
+      assert {:ok, _job} = Operations.acknowledge_job_stop(stopped.id, "andreas")
     end
   end
 
@@ -1186,6 +1277,32 @@ defmodule PtcManager.OperationsTest do
 
   defp write_stop_report(job, report) do
     File.write!(StopReport.path_for(job), Jason.encode!(report))
+  end
+
+  # A job as the reconciler holds it: claimed for verification, with its
+  # stop-report capability issued.
+  defp stoppable_job_fixture(context \\ nil) do
+    %{job: job} = context || running_job_fixture("working")
+    {:ok, job} = Operations.issue_stop_report_token(job)
+
+    job
+    |> Job.changeset(%{
+      state: "verifying_result",
+      result_attempt_token: "attempt-#{System.unique_integer([:positive])}",
+      result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 600, :second)
+    })
+    |> Repo.update!()
+  end
+
+  defp stop_job(report \\ nil) do
+    job = stoppable_job_fixture()
+
+    Operations.record_job_stop_report(
+      job.id,
+      job.fencing_token,
+      job.result_attempt_token,
+      report || stop_report_attrs()
+    )
   end
 
   defp running_job_fixture(state) do

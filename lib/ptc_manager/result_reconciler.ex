@@ -21,6 +21,16 @@ defmodule PtcManager.ResultReconciler do
   end
 
   defp verify_job(job, opts) do
+    # An agent that said it could not finish outranks whatever its branch looks
+    # like. A partial commit that happens to verify is not a delivery, and
+    # publishing it would ship work the agent itself declared incomplete.
+    case StopReport.read(job) do
+      {:ok, report} -> record_stop(job, report)
+      _no_usable_report -> verify_branch(job, opts)
+    end
+  end
+
+  defp verify_branch(job, opts) do
     probe = Keyword.get(opts, :probe, Application.fetch_env!(:ptc_manager, :result_probe))
     contract_provider = Keyword.get(opts, :contract_provider, PtcManager.Repository.Contract)
 
@@ -57,18 +67,13 @@ defmodule PtcManager.ResultReconciler do
     end
   end
 
-  # An agent that knew why it could not finish said so in a file. Prefer that
-  # over the probe's technical reason, which can only say the branch is not
-  # usable and never why.
-  defp record_failure(job, reason) do
-    case StopReport.read(job) do
-      {:ok, report} -> record_stop(job, report)
-      _no_report -> record_probe_failure(job, reason)
-    end
-  end
-
   defp record_stop(job, report) do
-    case Operations.record_job_stop_report(job.id, report) do
+    case Operations.record_job_stop_report(
+           job.id,
+           job.fencing_token,
+           job.result_attempt_token,
+           report
+         ) do
       {:ok, _job} ->
         StopReport.discard(job)
         {:error, {:agent_stopped, report["reason_code"]}}
@@ -78,7 +83,7 @@ defmodule PtcManager.ResultReconciler do
     end
   end
 
-  defp record_probe_failure(job, reason) do
+  defp record_failure(job, reason) do
     _ =
       Operations.record_result_error(
         job.id,

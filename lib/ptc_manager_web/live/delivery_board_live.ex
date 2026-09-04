@@ -123,6 +123,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       {:error, :agent_action_already_active} ->
         {:noreply, put_flash(socket, :error, "An action is already queued for that issue.")}
 
+      {:error, :recovery_not_offered} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The agent judged this unsafe. Read its evidence before asking on the issue."
+         )}
+
       {:error, :job_not_stopped} ->
         {:noreply,
          socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
@@ -220,6 +228,12 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   @doc "Whether this recovery is the one PtcManager offers first for that reason."
   def primary_recovery?(report, action), do: StopReport.primary_action(report) == action
+
+  @doc "Whether this recovery may be offered at all for that reason."
+  def recovery_offered?(report, action), do: StopReport.allows?(report, action)
+
+  @doc "Every recovery offered for this report; empty means a person must read it."
+  def recoveries(report), do: StopReport.recoveries(report)
 
   def stop_reason_label("missing_prerequisite"), do: "Missing prerequisite"
   def stop_reason_label("environment_broken"), do: "Environment broken"

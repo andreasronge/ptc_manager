@@ -271,7 +271,15 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     # The agent needs its stop contract in place before it can read the prompt
     # that names it. A failure here leaves it with no structured way to stop,
     # which is only the behaviour that existed before the contract.
-    _ = StopReport.prepare(job)
+    job =
+      case PtcManager.Operations.issue_stop_report_token(job) do
+        {:ok, issued} ->
+          _ = StopReport.prepare(issued)
+          %{issued | worktree_allocation: job.worktree_allocation, issue: job.issue}
+
+        {:error, _reason} ->
+          job
+      end
 
     with {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),

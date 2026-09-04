@@ -728,6 +728,18 @@ defmodule PtcManager.Operations do
   defp close_cancelled_pane(job, _run), do: {:ok, job}
 
   @doc """
+  Issues this attempt's stop-report capability and returns the reloaded job.
+
+  Every managed agent can write the shared results directory, so the file name
+  carries a fresh unguessable token: an agent learns only the name of its own.
+  """
+  def issue_stop_report_token(%Job{} = job) do
+    job
+    |> Job.changeset(%{stop_report_token: StopReport.new_token()})
+    |> Repo.update()
+  end
+
+  @doc """
   Records that this job's agent said it could not finish, and ends the attempt.
 
   The report only supplies a reason. The transition is the same one every other
@@ -735,16 +747,26 @@ defmodule PtcManager.Operations do
   is kept for attention. The heavy slot is released, because a stopped agent
   waiting on a person must not hold capacity that other work needs.
   """
-  def record_job_stop_report(job_id, report, actor \\ "coordinator")
-      when is_integer(job_id) and is_map(report) and is_binary(actor) do
+  def record_job_stop_report(job_id, fencing_token, attempt_token, report, actor \\ "coordinator")
+      when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) and
+             is_map(report) and is_binary(actor) do
     now = utc_now()
     summary = StopReport.summary(report)
 
     outcome =
       Repo.transaction(fn ->
+        # Same fencing as every other result write: only the verifier that
+        # currently holds this attempt may end the job, and only from the state
+        # it claimed. A stale verifier must never overwrite a newer success or a
+        # job that already published.
         {updated, _rows} =
           Job
-          |> where([job], job.id == ^job_id and job.state in ^@active_job_states)
+          |> where(
+            [job],
+            job.id == ^job_id and job.state == "verifying_result" and
+              job.fencing_token == ^fencing_token and
+              job.result_attempt_token == ^attempt_token
+          )
           |> Repo.update_all(
             set: [
               state: "failed",
@@ -757,7 +779,7 @@ defmodule PtcManager.Operations do
             ]
           )
 
-        if updated != 1, do: Repo.rollback(:job_not_stoppable)
+        if updated != 1, do: Repo.rollback(:stale_result_attempt)
 
         job = Repo.get!(Job, job_id)
 
@@ -857,6 +879,12 @@ defmodule PtcManager.Operations do
 
         if is_nil(stopped.stop_reported_at) or not is_nil(stopped.stop_acknowledged_at) do
           Repo.rollback(:job_not_stopped)
+        end
+
+        # A hidden button is not a guard. An agent that judged the work unsafe
+        # must not be restartable through a crafted event either.
+        unless StopReport.allows?(stopped.stop_report, :retry) do
+          Repo.rollback(:recovery_not_offered)
         end
 
         {updated, _rows} =

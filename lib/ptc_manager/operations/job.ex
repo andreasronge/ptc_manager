@@ -39,6 +39,7 @@ defmodule PtcManager.Operations.Job do
     field :pre_publication_duration_ms, :integer
     field :pre_publication_verified_at, :utc_datetime_usec
     field :prompt_instructions, :string
+    field :stop_report_token, :string
     field :stop_report, :map
     field :stop_reported_at, :utc_datetime_usec
     field :stop_acknowledged_at, :utc_datetime_usec
@@ -94,6 +95,7 @@ defmodule PtcManager.Operations.Job do
       :pre_publication_duration_ms,
       :pre_publication_verified_at,
       :prompt_instructions,
+      :stop_report_token,
       :stop_report,
       :stop_reported_at,
       :stop_acknowledged_at

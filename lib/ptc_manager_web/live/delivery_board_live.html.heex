@@ -267,6 +267,7 @@
             </button>
             <%= if report = stop_report(item) do %>
               <button
+                :if={recovery_offered?(report, :retry)}
                 id={"retry-stopped-#{item.active_job.id}"}
                 phx-click="retry-stopped-job"
                 phx-value-job-id={item.active_job.id}
@@ -282,6 +283,7 @@
                 <.icon name="hero-arrow-path-mini" class="size-3.5" /> Try again
               </button>
               <button
+                :if={recovery_offered?(report, :ask_on_issue)}
                 id={"ask-on-issue-#{item.active_job.id}"}
                 phx-click="ask-on-issue"
                 phx-value-job-id={item.active_job.id}
@@ -306,6 +308,12 @@
               >
                 Stop
               </button>
+              <span
+                :if={recoveries(report) == []}
+                class="self-center text-[11px] leading-4 text-rose-200"
+              >
+                Read the evidence before restarting this by hand.
+              </span>
             <% end %>
             <%= if lane.key in [:working, :stuck] && cancellable_agent?(item) do %>
               <%= if confirming_cancel?(@cancel_agent_job_id, item) do %>

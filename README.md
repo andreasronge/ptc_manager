@@ -516,11 +516,23 @@ technical branch error, until you answer it with one of three buttons:
 - **Stop** sets the card aside. The worktree stays on Operations until you
   discard it.
 
-`reason_code` decides which of those PtcManager offers first: a missing
-prerequisite or broken environment defaults to **Try again**, an ambiguous
-requirement to **Ask on the issue**, and an agent that judged something
-**unsafe** gets neither — it is never one click from being told to proceed
-anyway. You can still press any of them.
+`reason_code` decides which of those PtcManager offers: a missing prerequisite
+or broken environment defaults to **Try again**, an ambiguous requirement to
+**Ask on the issue**, and an agent that judged something **unsafe** is offered
+neither. That last one is a refusal, not a default — the buttons are absent and
+the server refuses the action, because restarting the work and asking an agent
+to reword it are both ways of proceeding anyway. Only **Stop** remains, and you
+read the evidence.
+
+The report is written by a model, so it is treated as untrusted throughout. Its
+file name carries an unguessable per-attempt token, since every managed agent
+can write the shared results directory; it is read only if it is a plain file of
+sane size; recording it takes the same fencing token and result-attempt token as
+any other result write, so a stale verifier cannot overwrite a newer result or
+an already-published job; and **Ask on the issue** delivers the text as fenced
+JSON with its angle brackets stripped, framed as a claim to verify, to an action
+narrowed so it may only leave the issue blocked or needing a decision — never
+mark it ready or close it.
 
 An agent that crashes or wedges writes no report, so the contract does not
 replace the timeouts. A run that sits `blocked` or `idle` past the grace period

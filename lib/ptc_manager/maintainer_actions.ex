@@ -15,6 +15,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
   alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication, Repository}
+  alias PtcManager.Operations.StopReport
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
   alias PtcManager.Repository.SourceSnapshot
@@ -99,18 +100,28 @@ defmodule PtcManager.MaintainerActions do
     job = Job |> Repo.get(job_id) |> Repo.preload([:issue, :repository])
 
     with %Job{stop_report: report, stop_acknowledged_at: nil} when is_map(report) <- job,
-         {:ok, attrs} <-
-           Catalog.build("prepare_issue", %{
-             issue: job.issue,
-             repository: job.repository,
-             blocker: report
-           }),
-         {:ok, action} <- enqueue_versioned(job.repository, "prepare_issue", attrs, actor),
-         {:ok, _job} <- Operations.acknowledge_job_stop(job_id, actor) do
-      {:ok, action}
+         true <- StopReport.allows?(report, :ask_on_issue) do
+      # Acknowledging and queueing must not be able to half-happen: a queued
+      # GitHub-writing action beside an unanswered card would let the same
+      # blocker be sent twice.
+      RepoTransaction.immediate(fn ->
+        with {:ok, _job} <- Operations.acknowledge_job_stop(job_id, actor),
+             {:ok, attrs} <-
+               Catalog.build("prepare_issue", %{
+                 issue: job.issue,
+                 repository: job.repository,
+                 blocker: report
+               }),
+             {:ok, action} <- enqueue_versioned(job.repository, "prepare_issue", attrs, actor) do
+          action
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
     else
       nil -> {:error, :not_found}
       %Job{} -> {:error, :job_not_stopped}
+      false -> {:error, :recovery_not_offered}
       {:error, reason} -> {:error, reason}
     end
   end

@@ -399,16 +399,14 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   end
 
   test "a stopped agent explains itself and offers the right recovery first", %{conn: conn} do
-    job = approved_job("Record a live session") |> set_job_state("working")
-
-    assert {:ok, stopped} =
-             Operations.record_job_stop_report(job.id, %{
-               "reason_code" => "missing_prerequisite",
-               "summary" => "OPENROUTER_API_KEY is not set in this workspace.",
-               "detail" => "The recording step needs a live key and no env file was found.",
-               "prerequisite" => "OPENROUTER_API_KEY",
-               "progress" => "none"
-             })
+    stopped =
+      stop_job("Record a live session", %{
+        "reason_code" => "missing_prerequisite",
+        "summary" => "OPENROUTER_API_KEY is not set in this workspace.",
+        "detail" => "The recording step needs a live key and no env file was found.",
+        "prerequisite" => "OPENROUTER_API_KEY",
+        "progress" => "none"
+      })
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
@@ -432,15 +430,13 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   end
 
   test "an ambiguity is offered to the issue first, not retried", %{conn: conn} do
-    job = approved_job("Decide the export shape") |> set_job_state("working")
-
-    assert {:ok, stopped} =
-             Operations.record_job_stop_report(job.id, %{
-               "reason_code" => "ambiguous_requirement",
-               "summary" => "The issue does not say which export shape to use.",
-               "detail" => "Two incompatible readings, and no test distinguishes them.",
-               "progress" => "partial"
-             })
+    stopped =
+      stop_job("Decide the export shape", %{
+        "reason_code" => "ambiguous_requirement",
+        "summary" => "The issue does not say which export shape to use.",
+        "detail" => "Two incompatible readings, and no test distinguishes them.",
+        "progress" => "partial"
+      })
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
@@ -461,26 +457,51 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   end
 
   test "an unsafe stop offers no filled recovery at all", %{conn: conn} do
-    job = approved_job("Delete the archive") |> set_job_state("working")
-
-    assert {:ok, stopped} =
-             Operations.record_job_stop_report(job.id, %{
-               "reason_code" => "unsafe_to_proceed",
-               "summary" => "The change would delete data with no backup path.",
-               "detail" => "The issue asks for a destructive migration with no rollback.",
-               "progress" => "none"
-             })
+    stopped =
+      stop_job("Delete the archive", %{
+        "reason_code" => "unsafe_to_proceed",
+        "summary" => "The change would delete data with no backup path.",
+        "detail" => "The issue asks for a destructive migration with no rollback.",
+        "progress" => "none"
+      })
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Judged unsafe")
-    refute has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
-    refute has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
+    assert has_element?(view, "#board-job-#{stopped.id}", "Read the evidence before restarting")
+
+    # Not merely unfilled: neither recovery exists to be clicked at all.
+    refute has_element?(view, "#retry-stopped-#{stopped.id}")
+    refute has_element?(view, "#ask-on-issue-#{stopped.id}")
 
     view |> element("#acknowledge-stop-#{stopped.id}") |> render_click()
 
     assert render(view) =~ "Set aside"
     refute has_element?(view, "#board-job-#{stopped.id}")
+  end
+
+  defp stop_job(title, report) do
+    job = approved_job(title) |> set_job_state("working")
+    {:ok, job} = Operations.issue_stop_report_token(job)
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: "verifying_result",
+        result_attempt_token: "attempt-#{System.unique_integer([:positive])}",
+        result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 600, :second)
+      })
+      |> Repo.update!()
+
+    {:ok, stopped} =
+      Operations.record_job_stop_report(
+        job.id,
+        job.fencing_token,
+        job.result_attempt_token,
+        report
+      )
+
+    stopped
   end
 
   defp approved_job(title) do

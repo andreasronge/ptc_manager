@@ -12,7 +12,13 @@ defmodule PtcManager.Operations.StopReport do
 
   Both sides derive the path from the job, so nothing has to be threaded through
   dispatch: the adapter writes the schema beside it before the agent starts, and
-  reconciliation looks for it when the agent produced no usable branch.
+  reconciliation looks for it.
+
+  The path carries an unguessable per-attempt token. Every managed agent can
+  write the shared results directory, so a predictable name would let one agent
+  forge another job's stop. The file is also read defensively — regular files
+  only, no symlinks, bounded size — because it is written by a model and this
+  process must not be steered, blocked, or exhausted by what it finds there.
   """
 
   alias PtcManager.Operations.Job
@@ -22,16 +28,34 @@ defmodule PtcManager.Operations.StopReport do
   @max_summary 300
   @max_detail 2_000
   @max_prerequisite 120
+  @max_file_bytes 32_768
 
   @doc "Every reason an agent may give for stopping."
   def reason_codes, do: @reason_codes
 
-  @doc "Where this job's agent writes its report."
-  def path_for(%Job{id: id, fencing_token: token}),
-    do: Path.join(directory(), "ptc-stop-job-#{id}-#{token}.json")
+  @doc "A fresh capability token naming one attempt's report file."
+  def new_token, do: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+
+  @doc """
+  Where this job's agent writes its report, or nil before a token was issued.
+
+  The token is the capability: an agent only learns the name of its own file.
+  """
+  def path_for(%Job{stop_report_token: token} = job) when is_binary(token) and token != "" do
+    if safe_token?(token),
+      do: Path.join(directory(), "ptc-stop-#{job.id}-#{job.fencing_token}-#{token}.json"),
+      else: nil
+  end
+
+  def path_for(%Job{}), do: nil
 
   @doc "Where the contract itself is placed, so the agent can read it."
-  def schema_path_for(%Job{} = job), do: Path.rootname(path_for(job)) <> ".schema.json"
+  def schema_path_for(%Job{} = job) do
+    case path_for(job) do
+      nil -> nil
+      path -> Path.rootname(path) <> ".schema.json"
+    end
+  end
 
   @doc """
   Places the schema next to the report path so the agent has the contract.
@@ -40,13 +64,14 @@ defmodule PtcManager.Operations.StopReport do
   which is the behaviour that existed before this contract.
   """
   def prepare(%Job{} = job) do
-    schema_path = schema_path_for(job)
-
-    with :ok <- File.mkdir_p(directory()),
+    with path when is_binary(path) <- path_for(job),
+         schema_path when is_binary(schema_path) <- schema_path_for(job),
+         :ok <- File.mkdir_p(directory()),
          :ok <- File.cp(schema_source(), schema_path),
          :ok <- File.chmod(schema_path, 0o440) do
-      {:ok, path_for(job), schema_path}
+      {:ok, path, schema_path}
     else
+      nil -> {:error, :stop_report_token_missing}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -60,21 +85,54 @@ defmodule PtcManager.Operations.StopReport do
   agent meant, so the ordinary "no usable result" path stays in charge.
   """
   def read(%Job{} = job) do
-    path = path_for(job)
+    case path_for(job) do
+      nil -> :none
+      path -> read_bounded(path)
+    end
+  end
 
-    case File.read(path) do
-      {:ok, body} -> decode(body)
-      {:error, :enoent} -> :none
-      {:error, reason} -> {:error, {:stop_report_unreadable, reason}}
+  # A model wrote this path's contents, and every managed agent can write this
+  # directory. Follow no symlink, open nothing that is not a regular file, and
+  # never read more than a report could legitimately be.
+  defp read_bounded(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_file_bytes ->
+        case File.read(path) do
+          {:ok, body} -> decode(body)
+          {:error, :enoent} -> :none
+          {:error, _reason} -> {:error, :invalid_stop_report}
+        end
+
+      {:ok, %File.Stat{}} ->
+        {:error, :invalid_stop_report}
+
+      {:error, :enoent} ->
+        :none
+
+      {:error, _reason} ->
+        {:error, :invalid_stop_report}
     end
   end
 
   @doc "Removes the report and its schema once the outcome is durable."
   def discard(%Job{} = job) do
-    _ = File.rm(path_for(job))
-    _ = File.rm(schema_path_for(job))
+    for path <- [path_for(job), schema_path_for(job)], is_binary(path), do: File.rm(path)
     :ok
   end
+
+  @doc """
+  The recoveries a maintainer may take for one report.
+
+  An agent that judged something unsafe offers none: restarting it or asking an
+  issue-writing agent to reword it are both ways of proceeding anyway, and the
+  point of that reason code is that a person reads the evidence first.
+  """
+  def recoveries(%{"reason_code" => "unsafe_to_proceed"}), do: []
+  def recoveries(%{"reason_code" => code}) when code in @reason_codes, do: [:retry, :ask_on_issue]
+  def recoveries(_report), do: []
+
+  @doc "True when this recovery may be offered for this report."
+  def allows?(report, action), do: action in recoveries(report)
 
   @doc """
   The recovery a maintainer most likely wants, given why the agent stopped.
@@ -144,6 +202,9 @@ defmodule PtcManager.Operations.StopReport do
     do: String.length(value) <= @max_prerequisite
 
   defp valid_prerequisite?(_value), do: false
+
+  # The token names a file, so it must never be able to leave the directory.
+  defp safe_token?(token), do: Regex.match?(~r/\A[A-Za-z0-9_-]{16,64}\z/, token)
 
   defp maybe_put_prerequisite(report, nil), do: report
   defp maybe_put_prerequisite(report, ""), do: report
