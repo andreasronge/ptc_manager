@@ -524,15 +524,26 @@ the server refuses the action, because restarting the work and asking an agent
 to reword it are both ways of proceeding anyway. Only **Stop** remains, and you
 read the evidence.
 
-The report is written by a model, so it is treated as untrusted throughout. Its
-file name carries an unguessable per-attempt token, since every managed agent
-can write the shared results directory; it is read only if it is a plain file of
-sane size; recording it takes the same fencing token and result-attempt token as
-any other result write, so a stale verifier cannot overwrite a newer result or
-an already-published job; and **Ask on the issue** delivers the text as fenced
-JSON with its angle brackets stripped, framed as a claim to verify, to an action
-narrowed so it may only leave the issue blocked or needing a decision — never
-mark it ready or close it.
+The report is written by a model, so it is treated as untrusted throughout.
+Recording one takes the same fencing token and result-attempt token as any other
+result write, so a stale verifier cannot overwrite a newer result or an
+already-published job. Reading one is bounded and deadlined, so an oversized or
+endless file cannot exhaust or stall the coordinator. **Ask on the issue**
+delivers the text as fenced JSON with its delimiter characters stripped, framed
+as a claim to verify, and the action it queues records the outcomes it may
+return — enforced when the result comes back, not merely requested in the
+prompt — so that recovery can only leave the issue blocked or needing a
+decision, never mark it ready or close it.
+
+One limit is worth stating plainly: the report's file name carries a random
+per-attempt token, but that is defence in depth and not a capability. Every
+managed agent runs as the same worker identity and can list the shared results
+directory, so a hostile agent can still find and forge another job's report.
+That is the same deferred technical separation described above for the
+authenticated `gh` session, and per-agent OS identities are the only thing that
+would close it. What a forged report can do is bounded: end one attempt whose
+verifier currently holds it, preserve its worktree, and show text to a
+maintainer. It cannot approve, publish, merge, or write to GitHub.
 
 An agent that crashes or wedges writes no report, so the contract does not
 replace the timeouts. A run that sits `blocked` or `idle` past the grace period

@@ -14,11 +14,18 @@ defmodule PtcManager.Operations.StopReport do
   dispatch: the adapter writes the schema beside it before the agent starts, and
   reconciliation looks for it.
 
-  The path carries an unguessable per-attempt token. Every managed agent can
-  write the shared results directory, so a predictable name would let one agent
-  forge another job's stop. The file is also read defensively — regular files
-  only, no symlinks, bounded size — because it is written by a model and this
-  process must not be steered, blocked, or exhausted by what it finds there.
+  The path carries a random per-attempt token. That is defence in depth, not a
+  capability: every managed agent runs as the same worker identity and can list
+  the shared results directory, so one agent can still find and forge another
+  job's report. Technical separation between agents is deferred deployment-wide,
+  and per-agent OS identities are the only thing that would close it.
+
+  What is enforced is the blast radius. A report cannot approve, publish, merge,
+  or write to GitHub. Recording one takes the same fencing and result-attempt
+  tokens as any other result write, so it can only end the attempt a verifier
+  currently holds, and the worktree is preserved either way. The read itself is
+  bounded and deadlined, so what the file contains cannot exhaust or stall the
+  coordinator.
   """
 
   alias PtcManager.Operations.Job
@@ -29,6 +36,7 @@ defmodule PtcManager.Operations.StopReport do
   @max_detail 2_000
   @max_prerequisite 120
   @max_file_bytes 32_768
+  @read_timeout_ms 2_000
 
   @doc "Every reason an agent may give for stopping."
   def reason_codes, do: @reason_codes
@@ -39,7 +47,8 @@ defmodule PtcManager.Operations.StopReport do
   @doc """
   Where this job's agent writes its report, or nil before a token was issued.
 
-  The token is the capability: an agent only learns the name of its own file.
+  The token keeps two attempts from colliding and makes the name impractical to
+  guess. It is not a secret: see the note on shared worker identity above.
   """
   def path_for(%Job{stop_report_token: token} = job) when is_binary(token) and token != "" do
     if safe_token?(token),
@@ -91,17 +100,15 @@ defmodule PtcManager.Operations.StopReport do
     end
   end
 
-  # A model wrote this path's contents, and every managed agent can write this
-  # directory. Follow no symlink, open nothing that is not a regular file, and
-  # never read more than a report could legitimately be.
+  # A model wrote this path's contents. The stat is only a cheap early reject:
+  # the path can be swapped between checking it and opening it, so the read
+  # itself has to be safe on its own. It is bounded, so a large or endless file
+  # cannot exhaust this process, and it runs under a deadline, so a FIFO that
+  # never yields cannot stall the single reconciliation task.
   defp read_bounded(path) do
     case File.lstat(path) do
       {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_file_bytes ->
-        case File.read(path) do
-          {:ok, body} -> decode(body)
-          {:error, :enoent} -> :none
-          {:error, _reason} -> {:error, :invalid_stop_report}
-        end
+        bounded_contents(path)
 
       {:ok, %File.Stat{}} ->
         {:error, :invalid_stop_report}
@@ -111,6 +118,41 @@ defmodule PtcManager.Operations.StopReport do
 
       {:error, _reason} ->
         {:error, :invalid_stop_report}
+    end
+  end
+
+  defp bounded_contents(path) do
+    task = Task.async(fn -> read_head(path) end)
+
+    case Task.yield(task, @read_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, body}} -> decode(body)
+      {:ok, :none} -> :none
+      {:ok, {:error, _reason}} -> {:error, :invalid_stop_report}
+      _timeout_or_crash -> {:error, :invalid_stop_report}
+    end
+  end
+
+  defp read_head(path) do
+    case File.open(path, [:read, :binary, :raw]) do
+      {:ok, handle} ->
+        try do
+          # One byte more than a report may be, so an oversized file is detected
+          # rather than truncated into something that happens to parse.
+          case :file.read(handle, @max_file_bytes + 1) do
+            {:ok, body} when byte_size(body) <= @max_file_bytes -> {:ok, body}
+            {:ok, _too_large} -> {:error, :too_large}
+            :eof -> {:error, :empty}
+            {:error, reason} -> {:error, reason}
+          end
+        after
+          File.close(handle)
+        end
+
+      {:error, :enoent} ->
+        :none
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

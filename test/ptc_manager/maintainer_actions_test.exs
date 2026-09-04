@@ -2656,6 +2656,39 @@ defmodule PtcManager.MaintainerActionsTest do
       refute prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
     end
 
+    test "the narrowed outcome set is enforced when the result comes back" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+
+      assert {:ok, attrs} =
+               Catalog.build("prepare_issue", %{
+                 issue: issue,
+                 repository: repository,
+                 blocker: %{
+                   "reason_code" => "ambiguous_requirement",
+                   "summary" => "Unclear which export shape to use.",
+                   "detail" => "Two readings, no test distinguishes them.",
+                   "progress" => "none"
+                 }
+               })
+
+      # Saying so in the prompt is not a restriction; the action carries it.
+      assert attrs.target_snapshot == %{"allowed_outcomes" => ["blocked", "needs-decision"]}
+
+      blocked = prepare_issue_result("blocked")
+      assert :ok = ActionAdapter.validate_result(blocked, "prepare_issue", attrs.target_snapshot)
+
+      for refused <- ["ready", "reject"] do
+        result = prepare_issue_result(refused)
+
+        # The key alone still allows it; this action does not.
+        assert :ok = ActionAdapter.validate_result(result, "prepare_issue")
+
+        assert {:error, :outcome_not_permitted_for_action} =
+                 ActionAdapter.validate_result(result, "prepare_issue", attrs.target_snapshot)
+      end
+    end
+
     test "ordinary preparation keeps its full outcome set" do
       repository = repository_fixture()
       issue = issue_fixture(repository)
@@ -2665,7 +2698,42 @@ defmodule PtcManager.MaintainerActionsTest do
 
       assert attrs.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
       refute attrs.prompt =~ "blocked_implementation"
+      assert attrs.target_snapshot == %{}
+
+      for outcome <- ["ready", "blocked", "needs-decision", "reject"] do
+        result = prepare_issue_result(outcome)
+        assert :ok = ActionAdapter.validate_result(result, "prepare_issue", attrs.target_snapshot)
+      end
     end
+
+    defp prepare_issue_result(outcome) do
+      %{
+        "outcome" => outcome,
+        "private_summary" => "A plain summary of what happened.",
+        "why_it_matters" => "It changes what a maintainer should do next.",
+        "scope" => "small",
+        "risk" => "low",
+        "technical_evidence" => "The relevant code path was read.",
+        "github_changes" => [],
+        "evidence" => [],
+        "created_issue_numbers" => [],
+        "suggestions" => [],
+        "decision_question" => decision_question(outcome),
+        "decision_options" => decision_options(outcome)
+      }
+    end
+
+    defp decision_question("needs-decision"), do: "Which export shape should users get?"
+    defp decision_question(_outcome), do: ""
+
+    defp decision_options("needs-decision") do
+      [
+        %{"label" => "Exact", "description" => "Only real exports.", "example" => "a/b works."},
+        %{"label" => "Namespace", "description" => "Broad hint.", "example" => "a/* works."}
+      ]
+    end
+
+    defp decision_options(_outcome), do: []
   end
 
   describe "queueing a retrospective" do

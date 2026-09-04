@@ -75,6 +75,26 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   def validate_result(_result, _action_key), do: {:error, :invalid_agent_action_output}
 
+  @doc """
+  Validates a result against the outcomes this particular action may return.
+
+  Some actions are queued with a narrower set than their key allows, because
+  their whole input came from a model. Saying so in the prompt is not a
+  restriction — the prompt is what the model reads, and this is where
+  deterministic code decides — so the permitted set is persisted on the action
+  and enforced here.
+  """
+  def validate_result(result, action_key, %{"allowed_outcomes" => allowed})
+      when is_map(result) and is_list(allowed) and allowed != [] do
+    with :ok <- validate_result(result, action_key) do
+      if Map.get(result, "outcome") in allowed,
+        do: :ok,
+        else: {:error, :outcome_not_permitted_for_action}
+    end
+  end
+
+  def validate_result(result, action_key, _snapshot), do: validate_result(result, action_key)
+
   defp validate_daily_digest_result(%{
          "status" => status,
          "title" => title,

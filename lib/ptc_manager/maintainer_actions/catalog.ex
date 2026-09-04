@@ -9,6 +9,11 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   @prompt_version 1
 
+  # A blocker review may only leave the issue blocked or needing a decision.
+  # Marking it ready or closing it are decisions the maintainer did not make,
+  # and this recovery's entire input was written by a model.
+  @blocker_allowed_outcomes ["blocked", "needs-decision"]
+
   @doc "Returns a safe, realistic example of the complete configured action prompt."
   def preview(action_key, instructions \\ nil, repository \\ nil) when is_binary(action_key) do
     repository = repository || preview_repository()
@@ -102,6 +107,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_id: issue.id,
        target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
        prompt_version: @prompt_version,
+       target_snapshot: blocker_snapshot(target[:blocker]),
        prompt:
          configured(
            "prepare_issue",
@@ -399,7 +405,12 @@ defmodule PtcManager.MaintainerActions.Catalog do
   # ordinary preparation may also mark an issue ready or close it, and neither
   # belongs to a recovery whose whole input came from a model.
   defp blocker_outcomes(nil), do: "ready,blocked,needs-decision,reject"
-  defp blocker_outcomes(_report), do: "blocked,needs-decision"
+  defp blocker_outcomes(_report), do: Enum.join(@blocker_allowed_outcomes, ",")
+
+  # Persisted with the action, so the restriction is enforced when the result
+  # comes back rather than only requested in the prompt the model reads.
+  defp blocker_snapshot(nil), do: %{}
+  defp blocker_snapshot(_report), do: %{"allowed_outcomes" => @blocker_allowed_outcomes}
 
   defp prepare_issue_prompt(repository, issue), do: prepare_issue_prompt(repository, issue, nil)
 

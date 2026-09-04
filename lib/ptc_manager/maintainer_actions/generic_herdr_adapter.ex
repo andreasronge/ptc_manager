@@ -37,7 +37,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
            :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
-           {:ok, result} <- read_result(output_path, action.action_key) do
+           {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
         {:ok, result}
       end
     after
@@ -374,11 +374,11 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     """
   end
 
-  defp read_result(path, action_key) do
+  defp read_result(path, action_key, snapshot) do
     with {:ok, body} <- File.read(path),
          :ok <- require_result(body),
          {:ok, result} when is_map(result) <- Jason.decode(body),
-         :ok <- ResultValidator.validate_result(result, action_key) do
+         :ok <- ResultValidator.validate_result(result, action_key, snapshot) do
       {:ok, result}
     else
       {:error, %Jason.DecodeError{}} -> {:error, :invalid_agent_result_json}
