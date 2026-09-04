@@ -126,10 +126,16 @@ defmodule PtcManager.Toolchain do
       linked: linked_version(target, prefix),
       target: target,
       installed?: File.dir?(prefix <> pinned),
+      # A link is not a program: File.read_link/1 reads the text a symlink
+      # holds without following it, so a link naming the pinned version can
+      # still point at nothing.
+      runnable?: target != nil and File.exists?(target),
       deferred?: Map.get(program, :deferred, false)
     }
 
-    described |> Map.put(:status, status(described)) |> Map.drop([:installed?, :deferred?])
+    described
+    |> Map.put(:status, status(described))
+    |> Map.drop([:installed?, :runnable?, :deferred?])
   end
 
   # A name on the PATH that is not a symlink was put there by hand: the
@@ -154,7 +160,7 @@ defmodule PtcManager.Toolchain do
     end
   end
 
-  defp status(%{pinned: version, linked: version}), do: :matched
+  defp status(%{pinned: version, linked: version, runnable?: true}), do: :matched
   defp status(%{deferred?: true, installed?: true}), do: :staged
   defp status(%{target: nil, installed?: false}), do: :absent
   defp status(_program), do: :drifted

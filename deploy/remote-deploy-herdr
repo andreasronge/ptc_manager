@@ -66,7 +66,6 @@ maintenance_override_preexisting=false
 agent_result_dir=/var/lib/ptc_manager-worker/agent-results
 agent_result_env=/etc/ptc_manager/agent-results.env
 agent_result_override=/etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-agent-results.conf
-mise_binary=/home/agent/.local/bin/mise
 worker_mise=/usr/local/bin/mise
 # Every third-party version this machine runs comes from the deployed
 # revision's toolchain manifest; read_pinned_versions fills these in.
@@ -765,8 +764,8 @@ install_worker_herdr() {
 }
 
 install_worker_node() {
-  "$mise_binary" install "node@${node_version}"
-  node_source=$("$mise_binary" where "node@${node_version}")
+  "$worker_mise" install "node@${node_version}"
+  node_source=$("$worker_mise" where "node@${node_version}")
 
   case "$node_source" in
     /home/agent/.local/share/mise/installs/node/*) ;;
@@ -829,8 +828,8 @@ install_worker_node() {
 # root-owned directory, version-checked, and linked, so an agent cannot rewrite
 # its own toolchain.
 install_worker_pnpm() {
-  "$mise_binary" install "pnpm@${pnpm_version}"
-  pnpm_source=$("$mise_binary" where "pnpm@${pnpm_version}")
+  "$worker_mise" install "pnpm@${pnpm_version}"
+  pnpm_source=$("$worker_mise" where "pnpm@${pnpm_version}")
 
   case "$pnpm_source" in
     /home/agent/.local/share/mise/installs/pnpm/*) ;;
@@ -915,11 +914,25 @@ gate_mix() {
     "$gate_elixir_dir/bin/mix" "$@"
 }
 
-# One digest for every Rebar the gate has, so a second copy for another Elixir
-# cannot pass by hiding behind the pinned one.
+# Mix keeps one Rebar per Elixir series under a directory it names after the
+# series, so the digest has to come from the series this revision pins. A copy
+# left by an older series would otherwise answer for one that has none.
+gate_rebar_series() {
+  series=$(printf '%s' "$elixir_version" |
+    sed 's/^\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.[0-9][0-9]*-otp-\([0-9][0-9]*\)$/\1-\2-otp-\3/')
+
+  case "$series" in
+    *[!0-9a-z-]*|*.*|'')
+      echo "pinned Elixir version does not name a Mix series: $elixir_version" >&2
+      return 1
+      ;;
+  esac
+
+  printf '%s' "$series"
+}
+
 gate_rebar_digest() {
-  sudo find "$gate_mix_home" -name rebar3 -type f -exec sha512sum {} + 2>/dev/null |
-    cut -d ' ' -f 1 | sort -u
+  sudo sha512sum "$gate_mix_home/elixir/$1/rebar3" 2>/dev/null | cut -d ' ' -f 1
 }
 
 install_gate_beam_toolchain() {
@@ -929,16 +942,16 @@ install_gate_beam_toolchain() {
   sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
     MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
-    "$mise_binary" install "erlang@${erlang_version}" "elixir@${elixir_version}"
+    "$worker_mise" install "erlang@${erlang_version}" "elixir@${elixir_version}"
 
   installed_erlang=$(sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
     MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
-    "$mise_binary" where "erlang@${erlang_version}")
+    "$worker_mise" where "erlang@${erlang_version}")
   installed_elixir=$(sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
     MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
-    "$mise_binary" where "elixir@${elixir_version}")
+    "$worker_mise" where "elixir@${elixir_version}")
 
   if [ "$installed_erlang" != "$gate_erlang_dir" ] ||
     [ "$installed_elixir" != "$gate_elixir_dir" ]; then
@@ -991,12 +1004,19 @@ install_gate_beam_toolchain() {
 
   # Rebar has no version to ask for, and mix installs a mismatched --sha512
   # anyway once --force is given, so the digest of what landed is the check.
-  if [ "$(gate_rebar_digest)" != "$rebar3_sha512" ]; then
+  rebar_series=$(gate_rebar_series)
+
+  if sudo test -d "$gate_mix_home/elixir"; then
+    sudo find "$gate_mix_home/elixir" -mindepth 1 -maxdepth 1 ! -name "$rebar_series" \
+      -exec rm -rf -- {} +
+  fi
+
+  if [ "$(gate_rebar_digest "$rebar_series")" != "$rebar3_sha512" ]; then
     gate_mix local.rebar --force
   fi
 
-  if [ "$(gate_rebar_digest)" != "$rebar3_sha512" ]; then
-    echo "the Rebar the gate installed does not match the sha512 this revision pins" >&2
+  if [ "$(gate_rebar_digest "$rebar_series")" != "$rebar3_sha512" ]; then
+    echo "the Rebar the gate installed for Elixir $rebar_series does not match the sha512 this revision pins" >&2
     return 1
   fi
 
@@ -1133,7 +1153,6 @@ command -v jq >/dev/null
 command -v python3 >/dev/null
 command -v nsenter >/dev/null
 [ -x "$failure_policy" ]
-[ -x "$mise_binary" ]
 [ -x "$manual_herdr" ]
 [ -x "$worker_herdr" ]
 [ -f "$source_archive" ]
@@ -1425,14 +1444,14 @@ tar -xf "$source_archive" -C "$build_dir"
 cd "$build_dir"
 
 echo "Building production release..."
-"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod PTC_WORKSPACE_CACHE_ROOT="$production_workspace_cache" \
   ./scripts/ptc/bootstrap
-"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix compile
-"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix assets.deploy
-"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix release
 install_gate_beam_toolchain
 

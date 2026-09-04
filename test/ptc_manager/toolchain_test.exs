@@ -103,6 +103,20 @@ defmodule PtcManager.ToolchainTest do
     assert Toolchain.summary(report) == :drifted
   end
 
+  # A symlink holds text, not a program. One naming the pinned version while
+  # pointing at nothing means the command does not run at all, which is the one
+  # thing a report claiming "pinned version" must never say.
+  test "a link naming the pinned version but pointing at nothing is not a match", context do
+    install_pinned_programs(context)
+    File.rm!(Path.join(context.install_root, "ptc-manager-pnpm-#{pinned("pnpm")}/pnpm"))
+
+    report = Toolchain.report()
+
+    assert %{linked: linked, status: :drifted} = program(report, :pnpm)
+    assert linked == pinned("pnpm")
+    assert %{status: :matched} = program(report, :node)
+  end
+
   test "the manifest pins every digest the deployment verifies a download against" do
     pinned = Toolchain.pinned()
 
@@ -136,6 +150,14 @@ defmodule PtcManager.ToolchainTest do
     assert_raise RuntimeError, ~r/line 1 is not a pinned version/, fn ->
       Manifest.parse!("codex=$(id -u)\n")
     end
+
+    # The deployment's reader counts only spaces and tabs as blank, so a line of
+    # other whitespace must not compile a release the deployment would refuse.
+    assert %{"codex" => "0.1.0"} = Manifest.parse!(" \t\ncodex=0.1.0\n")
+
+    assert_raise RuntimeError, ~r/line 1 is not a pinned version/, fn ->
+      Manifest.parse!("\u00a0\ncodex=0.1.0\n")
+    end
   end
 
   defp install_pinned_programs(context) do
@@ -153,7 +175,9 @@ defmodule PtcManager.ToolchainTest do
       ],
       fn {key, prefix, link_name, entry_point} ->
         directory = prefix <> pinned(key)
-        File.mkdir_p!(Path.join(context.install_root, directory))
+        entry = Path.join(context.install_root, directory <> entry_point)
+        File.mkdir_p!(Path.dirname(entry))
+        File.write!(entry, "the installed program")
         link(context, link_name, directory <> entry_point)
       end
     )

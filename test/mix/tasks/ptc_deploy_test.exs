@@ -504,8 +504,12 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ ~s(sudo -u ptc-manager-worker -H "$worker_mise" --version)
 
     # The worker's mise is a pinned program, not a copy of whatever the
-    # deploying user happens to have installed.
-    refute script =~ ~s(sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise")
+    # deploying user happens to have installed, and it is the only mise the
+    # deployment runs: the user-owned one was executed through sudo to provision
+    # the gate, which made an unverified binary root on this machine.
+    refute script =~ "mise_binary"
+    refute script =~ "/home/agent/.local/bin/mise"
+    assert script =~ ~s|"$worker_mise" install "node@${node_version}"|
 
     assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
              byte_index(script, "echo \"Building production release...\"")
@@ -551,6 +555,12 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "gate_mix local.rebar --force"
     assert script =~ ~s|!= "$rebar3_sha512"|
     assert script =~ "gate_rebar_digest"
+
+    # Mix keeps one Rebar per Elixir series, so the digest names the series this
+    # revision pins and copies from older ones are removed rather than left to
+    # answer for a series that has none.
+    assert script =~ "gate_rebar_series"
+    assert script =~ ~s|! -name "$rebar_series"|
     refute script =~ "local.hex --force --if-missing"
     refute script =~ "local.rebar --force --if-missing"
     refute script =~ "local.rebar --force --sha512"

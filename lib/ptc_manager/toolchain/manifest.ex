@@ -18,7 +18,10 @@ defmodule PtcManager.Toolchain.Manifest do
     |> Enum.with_index(1)
     |> Enum.reduce(%{}, fn {line, number}, pinned ->
       cond do
-        String.trim(line) == "" -> pinned
+        # The deployment's reader treats only spaces and tabs as blank, so a
+        # line of other whitespace has to fail here too rather than compile a
+        # release the deployment would then refuse to install.
+        Regex.match?(~r/^[ \t]*$/, line) -> pinned
         String.starts_with?(line, "#") -> pinned
         true -> pin(pinned, line, number, source)
       end
