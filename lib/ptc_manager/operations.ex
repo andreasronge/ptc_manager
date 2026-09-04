@@ -40,6 +40,7 @@ defmodule PtcManager.Operations do
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @capacity_run_states ~w(queued starting working idle unknown)
   @cancellable_job_states ~w(starting working idle blocked)
+  @abandonable_job_states ~w(reconciling awaiting_reconciliation verifying_result publish_blocked)
   @live_agent_run_states ~w(queued starting working idle blocked waiting unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @merge_action_key "repair_and_merge_pr"
@@ -931,6 +932,102 @@ defmodule PtcManager.Operations do
       {:ok, job} -> notify_and_return({:ok, job})
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc """
+  Ends a job stuck in a phase PtcManager owns and can never finish.
+
+  An agent that committed nothing leaves its branch unverifiable, so the check
+  fails identically every time and no button helps. Cancel deliberately refuses
+  these phases because they are not agent phases; that leaves the maintainer
+  with a card and no way out, which this closes.
+
+  It refuses a phase that is still moving, and one that already produced a pull
+  request, because abandoning either would discard real work. The bookkeeping
+  matches cancelling: the job ends, the partial worktree is kept for attention,
+  and the reason the phase was stuck is preserved beside the abandonment.
+  """
+  def abandon_stuck_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        job =
+          Job
+          |> where([item], item.id == ^job_id and item.state in ^@abandonable_job_states)
+          |> Repo.one()
+
+        if is_nil(job), do: Repo.rollback(:job_not_abandonable)
+
+        # A verifier holding a live claim is still working; ending the job
+        # underneath it would race its result write.
+        if verification_claim_live?(job, now), do: Repo.rollback(:verification_in_progress)
+
+        stuck_state = job.state
+        stuck_error = job.last_error
+
+        message =
+          "Abandoned by #{actor} while #{stuck_state}" <>
+            if(stuck_error, do: " (#{stuck_error})", else: "") <>
+            "; the partial worktree was preserved."
+
+        job
+        |> Job.changeset(%{
+          state: "cancelled",
+          lease_expires_at: nil,
+          ended_at: now,
+          last_error: message
+        })
+        |> Repo.update!()
+
+        end_live_run!(job, message, now)
+
+        mark_allocation!(job_id, %{state: "attention", last_used_at: now, last_error: message})
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.abandoned",
+          target_type: "job",
+          target_id: job_id,
+          details: %{
+            "abandoned_state" => stuck_state,
+            "last_error" => stuck_error,
+            "fencing_token" => job.fencing_token,
+            "worktree_preserved" => true
+          }
+        })
+
+        Repo.get!(Job, job_id)
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp verification_claim_live?(%Job{result_attempt_expires_at: %DateTime{} = expires_at}, now),
+    do: DateTime.compare(expires_at, now) == :gt
+
+  defp verification_claim_live?(%Job{}, _now), do: false
+
+  defp end_live_run!(%Job{} = job, message, now) do
+    AgentRun
+    |> where(
+      [run],
+      run.job_id == ^job.id and run.fencing_token == ^job.fencing_token and
+        run.state in ^@live_agent_run_states
+    )
+    |> Repo.update_all(
+      set: [
+        state: "lost",
+        status_text: String.slice(message, 0, 240),
+        last_heartbeat_at: now,
+        ended_at: now,
+        updated_at: now
+      ]
+    )
   end
 
   def release_idle_job(job_id, actor)

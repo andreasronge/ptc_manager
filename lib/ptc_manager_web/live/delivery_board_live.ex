@@ -37,6 +37,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      |> assign(:now, DateTime.utc_now())
      |> assign(:lane_definitions, @lane_definitions)
      |> assign(:cancel_agent_job_id, nil)
+     |> assign(:abandon_job_id, nil)
      |> load_board()}
   end
 
@@ -140,6 +141,38 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
+  def handle_event("confirm-abandon", %{"job-id" => job_id}, socket) do
+    {:noreply, assign(socket, :abandon_job_id, job_id)}
+  end
+
+  def handle_event("dismiss-abandon", _params, socket) do
+    {:noreply, assign(socket, :abandon_job_id, nil)}
+  end
+
+  def handle_event("abandon-job", %{"job-id" => job_id}, socket) do
+    socket = assign(socket, :abandon_job_id, nil)
+
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.abandon_stuck_job(job_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Abandoned. Its worktree is kept on Operations if you need it.")
+       |> load_board()}
+    else
+      {:error, :verification_in_progress} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "A check is running right now. Try again when it finishes.")
+         |> load_board()}
+
+      {:error, :job_not_abandonable} ->
+        {:noreply, socket |> put_flash(:info, "That job has already moved on.") |> load_board()}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "That job could not be abandoned.")}
+    end
+  end
+
   def handle_event("acknowledge-stop", %{"job-id" => job_id}, socket) do
     with {job_id, ""} <- Integer.parse(job_id),
          {:ok, _job} <- Operations.acknowledge_job_stop(job_id, socket.assigns.actor) do
@@ -221,6 +254,29 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def linked_issues(item), do: Map.get(item, :linked_issues, [])
 
   def cancellable_agent?(item), do: item.managed? and AgentCancel.cancellable?(item)
+
+  @doc """
+  True when PtcManager owns this job's phase and cannot finish it on its own.
+
+  These are the phases Cancel agent refuses, because there is no agent to
+  cancel. Without a way out they can repeat the same failure forever.
+  """
+  def abandonable?(%{managed?: true, active_job: %{state: state}} = item)
+      when state in ~w(reconciling awaiting_reconciliation verifying_result publish_blocked),
+      do: not verification_running?(item)
+
+  def abandonable?(_item), do: false
+
+  defp verification_running?(%{active_job: %{result_attempt_expires_at: %DateTime{} = at}}),
+    do: DateTime.compare(at, DateTime.utc_now()) == :gt
+
+  defp verification_running?(_item), do: false
+
+  @doc "Why PtcManager could not finish this phase, in its own words."
+  def phase_error(%{active_job: %{last_error: error}}) when is_binary(error) and error != "",
+    do: error
+
+  def phase_error(_item), do: nil
 
   @doc "The agent's own report of why it could not finish, when there is one."
   def stop_report(%{active_job: %{stop_report: report}}) when is_map(report), do: report

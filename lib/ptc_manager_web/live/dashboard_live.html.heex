@@ -806,6 +806,11 @@
                   class="mt-3 text-xs text-amber-300"
                 >
                   Branch verification is pending. You can retry the read-only check safely.
+                  PtcManager reported
+                  <span class="break-words font-mono text-amber-200">
+                    {item.active_job.last_error}
+                  </span>
+                  on its last attempt; if it cannot pass, abandon the job on the Delivery board.
                 </p>
                 <p
                   :if={!item.active_job && item.latest_job && item.latest_job.last_error}

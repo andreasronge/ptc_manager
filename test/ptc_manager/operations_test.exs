@@ -518,6 +518,75 @@ defmodule PtcManager.OperationsTest do
     end
   end
 
+  describe "abandon_stuck_job/2" do
+    test "ends a job PtcManager can never finish checking" do
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("working")
+
+      # The agent finished and committed nothing, so verification fails forever.
+      job =
+        job
+        |> Job.changeset(%{state: "awaiting_reconciliation", last_error: ":no_commits"})
+        |> Repo.update!()
+
+      Repo.get!(AgentRun, run.id)
+      |> AgentRun.changeset(%{state: "done", ended_at: DateTime.utc_now()})
+      |> Repo.update!()
+
+      assert {:ok, abandoned} = Operations.abandon_stuck_job(job.id, "andreas")
+      assert abandoned.state == "cancelled"
+      assert abandoned.ended_at
+      assert abandoned.last_error =~ "Abandoned by andreas"
+      assert abandoned.last_error =~ ":no_commits"
+
+      preserved = Repo.get!(WorktreeAllocation, allocation.id)
+      assert preserved.state == "attention"
+
+      audit = Repo.get_by!(AuditEvent, action: "job.abandoned")
+      assert audit.details["abandoned_state"] == "awaiting_reconciliation"
+      assert audit.details["last_error"] == ":no_commits"
+
+      # It leaves the board, and cannot be abandoned twice.
+      assert {:error, :job_not_abandonable} = Operations.abandon_stuck_job(job.id, "andreas")
+    end
+
+    test "refuses a phase that is still moving or that already published" do
+      %{job: job} = running_job_fixture("working")
+
+      for state <- ~w(queued starting working idle blocked ready_for_pr publishing_pr pr_open) do
+        Job |> Repo.get!(job.id) |> Job.changeset(%{state: state}) |> Repo.update!()
+
+        assert {:error, :job_not_abandonable} = Operations.abandon_stuck_job(job.id, "andreas")
+        assert Repo.get!(Job, job.id).state == state
+      end
+    end
+
+    test "refuses while a verifier still holds a live claim" do
+      %{job: job} = running_job_fixture("working")
+
+      claimed =
+        job
+        |> Job.changeset(%{
+          state: "verifying_result",
+          result_attempt_token: "live-attempt",
+          result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 300, :second)
+        })
+        |> Repo.update!()
+
+      assert {:error, :verification_in_progress} =
+               Operations.abandon_stuck_job(claimed.id, "andreas")
+
+      # Once that claim has expired, nothing is running and it can be ended.
+      expired =
+        claimed
+        |> Job.changeset(%{
+          result_attempt_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        })
+        |> Repo.update!()
+
+      assert {:ok, _job} = Operations.abandon_stuck_job(expired.id, "andreas")
+    end
+  end
+
   describe "agent stop reports" do
     setup do
       previous = Application.get_env(:ptc_manager, :agent_action_output_dir)

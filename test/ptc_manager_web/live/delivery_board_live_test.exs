@@ -487,6 +487,58 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 
+  test "a job stuck in checking shows why and can be abandoned", %{conn: conn} do
+    job = approved_job("Record a live session") |> set_job_state("working")
+
+    stuck =
+      job
+      |> Job.changeset(%{state: "awaiting_reconciliation", last_error: ":no_commits"})
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#board-job-#{stuck.id}"
+
+    # The reason has to be on the card, not only in the database.
+    assert has_element?(view, "#phase-error-board-job-#{stuck.id}", ":no_commits")
+
+    # There is no agent left to cancel, but there is a way out.
+    refute has_element?(view, "#cancel-agent-#{stuck.id}")
+    assert has_element?(view, "#abandon-job-#{stuck.id}", "Abandon")
+
+    view |> element("#abandon-job-#{stuck.id}") |> render_click()
+    assert has_element?(view, "#confirm-abandon-#{stuck.id}", "Confirm abandon")
+    assert Repo.get!(Job, stuck.id).state == "awaiting_reconciliation"
+
+    view |> element("#dismiss-abandon-#{stuck.id}") |> render_click()
+    assert has_element?(view, "#abandon-job-#{stuck.id}")
+
+    view |> element("#abandon-job-#{stuck.id}") |> render_click()
+    view |> element("#confirm-abandon-#{stuck.id}") |> render_click()
+
+    assert render(view) =~ "Abandoned."
+    assert Repo.get!(Job, stuck.id).state == "cancelled"
+    refute has_element?(view, card)
+  end
+
+  test "a job whose verifier is still working offers no abandon", %{conn: conn} do
+    job = approved_job("Still being checked") |> set_job_state("working")
+
+    claimed =
+      job
+      |> Job.changeset(%{
+        state: "verifying_result",
+        result_attempt_token: "live-attempt",
+        result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 300, :second)
+      })
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{claimed.id}")
+    refute has_element?(view, "#abandon-job-#{claimed.id}")
+  end
+
   defp stop_job(title, report) do
     job = approved_job(title) |> set_job_state("working")
     {:ok, job} = Operations.issue_stop_report_token(job)
