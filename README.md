@@ -1062,17 +1062,35 @@ ssh -t herdr-box sudo -u ptc-manager-worker -H claude auth login
 ssh -t herdr-box sudo -u ptc-manager-worker -H env NO_OPEN_BROWSER=1 cursor-agent login
 ```
 
-The deployment links `claude` from the worker Node directory and copies the
-pinned Cursor CLI from `/home/agent/.local/share/cursor-agent/versions/` into
-`/opt/ptc-manager-cursor-agent/` so both are on the worker's service `PATH`.
+Every program the machine runs is pinned in `deploy/toolchain-versions`, and
+that file is the only place a version is written. The deployment installs
+exactly what it names into a root-owned `/opt/ptc-manager-<program>-<version>`
+directory, checks the version it actually got, and links the entry point onto
+the worker's service `PATH`. Codex and Claude Code are installed from their npm
+packages with the pinned Node, and Codex is linked to the native binary its
+platform package carries rather than to the Node shim in front of it; the Cursor
+CLI comes from the versioned archive its installer downloads; Herdr comes from
+the release asset `https://herdr.dev/latest.json` names, refused unless its
+sha256 is the one this repository pins. Node, npm, corepack, pnpm, Erlang, and
+Elixir are provisioned the same way through mise. An agent therefore cannot
+rewrite the CLI it runs, and updating any of them is a change to
+`deploy/toolchain-versions` and a deployment, never a command run on the host,
+so the running program always matches a commit.
 
-Node, npm, corepack, and pnpm are provisioned the same way: mise installs the
-version this repository pins, the deployment copies it into a root-owned
-`/opt/ptc-manager-<tool>-<version>` directory, checks the version it actually
-got, and links it onto the worker's `PATH`. An agent therefore cannot rewrite
-its own toolchain, and the version in use is whatever the deployed revision
-says. Updating one is a change to `deploy/remote-deploy-herdr` and a deployment,
-not a command run on the host, so the running toolchain always matches a commit.
+Herdr is the one program that does not take effect at once. A client whose
+protocol does not match the running server breaks the coordinator's view of
+every agent, so the deployment installs the pinned build but moves
+`/usr/local/bin/herdr` only where it already restarts `ptc_manager-herdr`
+because nothing is retained. Until that restart happens the pinned build sits
+installed beside the running one. The interactive client in the `agent` account
+belongs to the person rather than to the deployment, which reports when it has
+drifted instead of replacing it.
+
+The Deployments page reports, for each program, the version this release pins
+beside the version `/usr/local/bin` links, so something installed by hand is
+visible without logging in to the machine. It reads link targets rather than
+running any of these programs, and it never changes them: the fix for drift is a
+commit and a deployment, which the same page offers.
 
 pnpm earns its place for repositories that use it: it links a worktree's
 `node_modules` into a shared content-addressed store instead of copying a tree

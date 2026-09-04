@@ -1,7 +1,7 @@
 defmodule PtcManagerWeb.DeploymentsLive do
   use PtcManagerWeb, :live_view
 
-  alias PtcManager.Deployments
+  alias PtcManager.{Deployments, Toolchain}
   alias PtcManagerWeb.TimeFormat
 
   @impl true
@@ -106,6 +106,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
       socket
       |> assign(:repositories, repositories)
       |> assign(:recent_deployments, Deployments.list_recent())
+      |> assign(:toolchain, Toolchain.report())
       |> assign_statuses()
 
     if connected?(socket) do
@@ -175,6 +176,36 @@ defmodule PtcManagerWeb.DeploymentsLive do
     do: "border-rose-400/25 bg-rose-400/[0.07] text-rose-100"
 
   def outcome_classes(_state), do: "border-white/10 bg-white/[0.035] text-slate-200"
+
+  @doc """
+  What the machine runs, compared with what this release pins.
+
+  Staged is not drift: Herdr is installed before its link moves, because the
+  link moves only when `ptc_manager-herdr` restarts.
+  """
+  def program_label(:matched), do: "Pinned version"
+  def program_label(:staged), do: "Installed, awaiting restart"
+  def program_label(:drifted), do: "Not this release"
+  def program_label(:absent), do: "Not on this machine"
+
+  def program_classes(:matched), do: "bg-teal-400/15 text-teal-200"
+  def program_classes(:staged), do: "bg-amber-400/15 text-amber-200"
+  def program_classes(:drifted), do: "bg-rose-400/15 text-rose-200"
+  def program_classes(:absent), do: "bg-white/5 text-slate-500"
+
+  def toolchain_note(:matched),
+    do: "Every program on the machine is the version this release pins."
+
+  def toolchain_note(:staged),
+    do:
+      "A pinned program is installed but not linked yet. Herdr takes effect when ptc_manager-herdr restarts with no agent session retained."
+
+  def toolchain_note(:drifted),
+    do:
+      "The machine runs a program this release does not pin. Deploy this revision to replace it, or pin what the machine runs in deploy/toolchain-versions."
+
+  def toolchain_note(:absent),
+    do: "This machine links none of these programs, so there is nothing to compare."
 
   def state_classes(state) when state in ~w(completed), do: "bg-teal-400/15 text-teal-200"
   def state_classes(state) when state in ~w(failed cancelled), do: "bg-rose-400/15 text-rose-200"

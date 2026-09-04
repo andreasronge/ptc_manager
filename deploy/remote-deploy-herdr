@@ -68,25 +68,35 @@ agent_result_env=/etc/ptc_manager/agent-results.env
 agent_result_override=/etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-agent-results.conf
 mise_binary=/home/agent/.local/bin/mise
 worker_mise=/usr/local/bin/mise
-node_version=22.23.2
-worker_node_dir="/opt/ptc-manager-node-${node_version}"
-pnpm_version=10.34.5
-worker_pnpm_dir="/opt/ptc-manager-pnpm-${pnpm_version}"
-cursor_agent_version=2026.08.25-3e8eec8
-cursor_agent_source="/home/agent/.local/share/cursor-agent/versions/${cursor_agent_version}"
-cursor_agent_root=/opt/ptc-manager-cursor-agent
+# Every third-party version this machine runs comes from the deployed
+# revision's toolchain manifest; read_pinned_versions fills these in.
+node_version=
+worker_node_dir=
+pnpm_version=
+worker_pnpm_dir=
+codex_version=
+worker_codex_dir=
+claude_code_version=
+worker_claude_code_dir=
+cursor_agent_version=
+worker_cursor_agent_dir=
+herdr_version=
+herdr_sha256=
+worker_herdr_dir=
+erlang_version=
+elixir_version=
 worker_node_staging=
 worker_pnpm_staging=
+worker_tool_staging=
+worker_opt_staging=
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
-erlang_version=29.0.3
-elixir_version=1.20.2-otp-29
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
 gate_mise_cache="$gate_mise_root/cache"
 gate_mise_state="$gate_mise_root/state"
 gate_mise_config="$gate_mise_root/config"
-gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
-gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
+gate_erlang_dir=
+gate_elixir_dir=
 gate_mix_home=/opt/ptc-manager-gate-mix
 gate_tool_home=
 manual_herdr=/home/agent/.local/bin/herdr
@@ -113,6 +123,8 @@ sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 self_deploy_runner_candidate="/tmp/ptc-manager-self-deploy-runner-${release_id}"
 self_deploy_service_candidate="/tmp/ptc-manager-self-deploy-service-${release_id}"
 self_deploy_access_candidate="/tmp/ptc-manager-self-deploy-access-${release_id}"
+toolchain_manifest="/tmp/ptc-manager-toolchain-versions-${release_id}"
+toolchain_reader="/tmp/ptc-manager-toolchain-version-${release_id}"
 coordinator_environment_files=
 coordinator_session=
 worker_session=
@@ -132,7 +144,7 @@ cleanup_remote() {
     "$operation_recovery_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
-    "$self_deploy_access_candidate"
+    "$self_deploy_access_candidate" "$toolchain_manifest" "$toolchain_reader"
   sudo rm -f -- "$maintenance_override_backup"
 
   case "$build_dir" in
@@ -145,6 +157,14 @@ cleanup_remote() {
 
   case "$worker_pnpm_staging" in
     /opt/ptc-manager-pnpm-*) sudo rm -rf -- "$worker_pnpm_staging" ;;
+  esac
+
+  case "$worker_opt_staging" in
+    /opt/ptc-manager-*) sudo rm -rf -- "$worker_opt_staging" ;;
+  esac
+
+  case "$worker_tool_staging" in
+    /tmp/ptc-manager-*) rm -rf -- "$worker_tool_staging" ;;
   esac
 
   case "$gate_tool_home" in
@@ -475,10 +495,11 @@ restart_worker_when_nothing_retained() {
   fi
 
   if [ "$live_runs" -eq 0 ] && [ "$live_agents" -eq 0 ]; then
-    echo "No agent session is retained; restarting ptc_manager-herdr so granted checkouts become writable"
+    echo "No agent session is retained; linking Herdr $herdr_version and restarting ptc_manager-herdr so granted checkouts become writable"
+    sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"
     sudo systemctl restart ptc_manager-herdr
   else
-    echo "Leaving ptc_manager-herdr running: $live_runs live run(s) and $live_agents live agent(s) would be lost. Restart it when none is retained so newly granted checkouts become writable for the worker."
+    echo "Leaving ptc_manager-herdr running: $live_runs live run(s) and $live_agents live agent(s) would be lost. Restart it when none is retained so newly granted checkouts become writable for the worker and the pinned Herdr $herdr_version takes effect."
   fi
 }
 
@@ -545,28 +566,175 @@ ensure_private_worktree_root() {
   done
 }
 
-# Herdr starts every agent kind by its canonical executable on the worker's
-# service PATH. Codex already lives in /usr/local/bin; Claude Code is the
-# native binary shipped inside the worker Node directory, and the Cursor CLI is
-# copied from the pinned per-user installation into a root-owned tree. Login
-# state stays per identity, so the worker still signs in once after this.
-install_worker_agents() {
-  if sudo test -x "$worker_node_dir/bin/claude"; then
-    sudo ln -sfn "$worker_node_dir/bin/claude" /usr/local/bin/claude
+# The manifest in the deployed revision is the only place a version of anything
+# third party is written, so a program running on this machine can always be
+# traced to a commit, and the release compiles the same values in to report what
+# the machine actually links.
+read_pinned_versions() {
+  node_version=$("$toolchain_reader" "$toolchain_manifest" node)
+  worker_node_dir="/opt/ptc-manager-node-${node_version}"
+  pnpm_version=$("$toolchain_reader" "$toolchain_manifest" pnpm)
+  worker_pnpm_dir="/opt/ptc-manager-pnpm-${pnpm_version}"
+  codex_version=$("$toolchain_reader" "$toolchain_manifest" codex)
+  worker_codex_dir="/opt/ptc-manager-codex-${codex_version}"
+  claude_code_version=$("$toolchain_reader" "$toolchain_manifest" claude_code)
+  worker_claude_code_dir="/opt/ptc-manager-claude-code-${claude_code_version}"
+  cursor_agent_version=$("$toolchain_reader" "$toolchain_manifest" cursor_agent)
+  worker_cursor_agent_dir="/opt/ptc-manager-cursor-agent-${cursor_agent_version}"
+  herdr_version=$("$toolchain_reader" "$toolchain_manifest" herdr)
+  herdr_sha256=$("$toolchain_reader" "$toolchain_manifest" herdr_sha256)
+  worker_herdr_dir="/opt/ptc-manager-herdr-${herdr_version}"
+  erlang_version=$("$toolchain_reader" "$toolchain_manifest" erlang)
+  elixir_version=$("$toolchain_reader" "$toolchain_manifest" elixir)
+  gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
+  gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
+}
+
+# Codex and Claude Code both ship as an npm package whose platform dependency
+# carries the native binary. Install the pinned version with the pinned Node as
+# the deploying user, then copy it into a root-owned directory, the same way the
+# worker gets Node and pnpm, so an agent cannot rewrite the CLI it runs.
+install_worker_npm_tool() {
+  package=$1
+  version=$2
+  target=$3
+  entry_point=$4
+
+  if sudo test -d "$target"; then
+    return 0
   fi
 
-  if [ -x "$cursor_agent_source/cursor-agent" ]; then
-    sudo install -d -o root -g root -m 0755 "$cursor_agent_root"
+  worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-npm-tool-${release_id}.XXXXXX")
 
-    if ! sudo test -d "$cursor_agent_root/$cursor_agent_version"; then
-      cursor_agent_staging=$(sudo mktemp -d "$cursor_agent_root/.staging.XXXXXX")
-      sudo cp -a "$cursor_agent_source/." "$cursor_agent_staging/"
-      sudo chown -R root:root "$cursor_agent_staging"
-      sudo mv "$cursor_agent_staging" "$cursor_agent_root/$cursor_agent_version"
+  PATH="$worker_node_dir/bin:$PATH" "$worker_node_dir/bin/node" \
+    "$worker_node_dir/lib/node_modules/npm/bin/npm-cli.js" install --global \
+    --no-fund --no-audit --prefix "$worker_tool_staging" "${package}@${version}" >/dev/null
+
+  if [ ! -x "$worker_tool_staging/$entry_point" ]; then
+    echo "installed $package does not provide $entry_point" >&2
+    return 1
+  fi
+
+  worker_opt_staging=$(sudo mktemp -d "${target}.XXXXXX")
+  sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
+  sudo chown -R root:root "$worker_opt_staging"
+  sudo mv "$worker_opt_staging" "$target"
+  worker_opt_staging=
+  rm -rf -- "$worker_tool_staging"
+  worker_tool_staging=
+}
+
+install_worker_codex() {
+  install_worker_npm_tool @openai/codex "$codex_version" "$worker_codex_dir" bin/codex
+
+  # The package's own entry point is a Node shim around the platform
+  # dependency's native binary. Link the binary itself, so a Codex agent does
+  # not depend on Node resolving from whatever environment Herdr starts it in,
+  # and link it where it stands so it still finds its sidecar alongside.
+  set -- "$worker_codex_dir"/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/*/bin/codex
+
+  if [ "$#" -ne 1 ] || ! sudo test -x "$1"; then
+    echo "pinned Codex package does not contain exactly one native binary" >&2
+    return 1
+  fi
+
+  if [ "$(sudo -u ptc-manager-worker -H "$1" --version)" != "codex-cli $codex_version" ]; then
+    echo "installed Codex has an unexpected version" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$1" /usr/local/bin/codex
+}
+
+install_worker_claude_code() {
+  install_worker_npm_tool @anthropic-ai/claude-code "$claude_code_version" \
+    "$worker_claude_code_dir" bin/claude
+
+  claude_binary="$worker_claude_code_dir/bin/claude"
+  claude_reported=$(sudo -u ptc-manager-worker -H "$claude_binary" --version)
+
+  if [ "$claude_reported" != "$claude_code_version (Claude Code)" ]; then
+    echo "installed Claude Code has an unexpected version: $claude_reported" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$claude_binary" /usr/local/bin/claude
+}
+
+# The Cursor CLI has no package manager: its installer downloads one versioned
+# archive and its own copy is whatever was current that day. Fetch the pinned
+# version directly, so the deployment no longer depends on a per-user
+# installation someone populated by hand.
+install_worker_cursor_agent() {
+  if ! sudo test -d "$worker_cursor_agent_dir"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-cursor-agent-${release_id}.XXXXXX")
+    cursor_archive="$worker_tool_staging/agent-cli-package.tar.gz"
+
+    curl -fsSL -o "$cursor_archive" \
+      "https://downloads.cursor.com/lab/${cursor_agent_version}/linux/x64/agent-cli-package.tar.gz"
+    tar --strip-components=1 -xzf "$cursor_archive" -C "$worker_tool_staging"
+    rm -f -- "$cursor_archive"
+
+    if [ ! -x "$worker_tool_staging/cursor-agent" ]; then
+      echo "pinned Cursor CLI archive does not contain cursor-agent" >&2
+      return 1
     fi
 
-    sudo ln -sfn "$cursor_agent_root/$cursor_agent_version/cursor-agent" \
-      /usr/local/bin/cursor-agent
+    worker_opt_staging=$(sudo mktemp -d "${worker_cursor_agent_dir}.XXXXXX")
+    sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
+    sudo chown -R root:root "$worker_opt_staging"
+    sudo mv "$worker_opt_staging" "$worker_cursor_agent_dir"
+    worker_opt_staging=
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  cursor_binary="$worker_cursor_agent_dir/cursor-agent"
+
+  if [ "$(sudo -u ptc-manager-worker -H "$cursor_binary" --version)" != "$cursor_agent_version" ]; then
+    echo "installed Cursor CLI has an unexpected version" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$cursor_binary" /usr/local/bin/cursor-agent
+}
+
+# Herdr is the one program a deployment cannot swap while it runs: a client
+# whose protocol does not match the server breaks the coordinator's view of
+# every agent. Install the pinned build and leave the link where it is;
+# restart_worker_when_nothing_retained moves it at the one moment the server
+# restarts anyway, and until then the console reports the staged version.
+install_worker_herdr() {
+  if ! sudo test -x "$worker_herdr_dir/herdr"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-herdr-${release_id}.XXXXXX")
+
+    curl -fsSL -o "$worker_tool_staging/herdr" \
+      "https://github.com/herdrdev/herdr/releases/download/v${herdr_version}/herdr-linux-x86_64"
+
+    if [ "$(sha256sum "$worker_tool_staging/herdr" | cut -d ' ' -f 1)" != "$herdr_sha256" ]; then
+      echo "downloaded Herdr does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
+    chmod 0755 "$worker_tool_staging/herdr"
+
+    if [ "$("$worker_tool_staging/herdr" --version)" != "herdr $herdr_version" ]; then
+      echo "downloaded Herdr has an unexpected version" >&2
+      return 1
+    fi
+
+    sudo install -d -o root -g root -m 0755 "$worker_herdr_dir"
+    sudo install -o root -g root -m 0755 "$worker_tool_staging/herdr" "$worker_herdr_dir/herdr"
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  # The interactive client belongs to the person, not to this deployment, so
+  # say when it has drifted rather than change it.
+  manual_herdr_version=$("$manual_herdr" --version 2>/dev/null || true)
+
+  if [ "$manual_herdr_version" != "herdr $herdr_version" ]; then
+    echo "Note: the interactive Herdr client at $manual_herdr reports \"$manual_herdr_version\" while this revision pins $herdr_version. Run \`herdr update\` as the agent user when convenient."
   fi
 }
 
@@ -900,6 +1068,8 @@ tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-self-deploy-runner >"$self_deploy_runner_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy.service >"$self_deploy_service_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_deploy_access_candidate"
+tar -xOf "$source_archive" deploy/toolchain-versions >"$toolchain_manifest"
+tar -xOf "$source_archive" deploy/ptc-manager-toolchain-version >"$toolchain_reader"
 chmod 0755 "$worker_git_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$claude_trust_candidate"
@@ -915,7 +1085,10 @@ chmod 0755 "$herdr_launch_candidate"
 chmod 0440 "$sudoers_candidate"
 chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
+chmod 0755 "$toolchain_reader"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
+
+read_pinned_versions
 
 coordinator_environment_files=$(
   sudo systemctl show -p EnvironmentFiles --value "$service_name" |
@@ -1081,7 +1254,20 @@ sudo systemctl daemon-reload
 install_worker_mise
 install_worker_node
 install_worker_pnpm
-install_worker_agents
+install_worker_codex
+install_worker_claude_code
+install_worker_cursor_agent
+install_worker_herdr
+
+# One-time removal of what the pinned installations replaced: the Codex tree
+# extracted into /opt by hand, the agent CLIs installed into the pinned Node
+# directory after a deployment staged it, and the Cursor tree copied from a
+# per-user installation. Unlinking an executable an idle agent still holds open
+# is safe; the process keeps the inode until it exits.
+sudo rm -rf -- /opt/codex /opt/ptc-manager-cursor-agent \
+  "$worker_node_dir/lib/node_modules/@openai" \
+  "$worker_node_dir/lib/node_modules/@anthropic-ai" \
+  "$worker_node_dir/bin/codex" "$worker_node_dir/bin/claude"
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.
@@ -1146,14 +1332,14 @@ tar -xf "$source_archive" -C "$build_dir"
 cd "$build_dir"
 
 echo "Building production release..."
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod PTC_WORKSPACE_CACHE_ROOT="$production_workspace_cache" \
   ./scripts/ptc/bootstrap
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix compile
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix assets.deploy
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$mise_binary" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix release
 install_gate_beam_toolchain
 

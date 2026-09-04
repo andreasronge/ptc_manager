@@ -18,6 +18,8 @@ defmodule Mix.Tasks.PtcDeployTest do
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
   @operation_recovery Path.join(@project_root, "deploy/ptc-manager-operation-recover")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
+  @toolchain_manifest Path.join(@project_root, "deploy/toolchain-versions")
+  @toolchain_reader Path.join(@project_root, "deploy/ptc-manager-toolchain-version")
   @environment_file_parser Path.join(
                              @project_root,
                              "deploy/systemd-environment-file-paths.awk"
@@ -37,7 +39,8 @@ defmodule Mix.Tasks.PtcDeployTest do
           @failure_policy,
           @self_deploy_command,
           @self_deploy_runner,
-          @operation_recovery
+          @operation_recovery,
+          @toolchain_reader
         ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
@@ -82,6 +85,58 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert {output, 2} = helper(home, ["forget", path])
     assert output =~ "allow or revoke"
     assert Jason.decode!(File.read!(config)) == revoked
+  end
+
+  # The deployment builds installation paths out of what the reader prints, so
+  # anything it cannot read exactly has to stop the deployment rather than yield
+  # an empty version and link a path like /opt/ptc-manager-codex- into place.
+  test "the toolchain reader prints one pinned version and refuses anything else" do
+    assert {version, 0} = reader([@toolchain_manifest, "codex"])
+    assert String.trim(version) == Map.fetch!(PtcManager.Toolchain.pinned(), "codex")
+
+    assert {output, 2} = reader([@toolchain_manifest, "vim"])
+    assert output =~ "pins no usable version for vim"
+
+    assert {output, 2} = reader([@toolchain_manifest, "Codex"])
+    assert output =~ "not a lowercase word"
+
+    assert {output, 2} = reader(["/nonexistent/toolchain-versions", "codex"])
+    assert output =~ "manifest is missing"
+
+    manifest =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-toolchain-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(manifest) end)
+
+    File.write!(manifest, "codex=0.1.0\ncodex=0.2.0\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "more than once"
+
+    File.write!(manifest, "codex=$(id -u)\nherdr=\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "pins no usable version"
+    assert {output, 2} = reader([manifest, "herdr"])
+    assert output =~ "pins no usable version"
+  end
+
+  # A version written twice drifts. The manifest is the only place one belongs,
+  # and the release reads the same file the deployment does.
+  test "the deployment script writes no version of its own" do
+    script = File.read!(@remote_script)
+
+    for {program, version} <- PtcManager.Toolchain.pinned() do
+      refute String.contains?(script, version),
+             "deploy/remote-deploy-herdr repeats the #{program} version #{version}"
+    end
+
+    assert script =~ "read_pinned_versions"
+  end
+
+  defp reader(args) do
+    System.cmd("sh", [@toolchain_reader | args], stderr_to_stdout: true)
   end
 
   defp helper(home, args) do
@@ -369,7 +424,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   test "remote deployment exposes the pinned Node runtime to managed agents" do
     script = File.read!(@remote_script)
 
-    assert script =~ "node_version=22.23.2"
+    assert script =~ ~s|node_version=$("$toolchain_reader" "$toolchain_manifest" node)|
     assert script =~ "install_worker_node"
     assert script =~ "/opt/ptc-manager-node-${node_version}"
     assert script =~ "lib/node_modules/npm/bin/npm-cli.js"
@@ -377,6 +432,34 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "lib/node_modules/corepack/dist/corepack.js"
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/node --version"
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
+  end
+
+  test "remote deployment installs every agent CLI at the version it pins" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "install_worker_codex"
+    assert script =~ "install_worker_claude_code"
+    assert script =~ "install_worker_cursor_agent"
+    assert script =~ "install_worker_herdr"
+
+    # An unverified download never becomes the program on the worker's PATH.
+    assert script =~ ~s|!= "codex-cli $codex_version"|
+    assert script =~ ~s|!= "$claude_code_version (Claude Code)"|
+    assert script =~ ~s|!= "$cursor_agent_version"|
+    assert script =~ ~s|!= "$herdr_sha256"|
+    assert script =~ ~s|!= "herdr $herdr_version"|
+
+    # The Cursor CLI no longer comes from a per-user installation, and the
+    # hand-placed trees the pinned ones replace are removed.
+    refute script =~ "/home/agent/.local/share/cursor-agent"
+    assert script =~ "sudo rm -rf -- /opt/codex /opt/ptc-manager-cursor-agent"
+
+    # A client whose protocol does not match the running server breaks the
+    # coordinator, so Herdr's link moves in the one step that restarts it.
+    assert script =~
+             ~s|sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"\n    sudo systemctl restart ptc_manager-herdr|
+
+    assert String.split(script, ~s|"$worker_herdr_dir/herdr" "$worker_herdr"|) |> length() == 2
   end
 
   test "remote deployment exposes mise for repository-owned worker setup" do

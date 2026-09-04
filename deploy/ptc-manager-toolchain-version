@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+# Print one pinned version from deploy/toolchain-versions.
+#
+# The deployment builds installation paths out of what this prints, so a missing,
+# malformed, or repeated entry has to stop the deployment rather than yield an
+# empty string and link something like /opt/ptc-manager-codex- into place.
+
+usage() {
+  echo "Usage: ptc-manager-toolchain-version MANIFEST KEY" >&2
+  exit 2
+}
+
+[ "$#" -eq 2 ] || usage
+manifest=$1
+key=$2
+
+case "$key" in
+  *[!a-z0-9_]*|'')
+    echo "toolchain manifest key is not a lowercase word: $key" >&2
+    exit 2
+    ;;
+esac
+
+[ -f "$manifest" ] || { echo "toolchain manifest is missing: $manifest" >&2; exit 2; }
+
+value=$(sed -n "s/^${key}=\([A-Za-z0-9][A-Za-z0-9._-]*\)\$/\1/p" "$manifest")
+
+case "$value" in
+  '')
+    echo "toolchain manifest pins no usable version for $key: $manifest" >&2
+    exit 2
+    ;;
+  *"
+"*)
+    echo "toolchain manifest pins $key more than once: $manifest" >&2
+    exit 2
+    ;;
+esac
+
+printf '%s\n' "$value"
