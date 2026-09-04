@@ -69,6 +69,9 @@ defmodule PtcManager.Operations do
 
   def get_issue!(id), do: Issue |> preload(:repository) |> Repo.get!(id)
 
+  @doc "The issue and its repository, or nil when the id no longer resolves."
+  def get_issue(id), do: Issue |> preload(:repository) |> Repo.get(id)
+
   def create_repository(attrs) do
     insert_repository(attrs)
   end

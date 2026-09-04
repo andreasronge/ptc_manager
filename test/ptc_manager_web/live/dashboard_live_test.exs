@@ -1588,6 +1588,27 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#planning-group-ready #issue-#{issue.id}")
   end
 
+  test "survives issue and publication ids that no longer exist", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+      })
+
+    issue = issue_fixture(repository, %{title: "Still here afterwards"})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    render_click(view, "toggle-issue-label", %{
+      "issue-id" => Integer.to_string(issue.id + 10_000),
+      "name" => "wait"
+    })
+
+    render_click(view, "dismiss-follow-up", %{"publication-id" => "999999"})
+
+    assert has_element?(view, "#planning-group-ready #issue-#{issue.id}")
+  end
+
   defp authenticated_conn(conn) do
     init_test_session(conn, %{authenticated: true, actor: "maintainer"})
   end

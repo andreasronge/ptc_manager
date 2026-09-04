@@ -2726,6 +2726,33 @@ defmodule PtcManager.MaintainerActionsTest do
       assert Publications.follow_up_candidates() == []
     end
 
+    test "only a current suggestion can be dismissed" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{title: "Nothing suggested here"})
+      publication = retrospective_publication_fixture(issue)
+
+      # Dismissing a pull request that never suggested anything would hide a
+      # later ptc:follow-up on it for good.
+      assert {:error, :not_a_follow_up_candidate} =
+               Publications.dismiss_follow_up(publication.id, "andreas")
+
+      assert is_nil(Repo.get!(PrPublication, publication.id).follow_up_dismissed_at)
+
+      assert {:error, :not_a_follow_up_candidate} =
+               Publications.dismiss_follow_up(publication.id + 10_000, "andreas")
+
+      labelled =
+        publication
+        |> PrPublication.changeset(%{labels: %{"names" => ["ptc:follow-up"]}})
+        |> Repo.update!()
+
+      assert {:ok, _dismissed} = Publications.dismiss_follow_up(labelled.id, "andreas")
+
+      # And it cannot be dismissed twice.
+      assert {:error, :not_a_follow_up_candidate} =
+               Publications.dismiss_follow_up(labelled.id, "andreas")
+    end
+
     test "an imported pull request never becomes a suggestion" do
       repository = repository_fixture()
       head_sha = String.duplicate("b", 40)

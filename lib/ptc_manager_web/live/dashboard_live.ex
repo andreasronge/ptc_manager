@@ -196,8 +196,8 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def handle_event("toggle-issue-label", %{"issue-id" => issue_id, "name" => name}, socket) do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
-         false <- MapSet.member?(socket.assigns.label_writes_in_flight, {issue_id, name}) do
-      issue = Operations.get_issue!(issue_id)
+         false <- MapSet.member?(socket.assigns.label_writes_in_flight, {issue_id, name}),
+         %{repository: %{}} = issue <- Operations.get_issue(issue_id) do
       actor = socket.assigns.actor
 
       {:noreply,
@@ -207,7 +207,8 @@ defmodule PtcManagerWeb.DashboardLive do
          IssueLabels.toggle(issue.repository, issue, name, actor)
        end)}
     else
-      _busy -> {:noreply, socket}
+      # A stale card, a second click, or an id the browser made up.
+      _unavailable -> {:noreply, socket}
     end
   end
 
@@ -235,7 +236,11 @@ defmodule PtcManagerWeb.DashboardLive do
        |> put_flash(:info, "Dismissed. The pull request and its labels are unchanged.")
        |> load_dashboard()}
     else
-      _error -> {:noreply, put_flash(socket, :error, "That suggestion could not be dismissed.")}
+      _error ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "That suggestion could not be dismissed.")
+         |> load_dashboard()}
     end
   end
 

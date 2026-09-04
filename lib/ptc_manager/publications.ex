@@ -124,14 +124,22 @@ defmodule PtcManager.Publications do
     |> reject_finished_retrospectives()
   end
 
-  @doc "Removes one follow-up suggestion from Planning without touching GitHub."
+  @doc """
+  Removes one follow-up suggestion from Planning without touching GitHub.
+
+  Only a pull request that is currently a candidate can be dismissed. Stamping
+  one that never suggested anything would hide a later `ptc:follow-up` on it for
+  good, and the id arrives from a browser event.
+  """
   def dismiss_follow_up(publication_id, actor)
       when is_integer(publication_id) and is_binary(actor) and actor != "" do
     now = now()
 
     outcome =
       Repo.transaction(fn ->
-        publication = Repo.get!(PrPublication, publication_id)
+        publication =
+          Enum.find(follow_up_candidates(), &(&1.id == publication_id)) ||
+            Repo.rollback(:not_a_follow_up_candidate)
 
         updated =
           publication
