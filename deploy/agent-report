@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+# Run deploy/ptc-manager-agent-probe on the Herdr machine and print what it
+# emits. `mix ptc.agents` renders the result; this script only decides which
+# machine to ask and gets the probe there.
+#
+# The probe is piped in rather than installed, so the report always runs the
+# revision checked out here against whatever the machine currently has. Nothing
+# it does changes the machine, so it needs no deployment of its own.
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: mix ptc.agents [--target SSH_TARGET]
+
+  --target  SSH host to inspect, default $PTC_DEPLOY_TARGET or herdr-box
+USAGE
+  exit 2
+}
+
+target=${PTC_DEPLOY_TARGET:-herdr-box}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)
+      [ "$#" -ge 2 ] || { echo "--target requires a value" >&2; exit 2; }
+      target=$2
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage
+      ;;
+  esac
+done
+
+case "$target" in
+  '' | -* | *[!A-Za-z0-9._@-]*)
+    echo "invalid SSH target: $target" >&2
+    exit 2
+    ;;
+esac
+
+probe=$(dirname "$0")/ptc-manager-agent-probe
+
+[ -f "$probe" ] || { echo "agent probe not found: $probe" >&2; exit 2; }
+
+exec ssh "$target" sh -s <"$probe"

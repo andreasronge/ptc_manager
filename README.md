@@ -1109,6 +1109,24 @@ installed beside the running one. The interactive client in the `agent` account
 belongs to the person rather than to the deployment, which reports when it has
 drifted instead of replacing it.
 
+The Deployments page reads link targets and never runs the programs it reports
+on. To ask the machine what its agent CLIs actually are, run
+
+```sh
+mix ptc.agents
+mix ptc.agents --target another-host
+```
+
+which prints, for each agent CLI, the version this release pins beside the
+version the program reports when `ptc-manager-worker` runs it, and whether that
+identity is still signed in — a linked binary matching the manifest can be
+signed out, and a signed-out agent stalls on its login prompt rather than
+failing. It also prints the live agent and live run counts that decide whether
+the next deployment may move Herdr's link, and the repository variables an
+implementation agent is given, by name. The report is read-only and pipes its
+probe over SSH rather than installing it, so it needs no deployment of its own
+and always runs the revision checked out locally.
+
 What pinning ends is drift, not the deploying account. A deployment runs as the
 `agent` user with passwordless `sudo`, so everything on this machine is
 downstream of that account: the toolchain trees mise installed before the

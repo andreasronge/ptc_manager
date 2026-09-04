@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+# Report what the agent CLIs on this machine actually are, for `mix ptc.agents`.
+#
+# The Machine software panel reads link targets and deliberately never runs the
+# programs it reports on, because a version a program prints is that program's
+# own claim. This probe asks for that claim anyway: a linked binary that matches
+# the manifest can still be signed out, and a signed-out agent stalls on its
+# login prompt rather than failing, which no link inspection can see.
+#
+# Everything here is read-only. It runs as the deploying user over SSH and drops
+# to ptc-manager-worker for anything an agent would run, so it observes the same
+# identity, PATH and home directory that Herdr starts a pane with.
+#
+# Output is one tab-separated record per line, for the Mix task to render:
+#
+#   agent<TAB>codex<TAB>reported<TAB>login<TAB>link target
+#   herdr<TAB>live_agents<TAB>count
+#   herdr<TAB>live_runs<TAB>count
+#   env<TAB>owner/name<TAB>NAME,NAME
+#
+# A field that could not be read is the literal "unknown", never empty, so a
+# missing answer cannot be mistaken for an empty one.
+
+database_path=${PTC_DATABASE_PATH:-/var/lib/ptc_manager/ptc_manager.db}
+herdr_session=${PTC_HERDR_SESSION:-default}
+worker=ptc-manager-worker
+
+emit() {
+  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"
+}
+
+# One line, no tabs, never empty: the record format depends on it, and a command
+# that fails or prints nothing has to stay distinguishable from one that
+# answered.
+one_line() {
+  value=$(tr '\t\n' '  ' 2>/dev/null | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//')
+  [ -n "$value" ] || value=unknown
+  printf '%s' "$value"
+}
+
+as_worker() {
+  sudo -u "$worker" -H "$@" 2>&1 || true
+}
+
+link_target() {
+  if [ -L "/usr/local/bin/$1" ]; then
+    readlink "/usr/local/bin/$1"
+  elif [ -e "/usr/local/bin/$1" ]; then
+    echo "not a link"
+  else
+    echo unlinked
+  fi
+}
+
+# A CLI reports its login state in whatever shape it likes, so each one names
+# the jq filter that turns its answer into a line, or "-" when the first line of
+# plain output already is one. Claude Code answers in JSON, and taking its first
+# line without asking jq would report the state as "{".
+probe_agent() {
+  key=$1
+  command_name=$2
+  filter=$3
+  shift 3
+
+  if ! [ -e "/usr/local/bin/$command_name" ]; then
+    emit agent "$key" unknown unknown unlinked
+    return 0
+  fi
+
+  reported=$(as_worker "$command_name" --version | head -n 1 | one_line)
+  answer=$(as_worker "$command_name" "$@")
+
+  if [ "$filter" = - ]; then
+    login=$(printf '%s\n' "$answer" | head -n 1 | one_line)
+  else
+    login=$(printf '%s\n' "$answer" | jq -r "$filter" 2>/dev/null | head -n 1 | one_line)
+  fi
+
+  emit agent "$key" "$reported" "$login" "$(link_target "$command_name" | one_line)"
+}
+
+probe_agent codex codex - login status
+probe_agent claude_code claude \
+  'if .loggedIn == true then "logged in via " + (.authMethod // "unknown") else "NOT LOGGED IN" end' \
+  auth status
+probe_agent cursor_agent cursor-agent - status
+
+# The pair that decides whether a deployment may move Herdr's link. A retained
+# agent holds it back, and nothing else on the machine says so in one place.
+if [ -x /usr/local/bin/herdr ]; then
+  live_agents=$(
+    as_worker herdr --session "$herdr_session" agent list |
+      jq '[.result.agents[]? | select(.agent_status != "done")] | length' 2>/dev/null || true
+  )
+else
+  live_agents=
+fi
+
+[ -n "${live_agents:-}" ] || live_agents=unknown
+emit herdr live_agents "$live_agents" "" ""
+
+live_runs=$(
+  sudo -u ptc-manager -H sqlite3 -readonly "$database_path" \
+    "select count(*) from agent_runs where state not in ('done', 'failed', 'lost');" \
+    2>/dev/null || true
+)
+
+[ -n "${live_runs:-}" ] || live_runs=unknown
+emit herdr live_runs "$live_runs" "" ""
+
+# Names only. The values are encrypted at rest and write-only to the console, so
+# a report that printed them would be the one place they leak.
+sudo -u ptc-manager -H sqlite3 -readonly -separator '	' "$database_path" \
+  "select r.github_owner || '/' || r.github_name,
+          coalesce(group_concat(v.name, ','), '')
+     from repositories r
+     left join agent_environment_variables v on v.repository_id = r.id
+    where r.enabled = 1
+    group by r.id
+    order by r.github_owner, r.github_name;" 2>/dev/null |
+  while IFS='	' read -r repository names; do
+    [ -n "$repository" ] || continue
+    emit env "$repository" "$names" "" ""
+  done
