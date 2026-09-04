@@ -169,6 +169,47 @@ defmodule PtcManager.ToolchainTest do
     assert %{status: :drifted} = Toolchain.report() |> program(:cursor_agent)
   end
 
+  # A path that starts inside a pinned directory and walks back out of it is not
+  # that directory's program.
+  test "a link that leaves the pinned directory is not a match", context do
+    install_pinned_programs(context)
+
+    unmanaged = Path.join(context.install_root, "unmanaged/bin")
+    File.mkdir_p!(unmanaged)
+    File.write!(Path.join(unmanaged, "node"), "a program from somewhere else")
+    File.chmod!(Path.join(unmanaged, "node"), 0o755)
+    link(context, "node", "ptc-manager-node-#{pinned("node")}/../unmanaged/bin/node")
+
+    assert %{status: :drifted} = Toolchain.report() |> program(:node)
+  end
+
+  # A machine with one program missing is not a machine that matches: no
+  # restart or deployment step is pending, the program simply is not there.
+  test "one missing program among installed ones is drift", context do
+    install_pinned_programs(context)
+    File.rm!(Path.join(context.link_dir, "pnpm"))
+    File.rm_rf!(Path.join(context.install_root, "ptc-manager-pnpm-#{pinned("pnpm")}"))
+
+    report = Toolchain.report()
+
+    assert %{status: :absent} = program(report, :pnpm)
+    assert Toolchain.summary(report) == :drifted
+  end
+
+  # A release that compiled without a digest the deployment reads would only
+  # fail on the machine, halfway through a deployment.
+  test "the release requires every pin a deployment reads" do
+    pinned = Toolchain.pinned()
+
+    for key <- Toolchain.required_pins() do
+      assert Map.has_key?(pinned, key), key
+    end
+
+    for key <- ~w(cursor_agent_sha256 herdr_sha256 mise_sha256 hex rebar3_sha512) do
+      assert key in Toolchain.required_pins(), key
+    end
+  end
+
   test "the manifest pins every digest the deployment verifies a download against" do
     pinned = Toolchain.pinned()
 

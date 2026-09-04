@@ -189,6 +189,21 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ ~s|if [ "$herdr_link_backup_retained" != true ]; then|
   end
 
+  # The deployment and the release read the same manifest, so a pin one of them
+  # needs and the other does not know about is a deployment that fails on the
+  # machine or a release that compiled against a manifest it cannot use.
+  test "the deployment reads exactly the pins the release requires" do
+    script = File.read!(@remote_script)
+
+    read =
+      ~r/"\$toolchain_reader" "\$toolchain_manifest" ([a-z0-9_]+)/
+      |> Regex.scan(script)
+      |> Enum.map(fn [_line, key] -> key end)
+      |> Enum.sort()
+
+    assert read == Enum.sort(PtcManager.Toolchain.required_pins())
+  end
+
   # A version written twice drifts. The manifest is the only place one belongs,
   # and the release reads the same file the deployment does.
   test "the deployment script writes no version of its own" do

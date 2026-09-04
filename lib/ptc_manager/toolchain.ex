@@ -69,11 +69,17 @@ defmodule PtcManager.Toolchain do
     }
   ]
 
-  @unpinned Enum.reject(@programs, &Map.has_key?(@pinned, &1.pin))
+  # The deployment reads more than the programs listed above: a digest for every
+  # download it does not take from npm, and the gate's own build tools. A
+  # release that compiled without one of them would only fail on the machine,
+  # halfway through a deployment, so require the whole set here.
+  @required Enum.map(@programs, & &1.pin) ++
+              ~w(cursor_agent_sha256 herdr_sha256 mise_sha256 hex rebar3_sha512)
+
+  @unpinned Enum.reject(@required, &Map.has_key?(@pinned, &1))
 
   if @unpinned != [] do
-    raise "deploy/toolchain-versions pins no version for: " <>
-            Enum.map_join(@unpinned, ", ", & &1.pin)
+    raise "deploy/toolchain-versions pins nothing for: " <> Enum.join(@unpinned, ", ")
   end
 
   @type status :: :matched | :staged | :drifted | :absent
@@ -91,6 +97,10 @@ defmodule PtcManager.Toolchain do
   @spec pinned() :: %{String.t() => String.t()}
   def pinned, do: @pinned
 
+  @doc "Every manifest key a deployment reads, which is every key this release requires."
+  @spec required_pins() :: [String.t()]
+  def required_pins, do: @required
+
   @doc """
   One entry per pinned program, in the order a maintainer reads them: the agents
   that do the work first, then the toolchain underneath them.
@@ -102,13 +112,14 @@ defmodule PtcManager.Toolchain do
   What the report says about the machine as a whole.
 
   `:absent` means this machine links no deployed program at all, which is every
-  development machine.
+  development machine. One missing program among installed ones is not that: it
+  is a program this release pins that the machine does not have.
   """
-  @spec summary([program()]) :: status() | :absent
+  @spec summary([program()]) :: status()
   def summary(report) do
     cond do
       Enum.all?(report, &(&1.status == :absent)) -> :absent
-      Enum.any?(report, &(&1.status == :drifted)) -> :drifted
+      Enum.any?(report, &(&1.status in [:drifted, :absent])) -> :drifted
       Enum.any?(report, &(&1.status == :staged)) -> :staged
       true -> :matched
     end
@@ -117,7 +128,7 @@ defmodule PtcManager.Toolchain do
   defp describe(program) do
     pinned = Map.fetch!(@pinned, program.pin)
     prefix = install_root() <> "/" <> program.prefix
-    target = link_target(Path.join(link_dir(), program.link))
+    target = canonical_target(Path.join(link_dir(), program.link))
 
     described = %{
       key: program.key,
@@ -139,10 +150,12 @@ defmodule PtcManager.Toolchain do
   end
 
   # A name on the PATH that is not a symlink was put there by hand: the
-  # deployment only ever links a versioned directory it installed itself.
-  defp link_target(link) do
+  # deployment only ever links a versioned directory it installed itself. The
+  # target is normalized first, so a path that walks back out of a pinned
+  # directory cannot be read as the version it starts with.
+  defp canonical_target(link) do
     case File.read_link(link) do
-      {:ok, target} -> target
+      {:ok, target} -> Path.expand(target)
       {:error, :enoent} -> nil
       {:error, _not_a_link} -> link
     end
