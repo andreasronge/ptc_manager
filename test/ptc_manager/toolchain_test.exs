@@ -90,8 +90,8 @@ defmodule PtcManager.ToolchainTest do
   end
 
   # Only Herdr's link is allowed to lag its installation. Reporting a missing
-  # Codex link as "awaiting restart" would send a maintainer to restart Herdr
-  # for a problem no restart repairs.
+  # Codex link as awaiting a deployment would point a maintainer at a step that
+  # repairs nothing here.
   test "an installed program that is not deferred and is not linked is drift", context do
     install_pinned_programs(context)
     File.rm!(Path.join(context.link_dir, "codex"))

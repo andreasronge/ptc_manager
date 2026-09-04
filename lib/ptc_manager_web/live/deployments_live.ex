@@ -178,13 +178,13 @@ defmodule PtcManagerWeb.DeploymentsLive do
   def outcome_classes(_state), do: "border-white/10 bg-white/[0.035] text-slate-200"
 
   @doc """
-  What the machine runs, compared with what this release pins.
+  What the machine links, compared with what this release pins.
 
-  Staged is not drift: Herdr is installed before its link moves, because the
-  link moves only when `ptc_manager-herdr` restarts.
+  Staged is not drift: Herdr is installed before its link moves, because only a
+  deployment that finds no agent session retained moves it.
   """
   def program_label(:matched), do: "Pinned version"
-  def program_label(:staged), do: "Installed, awaiting restart"
+  def program_label(:staged), do: "Installed, awaiting deployment"
   def program_label(:drifted), do: "Not this release"
   def program_label(:absent), do: "Not on this machine"
 
@@ -194,7 +194,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
   def program_classes(:absent), do: "bg-white/5 text-slate-500"
 
   def toolchain_note(:matched),
-    do: "Every program on the machine is the version this release pins."
+    do: "Each program below links the version this release pins."
 
   def toolchain_note(:staged),
     do:
