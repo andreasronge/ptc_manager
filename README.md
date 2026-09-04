@@ -433,11 +433,28 @@ from synchronization.
 
 The implementation prompt asks every pull-request description for a
 `## Retrospective` section, and asks the agent to add the label `ptc:follow-up`
-to its own pull request when that section lists untracked follow-up work. Those
-pull requests appear in the **Suggested follow-ups** group, before and after
-merge, with two buttons: **Run retrospective** queues a read-only agent that
-proposes concrete follow-ups, and **Dismiss** removes the card without touching
-GitHub. Each proposed follow-up then has its own **Add as GitHub issue** button;
+to its own pull request when that section lists untracked follow-up work.
+
+**Create that label in each repository before enabling this.** `gh` fails when a
+label does not exist, so without it the agent's labelling step fails and no pull
+request ever reaches the group. PtcManager never creates a label:
+
+```sh
+gh label create 'ptc:follow-up' --repo '<owner>/<name>' --color 5319E7 \
+  --description 'The pull-request retrospective lists untracked follow-up work'
+```
+
+The same applies to the three workflow labels `ptc:ready`, `ptc:blocked`, and
+`ptc:needs-decision`: **Prepare issue** and **Review issue** ask an agent to
+leave exactly one of them on the issue, and that write fails against a
+repository where the label was never created. Every `ptc:` label is written by
+an agent or the label wrapper and read back by synchronization; none is created
+by PtcManager.
+
+A labelled pull request appears in the **Suggested follow-ups** group, before
+and after merge, with two buttons: **Run retrospective** queues a read-only
+agent that proposes concrete follow-ups, and **Dismiss** removes the card
+without touching GitHub. Each proposed follow-up then has its own **Add as GitHub issue** button;
 nothing reaches GitHub without that second, explicit click. A card leaves the
 group when it is dismissed or when a retrospective reports that there is nothing
 to follow up.
