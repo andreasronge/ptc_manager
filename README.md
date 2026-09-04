@@ -898,8 +898,10 @@ uploads a Git archive rather than uncommitted files, and builds the production
 release on the server with its mise-managed
 Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
 checks both managed runs and the manual and worker Herdr sessions. Non-idle
-agents make deployment stop safely; idle Herdr sessions continue running and
-are not restarted. Immediately before the release swap, the task stops the
+agents make deployment stop safely, and a retained agent session keeps
+`ptc_manager-herdr` running even when it is idle. When no run and no agent is
+retained there is nothing to lose, so the deployment restarts it, which is also
+the moment a pinned Herdr takes effect. Immediately before the release swap, the task stops the
 coordinator and checks the database again so no new managed work can race the
 deployment. The new release always starts in maintenance mode: the web UI and
 `/health` remain readable, while pollers, button-triggered mutations, agents,

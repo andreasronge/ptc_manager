@@ -202,7 +202,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
 
   def toolchain_note(:drifted),
     do:
-      "The machine runs a program this release does not pin. Deploy this revision to replace it, or pin what the machine runs in deploy/toolchain-versions."
+      "The machine links something this release does not pin, or nothing at all. Deploy this revision to put the pinned version in place, or pin what the machine has in deploy/toolchain-versions."
 
   def toolchain_note(:absent),
     do: "This machine links none of these programs, so there is nothing to compare."

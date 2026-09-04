@@ -110,7 +110,7 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
     assert has_element?(view, "#program-codex", codex)
     assert has_element?(view, "#program-codex", "Not this release")
     assert has_element?(view, "#program-codex", "/opt/codex/0.1.0/bin/codex")
-    assert has_element?(view, "#machine-software", "runs a program this release does not pin")
+    assert has_element?(view, "#machine-software", "links something this release does not pin")
     assert has_element?(view, "#program-herdr", "Not on this machine")
   end
 
