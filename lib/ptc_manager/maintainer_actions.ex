@@ -22,6 +22,21 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Automations
 
+  # Actions that operate on one GitHub issue through the worker's `gh` session.
+  # Each needs the same treatment: a fresh synchronization and an open-issue
+  # check before it starts, a read-only source snapshot to work from, that
+  # snapshot released afterwards, and a decision digest recorded when it returns
+  # a question. Keeping one list is what stops a new action getting three of the
+  # four.
+  @issue_maintenance_action_keys ~w(
+    prepare_issue
+    report_issue_blocker
+    review_issue
+    resolve_issue_decision
+  )
+
+  @snapshot_action_keys ["daily_digest" | @issue_maintenance_action_keys]
+
   @max_daily_digest_prompt_bytes 100_000
   @terminal_daily_digest_evidence_errors ~w(
     daily_digest_pull_request_limit_reached
@@ -360,7 +375,7 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(%{action_key: action_key} = action, _adapter, sync)
-       when action_key in ["private_issue_analysis", "prepare_issue", "review_issue"] do
+       when action_key in ["private_issue_analysis" | @issue_maintenance_action_keys] do
     case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
@@ -707,12 +722,7 @@ defmodule PtcManager.MaintainerActions do
   defp release_planning_source_snapshot(
          %AgentAction{action_key: action_key, repository: repository} = action
        )
-       when action_key in [
-              "daily_digest",
-              "prepare_issue",
-              "review_issue",
-              "resolve_issue_decision"
-            ] or action.target_type == "repository" do
+       when action_key in @snapshot_action_keys or action.target_type == "repository" do
     source_snapshot =
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
@@ -750,12 +760,7 @@ defmodule PtcManager.MaintainerActions do
     |> where(
       [action],
       (action.target_type == "repository" or
-         action.action_key in [
-           "daily_digest",
-           "prepare_issue",
-           "review_issue",
-           "resolve_issue_decision"
-         ]) and
+         action.action_key in ^@snapshot_action_keys) and
         action.state in ["sync_pending", "done", "failed"]
     )
     |> where(
@@ -922,7 +927,7 @@ defmodule PtcManager.MaintainerActions do
          {:ok, result},
          _summary
        )
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+       when action_key in @issue_maintenance_action_keys do
     issue = Repo.get!(Issue, issue_id)
 
     analysis = %{
@@ -1063,12 +1068,7 @@ defmodule PtcManager.MaintainerActions do
     do: {:error, :issue_decision_not_current}
 
   defp record_decision_source(action_id, action_key, issue, %{"outcome" => "needs-decision"})
-       when action_key in [
-              "prepare_issue",
-              "report_issue_blocker",
-              "review_issue",
-              "resolve_issue_decision"
-            ] do
+       when action_key in @issue_maintenance_action_keys do
     case Operations.record_agent_action_decision_digest(action_id, issue.content_digest) do
       {:ok, _action} -> :ok
       {:error, reason} -> {:error, reason}

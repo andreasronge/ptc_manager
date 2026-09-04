@@ -2704,27 +2704,40 @@ defmodule PtcManager.MaintainerActionsTest do
 
     test "a needs-decision result completes the recovery it exists for" do
       repository = repository_fixture()
-      issue = issue_fixture(repository)
+      issue = issue_fixture(repository, %{title: "Decide the export shape"})
 
-      decision =
-        prepare_issue_result("needs-decision")
-        |> Map.put("private_summary", "A person has to choose the export shape.")
+      job =
+        blocked_job_fixture(repository, issue, %{
+          "reason_code" => "ambiguous_requirement",
+          "summary" => "The issue does not say which export shape to use.",
+          "detail" => "Two incompatible readings, and no test distinguishes them.",
+          "progress" => "none"
+        })
 
-      # The point of this action is to reach Planning's decision form, so a
-      # proper decision result has to be accepted, not rejected after the
-      # agent already wrote to GitHub.
-      assert :ok = ActionAdapter.validate_result(decision, "report_issue_blocker")
+      assert {:ok, queued} = MaintainerActions.enqueue_blocked_issue_review(job.id, "andreas")
+      assert queued.action_key == "report_issue_blocker"
 
-      assert :ok =
-               ActionAdapter.validate_result(decision, "report_issue_blocker", %{
-                 "allowed_outcomes" => ["blocked", "needs-decision"]
-               })
+      # Run the action to completion, not just parse a result: the digest that
+      # makes Planning's decision form usable is written on the completion path.
+      assert {:ok, completed} =
+               MaintainerActions.run_once(adapter: NeedsDecisionAdapter, sync: NeedsDecisionSync)
 
-      # And the structured choices survive into the decision the page renders.
-      assert {:ok, parsed} = PtcManager.IssueDecision.from_result(decision)
-      assert parsed.question == "Which export shape should users get?"
-      assert length(parsed.options) == 2
-      assert issue.id
+      assert completed.id == queued.id
+      assert completed.state == "done"
+
+      synchronized = Repo.get!(Issue, issue.id)
+
+      assert completed.target_snapshot["decision_issue_content_digest"] ==
+               synchronized.content_digest
+
+      # And that is exactly what the decision form checks before rendering.
+      assert {:ok, decision} =
+               completed.result_summary
+               |> Jason.decode!()
+               |> PtcManager.IssueDecision.from_result()
+
+      assert decision.question != ""
+      assert length(decision.options) >= 2
     end
 
     test "the configuration preview shows the real blocker restriction" do
@@ -2760,6 +2773,32 @@ defmodule PtcManager.MaintainerActionsTest do
       for outcome <- ["ready", "blocked", "needs-decision", "reject"] do
         assert :ok = ActionAdapter.validate_result(prepare_issue_result(outcome), "prepare_issue")
       end
+    end
+
+    defp blocked_job_fixture(repository, issue, report) do
+      proposal_fixture(issue)
+      {:ok, job} = PtcManager.Operations.approve_issue(issue.id, "andreas")
+
+      job =
+        job
+        |> PtcManager.Operations.Job.changeset(%{
+          state: "verifying_result",
+          fencing_token: 1,
+          branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+          result_attempt_token: "attempt-#{System.unique_integer([:positive])}",
+          result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 600, :second)
+        })
+        |> Repo.update!()
+
+      {:ok, stopped} =
+        PtcManager.Operations.record_job_stop_report(
+          job.id,
+          job.fencing_token,
+          job.result_attempt_token,
+          report
+        )
+
+      stopped
     end
 
     defp prepare_issue_result(outcome) do
