@@ -79,10 +79,16 @@ worker_codex_dir=
 claude_code_version=
 worker_claude_code_dir=
 cursor_agent_version=
+cursor_agent_sha256=
 worker_cursor_agent_dir=
 herdr_version=
 herdr_sha256=
 worker_herdr_dir=
+mise_version=
+mise_sha256=
+worker_mise_dir=
+hex_version=
+rebar3_sha512=
 erlang_version=
 elixir_version=
 worker_node_staging=
@@ -580,10 +586,16 @@ read_pinned_versions() {
   claude_code_version=$("$toolchain_reader" "$toolchain_manifest" claude_code)
   worker_claude_code_dir="/opt/ptc-manager-claude-code-${claude_code_version}"
   cursor_agent_version=$("$toolchain_reader" "$toolchain_manifest" cursor_agent)
+  cursor_agent_sha256=$("$toolchain_reader" "$toolchain_manifest" cursor_agent_sha256)
   worker_cursor_agent_dir="/opt/ptc-manager-cursor-agent-${cursor_agent_version}"
   herdr_version=$("$toolchain_reader" "$toolchain_manifest" herdr)
   herdr_sha256=$("$toolchain_reader" "$toolchain_manifest" herdr_sha256)
   worker_herdr_dir="/opt/ptc-manager-herdr-${herdr_version}"
+  mise_version=$("$toolchain_reader" "$toolchain_manifest" mise)
+  mise_sha256=$("$toolchain_reader" "$toolchain_manifest" mise_sha256)
+  worker_mise_dir="/opt/ptc-manager-mise-${mise_version}"
+  hex_version=$("$toolchain_reader" "$toolchain_manifest" hex)
+  rebar3_sha512=$("$toolchain_reader" "$toolchain_manifest" rebar3_sha512)
   erlang_version=$("$toolchain_reader" "$toolchain_manifest" erlang)
   elixir_version=$("$toolchain_reader" "$toolchain_manifest" elixir)
   gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
@@ -672,6 +684,14 @@ install_worker_cursor_agent() {
 
     curl -fsSL -o "$cursor_archive" \
       "https://downloads.cursor.com/lab/${cursor_agent_version}/linux/x64/agent-cli-package.tar.gz"
+
+    # The version an unverified archive reports is the archive's own claim, so
+    # the digest has to be proven before anything is unpacked from it.
+    if [ "$(sha256sum "$cursor_archive" | cut -d ' ' -f 1)" != "$cursor_agent_sha256" ]; then
+      echo "downloaded Cursor CLI archive does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
     tar --strip-components=1 -xzf "$cursor_archive" -C "$worker_tool_staging"
     rm -f -- "$cursor_archive"
 
@@ -716,17 +736,23 @@ install_worker_herdr() {
       return 1
     fi
 
-    chmod 0755 "$worker_tool_staging/herdr"
-
-    if [ "$("$worker_tool_staging/herdr" --version)" != "herdr $herdr_version" ]; then
-      echo "downloaded Herdr has an unexpected version" >&2
-      return 1
-    fi
-
     sudo install -d -o root -g root -m 0755 "$worker_herdr_dir"
     sudo install -o root -g root -m 0755 "$worker_tool_staging/herdr" "$worker_herdr_dir/herdr"
     rm -rf -- "$worker_tool_staging"
     worker_tool_staging=
+  fi
+
+  # Whatever stands at the pinned path is what a later restart links onto the
+  # PATH, including a file an interrupted deployment left there, so prove it on
+  # every run rather than only on the run that downloaded it.
+  if [ "$(sudo sha256sum "$worker_herdr_dir/herdr" | cut -d ' ' -f 1)" != "$herdr_sha256" ]; then
+    echo "installed Herdr does not match the sha256 this revision pins" >&2
+    return 1
+  fi
+
+  if [ "$(sudo -u ptc-manager-worker -H "$worker_herdr_dir/herdr" --version)" != "herdr $herdr_version" ]; then
+    echo "installed Herdr has an unexpected version" >&2
+    return 1
   fi
 
   # The interactive client belongs to the person, not to this deployment, so
@@ -739,6 +765,7 @@ install_worker_herdr() {
 }
 
 install_worker_node() {
+  "$mise_binary" install "node@${node_version}"
   node_source=$("$mise_binary" where "node@${node_version}")
 
   case "$node_source" in
@@ -846,9 +873,53 @@ install_worker_pnpm() {
   sudo -u ptc-manager-worker -H sh -c 'cd / && /usr/local/bin/pnpm --version' >/dev/null
 }
 
+# A repository's own bootstrap script runs the worker's mise to install its
+# toolchain, so it is a program on the machine like any other rather than a copy
+# of whatever the deploying user happens to have installed that week.
 install_worker_mise() {
-  sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise"
-  sudo -u ptc-manager-worker -H "$worker_mise" --version >/dev/null
+  if ! sudo test -f "$worker_mise_dir/mise"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-mise-${release_id}.XXXXXX")
+
+    curl -fsSL -o "$worker_tool_staging/mise" \
+      "https://github.com/jdx/mise/releases/download/v${mise_version}/mise-v${mise_version}-linux-x64"
+
+    if [ "$(sha256sum "$worker_tool_staging/mise" | cut -d ' ' -f 1)" != "$mise_sha256" ]; then
+      echo "downloaded mise does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
+    sudo install -d -o root -g root -m 0755 "$worker_mise_dir"
+    sudo install -o root -g root -m 0755 "$worker_tool_staging/mise" "$worker_mise_dir/mise"
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  if [ "$(sudo sha256sum "$worker_mise_dir/mise" | cut -d ' ' -f 1)" != "$mise_sha256" ]; then
+    echo "installed mise does not match the sha256 this revision pins" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$worker_mise_dir/mise" "$worker_mise"
+
+  installed_mise=$(sudo -u ptc-manager-worker -H "$worker_mise" --version | cut -d ' ' -f 1)
+
+  if [ "$installed_mise" != "$mise_version" ]; then
+    echo "installed mise has an unexpected version: $installed_mise" >&2
+    return 1
+  fi
+}
+
+gate_mix() {
+  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
+    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
+    "$gate_elixir_dir/bin/mix" "$@"
+}
+
+# One digest for every Rebar the gate has, so a second copy for another Elixir
+# cannot pass by hiding behind the pinned one.
+gate_rebar_digest() {
+  sudo find "$gate_mix_home" -name rebar3 -type f -exec sha512sum {} + 2>/dev/null |
+    cut -d ' ' -f 1 | sort -u
 }
 
 install_gate_beam_toolchain() {
@@ -901,12 +972,34 @@ install_gate_beam_toolchain() {
   sudo install -d -o root -g root -m 0755 "$gate_mix_home"
 
   gate_tool_home=$(sudo mktemp -d /tmp/ptc-manager-gate-toolchain.XXXXXX)
-  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
-    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
-    "$gate_elixir_dir/bin/mix" local.hex --force --if-missing
-  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
-    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
-    "$gate_elixir_dir/bin/mix" local.rebar --force --if-missing
+
+  if ! sudo test -d "$gate_mix_home/archives/hex-${hex_version}"; then
+    gate_mix local.hex "$hex_version" --force
+  fi
+
+  # Mix runs the newest archive it finds, so the pinned one is the only one that
+  # stays.
+  if sudo test -d "$gate_mix_home/archives"; then
+    sudo find "$gate_mix_home/archives" -mindepth 1 -maxdepth 1 -name 'hex-*' \
+      ! -name "hex-${hex_version}" -exec rm -rf -- {} +
+  fi
+
+  if ! sudo test -d "$gate_mix_home/archives/hex-${hex_version}"; then
+    echo "the gate does not have the Hex version this revision pins" >&2
+    return 1
+  fi
+
+  # Rebar has no version to ask for, and mix installs a mismatched --sha512
+  # anyway once --force is given, so the digest of what landed is the check.
+  if [ "$(gate_rebar_digest)" != "$rebar3_sha512" ]; then
+    gate_mix local.rebar --force
+  fi
+
+  if [ "$(gate_rebar_digest)" != "$rebar3_sha512" ]; then
+    echo "the Rebar the gate installed does not match the sha512 this revision pins" >&2
+    return 1
+  fi
+
   sudo rm -rf -- "$gate_tool_home"
   gate_tool_home=
 

@@ -166,7 +166,8 @@
         <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Machine</p>
         <h2 class="mt-1 text-2xl font-semibold">Machine software</h2>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-          Every agent and toolchain the machine runs is pinned in the deployed revision's <code class="text-slate-300">deploy/toolchain-versions</code>, installed by the deployment, and linked onto the worker's <code class="text-slate-300">PATH</code>. Updating one is a change to that file and a deployment, never a command run on the host.
+          Every program on the worker's <code class="text-slate-300">PATH</code>
+          is pinned in the deployed revision's <code class="text-slate-300">deploy/toolchain-versions</code>, installed by the deployment, and linked from the version it names. Updating one is a change to that file and a deployment, never a command run on the host.
         </p>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
           {toolchain_note(Toolchain.summary(@toolchain))}

@@ -4,6 +4,7 @@ defmodule PtcManager.ToolchainTest do
   use ExUnit.Case, async: false
 
   alias PtcManager.Toolchain
+  alias PtcManager.Toolchain.Manifest
 
   setup do
     root =
@@ -88,9 +89,53 @@ defmodule PtcManager.ToolchainTest do
              Toolchain.report() |> program(:cursor_agent)
   end
 
-  test "the manifest pins a herdr digest the deployment can verify a download against" do
-    assert %{"herdr_sha256" => digest} = Toolchain.pinned()
-    assert String.match?(digest, ~r/^[0-9a-f]{64}$/)
+  # Only Herdr's link is allowed to lag its installation. Reporting a missing
+  # Codex link as "awaiting restart" would send a maintainer to restart Herdr
+  # for a problem no restart repairs.
+  test "an installed program that is not deferred and is not linked is drift", context do
+    install_pinned_programs(context)
+    File.rm!(Path.join(context.link_dir, "codex"))
+
+    report = Toolchain.report()
+
+    assert %{linked: nil, target: nil, status: :drifted} = program(report, :codex)
+    assert %{status: :matched} = program(report, :herdr)
+    assert Toolchain.summary(report) == :drifted
+  end
+
+  test "the manifest pins every digest the deployment verifies a download against" do
+    pinned = Toolchain.pinned()
+
+    for key <- ~w(herdr_sha256 mise_sha256 cursor_agent_sha256) do
+      assert String.match?(Map.fetch!(pinned, key), ~r/^[0-9a-f]{64}$/), key
+    end
+
+    assert String.match?(Map.fetch!(pinned, "rebar3_sha512"), ~r/^[0-9a-f]{128}$/)
+  end
+
+  # The deployment's reader stops on a line it cannot read, so a release that
+  # compiled against a manifest the deployment would reject could install a
+  # version the console never reports.
+  test "the manifest parser refuses what the deployment's reader refuses" do
+    assert %{"codex" => "0.1.0", "herdr" => "0.8.2"} =
+             Manifest.parse!("# a comment\n\ncodex=0.1.0\nherdr=0.8.2\n")
+
+    assert_raise RuntimeError, ~r/pins codex more than once/, fn ->
+      Manifest.parse!("codex=0.1.0\ncodex=0.2.0\n")
+    end
+
+    # The case a filtering parser accepts: a duplicate whose value is empty.
+    assert_raise RuntimeError, ~r/line 2 is not a pinned version: codex=/, fn ->
+      Manifest.parse!("codex=0.1.0\ncodex=\n")
+    end
+
+    assert_raise RuntimeError, ~r/line 1 is not a pinned version/, fn ->
+      Manifest.parse!("codex = 0.1.0\n")
+    end
+
+    assert_raise RuntimeError, ~r/line 1 is not a pinned version/, fn ->
+      Manifest.parse!("codex=$(id -u)\n")
+    end
   end
 
   defp install_pinned_programs(context) do
@@ -102,6 +147,7 @@ defmodule PtcManager.ToolchainTest do
         {"herdr", "ptc-manager-herdr-", "herdr", "/herdr"},
         {"node", "ptc-manager-node-", "node", "/bin/node"},
         {"pnpm", "ptc-manager-pnpm-", "pnpm", "/pnpm"},
+        {"mise", "ptc-manager-mise-", "mise", "/mise"},
         {"erlang", "ptc-manager-gate-mise/data/installs/erlang/", "erl", "/bin/erl"},
         {"elixir", "ptc-manager-gate-mise/data/installs/elixir/", "elixir", "/bin/elixir"}
       ],

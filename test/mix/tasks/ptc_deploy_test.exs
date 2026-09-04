@@ -95,7 +95,7 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert String.trim(version) == Map.fetch!(PtcManager.Toolchain.pinned(), "codex")
 
     assert {output, 2} = reader([@toolchain_manifest, "vim"])
-    assert output =~ "pins no usable version for vim"
+    assert output =~ "pins no version for vim"
 
     assert {output, 2} = reader([@toolchain_manifest, "Codex"])
     assert output =~ "not a lowercase word"
@@ -113,13 +113,46 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     File.write!(manifest, "codex=0.1.0\ncodex=0.2.0\n")
     assert {output, 2} = reader([manifest, "codex"])
-    assert output =~ "more than once"
+    assert output =~ "pins codex more than once"
 
-    File.write!(manifest, "codex=$(id -u)\nherdr=\n")
+    # A line the reader cannot read stops the deployment even when the key it
+    # was asked for is pinned elsewhere in the file. Skipping it would leave the
+    # previous version installed while the edit looks applied.
+    File.write!(manifest, "codex=0.1.0\ncodex=\n")
     assert {output, 2} = reader([manifest, "codex"])
-    assert output =~ "pins no usable version"
+    assert output =~ "line 2 is not a pinned version"
+
+    File.write!(manifest, "codex = 0.1.0\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "line 1 is not a pinned version"
+
+    File.write!(manifest, "codex=$(id -u)\nherdr=0.8.2\n")
     assert {output, 2} = reader([manifest, "herdr"])
-    assert output =~ "pins no usable version"
+    assert output =~ "line 1 is not a pinned version"
+
+    File.write!(manifest, "# only a comment\n\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "pins no version for codex"
+  end
+
+  # The version a program reports is the program's own claim, so a download
+  # nobody hashed can pass a version check by printing the expected string.
+  test "the deployment verifies a pinned digest for every download it does not take from npm" do
+    script = File.read!(@remote_script)
+
+    for digest <- ~w(cursor_agent_sha256 herdr_sha256 mise_sha256) do
+      assert script =~ ~s|!= "$#{digest}"|, digest
+    end
+
+    # Cursor's archive is proven before anything is unpacked from it.
+    assert byte_index(script, ~s|!= "$cursor_agent_sha256"|) <
+             byte_index(script, ~s|tar --strip-components=1 -xzf "$cursor_archive"|)
+
+    # An executable an interrupted deployment left at the pinned path is what a
+    # later restart would link, so it is proven on every run, not only on the
+    # run that downloaded it.
+    assert script =~ ~s|sudo sha256sum "$worker_herdr_dir/herdr"|
+    assert script =~ ~s|sudo sha256sum "$worker_mise_dir/mise"|
   end
 
   # A version written twice drifts. The manifest is the only place one belongs,
@@ -467,8 +500,12 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     assert script =~ "worker_mise=/usr/local/bin/mise"
     assert script =~ "install_worker_mise"
-    assert script =~ ~s(sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise")
+    assert script =~ ~s|sudo ln -sfn "$worker_mise_dir/mise" "$worker_mise"|
     assert script =~ ~s(sudo -u ptc-manager-worker -H "$worker_mise" --version)
+
+    # The worker's mise is a pinned program, not a copy of whatever the
+    # deploying user happens to have installed.
+    refute script =~ ~s(sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise")
 
     assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
              byte_index(script, "echo \"Building production release...\"")
@@ -508,8 +545,15 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~
              "/bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix help hex'"
 
-    assert script =~ "local.hex --force --if-missing"
-    assert script =~ "local.rebar --force --if-missing"
+    # Mix installs a mismatched --sha512 once --force is given, so the gate
+    # hashes the Rebar it received instead of asking mix to check it.
+    assert script =~ ~s|gate_mix local.hex "$hex_version" --force|
+    assert script =~ "gate_mix local.rebar --force"
+    assert script =~ ~s|!= "$rebar3_sha512"|
+    assert script =~ "gate_rebar_digest"
+    refute script =~ "local.hex --force --if-missing"
+    refute script =~ "local.rebar --force --if-missing"
+    refute script =~ "local.rebar --force --sha512"
     assert script =~ "gate toolchain symlink escapes its root-owned prefix"
     refute script =~ "verify_gate_contract"
     refute script =~ "./scripts/ci/pre-publication"

@@ -19,18 +19,7 @@ defmodule PtcManager.Toolchain do
   @manifest Path.expand("../../deploy/toolchain-versions", __DIR__)
   @external_resource @manifest
 
-  @entry ~r/^([a-z0-9_]+)=([A-Za-z0-9][A-Za-z0-9._-]*)$/
-
-  @pinned @manifest
-          |> File.read!()
-          |> String.split("\n")
-          |> Enum.flat_map(fn line ->
-            case Regex.run(@entry, line, capture: :all_but_first) do
-              [key, value] -> [{key, value}]
-              nil -> []
-            end
-          end)
-          |> Map.new()
+  @pinned PtcManager.Toolchain.Manifest.parse!(File.read!(@manifest))
 
   # `link` is the name on the worker's service PATH; `prefix` is what the
   # deployment puts in front of the version when it installs the program, so the
@@ -63,6 +52,7 @@ defmodule PtcManager.Toolchain do
     },
     %{key: :node, name: "Node", pin: "node", link: "node", prefix: "ptc-manager-node-"},
     %{key: :pnpm, name: "pnpm", pin: "pnpm", link: "pnpm", prefix: "ptc-manager-pnpm-"},
+    %{key: :mise, name: "mise", pin: "mise", link: "mise", prefix: "ptc-manager-mise-"},
     %{
       key: :erlang,
       name: "Erlang/OTP",
@@ -165,9 +155,8 @@ defmodule PtcManager.Toolchain do
   end
 
   defp status(%{pinned: version, linked: version}), do: :matched
-  defp status(%{target: nil, installed?: true}), do: :staged
-  defp status(%{target: nil}), do: :absent
   defp status(%{deferred?: true, installed?: true}), do: :staged
+  defp status(%{target: nil, installed?: false}), do: :absent
   defp status(_program), do: :drifted
 
   defp link_dir, do: Application.get_env(:ptc_manager, :toolchain_link_dir, "/usr/local/bin")

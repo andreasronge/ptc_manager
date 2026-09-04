@@ -3,9 +3,11 @@ set -eu
 
 # Print one pinned version from deploy/toolchain-versions.
 #
-# The deployment builds installation paths out of what this prints, so a missing,
-# malformed, or repeated entry has to stop the deployment rather than yield an
-# empty string and link something like /opt/ptc-manager-codex- into place.
+# The deployment builds installation paths out of what this prints, so the whole
+# manifest is validated on every read: a line that is not a pin, a key written
+# twice, or a key with no usable value stops the deployment. Accepting a
+# malformed line would leave the previous version installed while the maintainer
+# believes the edit took effect, which is the drift this manifest exists to end.
 
 usage() {
   echo "Usage: ptc-manager-toolchain-version MANIFEST KEY" >&2
@@ -25,18 +27,41 @@ esac
 
 [ -f "$manifest" ] || { echo "toolchain manifest is missing: $manifest" >&2; exit 2; }
 
-value=$(sed -n "s/^${key}=\([A-Za-z0-9][A-Za-z0-9._-]*\)\$/\1/p" "$manifest")
+awk -v key="$key" -v manifest="$manifest" '
+  /^[ \t]*$/ { next }
+  /^#/ { next }
 
-case "$value" in
-  '')
-    echo "toolchain manifest pins no usable version for $key: $manifest" >&2
-    exit 2
-    ;;
-  *"
-"*)
-    echo "toolchain manifest pins $key more than once: $manifest" >&2
-    exit 2
-    ;;
-esac
+  !/^[a-z0-9_]+=[A-Za-z0-9][A-Za-z0-9._-]*$/ {
+    printf "%s line %d is not a pinned version: %s\n", manifest, NR, $0 > "/dev/stderr"
+    malformed = 1
+    next
+  }
 
-printf '%s\n' "$value"
+  {
+    name = substr($0, 1, index($0, "=") - 1)
+
+    if (name in seen) {
+      printf "%s pins %s more than once\n", manifest, name > "/dev/stderr"
+      malformed = 1
+    }
+
+    seen[name] = 1
+
+    if (name == key) {
+      value = substr($0, index($0, "=") + 1)
+    }
+  }
+
+  END {
+    if (malformed) {
+      exit 2
+    }
+
+    if (value == "") {
+      printf "%s pins no version for %s\n", manifest, key > "/dev/stderr"
+      exit 2
+    }
+
+    print value
+  }
+' "$manifest"

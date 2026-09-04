@@ -1068,14 +1068,23 @@ exactly what it names into a root-owned `/opt/ptc-manager-<program>-<version>`
 directory, checks the version it actually got, and links the entry point onto
 the worker's service `PATH`. Codex and Claude Code are installed from their npm
 packages with the pinned Node, and Codex is linked to the native binary its
-platform package carries rather than to the Node shim in front of it; the Cursor
-CLI comes from the versioned archive its installer downloads; Herdr comes from
-the release asset `https://herdr.dev/latest.json` names, refused unless its
-sha256 is the one this repository pins. Node, npm, corepack, pnpm, Erlang, and
-Elixir are provisioned the same way through mise. An agent therefore cannot
-rewrite the CLI it runs, and updating any of them is a change to
-`deploy/toolchain-versions` and a deployment, never a command run on the host,
-so the running program always matches a commit.
+platform package carries rather than to the Node shim in front of it. Node, npm,
+corepack, pnpm, Erlang, and Elixir come through mise, and the worker's own mise
+is itself a pinned download rather than a copy of whatever the deploying user
+has. An agent therefore cannot rewrite the CLI it runs, and updating any of them
+is a change to `deploy/toolchain-versions` and a deployment, never a command run
+on the host, so the running program always matches a commit.
+
+A version a program reports is that program's own claim, so every download that
+does not come from npm carries a pinned sha256 that is checked before anything
+is unpacked or installed: the Cursor CLI archive, the Herdr release asset named
+by `https://herdr.dev/latest.json`, and the mise release binary. Herdr and mise
+are single files, so the deployment re-checks the digest of what stands at the
+pinned path on every run rather than trusting the run that installed it. The
+pre-publication gate pins its build tools the same way: Hex by version, and
+Rebar by the sha512 of the script Hex's CDN serves, hashed after installation
+because `mix local.rebar` accepts a mismatched `--sha512` once `--force` is
+given.
 
 Herdr is the one program that does not take effect at once. A client whose
 protocol does not match the running server breaks the coordinator's view of
