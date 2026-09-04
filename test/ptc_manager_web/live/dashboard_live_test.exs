@@ -1605,6 +1605,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     })
 
     render_click(view, "dismiss-follow-up", %{"publication-id" => "999999"})
+    render_click(view, "retry-publication", %{"publication-id" => "999999"})
 
     assert has_element?(view, "#planning-group-ready #issue-#{issue.id}")
   end

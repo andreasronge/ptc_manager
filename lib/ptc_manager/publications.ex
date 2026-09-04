@@ -842,7 +842,10 @@ defmodule PtcManager.Publications do
 
     outcome =
       Repo.transaction(fn ->
-        publication = Repo.get!(PrPublication, publication_id)
+        # The id arrives from a browser event, so a card the maintainer is
+        # looking at may already be gone.
+        publication =
+          Repo.get(PrPublication, publication_id) || Repo.rollback(:publication_not_found)
 
         {updated, _rows} =
           PrPublication
