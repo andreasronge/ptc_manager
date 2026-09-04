@@ -17,7 +17,7 @@
           Private summaries stay here. Approved agents prepare pull requests; merging still requires your approval.
         </p>
       </div>
-      <div class="flex gap-3 text-sm">
+      <div class="flex flex-wrap items-center gap-3 text-sm">
         <div class="rounded-xl border border-white/10 bg-white/5 px-4 py-3">
           <span class="block text-2xl font-semibold">{length(@issues)}</span>
           <span class="text-slate-500">issues</span>
@@ -28,26 +28,11 @@
           </span>
           <span class="text-slate-500">active agents</span>
         </div>
-      </div>
-    </div>
-  </section>
-
-  <section
-    id="integrations"
-    aria-label="Integrations"
-    class="mb-8 grid gap-3 md:grid-cols-2 xl:grid-cols-4"
-  >
-    <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">GitHub</p>
-          <p class="mt-1 text-sm text-slate-300">Read-only issue inbox</p>
-        </div>
         <button
           id="sync-github"
           phx-click="sync-github"
           disabled={@github_syncing || @repositories == []}
-          class="rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
+          class="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-xs font-semibold text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:text-slate-500"
         >
           <%= if @github_syncing do %>
             <span class="inline-flex items-center gap-1.5">
@@ -55,71 +40,10 @@
               Syncing…
             </span>
           <% else %>
-            Sync now
+            Sync GitHub now
           <% end %>
         </button>
       </div>
-      <div :for={repository <- @repositories} class="mt-4 border-t border-white/10 pt-3 text-xs">
-        <p class="text-slate-400">
-          {repository.github_owner}/{repository.github_name}
-          <span class={["ml-2", sync_classes(repository)]}>{sync_label(repository)}</span>
-        </p>
-        <p class="mt-1 text-slate-600">
-          Last complete sync: {short_time(repository.last_synced_at)}
-        </p>
-        <p :if={repository.last_sync_error} class="mt-2 text-rose-300">
-          The last read-only sync failed. Check the service logs.
-        </p>
-      </div>
-    </div>
-
-    <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        Automatic PR publication
-      </p>
-      <p class="mt-1 text-sm text-slate-300">
-        Prompted test/review workflow → verified commit → PR
-      </p>
-      <p :if={@agent_pr_enabled} class="mt-4 text-xs text-teal-300">
-        New jobs use agent publication · authenticated worker creates the PR
-      </p>
-      <p :if={!@agent_pr_enabled && @publication_enabled} class="mt-4 text-xs text-teal-300">
-        Publication enabled · exact-SHA GitHub App broker
-      </p>
-      <p :if={!@agent_pr_enabled && !@publication_enabled} class="mt-4 text-xs text-amber-300">
-        Publication disabled · verified work waits safely without GitHub writes
-      </p>
-      <p :if={@pr_reconcile_enabled} class="mt-1 text-xs text-teal-300">
-        Read-only PR status tracking enabled
-      </p>
-      <p :if={!@pr_reconcile_enabled} class="mt-1 text-xs text-amber-300">
-        Read-only PR status tracking disabled
-      </p>
-      <p :for={repository <- @repositories} class="mt-2 text-xs text-slate-500">
-        Agent prompt requests {required_reviews(repository)} Codex review pass(es)
-      </p>
-    </div>
-
-    <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Private analysis</p>
-      <p class="mt-1 text-sm text-slate-300">Lightweight Herdr repository investigation</p>
-      <p :if={@agent_actions_enabled} class="mt-2 text-xs text-teal-300">
-        Maintainer actions enabled · durable prompt queue
-      </p>
-      <p :if={!@agent_actions_enabled} class="mt-2 text-xs text-amber-300">
-        Maintainer actions disabled · requests can be queued for later
-      </p>
-    </div>
-
-    <div class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Dispatcher</p>
-      <p class="mt-1 text-sm text-slate-300">Approved Herdr implementation work</p>
-      <p :if={@dispatch_enabled} class="mt-4 text-xs text-teal-300">
-        Enabled · fresh GitHub check · fenced worker lease
-      </p>
-      <p :if={!@dispatch_enabled} class="mt-4 text-xs text-amber-300">
-        Disabled · approvals remain safely queued
-      </p>
     </div>
   </section>
 
@@ -127,636 +51,778 @@
     <section aria-labelledby="issue-inbox-title" class="min-w-0">
       <div class="mb-4 flex items-center justify-between">
         <h2 id="issue-inbox-title" class="text-lg font-semibold">Issue inbox</h2>
-        <span class="text-xs text-slate-500">Newest GitHub update first</span>
+        <span class="text-xs text-slate-500">Grouped by what you can do next</span>
       </div>
 
-      <div id="issue-inbox" class="space-y-4">
-        <article
-          :for={item <- @issues}
-          id={"issue-#{item.issue.id}"}
-          class="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl shadow-black/10 sm:p-6"
+      <div id="issue-inbox" class="space-y-5">
+        <section
+          :for={{group, items} <- @grouped_issues}
+          id={"planning-group-#{group}"}
+          class="rounded-2xl border border-white/10 bg-slate-900/40 p-3 sm:p-4"
         >
-          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <p class="text-xs font-medium text-slate-500">
-                {item.issue.repository.github_owner}/{item.issue.repository.github_name} · #{item.issue.number}
-                <span :if={item.issue.state != "open"}>{" · #{item.issue.state}"}</span>
-              </p>
-              <h3 class="mt-1 text-lg font-semibold leading-7">{item.issue.title}</h3>
-            </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <span
-                :if={claimed?(item.issue)}
-                id={"issue-#{item.issue.id}-claimed"}
-                title="GitHub assignment is advisory, but PtcManager will not start duplicate work."
-                class="inline-flex w-fit items-center gap-1.5 rounded-full bg-sky-400/15 px-2.5 py-1 text-xs text-sky-300 ring-1 ring-sky-400/20"
-              >
-                <.icon name="hero-user-circle-mini" class="size-4" />
-                {claim_label(item.issue)}
-              </span>
-              <span
-                :if={not item.issue.github_assignment_projected}
-                id={"issue-#{item.issue.id}-claim-unknown"}
-                class="inline-flex w-fit items-center gap-1.5 rounded-full bg-amber-400/15 px-2.5 py-1 text-xs text-amber-300 ring-1 ring-amber-400/20"
-              >
-                <.icon name="hero-arrow-path-mini" class="size-4" /> Claim status needs sync
-              </span>
-              <span
-                :if={item.proposal}
-                class={[
-                  "w-fit rounded-full px-2.5 py-1 text-xs ring-1",
-                  state_classes(item.proposal.readiness)
-                ]}
-              >
-                {String.replace(item.proposal.readiness, "_", " ")}
-              </span>
-              <span
-                :if={item.issue.workflow_label}
-                class="w-fit rounded-full bg-violet-400/15 px-2.5 py-1 text-xs text-violet-300 ring-1 ring-violet-400/20"
-              >
-                {item.issue.workflow_label}
-              </span>
-              <span
-                :if={item.issue.workflow_label_conflict}
-                class="w-fit rounded-full bg-amber-400/15 px-2.5 py-1 text-xs text-amber-300 ring-1 ring-amber-400/20"
-              >
-                conflicting ptc labels
-              </span>
-            </div>
-          </div>
+          <.group_heading
+            group={group}
+            count={length(items)}
+            collapsed={collapsed_group?(@collapsed_groups, group)}
+          />
 
           <div
-            :if={
-              item.dependencies != [] or item.issue.dependency_overflow or
-                item.issue.dependency_unknown_count > 0 or
-                not item.issue.dependencies_projected
-            }
-            id={"issue-dependencies-#{item.issue.id}"}
-            class="mt-4 rounded-xl border border-amber-400/15 bg-amber-400/[0.05] p-4"
+            :if={!collapsed_group?(@collapsed_groups, group) && group == :follow_ups}
+            class="mt-3 space-y-3"
           >
-            <p class="text-xs font-semibold uppercase tracking-wide text-amber-300">
-              Dependencies
-            </p>
-            <div class="mt-2 flex flex-wrap gap-2">
-              <a
-                :for={dependency <- item.dependencies}
-                id={dependency_dom_id(item.issue.id, dependency)}
-                href={dependency_url(item.issue.repository, dependency)}
-                target="_blank"
-                rel="noreferrer"
-                class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300 ring-1 ring-white/10 hover:bg-white/10"
-              >
-                Blocked by {dependency.repository_full_name}#{dependency.number} · {dependency_status(
-                  dependency
-                )} ↗
-              </a>
-            </div>
-            <p
-              :if={item.dependency_cycle}
-              id={"issue-dependency-cycle-#{item.issue.id}"}
-              class="mt-3 text-xs font-medium text-rose-300"
+            <article
+              :for={item <- items}
+              id={"follow-up-#{item.publication.id}"}
+              class="rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl shadow-black/10 sm:p-5"
             >
-              Dependency cycle: {dependency_cycle_label(item.dependency_cycle)}. Maintainer attention is required.
-            </p>
-            <p
-              :if={dependencies_unknown?(item.dependencies)}
-              class="mt-3 text-xs text-amber-300"
-            >
-              GitHub did not provide enough information about every blocker. This issue stays out of the work queue until the dependency can be synchronized.
-            </p>
-            <p
-              :if={dependencies_need_decision?(item.dependencies)}
-              class="mt-3 text-xs text-amber-300"
-            >
-              A prerequisite was closed without being completed. Decide whether to remove or replace that dependency before implementation starts.
-            </p>
-            <p
-              :if={item.issue.dependency_unknown_count > 0}
-              class="mt-3 text-xs text-amber-300"
-            >
-              GitHub reports {item.issue.dependency_unknown_count} blocker(s) that this account cannot inspect. This issue stays out of the work queue.
-            </p>
-            <p
-              :if={not item.issue.dependencies_projected}
-              class="mt-3 text-xs text-amber-300"
-            >
-              Dependency state has not been synchronized yet. Run GitHub sync before approval.
-            </p>
-            <p
-              :if={item.issue.dependency_overflow}
-              class="mt-3 text-xs text-amber-300"
-            >
-              More than 100 blockers were declared. Simplify the dependency list before approval.
-            </p>
-            <p
-              :if={
-                item.issue.dependencies_projected and not item.issue.dependency_overflow and
-                  item.issue.dependency_unknown_count == 0 and
-                  is_nil(item.dependency_cycle) and dependencies_resolved?(item.dependencies)
-              }
-              class="mt-3 text-xs text-teal-300"
-            >
-              All recorded blockers are complete. This issue can start when the other approval checks pass.
-            </p>
-          </div>
-
-          <div :if={item.proposal} class="mt-5 grid gap-4 sm:grid-cols-2">
-            <div class="rounded-xl bg-white/[0.035] p-4 sm:col-span-2">
-              <p class="text-xs font-semibold uppercase tracking-wide text-teal-300">
-                In plain language
-              </p>
-              <p class="mt-2 leading-7 text-slate-200">{item.proposal.plain_summary}</p>
-            </div>
-            <div>
-              <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Why it matters
-              </p>
-              <p class="mt-1 text-sm leading-6 text-slate-300">{item.proposal.why_it_matters}</p>
-            </div>
-            <div class="flex gap-3 sm:justify-end">
-              <span class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300">
-                Scope: {item.proposal.scope}
-              </span>
-              <span class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300">
-                Risk: {item.proposal.risk}
-              </span>
-            </div>
-          </div>
-
-          <p :if={!item.proposal} class="mt-4 text-sm text-amber-300">
-            This issue still needs a manager investigation.
-          </p>
-
-          <details
-            :if={item.proposal}
-            id={"technical-evidence-#{item.issue.id}"}
-            phx-mounted={JS.ignore_attributes("open")}
-            class="group mt-5 rounded-xl border border-white/10 px-4 py-3"
-          >
-            <summary class="cursor-pointer text-sm font-medium text-slate-300">
-              Technical evidence
-            </summary>
-            <p class="mt-3 whitespace-pre-line text-sm leading-6 text-slate-400">
-              {item.proposal.technical_evidence}
-            </p>
-          </details>
-
-          <div class="mt-5 flex flex-wrap items-center gap-3">
-            <button
-              :for={action <- ActionCatalog.issue_actions(item.issue)}
-              id={"agent-action-#{action.key}-issue-#{item.issue.id}"}
-              phx-click="run-agent-action"
-              phx-value-action-key={action.key}
-              phx-value-target-id={item.issue.id}
-              disabled={active_agent_action?(item.issue_agent_action)}
-              title={action.description}
-              class="rounded-xl bg-violet-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-            >
-              {action.label}
-            </button>
-            <.work_status
-              :if={item.issue_agent_action}
-              state={item.issue_agent_action.state}
-              label={agent_action_label(item.issue_agent_action)}
-              class="rounded-xl px-3 py-2"
-            />
-            <span
-              :if={source_note = agent_action_source_note(item.issue_agent_action)}
-              id={"agent-action-source-#{item.issue_agent_action.id}"}
-              class="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-xs font-medium text-slate-400"
-            >
-              {source_note}
-            </span>
-            <form
-              :if={!item.active_job}
-              id={"approve-form-issue-#{item.issue.id}"}
-              phx-submit="approve"
-              class="flex flex-wrap items-end gap-2"
-            >
-              <input type="hidden" name="issue-id" value={item.issue.id} />
-              <label class="text-xs font-medium text-slate-400">
-                Reviews
-                <select
-                  id={"review-count-issue-#{item.issue.id}"}
-                  name="review-count"
-                  disabled={!approvable?(item)}
-                  class="mt-1 block rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5 text-sm font-semibold text-white outline-none focus:border-teal-400/60"
-                >
-                  <option
-                    :for={count <- 0..3}
-                    value={count}
-                    selected={count == required_reviews(item.issue.repository)}
-                  >
-                    {count}{if(count == 0, do: " · none", else: "")}
-                  </option>
-                </select>
-              </label>
-              <button
-                id={"approve-issue-#{item.issue.id}"}
-                type="submit"
-                disabled={!approvable?(item)}
-                class="rounded-xl bg-teal-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-              >
-                Approve and start
-              </button>
-            </form>
-            <.work_status
-              :if={item.active_job}
-              state={item.active_job.state}
-              label={"Job #{job_label(item.active_job.state)}"}
-              class="rounded-xl px-4 py-2.5 text-sm"
-            />
-            <span
-              :if={item.active_job}
-              id={"job-review-count-#{item.active_job.id}"}
-              class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-xs font-medium text-slate-400"
-            >
-              {job_review_label(item.active_job, item.issue.repository)}
-            </span>
-            <button
-              :if={
-                item.active_job &&
-                  item.active_job.state in ["awaiting_reconciliation", "verifying_result"]
-              }
-              id={"reconcile-job-#{item.active_job.id}"}
-              phx-click="reconcile-result"
-              phx-value-job-id={item.active_job.id}
-              disabled={reconciling_result?(@reconciling_results, item.active_job.id)}
-              class="rounded-xl bg-white/10 px-4 py-2.5 text-sm font-semibold text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
-            >
-              <%= if reconciling_result?(@reconciling_results, item.active_job.id) do %>
-                <span class="inline-flex items-center gap-1.5">
-                  <.icon name="hero-arrow-path-mini" class="size-4 motion-safe:animate-spin" />
-                  Checking branch…
-                </span>
-              <% else %>
-                {if item.active_job.state == "verifying_result",
-                  do: "Check verification status",
-                  else: "Check committed branch"}
-              <% end %>
-            </button>
-            <.work_status
-              :if={!item.active_job && item.latest_job}
-              state={item.latest_job.state}
-              label={"Last job #{item.latest_job.state}"}
-              class="rounded-xl px-4 py-2.5 text-sm"
-            />
-            <a
-              href={item.issue.html_url}
-              target="_blank"
-              class="text-sm text-slate-400 hover:text-white"
-            >
-              Open on GitHub ↗
-            </a>
-            <span :if={item.proposal && !fresh?(item)} class="text-xs text-amber-300">
-              Summary is stale
-            </span>
-          </div>
-          <%= if decision = issue_decision(item.issue, item.issue_agent_action) do %>
-            <div
-              id={"issue-decision-#{item.issue.id}"}
-              class="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.07] p-4 sm:p-5"
-            >
-              <p class="text-xs font-semibold uppercase tracking-wide text-amber-200">
-                Your decision is needed
-              </p>
-              <h3 class="mt-2 text-base font-semibold leading-6 text-white">
-                {decision.question}
-              </h3>
-              <div class="mt-3 grid gap-3 text-sm leading-6 sm:grid-cols-2">
-                <div class="rounded-lg bg-black/15 p-3">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    In simple language
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
+                  <p class="text-xs font-medium text-slate-500">
+                    {item.repository.github_owner}/{item.repository.github_name} · PR #{item.publication.pr_number} · {item.publication.pr_state}
                   </p>
-                  <p class="mt-1 text-slate-200">
-                    {agent_action_private_summary(item.issue_agent_action) ||
-                      "Choose the behavior you want the implementation to follow."}
+                  <h3 class="mt-1 text-base font-semibold leading-6">
+                    {item.publication.title || (item.issue && item.issue.title)}
+                  </h3>
+                  <p class="mt-1.5 text-xs text-slate-500">
+                    <span title={TimeFormat.utc(item.publication.pr_checked_at)}>
+                      last checked {TimeFormat.relative(@now, item.publication.pr_checked_at)}
+                    </span>
                   </p>
                 </div>
-                <div class="rounded-lg bg-black/15 p-3">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Why the choice matters
-                  </p>
-                  <p class="mt-1 text-slate-300">
-                    {item.proposal && item.proposal.why_it_matters}
-                  </p>
-                </div>
-              </div>
-
-              <.form
-                for={%{}}
-                as={:decision}
-                id={"resolve-decision-form-#{item.issue.id}"}
-                phx-submit="resolve-issue-decision"
-                class="mt-4 space-y-3"
-              >
-                <input type="hidden" name="issue-id" value={item.issue.id} />
-                <input
-                  type="hidden"
-                  name="source-action-id"
-                  value={item.issue_agent_action.id}
-                />
-                <label
-                  :for={option <- decision.options}
-                  class="flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-slate-950/45 p-3 transition hover:border-amber-200/40"
-                >
-                  <input
-                    type="radio"
-                    name="decision[choice]"
-                    value={option.index}
-                    disabled={active_agent_action?(item.issue_agent_action)}
-                    class="mt-1 size-4 border-white/20 bg-slate-900 text-amber-300 focus:ring-amber-300"
-                  />
-                  <span class="min-w-0">
-                    <span class="block font-semibold text-white">
-                      {option.letter} — {option.label}
-                    </span>
-                    <span class="mt-1 block text-sm leading-6 text-slate-300">
-                      {option.description}
-                    </span>
-                    <span class="mt-2 block text-xs leading-5 text-slate-500">
-                      Example: {option.example}
-                    </span>
-                  </span>
-                </label>
-
-                <label class="block rounded-xl border border-dashed border-white/15 p-3">
-                  <span class="text-sm font-semibold text-slate-200">
-                    Or write another answer
-                  </span>
-                  <span class="mt-1 block text-xs leading-5 text-slate-500">
-                    Explain the result you want. The agent will turn it into acceptance criteria on the GitHub issue.
-                  </span>
-                  <textarea
-                    id={"custom-decision-answer-#{item.issue.id}"}
-                    name="decision[custom_answer]"
-                    rows="3"
-                    maxlength="2000"
-                    disabled={active_agent_action?(item.issue_agent_action)}
-                    placeholder="Example: Use exact exports for doc, but keep apropos namespace-only for now."
-                    class="mt-2 block w-full rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm leading-6 text-white outline-none focus:border-amber-300/60"
-                  ></textarea>
-                </label>
-
-                <div class="flex flex-wrap items-center gap-3">
-                  <button
-                    type="submit"
-                    disabled={active_agent_action?(item.issue_agent_action)}
-                    class="rounded-lg bg-amber-300 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                  >
-                    Apply decision
-                  </button>
-                  <span class="text-xs leading-5 text-slate-500">
-                    This queues an agent to update GitHub; it does not start implementation.
-                  </span>
-                </div>
-              </.form>
-            </div>
-          <% else %>
-            <%= if refresh_reason = decision_refresh_reason(item.issue, item.issue_agent_action) do %>
-              <div
-                id={"issue-decision-refresh-#{item.issue.id}"}
-                class="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.07] p-4"
-              >
-                <p class="text-xs font-semibold uppercase tracking-wide text-amber-200">
-                  <%= if refresh_reason == :issue_changed do %>
-                    Issue changed since this decision was prepared
-                  <% else %>
-                    Decision choices need a refresh
-                  <% end %>
-                </p>
-                <p class="mt-2 text-sm leading-6 text-slate-200">
-                  <%= if refresh_reason == :issue_changed do %>
-                    GitHub has newer issue content, so these choices may no longer be correct. Run Prepare issue again to analyze the current version before deciding.
-                  <% else %>
-                    This completed result has no valid structured choices, possibly because it was created before they were required. Run Prepare issue again to get a clear question, 2–4 alternatives, and an example for each one.
-                  <% end %>
-                </p>
-                <button
-                  type="button"
-                  phx-click="run-agent-action"
-                  phx-value-action-key="prepare_issue"
-                  phx-value-target-id={item.issue.id}
-                  disabled={active_agent_action?(item.issue_agent_action)}
-                  class="mt-3 rounded-lg bg-amber-300 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                >
-                  Refresh decision choices
-                </button>
-              </div>
-            <% end %>
-            <div
-              :if={
-                agent_action_private_summary(item.issue_agent_action) &&
-                  is_nil(decision_refresh_reason(item.issue, item.issue_agent_action))
-              }
-              class="mt-4 rounded-xl border border-violet-400/20 bg-violet-400/[0.06] p-4"
-            >
-              <p class="text-xs font-semibold uppercase tracking-wide text-violet-300">
-                Private agent result · {agent_action_outcome(item.issue_agent_action)}
-              </p>
-              <p class="mt-2 text-sm leading-6 text-slate-200">
-                {agent_action_private_summary(item.issue_agent_action)}
-              </p>
-            </div>
-          <% end %>
-
-          <details
-            :if={
-              agent_action_result_items(item.issue_agent_action, "github_changes") != [] or
-                agent_action_result_items(item.issue_agent_action, "evidence") != []
-            }
-            id={"agent-action-details-#{item.issue_agent_action.id}"}
-            phx-mounted={JS.ignore_attributes("open")}
-            class="mt-3 text-xs text-slate-400"
-          >
-            <summary class="cursor-pointer font-medium text-slate-300">Action details</summary>
-            <ul class="mt-2 list-disc space-y-1 pl-5">
-              <li :for={
-                change <- agent_action_result_items(item.issue_agent_action, "github_changes")
-              }>
-                {change}
-              </li>
-              <li :for={
-                evidence <- agent_action_result_items(item.issue_agent_action, "evidence")
-              }>
-                {evidence}
-              </li>
-            </ul>
-          </details>
-          <p
-            :if={agent_action_failure(item.issue_agent_action)}
-            class="mt-3 text-xs leading-5 text-amber-300"
-          >
-            {agent_action_failure(item.issue_agent_action)}
-          </p>
-          <div
-            :if={
-              item.active_job &&
-                item.active_job.state in [
-                  "ready_for_pr",
-                  "publishing_pr",
-                  "pr_open",
-                  "publish_blocked"
-                ]
-            }
-            class="mt-4 rounded-xl border border-teal-400/20 bg-teal-400/[0.06] p-4 text-sm"
-          >
-            <p class="font-semibold text-teal-300">
-              <%= cond do %>
-                <% item.publication && item.publication.state == "published" -> %>
-                  PR published
-                <% item.publication && item.publication.state == "publishing" -> %>
-                  Publishing exact verified commit…
-                <% item.publication && item.publication.state == "blocked" -> %>
-                  PR verification needs attention
-                <% true -> %>
-                  Waiting for publication
-              <% end %>
-            </p>
-            <p class="mt-1 text-slate-400">
-              {item.active_job.result_commit_count} committed change(s) verified against <span class="font-mono">{String.slice(item.active_job.result_base_sha, 0, 8)}</span>.
-              Head <span class="font-mono">{String.slice(item.active_job.result_head_sha, 0, 8)}</span>.
-            </p>
-            <%= cond do %>
-              <% item.publication && item.publication.state == "published" -> %>
-                <a
-                  id={"publication-pr-#{item.publication.id}"}
-                  href={item.publication.pr_url}
-                  target="_blank"
-                  class="mt-2 inline-block text-xs font-semibold text-teal-300 hover:text-teal-200"
-                >
-                  Open PR #{item.publication.pr_number} ↗
-                </a>
-                <div class="mt-3 flex flex-wrap items-center gap-3">
-                  <button
-                    :for={action <- ActionCatalog.pull_request_actions(item.publication)}
-                    id={"agent-action-#{action.key}-pr-#{item.publication.id}"}
-                    phx-click="run-agent-action"
-                    phx-value-action-key={action.key}
-                    phx-value-target-id={item.publication.id}
-                    disabled={active_agent_action?(item.pr_agent_action)}
-                    title={action.description}
-                    class="rounded-lg bg-violet-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                  >
-                    {action.label}
-                  </button>
+                <div class="flex shrink-0 flex-wrap items-center gap-2">
                   <.work_status
                     :if={item.pr_agent_action}
                     state={item.pr_agent_action.state}
                     label={agent_action_label(item.pr_agent_action)}
-                    class="rounded-lg px-3 py-2"
+                    class="rounded-full px-2.5 py-1"
                   />
                 </div>
-              <% item.publication && item.publication.state == "blocked" -> %>
-                <p class="mt-2 text-xs text-amber-300">
-                  {publication_error(item.publication.last_error)} No merge can occur; retry after correcting the cause.
-                </p>
+              </div>
+
+              <div class="mt-4 flex flex-wrap items-center gap-3">
                 <button
-                  id={"retry-publication-#{item.publication.id}"}
-                  phx-click="retry-publication"
-                  phx-value-publication-id={item.publication.id}
-                  class="mt-3 rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15"
+                  id={"run-retrospective-#{item.publication.id}"}
+                  phx-click="run-agent-action"
+                  phx-value-action-key="pr_retrospective"
+                  phx-value-target-id={item.publication.id}
+                  disabled={active_agent_action?(item.pr_agent_action)}
+                  title="Read this pull request back and propose the follow-up work it left behind. It changes nothing on GitHub."
+                  class="rounded-xl bg-violet-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
                 >
-                  Retry publishing
+                  Run retrospective
                 </button>
-              <% item.publication && item.publication.state == "publishing" -> %>
-                <p class="mt-2 text-xs text-slate-500">
-                  PtcManager is publishing the exact verified commit through its isolated broker.
+                <button
+                  id={"dismiss-follow-up-#{item.publication.id}"}
+                  phx-click="dismiss-follow-up"
+                  phx-value-publication-id={item.publication.id}
+                  class="rounded-xl border border-white/10 px-4 py-2.5 text-sm font-semibold text-slate-300 hover:bg-white/5"
+                >
+                  Dismiss
+                </button>
+                <a
+                  href={item.publication.pr_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  class="text-sm text-slate-400 hover:text-white"
+                >
+                  Open PR ↗
+                </a>
+                <a
+                  :if={item.issue}
+                  href={item.issue.html_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  class="text-sm text-slate-400 hover:text-white"
+                >
+                  Issue #{item.issue.number} ↗
+                </a>
+              </div>
+
+              <.retrospective
+                id={"follow-up-retro-#{item.publication.id}"}
+                action={item.pr_retrospective_action}
+                creation_actions={item.pr_retrospective_issue_actions}
+                repository={item.repository}
+              />
+            </article>
+          </div>
+
+          <div
+            :if={!collapsed_group?(@collapsed_groups, group) && group != :follow_ups}
+            class="mt-3 space-y-3"
+          >
+            <article
+              :for={item <- items}
+              id={"issue-#{item.issue.id}"}
+              class="rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl shadow-black/10 sm:p-5"
+            >
+              <.card_header
+                item={item}
+                now={@now}
+                expanded={expanded_issue?(@expanded_issue_ids, item)}
+              />
+
+              <div class="mt-4 flex flex-wrap items-end gap-3">
+                <%= case group do %>
+                  <% :in_delivery -> %>
+                    <.link
+                      id={"in-delivery-#{item.issue.id}"}
+                      navigate={~p"/board"}
+                      class="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 hover:bg-white/10"
+                    >
+                      {DeliveryLane.label(delivery_lane(item))} · Delivery board →
+                    </.link>
+                  <% _other -> %>
+                    <button
+                      :if={action = primary_issue_action(item, group)}
+                      id={"agent-action-#{action.key}-issue-#{item.issue.id}"}
+                      phx-click="run-agent-action"
+                      phx-value-action-key={action.key}
+                      phx-value-target-id={item.issue.id}
+                      disabled={active_agent_action?(item.issue_agent_action)}
+                      title={action.description}
+                      class="rounded-xl bg-violet-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                    >
+                      {action.label}
+                    </button>
+                    <form
+                      :if={approval_group?(group) && !item.active_job}
+                      id={"approve-form-issue-#{item.issue.id}"}
+                      phx-submit="approve"
+                      class="flex flex-wrap items-end gap-2"
+                    >
+                      <input type="hidden" name="issue-id" value={item.issue.id} />
+                      <label class="text-xs font-medium text-slate-400">
+                        Reviews
+                        <select
+                          id={"review-count-issue-#{item.issue.id}"}
+                          name="review-count"
+                          disabled={!startable?(item)}
+                          class="mt-1 block rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5 text-sm font-semibold text-white outline-none focus:border-teal-400/60"
+                        >
+                          <option
+                            :for={count <- 0..3}
+                            value={count}
+                            selected={count == required_reviews(item.issue.repository)}
+                          >
+                            {count}{if(count == 0, do: " · none", else: "")}
+                          </option>
+                        </select>
+                      </label>
+                      <button
+                        id={"approve-issue-#{item.issue.id}"}
+                        type="submit"
+                        disabled={!approvable?(item)}
+                        class="rounded-xl bg-teal-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                      >
+                        Approve and start
+                      </button>
+                      <button
+                        id={"fix-directly-issue-#{item.issue.id}"}
+                        type="submit"
+                        name="direct"
+                        value="true"
+                        disabled={!startable?(item)}
+                        title="Start implementation without a preparation round. Every other deterministic check still applies."
+                        class="rounded-xl border border-teal-400/30 px-4 py-2.5 text-sm font-semibold text-teal-200 transition hover:bg-teal-400/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500"
+                      >
+                        Fix directly
+                      </button>
+                    </form>
+                <% end %>
+                <span
+                  :if={maintainer_label_chips(item.issue) != []}
+                  id={"issue-labels-#{item.issue.id}"}
+                  class="flex flex-wrap items-center gap-1.5 self-center"
+                >
+                  <button
+                    :for={{name, present} <- maintainer_label_chips(item.issue)}
+                    id={"toggle-label-#{item.issue.id}-#{name}"}
+                    type="button"
+                    phx-click="toggle-issue-label"
+                    phx-value-issue-id={item.issue.id}
+                    phx-value-name={name}
+                    disabled={
+                      writing_label?(@label_writes_in_flight, item.issue, name) ||
+                        item.issue.state != "open"
+                    }
+                    aria-pressed={to_string(present)}
+                    title={"Add or remove the GitHub label #{name}"}
+                    class={[
+                      "rounded-full px-2.5 py-1 text-xs font-medium ring-1 disabled:cursor-not-allowed disabled:opacity-50",
+                      present && "bg-sky-400/20 text-sky-200 ring-sky-400/30",
+                      !present && "text-slate-400 ring-white/15 hover:bg-white/5"
+                    ]}
+                  >
+                    {name}
+                  </button>
+                </span>
+                <.work_status
+                  :if={item.issue_agent_action}
+                  state={item.issue_agent_action.state}
+                  label={agent_action_label(item.issue_agent_action)}
+                  class="self-center rounded-xl px-3 py-2"
+                />
+                <a
+                  href={item.issue.html_url}
+                  target="_blank"
+                  class="self-center text-sm text-slate-400 hover:text-white"
+                >
+                  Open on GitHub ↗
+                </a>
+              </div>
+
+              <div
+                :if={expanded_issue?(@expanded_issue_ids, item)}
+                id={"issue-detail-#{item.issue.id}"}
+                class="mt-5 border-t border-white/10 pt-5"
+              >
+                <p
+                  :if={
+                    (other_labels =
+                       MaintainerLabels.unconfigured_on(item.issue.repository, item.issue)) != []
+                  }
+                  class="mb-4 text-xs text-slate-500"
+                >
+                  GitHub labels: {Enum.join(other_labels, ", ")}
                 </p>
-              <% agent_publication?(item) -> %>
-                <p class="mt-2 text-xs text-slate-500">
-                  Waiting for GitHub to report the agent-created PR for this exact branch and commit.
+                <div
+                  :if={
+                    item.dependencies != [] or item.issue.dependency_overflow or
+                      item.issue.dependency_unknown_count > 0 or
+                      not item.issue.dependencies_projected
+                  }
+                  id={"issue-dependencies-#{item.issue.id}"}
+                  class="mt-4 rounded-xl border border-amber-400/15 bg-amber-400/[0.05] p-4"
+                >
+                  <p class="text-xs font-semibold uppercase tracking-wide text-amber-300">
+                    Dependencies
+                  </p>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <a
+                      :for={dependency <- item.dependencies}
+                      id={dependency_dom_id(item.issue.id, dependency)}
+                      href={dependency_url(item.issue.repository, dependency)}
+                      target="_blank"
+                      rel="noreferrer"
+                      class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300 ring-1 ring-white/10 hover:bg-white/10"
+                    >
+                      Blocked by {dependency.repository_full_name}#{dependency.number} · {dependency_status(
+                        dependency
+                      )} ↗
+                    </a>
+                  </div>
+                  <p
+                    :if={item.dependency_cycle}
+                    id={"issue-dependency-cycle-#{item.issue.id}"}
+                    class="mt-3 text-xs font-medium text-rose-300"
+                  >
+                    Dependency cycle: {dependency_cycle_label(item.dependency_cycle)}. Maintainer attention is required.
+                  </p>
+                  <p
+                    :if={dependencies_unknown?(item.dependencies)}
+                    class="mt-3 text-xs text-amber-300"
+                  >
+                    GitHub did not provide enough information about every blocker. This issue stays out of the work queue until the dependency can be synchronized.
+                  </p>
+                  <p
+                    :if={dependencies_need_decision?(item.dependencies)}
+                    class="mt-3 text-xs text-amber-300"
+                  >
+                    A prerequisite was closed without being completed. Decide whether to remove or replace that dependency before implementation starts.
+                  </p>
+                  <p
+                    :if={item.issue.dependency_unknown_count > 0}
+                    class="mt-3 text-xs text-amber-300"
+                  >
+                    GitHub reports {item.issue.dependency_unknown_count} blocker(s) that this account cannot inspect. This issue stays out of the work queue.
+                  </p>
+                  <p
+                    :if={not item.issue.dependencies_projected}
+                    class="mt-3 text-xs text-amber-300"
+                  >
+                    Dependency state has not been synchronized yet. Run GitHub sync before approval.
+                  </p>
+                  <p
+                    :if={item.issue.dependency_overflow}
+                    class="mt-3 text-xs text-amber-300"
+                  >
+                    More than 100 blockers were declared. Simplify the dependency list before approval.
+                  </p>
+                  <p
+                    :if={
+                      item.issue.dependencies_projected and not item.issue.dependency_overflow and
+                        item.issue.dependency_unknown_count == 0 and
+                        is_nil(item.dependency_cycle) and
+                        dependencies_resolved?(item.dependencies)
+                    }
+                    class="mt-3 text-xs text-teal-300"
+                  >
+                    All recorded blockers are complete. This issue can start when the other approval checks pass.
+                  </p>
+                </div>
+
+                <div :if={item.proposal} class="mt-5 grid gap-4 sm:grid-cols-2">
+                  <div class="rounded-xl bg-white/[0.035] p-4 sm:col-span-2">
+                    <p class="text-xs font-semibold uppercase tracking-wide text-teal-300">
+                      In plain language
+                    </p>
+                    <p class="mt-2 leading-7 text-slate-200">{item.proposal.plain_summary}</p>
+                  </div>
+                  <div>
+                    <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Why it matters
+                    </p>
+                    <p class="mt-1 text-sm leading-6 text-slate-300">
+                      {item.proposal.why_it_matters}
+                    </p>
+                  </div>
+                  <div class="flex gap-3 sm:justify-end">
+                    <span class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300">
+                      Scope: {item.proposal.scope}
+                    </span>
+                    <span class="rounded-lg bg-white/5 px-3 py-2 text-xs text-slate-300">
+                      Risk: {item.proposal.risk}
+                    </span>
+                  </div>
+                </div>
+
+                <p :if={!item.proposal} class="mt-4 text-sm text-amber-300">
+                  This issue still needs a manager investigation.
                 </p>
-              <% @publication_enabled -> %>
-                <p class="mt-2 text-xs text-slate-500">
-                  PtcManager will publish this exact commit after its local branch result is verified.
+
+                <details
+                  :if={item.proposal}
+                  id={"technical-evidence-#{item.issue.id}"}
+                  phx-mounted={JS.ignore_attributes("open")}
+                  class="group mt-5 rounded-xl border border-white/10 px-4 py-3"
+                >
+                  <summary class="cursor-pointer text-sm font-medium text-slate-300">
+                    Technical evidence
+                  </summary>
+                  <p class="mt-3 whitespace-pre-line text-sm leading-6 text-slate-400">
+                    {item.proposal.technical_evidence}
+                  </p>
+                </details>
+
+                <div class="mt-5 flex flex-wrap items-center gap-3">
+                  <button
+                    :for={action <- secondary_issue_actions(item, group)}
+                    id={"agent-action-#{action.key}-issue-#{item.issue.id}"}
+                    phx-click="run-agent-action"
+                    phx-value-action-key={action.key}
+                    phx-value-target-id={item.issue.id}
+                    disabled={active_agent_action?(item.issue_agent_action)}
+                    title={action.description}
+                    class="rounded-xl bg-violet-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                  >
+                    {action.label}
+                  </button>
+                  <span
+                    :if={source_note = agent_action_source_note(item.issue_agent_action)}
+                    id={"agent-action-source-#{item.issue_agent_action.id}"}
+                    class="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-xs font-medium text-slate-400"
+                  >
+                    {source_note}
+                  </span>
+                  <.work_status
+                    :if={item.active_job}
+                    state={item.active_job.state}
+                    label={"Job #{job_label(item.active_job.state)}"}
+                    class="rounded-xl px-4 py-2.5 text-sm"
+                  />
+                  <span
+                    :if={item.active_job}
+                    id={"job-review-count-#{item.active_job.id}"}
+                    class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-xs font-medium text-slate-400"
+                  >
+                    {job_review_label(item.active_job, item.issue.repository)}
+                  </span>
+                  <button
+                    :if={
+                      item.active_job &&
+                        item.active_job.state in ["awaiting_reconciliation", "verifying_result"]
+                    }
+                    id={"reconcile-job-#{item.active_job.id}"}
+                    phx-click="reconcile-result"
+                    phx-value-job-id={item.active_job.id}
+                    disabled={reconciling_result?(@reconciling_results, item.active_job.id)}
+                    class="rounded-xl bg-white/10 px-4 py-2.5 text-sm font-semibold text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:text-slate-500"
+                  >
+                    <%= if reconciling_result?(@reconciling_results, item.active_job.id) do %>
+                      <span class="inline-flex items-center gap-1.5">
+                        <.icon
+                          name="hero-arrow-path-mini"
+                          class="size-4 motion-safe:animate-spin"
+                        /> Checking branch…
+                      </span>
+                    <% else %>
+                      {if item.active_job.state == "verifying_result",
+                        do: "Check verification status",
+                        else: "Check committed branch"}
+                    <% end %>
+                  </button>
+                  <.work_status
+                    :if={!item.active_job && item.latest_job}
+                    state={item.latest_job.state}
+                    label={"Last job #{item.latest_job.state}"}
+                    class="rounded-xl px-4 py-2.5 text-sm"
+                  />
+                  <span :if={item.proposal && !fresh?(item)} class="text-xs text-amber-300">
+                    Summary is stale
+                  </span>
+                </div>
+                <%= if decision = issue_decision(item.issue, item.issue_agent_action) do %>
+                  <div
+                    id={"issue-decision-#{item.issue.id}"}
+                    class="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.07] p-4 sm:p-5"
+                  >
+                    <p class="text-xs font-semibold uppercase tracking-wide text-amber-200">
+                      Your decision is needed
+                    </p>
+                    <h3 class="mt-2 text-base font-semibold leading-6 text-white">
+                      {decision.question}
+                    </h3>
+                    <div class="mt-3 grid gap-3 text-sm leading-6 sm:grid-cols-2">
+                      <div class="rounded-lg bg-black/15 p-3">
+                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          In simple language
+                        </p>
+                        <p class="mt-1 text-slate-200">
+                          {agent_action_private_summary(item.issue_agent_action) ||
+                            "Choose the behavior you want the implementation to follow."}
+                        </p>
+                      </div>
+                      <div class="rounded-lg bg-black/15 p-3">
+                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Why the choice matters
+                        </p>
+                        <p class="mt-1 text-slate-300">
+                          {item.proposal && item.proposal.why_it_matters}
+                        </p>
+                      </div>
+                    </div>
+
+                    <.form
+                      for={%{}}
+                      as={:decision}
+                      id={"resolve-decision-form-#{item.issue.id}"}
+                      phx-submit="resolve-issue-decision"
+                      class="mt-4 space-y-3"
+                    >
+                      <input type="hidden" name="issue-id" value={item.issue.id} />
+                      <input
+                        type="hidden"
+                        name="source-action-id"
+                        value={item.issue_agent_action.id}
+                      />
+                      <label
+                        :for={option <- decision.options}
+                        class="flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-slate-950/45 p-3 transition hover:border-amber-200/40"
+                      >
+                        <input
+                          type="radio"
+                          name="decision[choice]"
+                          value={option.index}
+                          disabled={active_agent_action?(item.issue_agent_action)}
+                          class="mt-1 size-4 border-white/20 bg-slate-900 text-amber-300 focus:ring-amber-300"
+                        />
+                        <span class="min-w-0">
+                          <span class="block font-semibold text-white">
+                            {option.letter} — {option.label}
+                          </span>
+                          <span class="mt-1 block text-sm leading-6 text-slate-300">
+                            {option.description}
+                          </span>
+                          <span class="mt-2 block text-xs leading-5 text-slate-500">
+                            Example: {option.example}
+                          </span>
+                        </span>
+                      </label>
+
+                      <label class="block rounded-xl border border-dashed border-white/15 p-3">
+                        <span class="text-sm font-semibold text-slate-200">
+                          Or write another answer
+                        </span>
+                        <span class="mt-1 block text-xs leading-5 text-slate-500">
+                          Explain the result you want. The agent will turn it into acceptance criteria on the GitHub issue.
+                        </span>
+                        <textarea
+                          id={"custom-decision-answer-#{item.issue.id}"}
+                          name="decision[custom_answer]"
+                          rows="3"
+                          maxlength="2000"
+                          disabled={active_agent_action?(item.issue_agent_action)}
+                          placeholder="Example: Use exact exports for doc, but keep apropos namespace-only for now."
+                          class="mt-2 block w-full rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm leading-6 text-white outline-none focus:border-amber-300/60"
+                        ></textarea>
+                      </label>
+
+                      <div class="flex flex-wrap items-center gap-3">
+                        <button
+                          type="submit"
+                          disabled={active_agent_action?(item.issue_agent_action)}
+                          class="rounded-lg bg-amber-300 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                        >
+                          Apply decision
+                        </button>
+                        <span class="text-xs leading-5 text-slate-500">
+                          This queues an agent to update GitHub; it does not start implementation.
+                        </span>
+                      </div>
+                    </.form>
+                  </div>
+                <% else %>
+                  <%= if refresh_reason = decision_refresh_reason(item.issue, item.issue_agent_action) do %>
+                    <div
+                      id={"issue-decision-refresh-#{item.issue.id}"}
+                      class="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.07] p-4"
+                    >
+                      <p class="text-xs font-semibold uppercase tracking-wide text-amber-200">
+                        <%= if refresh_reason == :issue_changed do %>
+                          Issue changed since this decision was prepared
+                        <% else %>
+                          Decision choices need a refresh
+                        <% end %>
+                      </p>
+                      <p class="mt-2 text-sm leading-6 text-slate-200">
+                        <%= if refresh_reason == :issue_changed do %>
+                          GitHub has newer issue content, so these choices may no longer be correct. Run Prepare issue again to analyze the current version before deciding.
+                        <% else %>
+                          This completed result has no valid structured choices, possibly because it was created before they were required. Run Prepare issue again to get a clear question, 2–4 alternatives, and an example for each one.
+                        <% end %>
+                      </p>
+                      <button
+                        type="button"
+                        phx-click="run-agent-action"
+                        phx-value-action-key="prepare_issue"
+                        phx-value-target-id={item.issue.id}
+                        disabled={active_agent_action?(item.issue_agent_action)}
+                        class="mt-3 rounded-lg bg-amber-300 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                      >
+                        Refresh decision choices
+                      </button>
+                    </div>
+                  <% end %>
+                  <div
+                    :if={
+                      agent_action_private_summary(item.issue_agent_action) &&
+                        is_nil(decision_refresh_reason(item.issue, item.issue_agent_action))
+                    }
+                    class="mt-4 rounded-xl border border-violet-400/20 bg-violet-400/[0.06] p-4"
+                  >
+                    <p class="text-xs font-semibold uppercase tracking-wide text-violet-300">
+                      Private agent result · {agent_action_outcome(item.issue_agent_action)}
+                    </p>
+                    <p class="mt-2 text-sm leading-6 text-slate-200">
+                      {agent_action_private_summary(item.issue_agent_action)}
+                    </p>
+                  </div>
+                <% end %>
+
+                <details
+                  :if={
+                    agent_action_result_items(item.issue_agent_action, "github_changes") != [] or
+                      agent_action_result_items(item.issue_agent_action, "evidence") != []
+                  }
+                  id={"agent-action-details-#{item.issue_agent_action.id}"}
+                  phx-mounted={JS.ignore_attributes("open")}
+                  class="mt-3 text-xs text-slate-400"
+                >
+                  <summary class="cursor-pointer font-medium text-slate-300">
+                    Action details
+                  </summary>
+                  <ul class="mt-2 list-disc space-y-1 pl-5">
+                    <li :for={
+                      change <-
+                        agent_action_result_items(item.issue_agent_action, "github_changes")
+                    }>
+                      {change}
+                    </li>
+                    <li :for={
+                      evidence <- agent_action_result_items(item.issue_agent_action, "evidence")
+                    }>
+                      {evidence}
+                    </li>
+                  </ul>
+                </details>
+                <p
+                  :if={agent_action_failure(item.issue_agent_action)}
+                  class="mt-3 text-xs leading-5 text-amber-300"
+                >
+                  {agent_action_failure(item.issue_agent_action)}
+                </p>
+                <div
+                  :if={
+                    item.active_job &&
+                      item.active_job.state in [
+                        "ready_for_pr",
+                        "publishing_pr",
+                        "pr_open",
+                        "publish_blocked"
+                      ]
+                  }
+                  class="mt-4 rounded-xl border border-teal-400/20 bg-teal-400/[0.06] p-4 text-sm"
+                >
+                  <p class="font-semibold text-teal-300">
+                    <%= cond do %>
+                      <% item.publication && item.publication.state == "published" -> %>
+                        PR published
+                      <% item.publication && item.publication.state == "publishing" -> %>
+                        Publishing exact verified commit…
+                      <% item.publication && item.publication.state == "blocked" -> %>
+                        PR verification needs attention
+                      <% true -> %>
+                        Waiting for publication
+                    <% end %>
+                  </p>
+                  <p class="mt-1 text-slate-400">
+                    {item.active_job.result_commit_count} committed change(s) verified against <span class="font-mono">{String.slice(item.active_job.result_base_sha, 0, 8)}</span>.
+                    Head <span class="font-mono">{String.slice(item.active_job.result_head_sha, 0, 8)}</span>.
+                  </p>
+                  <%= cond do %>
+                    <% item.publication && item.publication.state == "published" -> %>
+                      <a
+                        id={"publication-pr-#{item.publication.id}"}
+                        href={item.publication.pr_url}
+                        target="_blank"
+                        class="mt-2 inline-block text-xs font-semibold text-teal-300 hover:text-teal-200"
+                      >
+                        Open PR #{item.publication.pr_number} ↗
+                      </a>
+                      <div class="mt-3 flex flex-wrap items-center gap-3">
+                        <button
+                          :for={action <- ActionCatalog.pull_request_actions(item.publication)}
+                          id={"agent-action-#{action.key}-pr-#{item.publication.id}"}
+                          phx-click="run-agent-action"
+                          phx-value-action-key={action.key}
+                          phx-value-target-id={item.publication.id}
+                          disabled={active_agent_action?(item.pr_agent_action)}
+                          title={action.description}
+                          class="rounded-lg bg-violet-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                        >
+                          {action.label}
+                        </button>
+                        <.work_status
+                          :if={item.pr_agent_action}
+                          state={item.pr_agent_action.state}
+                          label={agent_action_label(item.pr_agent_action)}
+                          class="rounded-lg px-3 py-2"
+                        />
+                      </div>
+                    <% item.publication && item.publication.state == "blocked" -> %>
+                      <p class="mt-2 text-xs text-amber-300">
+                        {publication_error(item.publication.last_error)} No merge can occur; retry after correcting the cause.
+                      </p>
+                      <button
+                        id={"retry-publication-#{item.publication.id}"}
+                        phx-click="retry-publication"
+                        phx-value-publication-id={item.publication.id}
+                        class="mt-3 rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/15"
+                      >
+                        Retry publishing
+                      </button>
+                    <% item.publication && item.publication.state == "publishing" -> %>
+                      <p class="mt-2 text-xs text-slate-500">
+                        PtcManager is publishing the exact verified commit through its isolated broker.
+                      </p>
+                    <% agent_publication?(item) -> %>
+                      <p class="mt-2 text-xs text-slate-500">
+                        Waiting for GitHub to report the agent-created PR for this exact branch and commit.
+                      </p>
+                    <% @publication_enabled -> %>
+                      <p class="mt-2 text-xs text-slate-500">
+                        PtcManager will publish this exact commit after its local branch result is verified.
+                      </p>
+                      <p
+                        :if={item.publication && item.publication.last_error}
+                        class="mt-1 text-xs text-amber-300"
+                      >
+                        The last PR verification did not match yet. PtcManager will check again.
+                      </p>
+                    <% true -> %>
+                      <p class="mt-2 text-xs text-amber-300">
+                        Waiting safely until automatic publication is enabled.
+                      </p>
+                  <% end %>
+                </div>
+                <div
+                  :if={
+                    !item.active_job && item.publication &&
+                      item.publication.pr_state in ["merged", "closed"]
+                  }
+                  class="mt-4 rounded-xl border border-white/10 bg-white/[0.035] p-4 text-sm"
+                >
+                  <p class="font-semibold text-slate-200">
+                    Pull request {item.publication.pr_state}
+                  </p>
+                  <p class="mt-1 text-xs text-slate-500">
+                    GitHub is authoritative; this implementation no longer occupies the active queue.
+                  </p>
+                  <a
+                    href={item.publication.pr_url}
+                    target="_blank"
+                    class="mt-2 inline-block text-xs font-semibold text-teal-300 hover:text-teal-200"
+                  >
+                    Open PR #{item.publication.pr_number} ↗
+                  </a>
+                  <div class="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                      :for={action <- ActionCatalog.pull_request_actions(item.publication)}
+                      id={"agent-action-#{action.key}-pr-#{item.publication.id}"}
+                      phx-click="run-agent-action"
+                      phx-value-action-key={action.key}
+                      phx-value-target-id={item.publication.id}
+                      disabled={active_agent_action?(item.pr_agent_action)}
+                      title={action.description}
+                      class="rounded-lg bg-violet-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                    >
+                      {action.label}
+                    </button>
+                    <.work_status
+                      :if={item.pr_agent_action}
+                      state={item.pr_agent_action.state}
+                      label={agent_action_label(item.pr_agent_action)}
+                      class="rounded-lg px-3 py-2"
+                    />
+                  </div>
+                  <div
+                    :if={agent_action_private_summary(item.pr_agent_action)}
+                    class="mt-3 rounded-lg bg-violet-400/[0.06] p-3"
+                  >
+                    <p class="text-xs font-semibold text-violet-300">
+                      Private retrospective · {agent_action_outcome(item.pr_agent_action)}
+                    </p>
+                    <p class="mt-1 text-xs leading-5 text-slate-300">
+                      {agent_action_private_summary(item.pr_agent_action)}
+                    </p>
+                  </div>
+                </div>
+                <p
+                  :if={
+                    item.active_job && item.active_job.state == "awaiting_reconciliation" &&
+                      item.active_job.last_error
+                  }
+                  class="mt-3 text-xs text-amber-300"
+                >
+                  Branch verification is pending. You can retry the read-only check safely.
                 </p>
                 <p
-                  :if={item.publication && item.publication.last_error}
-                  class="mt-1 text-xs text-amber-300"
+                  :if={!item.active_job && item.latest_job && item.latest_job.last_error}
+                  class="mt-3 text-xs text-rose-300"
                 >
-                  The last PR verification did not match yet. PtcManager will check again.
+                  The last attempt stopped safely. Review the service audit log before trying again.
+                  <span class="mt-1 block break-words font-mono text-rose-200">
+                    {item.latest_job.last_error}
+                  </span>
                 </p>
-              <% true -> %>
-                <p class="mt-2 text-xs text-amber-300">
-                  Waiting safely until automatic publication is enabled.
-                </p>
-            <% end %>
+              </div>
+            </article>
           </div>
-          <div
-            :if={
-              !item.active_job && item.publication &&
-                item.publication.pr_state in ["merged", "closed"]
-            }
-            class="mt-4 rounded-xl border border-white/10 bg-white/[0.035] p-4 text-sm"
-          >
-            <p class="font-semibold text-slate-200">
-              Pull request {item.publication.pr_state}
-            </p>
-            <p class="mt-1 text-xs text-slate-500">
-              GitHub is authoritative; this implementation no longer occupies the active queue.
-            </p>
-            <a
-              href={item.publication.pr_url}
-              target="_blank"
-              class="mt-2 inline-block text-xs font-semibold text-teal-300 hover:text-teal-200"
-            >
-              Open PR #{item.publication.pr_number} ↗
-            </a>
-            <div class="mt-3 flex flex-wrap items-center gap-3">
-              <button
-                :for={action <- ActionCatalog.pull_request_actions(item.publication)}
-                id={"agent-action-#{action.key}-pr-#{item.publication.id}"}
-                phx-click="run-agent-action"
-                phx-value-action-key={action.key}
-                phx-value-target-id={item.publication.id}
-                disabled={active_agent_action?(item.pr_agent_action)}
-                title={action.description}
-                class="rounded-lg bg-violet-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-violet-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-              >
-                {action.label}
-              </button>
-              <.work_status
-                :if={item.pr_agent_action}
-                state={item.pr_agent_action.state}
-                label={agent_action_label(item.pr_agent_action)}
-                class="rounded-lg px-3 py-2"
-              />
-            </div>
-            <div
-              :if={agent_action_private_summary(item.pr_agent_action)}
-              class="mt-3 rounded-lg bg-violet-400/[0.06] p-3"
-            >
-              <p class="text-xs font-semibold text-violet-300">
-                Private retrospective · {agent_action_outcome(item.pr_agent_action)}
-              </p>
-              <p class="mt-1 text-xs leading-5 text-slate-300">
-                {agent_action_private_summary(item.pr_agent_action)}
-              </p>
-            </div>
-          </div>
-          <p
-            :if={
-              item.active_job && item.active_job.state == "awaiting_reconciliation" &&
-                item.active_job.last_error
-            }
-            class="mt-3 text-xs text-amber-300"
-          >
-            Branch verification is pending. You can retry the read-only check safely.
-          </p>
-          <p
-            :if={!item.active_job && item.latest_job && item.latest_job.last_error}
-            class="mt-3 text-xs text-rose-300"
-          >
-            The last attempt stopped safely. Review the service audit log before trying again.
-            <span class="mt-1 block break-words font-mono text-rose-200">
-              {item.latest_job.last_error}
-            </span>
-          </p>
-        </article>
+        </section>
 
         <div
-          :if={@issues == []}
+          :if={@grouped_issues == []}
           class="rounded-2xl border border-dashed border-white/10 p-10 text-center text-slate-500"
         >
           No open issues need planning.

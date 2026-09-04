@@ -1,9 +1,13 @@
 defmodule PtcManagerWeb.ConfigurationLive do
   use PtcManagerWeb, :live_view
 
+  alias PtcManager.MaintainerActions
   alias PtcManager.Operations
   alias PtcManager.Operations.Repository
+  alias PtcManager.Publications
   alias PtcManager.Repository.Health
+  alias PtcManager.Repository.MaintainerLabels
+  alias PtcManager.ReviewPolicy
   alias PtcManager.CapacitySettings
 
   @impl true
@@ -126,6 +130,43 @@ defmodule PtcManagerWeb.ConfigurationLive do
   def handle_event("remove-repository", _params, socket),
     do: {:noreply, put_flash(socket, :error, "Confirm the repository before removing it.")}
 
+  def handle_event("add-maintainer-label", %{"label" => params}, socket) do
+    with {repository_id, ""} <- Integer.parse(params["repository_id"] || ""),
+         %Repository{} = repository <- Operations.get_repository(repository_id),
+         {:ok, labels} <- MaintainerLabels.add(repository, params["name"], params["role"]),
+         {:ok, _repository} <-
+           Operations.update_maintainer_labels(repository_id, labels, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(
+         :info,
+         "Added #{params["name"]}. It must already exist on GitHub for the toggle to work."
+       )
+       |> load_configuration()}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, label_error(reason))}
+      _invalid -> {:noreply, put_flash(socket, :error, label_error(:invalid_label_name))}
+    end
+  end
+
+  def handle_event("remove-maintainer-label", %{"id" => id, "name" => name}, socket) do
+    with {repository_id, ""} <- Integer.parse(id),
+         %Repository{} = repository <- Operations.get_repository(repository_id),
+         {:ok, _repository} <-
+           Operations.update_maintainer_labels(
+             repository_id,
+             MaintainerLabels.remove(repository, name),
+             socket.assigns.actor
+           ) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "#{name} is no longer a maintainer label here. GitHub is unchanged.")
+       |> load_configuration()}
+    else
+      _invalid -> {:noreply, put_flash(socket, :error, "That label could not be removed.")}
+    end
+  end
+
   def handle_event("save-capacity", %{"capacity" => params}, socket) do
     case CapacitySettings.update(params) do
       {:ok, _setting} ->
@@ -184,11 +225,45 @@ defmodule PtcManagerWeb.ConfigurationLive do
 
     assign(socket,
       remove_repository: remove_repository,
+      repositories: repositories,
       capacity_setting: CapacitySettings.current(),
+      agent_actions_enabled: MaintainerActions.enabled?(),
+      dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
+      agent_pr_enabled:
+        Application.get_env(:ptc_manager, :implementation_agent_publishes_pr, false),
+      publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false),
+      pr_reconcile_enabled:
+        Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
+          Publications.agent_reconciliation_needed?(),
       repository_health:
         Enum.map(repositories, &Health.summarize(&1, Map.fetch!(availability, &1.id)))
     )
   end
+
+  def maintainer_labels(repository), do: MaintainerLabels.list(repository)
+
+  defp label_error(:invalid_label_role), do: "Choose either badge or park."
+
+  defp label_error(:reserved_label_name),
+    do: "Names starting with ptc: belong to PtcManager's own display projection."
+
+  defp label_error(:label_already_configured), do: "That label is already configured here."
+  defp label_error(:too_many_labels), do: "Twenty maintainer labels per repository is the limit."
+
+  defp label_error(_reason),
+    do:
+      "Use 1 to 50 characters from letters, digits, spaces, and . _ / : - for a GitHub label name."
+
+  def sync_label(%{sync_status: "syncing"}), do: "syncing"
+  def sync_label(%{sync_status: "ok"}), do: "connected"
+  def sync_label(%{sync_status: "error"}), do: "needs attention"
+  def sync_label(_repository), do: "not synchronized"
+
+  def sync_classes(%{sync_status: "ok"}), do: "text-teal-300"
+  def sync_classes(%{sync_status: "error"}), do: "text-rose-300"
+  def sync_classes(_repository), do: "text-amber-300"
+
+  def required_reviews(repository), do: ReviewPolicy.default_count(repository)
 
   def health_classes(:ready), do: "bg-teal-400/15 text-teal-200"
   def health_classes(:attention), do: "bg-amber-400/15 text-amber-200"

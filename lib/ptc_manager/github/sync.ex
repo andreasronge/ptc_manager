@@ -49,13 +49,26 @@ defmodule PtcManager.GitHub.Sync do
 
     with {:ok, remote_issues} <- Gateway.call(client, :list_open_issues, [syncing_repository]),
          {:ok, missing_issues} <- fetch_missing_issues(syncing_repository, remote_issues, client) do
-      persist_snapshot(syncing_repository, remote_issues, missing_issues)
+      persist_snapshot(syncing_repository, remote_issues, missing_issues, viewer_login(client))
     else
       {:error, reason} -> mark_failed(syncing_repository, reason)
     end
   end
 
-  defp persist_snapshot(repository, remote_issues, missing_issues) do
+  # Who PtcManager reads GitHub as. A failure here must not fail the sync: the
+  # console simply shows no author badges until the identity is known again.
+  defp viewer_login(client) do
+    {module, arity} = if is_atom(client), do: {client, 0}, else: {client.__struct__, 1}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :viewer_login, arity) do
+      case Gateway.call(client, :viewer_login, []) do
+        {:ok, login} when is_binary(login) and login != "" -> login
+        _unavailable -> nil
+      end
+    end
+  end
+
+  defp persist_snapshot(repository, remote_issues, missing_issues, viewer_login) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
@@ -98,7 +111,8 @@ defmodule PtcManager.GitHub.Sync do
           |> Repository.changeset(%{
             sync_status: "ok",
             last_synced_at: now,
-            last_sync_error: nil
+            last_sync_error: nil,
+            github_viewer_login: viewer_login || repository.github_viewer_login
           })
           |> Repo.update!()
 

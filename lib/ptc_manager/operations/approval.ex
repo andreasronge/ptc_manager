@@ -1,6 +1,17 @@
 defmodule PtcManager.Operations.Approval do
+  @moduledoc """
+  One maintainer decision to start implementing one issue.
+
+  A prepared approval freezes the proposal it was made from. A direct one has no
+  proposal at all: the maintainer looked at the issue and decided it is small
+  enough that the preparation round would only be overhead. Every other
+  deterministic gate is identical.
+  """
+
   use Ecto.Schema
   import Ecto.Changeset
+
+  @decisions ~w(start_implementation start_implementation_direct)
 
   schema "approvals" do
     field :decision, :string
@@ -27,15 +38,14 @@ defmodule PtcManager.Operations.Approval do
       :proposal_digest,
       :approved_at
     ])
-    |> validate_required([
-      :proposal_id,
-      :decision,
-      :actor,
-      :source_updated_at,
-      :source_digest,
-      :proposal_digest,
-      :approved_at
-    ])
-    |> validate_inclusion(:decision, ["start_implementation"])
+    |> validate_required([:decision, :actor, :source_updated_at, :source_digest, :approved_at])
+    |> validate_inclusion(:decision, @decisions)
+    |> require_proposal()
+  end
+
+  defp require_proposal(changeset) do
+    if get_field(changeset, :decision) == "start_implementation_direct",
+      do: changeset,
+      else: validate_required(changeset, [:proposal_id, :proposal_digest])
   end
 end

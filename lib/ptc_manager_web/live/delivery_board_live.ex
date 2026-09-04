@@ -1,37 +1,23 @@
 defmodule PtcManagerWeb.DeliveryBoardLive do
   use PtcManagerWeb, :live_view
 
+  import PtcManagerWeb.RetrospectiveComponents, only: [retrospective: 1]
+
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
+  alias PtcManager.Operations.DeliveryLane
+  alias PtcManager.Operations.PrPublication
+  alias PtcManagerWeb.AgentCancel
+  alias PtcManagerWeb.RetrospectiveComponents
 
   @lane_definitions [
-    %{
-      key: :queued,
-      title: "Queued",
-      subtitle: "Approved · waiting for capacity",
-      color: "bg-sky-400"
-    },
-    %{
-      key: :working,
-      title: "In progress",
-      subtitle: "Agent, verification, or publishing",
-      color: "bg-teal-400"
-    },
-    %{
-      key: :stuck,
-      title: "Needs attention",
-      subtitle: "Failure, conflict, or decision",
-      color: "bg-amber-400"
-    },
-    %{
-      key: :ready,
-      title: "Ready to merge",
-      subtitle: "Clean checks and no conflicts",
-      color: "bg-emerald-400"
-    }
+    %{key: :queued, subtitle: "Approved · waiting for capacity", color: "bg-sky-400"},
+    %{key: :working, subtitle: "Agent, verification, or publishing", color: "bg-teal-400"},
+    %{key: :stuck, subtitle: "Failure, conflict, or decision", color: "bg-amber-400"},
+    %{key: :ready, subtitle: "Clean checks and no conflicts", color: "bg-emerald-400"}
   ]
 
   @impl true
@@ -49,6 +35,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      |> assign(:repositories, Operations.list_repositories())
      |> assign(:now, DateTime.utc_now())
      |> assign(:lane_definitions, @lane_definitions)
+     |> assign(:cancel_agent_job_id, nil)
      |> load_board()}
   end
 
@@ -81,6 +68,24 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   @impl true
+  def handle_event("confirm-cancel-agent", %{"job-id" => job_id}, socket) do
+    {:noreply, assign(socket, :cancel_agent_job_id, job_id)}
+  end
+
+  def handle_event("dismiss-cancel-agent", _params, socket) do
+    {:noreply, assign(socket, :cancel_agent_job_id, nil)}
+  end
+
+  def handle_event("cancel-agent", %{"job-id" => job_id}, socket) do
+    {kind, message} = AgentCancel.cancel(job_id, socket.assigns.actor)
+
+    {:noreply,
+     socket
+     |> assign(:cancel_agent_job_id, nil)
+     |> put_flash(kind, message)
+     |> load_board()}
+  end
+
   def handle_event(
         "run-agent-action",
         %{"action-key" => action_key, "target-id" => target_id},
@@ -114,30 +119,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
         %{"source-action-id" => source_action_id, "suggestion-index" => suggestion_index},
         socket
       ) do
-    with {source_action_id, ""} <- Integer.parse(source_action_id),
-         {suggestion_index, ""} <- Integer.parse(suggestion_index),
-         {:ok, _action} <-
-           MaintainerActions.enqueue_retrospective_issue(
-             source_action_id,
-             suggestion_index,
-             socket.assigns.actor
-           ) do
-      MaintainerActionPoller.wake()
+    {kind, message} =
+      RetrospectiveComponents.queue_issue(
+        source_action_id,
+        suggestion_index,
+        socket.assigns.actor
+      )
 
-      {:noreply,
-       socket
-       |> put_flash(:info, "Approved follow-up queued for GitHub issue creation.")
-       |> load_board()}
-    else
-      {:error, :suggestion_already_handled} ->
-        {:noreply, put_flash(socket, :info, "That follow-up is already queued or handled.")}
-
-      {:error, :agent_action_already_active} ->
-        {:noreply, put_flash(socket, :error, "Another PR action is already queued or running.")}
-
-      _error ->
-        {:noreply, put_flash(socket, :error, "The follow-up issue could not be queued.")}
-    end
+    {:noreply, socket |> put_flash(kind, message) |> load_board()}
   end
 
   def lane_items(lanes, key) do
@@ -162,6 +151,11 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def linked_issues(item), do: Map.get(item, :linked_issues, [])
+
+  def cancellable_agent?(item), do: item.managed? and AgentCancel.cancellable?(item)
+
+  def confirming_cancel?(job_id, %{active_job: %{id: id}}), do: job_id == Integer.to_string(id)
+  def confirming_cancel?(_job_id, _item), do: false
 
   def status_label(state) do
     case state do
@@ -241,6 +235,17 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "pr_retrospective"))
   end
 
+  @doc """
+  True when this pull request's own retrospective asked for follow-up work.
+
+  The implementation agent adds the label when its retrospective lists untracked
+  work, so the badge is GitHub's answer rather than PtcManager's guess.
+  """
+  def follow_up_suggested?(%{publication: %PrPublication{} = publication}),
+    do: PrPublication.follow_up_suggested?(publication)
+
+  def follow_up_suggested?(_item), do: false
+
   def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
     do: true
 
@@ -317,80 +322,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def queue_feedback(_item), do: nil
-
-  def retrospective_suggestions(%{state: "done", result_summary: body})
-      when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body),
-         suggestions when is_list(suggestions) <- result["suggestions"] do
-      Enum.with_index(suggestions)
-    else
-      _result -> []
-    end
-  end
-
-  def retrospective_suggestions(_action), do: []
-
-  def retrospective_summary(%{state: "done", result_summary: body}) when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body),
-         summary when is_binary(summary) <- result["private_summary"] do
-      summary
-    else
-      _result -> nil
-    end
-  end
-
-  def retrospective_summary(_action), do: nil
-
-  def suggestion_action(item, source_action_id, suggestion_index) do
-    Enum.find(item.pr_retrospective_issue_actions, fn action ->
-      action.target_snapshot["source_action_id"] == source_action_id and
-        action.target_snapshot["suggestion_index"] == suggestion_index
-    end)
-  end
-
-  def suggestion_action_active?(%{state: state})
-      when state in ["queued", "running", "sync_pending"],
-      do: true
-
-  def suggestion_action_active?(_action), do: false
-
-  def suggestion_action_label(%{state: "queued"}), do: "Issue queued"
-  def suggestion_action_label(%{state: "running"}), do: "Creating issue"
-  def suggestion_action_label(%{state: "sync_pending"}), do: "Checking GitHub"
-  def suggestion_action_label(%{state: "failed"}), do: "Try again"
-  def suggestion_action_label(_action), do: "Add as GitHub issue"
-
-  def created_issue_number(%{state: "done", result_summary: body}) when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body),
-         [number] <- result["created_issue_numbers"],
-         true <- is_integer(number) do
-      number
-    else
-      _result -> nil
-    end
-  end
-
-  def created_issue_number(_action), do: nil
-
-  def suggestion_not_created?(%{state: "done", result_summary: body}) when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body) do
-      result["outcome"] == "no-followups"
-    else
-      _result -> false
-    end
-  end
-
-  def suggestion_not_created?(_action), do: false
-
-  def issue_url(item, issue_number) do
-    "https://github.com/#{item.issue.repository.github_owner}/#{item.issue.repository.github_name}/issues/#{issue_number}"
-  end
-
-  def category_label(category) when is_binary(category) do
-    category |> String.replace("-", " ") |> String.capitalize()
-  end
-
-  def category_label(_category), do: "Follow-up"
 
   def health_badges(item) do
     publication = item.publication
@@ -538,7 +469,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     lanes =
       @lane_definitions
       |> Map.new(&{&1.key, []})
-      |> Map.merge(Enum.group_by(items, &lane_for/1))
+      |> Map.merge(Enum.group_by(items, &DeliveryLane.lane_for/1))
 
     assign(socket, lanes: lanes, item_count: length(items))
   end
@@ -558,35 +489,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  defp lane_for(item) do
-    cond do
-      job_state(item) == "queued" -> :queued
-      stuck?(item) -> :stuck
-      ready?(item) -> :ready
-      true -> :working
-    end
-  end
-
-  defp stuck?(item) do
-    job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
-      match?(%{checks_state: "failure"}, item.publication) or
-      match?(%{mergeability: "conflicting"}, item.publication) or
-      match?(
-        %{draft: false, checks_state: checks_state, mergeability: "blocked"}
-        when checks_state in ["success", "none"],
-        item.publication
-      )
-  end
-
-  defp ready?(item) do
-    open_pull_request?(item) and
-      match?(%{state: "published", pr_state: "open", draft: false}, item.publication) and
-      item.publication.checks_state in ["success", "none"] and
-      item.publication.mergeability == "mergeable"
-  end
-
-  defp open_pull_request?(%{publication: %{state: "published", pr_state: "open"}}), do: true
-  defp open_pull_request?(_item), do: false
+  def lane_title(key), do: DeliveryLane.label(key)
 
   defp job_state(%{active_job: %{state: state}}), do: state
   defp job_state(_item), do: nil

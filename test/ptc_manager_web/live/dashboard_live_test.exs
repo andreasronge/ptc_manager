@@ -23,10 +23,25 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     IssueDependency,
     Job,
     PrPublication,
+    Repository,
     WorktreeAllocation
   }
 
   alias PtcManager.Repo
+
+  defmodule PlanningLabelWriter do
+    @behaviour PtcManager.GitHub.IssueLabelWriter
+
+    @impl true
+    def write(_repository, _number, operation, label) do
+      send(
+        Application.fetch_env!(:ptc_manager, :dashboard_label_test_pid),
+        {:label_written, operation, label}
+      )
+
+      :ok
+    end
+  end
 
   test "filters Planning by repository from the URL" do
     first = repository_fixture(%{github_owner: "andreas", github_name: "first"})
@@ -66,6 +81,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> live("/?repo=andreas%2Fsecond")
 
     assert has_element?(view, "#repository-selector option[selected]", "andreas/second")
+    view |> element("#planning-group-toggle-in_delivery") |> render_click()
     assert has_element?(view, "#issue-#{second_issue.id}", "Only in second")
     refute has_element?(view, "#issue-#{first_issue.id}")
     assert has_element?(view, "#agent-run-#{second_run.id}")
@@ -78,6 +94,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> live("/?repo=all")
 
     assert has_element?(all_view, "#repository-selector option[selected]", "All repositories")
+    all_view |> element("#planning-group-toggle-in_delivery") |> render_click()
     assert has_element?(all_view, "#issue-#{first_issue.id}")
     assert has_element?(all_view, "#issue-#{second_issue.id}")
     assert has_element?(all_view, "#agent-run-#{first_run.id}")
@@ -152,10 +169,14 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     })
     |> render_submit()
 
-    assert render(view) =~ "Job queued"
+    assert render(view) =~ "One implementation job is now queued"
     job = Repo.one!(Job)
     assert job.issue_id == issue.id
     assert job.required_review_count == 3
+
+    assert has_element?(view, "#planning-group-in_delivery")
+    open_issue(view, issue)
+    assert has_element?(view, "#in-delivery-#{issue.id}", "Queued")
     assert has_element?(view, "#job-review-count-#{job.id}", "3 review passes")
   end
 
@@ -169,11 +190,30 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
+    open_issue(view, issue)
     assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
 
     send(view.pid, :tick)
 
     assert has_element?(view, "#technical-evidence-#{issue.id}[phx-mounted]")
+  end
+
+  test "keeps group and card state across an unrelated broadcast", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Stay open across a reload"})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    view |> element("#toggle-issue-#{issue.id}") |> render_click()
+    view |> element("#planning-group-toggle-ready") |> render_click()
+
+    Operations.notify_changed(:test)
+
+    assert has_element?(view, "#planning-group-toggle-ready[aria-expanded=false]")
+
+    view |> element("#planning-group-toggle-ready") |> render_click()
+    assert has_element?(view, "#issue-detail-#{issue.id}")
   end
 
   test "keeps action details open and turns a marked issue decision into choices", %{conn: conn} do
@@ -243,6 +283,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> Repo.insert!()
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
 
     assert has_element?(
              view,
@@ -327,6 +368,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     |> Repo.insert!()
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
 
     assert has_element?(
              view,
@@ -389,6 +431,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     |> Repo.update!()
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
 
     assert has_element?(
              view,
@@ -436,7 +479,9 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     })
     |> Repo.insert!()
 
-    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
+    html = render(view)
 
     assert html =~ "Codex rejected the configured result format"
     refute html =~ "secret issue body"
@@ -480,6 +525,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     issue = issue_fixture(repository, %{title: "Explain this issue privately"})
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
 
     assert has_element?(
              view,
@@ -503,6 +549,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     issue = issue_fixture(repository, %{title: "Challenge the issue before implementation"})
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
 
     assert has_element?(
              view,
@@ -518,39 +565,6 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     action = Repo.one!(AgentAction)
     assert action.action_key == "review_issue"
     assert action.target_id == issue.id
-  end
-
-  test "reports publication writes and read-only PR tracking independently", %{conn: conn} do
-    previous_publication = Application.get_env(:ptc_manager, :publication_enabled)
-    previous_reconciliation = Application.get_env(:ptc_manager, :pr_reconcile_enabled)
-
-    on_exit(fn ->
-      Application.put_env(:ptc_manager, :publication_enabled, previous_publication)
-      Application.put_env(:ptc_manager, :pr_reconcile_enabled, previous_reconciliation)
-    end)
-
-    Application.put_env(:ptc_manager, :publication_enabled, true)
-    Application.put_env(:ptc_manager, :pr_reconcile_enabled, false)
-
-    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
-
-    assert html =~ "Publication enabled · exact-SHA GitHub App broker"
-    assert html =~ "Read-only PR status tracking disabled"
-    refute html =~ "without GitHub writes"
-  end
-
-  test "reports agent-owned PR creation as an enabled GitHub write path", %{conn: conn} do
-    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
-    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
-
-    on_exit(fn ->
-      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
-    end)
-
-    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/")
-
-    assert html =~ "New jobs use agent publication · authenticated worker creates the PR"
-    refute html =~ "without GitHub writes"
   end
 
   test "shows who an agent is working for and since when", %{conn: conn} do
@@ -644,6 +658,8 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       })
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    assert has_element?(view, "#planning-group-blocked #issue-#{dependent.id}")
+    open_issue(view, dependent)
 
     assert has_element?(
              view,
@@ -695,7 +711,8 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
-    assert has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
+    assert has_element?(view, "#planning-group-blocked #issue-#{dependent.id}")
+    refute has_element?(view, "#approve-issue-#{dependent.id}")
 
     blocker
     |> Issue.changeset(%{state: "closed", github_state_reason: "completed"})
@@ -710,6 +727,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     Operations.notify_changed(:test)
 
+    assert has_element?(view, "#planning-group-ready #issue-#{dependent.id}")
     refute has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
   end
 
@@ -735,13 +753,16 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
+    assert has_element?(view, "#planning-group-needs_decision #issue-#{dependent.id}")
+    open_issue(view, dependent)
+
     assert has_element?(
              view,
              "#issue-dependencies-#{dependent.id}",
              "A prerequisite was closed without being completed"
            )
 
-    assert has_element?(view, "#approve-issue-#{dependent.id}[disabled]")
+    refute has_element?(view, "#approve-issue-#{dependent.id}")
   end
 
   test "shows dependency overflow and keeps approval disabled", %{conn: conn} do
@@ -751,13 +772,16 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
+    assert has_element?(view, "#planning-group-blocked #issue-#{issue.id}")
+    open_issue(view, issue)
+
     assert has_element?(
              view,
              "#issue-dependencies-#{issue.id}",
              "More than 100 blockers were declared"
            )
 
-    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+    refute has_element?(view, "#approve-issue-#{issue.id}")
   end
 
   test "shows an exact dependency cycle and keeps every issue blocked", %{conn: conn} do
@@ -772,14 +796,18 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
+    assert has_element?(view, "#planning-group-needs_decision #issue-#{first.id}")
+    assert has_element?(view, "#planning-group-needs_decision #issue-#{second.id}")
+    open_issue(view, first)
+
     assert has_element?(
              view,
              "#issue-dependency-cycle-#{first.id}",
              "owner/application#201 → owner/application#202 → owner/application#201"
            )
 
-    assert has_element?(view, "#approve-issue-#{first.id}[disabled]")
-    assert has_element?(view, "#approve-issue-#{second.id}[disabled]")
+    refute has_element?(view, "#approve-issue-#{first.id}")
+    refute has_element?(view, "#approve-issue-#{second.id}")
   end
 
   test "keeps approval disabled for a cycle whose direct blocker is completed", %{conn: conn} do
@@ -798,9 +826,10 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     dependency_fixture(second, first, repository)
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, first)
 
     assert has_element?(view, "#issue-dependency-cycle-#{first.id}")
-    assert has_element?(view, "#approve-issue-#{first.id}[disabled]")
+    refute has_element?(view, "#approve-issue-#{first.id}")
   end
 
   test "shows an unsynchronized dependency projection and keeps approval disabled", %{conn: conn} do
@@ -815,13 +844,16 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     proposal_fixture(issue)
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
+    assert has_element?(view, "#planning-group-blocked #issue-#{issue.id}")
+    open_issue(view, issue)
+
     assert has_element?(
              view,
              "#issue-dependencies-#{issue.id}",
              "Dependency state has not been synchronized yet"
            )
 
-    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+    refute has_element?(view, "#approve-issue-#{issue.id}")
   end
 
   test "explains blockers hidden from the GitHub reader", %{conn: conn} do
@@ -831,13 +863,16 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
+    assert has_element?(view, "#planning-group-blocked #issue-#{issue.id}")
+    open_issue(view, issue)
+
     assert has_element?(
              view,
              "#issue-dependencies-#{issue.id}",
              "GitHub reports 2 blocker(s) that this account cannot inspect"
            )
 
-    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+    refute has_element?(view, "#approve-issue-#{issue.id}")
   end
 
   test "shows only active agents and limits recent history to five ended runs", %{conn: conn} do
@@ -929,6 +964,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
+    open_issue(view, issue)
     assert has_element?(view, "#issue-#{issue.id}", "Waiting for publication")
     assert render(view) =~ "2 committed change(s) verified"
     assert render(view) =~ "Waiting safely until automatic publication is enabled"
@@ -946,6 +982,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
+    open_issue(view, issue)
     assert has_element?(view, "#issue-#{issue.id}", "PR published")
 
     assert has_element?(
@@ -990,6 +1027,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
+    open_issue(view, issue)
     assert has_element?(view, "#retry-publication-#{publication.id}", "Retry publishing")
 
     view
@@ -1104,6 +1142,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       |> authenticated_conn()
       |> live(~p"/")
 
+    open_issue(view, issue)
     assert has_element?(view, "#reconcile-job-#{job.id}", "Check committed branch")
     assert render(view) =~ "Branch verification is pending"
   end
@@ -1158,8 +1197,321 @@ defmodule PtcManagerWeb.DashboardLiveTest do
            |> render() =~ "2m 0s"
   end
 
+  test "groups the inbox by what the maintainer can do next", %{conn: conn} do
+    repository = repository_fixture()
+    ready = issue_fixture(repository, %{title: "Ready to start now"})
+    proposal_fixture(ready)
+
+    unprepared = issue_fixture(repository, %{title: "Nobody looked at this"})
+
+    deciding =
+      issue_fixture(repository, %{
+        title: "Waiting on an answer",
+        workflow_label: "ptc:needs-decision"
+      })
+
+    proposal_fixture(deciding, %{readiness: "needs_information"})
+
+    stale =
+      issue_fixture(repository, %{
+        title: "Nothing happened for a month",
+        github_updated_at: DateTime.add(DateTime.utc_now(), -40 * 86_400, :second)
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#planning-group-ready #issue-#{ready.id}", "Ready to start now")
+
+    assert has_element?(
+             view,
+             "#planning-group-needs_decision #issue-#{deciding.id}",
+             "Waiting on an answer"
+           )
+
+    assert has_element?(
+             view,
+             "#planning-group-not_prepared #issue-#{unprepared.id}",
+             "Nobody looked at this"
+           )
+
+    assert has_element?(view, "#planning-group-stale", "Stale")
+    refute has_element?(view, "#planning-group-stale #issue-#{stale.id}")
+
+    assert has_element?(view, "#planning-group-toggle-ready", "Ready to start")
+    refute has_element?(view, "#planning-group-waiting")
+
+    view |> element("#planning-group-toggle-stale") |> render_click()
+
+    assert has_element?(
+             view,
+             "#planning-group-stale #issue-#{stale.id}",
+             "Nothing happened for a month"
+           )
+  end
+
+  test "a collapsed card shows both ages and hides the detail until asked", %{conn: conn} do
+    repository = repository_fixture()
+    now = DateTime.utc_now()
+
+    issue =
+      issue_fixture(repository, %{
+        title: "Show me how old this is",
+        github_created_at: DateTime.add(now, -12 * 86_400, :second),
+        github_updated_at: DateTime.add(now, -3 * 3_600, :second)
+      })
+
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#issue-#{issue.id}", "opened 12 d ago")
+    assert has_element?(view, "#issue-#{issue.id}", "updated 3 h ago")
+    refute has_element?(view, "#issue-detail-#{issue.id}")
+
+    view |> element("#toggle-issue-#{issue.id}") |> render_click()
+
+    assert has_element?(view, "#issue-detail-#{issue.id}", "In plain language")
+
+    view |> element("#toggle-issue-#{issue.id}") |> render_click()
+
+    refute has_element?(view, "#issue-detail-#{issue.id}")
+  end
+
+  test "an issue whose pull request a person opened by hand counts as in delivery", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{number: 640, title: "Fixed by a hand-made PR"})
+    proposal_fixture(issue)
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    head_sha = String.duplicate("b", 40)
+
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      repository_id: repository.id,
+      source: "external",
+      state: "published",
+      idempotency_key: String.duplicate("e", 64),
+      fencing_token: 0,
+      branch_name: "hand/fix-640",
+      base_sha: String.duplicate("a", 40),
+      head_sha: head_sha,
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 0,
+      pr_number: 981,
+      pr_url: "https://github.com/#{repository.github_owner}/#{repository.github_name}/pull/981",
+      remote_head_sha: head_sha,
+      remote_base_sha: String.duplicate("a", 40),
+      head_ref: "hand/fix-640",
+      head_repository: "#{repository.github_owner}/#{repository.github_name}",
+      title: "Fix 640 by hand",
+      pr_state: "open",
+      pr_checked_at: now,
+      linked_issue_numbers: %{"numbers" => [640]}
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    refute has_element?(view, "#planning-group-ready #issue-#{issue.id}")
+
+    view |> element("#planning-group-toggle-in_delivery") |> render_click()
+
+    assert has_element?(view, "#planning-group-in_delivery #issue-#{issue.id}")
+    assert has_element?(view, "#in-delivery-#{issue.id}[href='/board']")
+  end
+
+  test "marks an issue somebody else opened, and stays quiet until the identity is known", %{
+    conn: conn
+  } do
+    repository = repository_fixture()
+
+    mine = issue_fixture(repository, %{title: "I opened this", github_author_login: "andreas"})
+
+    theirs =
+      issue_fixture(repository, %{
+        title: "Somebody else opened this",
+        github_author_login: "guest"
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    refute has_element?(view, "#issue-#{theirs.id}-external")
+
+    repository
+    |> Repository.changeset(%{github_viewer_login: "andreas"})
+    |> Repo.update!()
+
+    Operations.notify_changed(:test)
+
+    assert has_element?(view, "#issue-#{theirs.id}-external", "External · @guest")
+    refute has_element?(view, "#issue-#{mine.id}-external")
+  end
+
+  test "a parked label moves an issue to Waiting and shows the configured labels", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{
+          "labels" => [
+            %{"name" => "wait", "role" => "park"},
+            %{"name" => "ux", "role" => "badge"}
+          ]
+        }
+      })
+
+    issue =
+      issue_fixture(repository, %{
+        title: "Parked until the design lands",
+        github_labels: %{"names" => ["needs-design", "ux", "wait"]}
+      })
+
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    refute has_element?(view, "#planning-group-ready #issue-#{issue.id}")
+
+    view |> element("#planning-group-toggle-waiting") |> render_click()
+
+    assert has_element?(view, "#planning-group-waiting #issue-#{issue.id}")
+    assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=true]", "wait")
+    assert has_element?(view, "#toggle-label-#{issue.id}-ux[aria-pressed=true]", "ux")
+    refute has_element?(view, "#issue-#{issue.id}", "needs-design")
+
+    view |> element("#toggle-issue-#{issue.id}") |> render_click()
+
+    assert has_element?(view, "#issue-detail-#{issue.id}", "GitHub labels: needs-design")
+  end
+
+  test "toggles one configured label straight from a Planning card", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :issue_label_writer)
+    Application.put_env(:ptc_manager, :dashboard_label_test_pid, self())
+    Application.put_env(:ptc_manager, :issue_label_writer, PlanningLabelWriter)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :issue_label_writer, previous)
+      Application.delete_env(:ptc_manager, :dashboard_label_test_pid)
+    end)
+
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+      })
+
+    issue = issue_fixture(repository, %{title: "Park this one"})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=false]", "wait")
+
+    view |> element("#toggle-label-#{issue.id}-wait") |> render_click()
+
+    assert_receive {:label_written, :add, "wait"}
+    assert render_async(view) =~ "Added wait on GitHub"
+  end
+
+  test "reports a refused label write without echoing the wrapper output", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+      })
+
+    issue = issue_fixture(repository, %{title: "No wrapper on this host"})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    view |> element("#toggle-label-#{issue.id}-wait") |> render_click()
+
+    assert render_async(view) =~ "This host cannot write GitHub labels"
+  end
+
+  test "starts a small issue directly from a card that has no analysis", %{conn: conn} do
+    repository = repository_fixture(%{required_pre_pr_reviews: 2})
+    issue = issue_fixture(repository, %{title: "Rename one confusing button"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#planning-group-not_prepared #issue-#{issue.id}")
+    assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")
+    refute has_element?(view, "#fix-directly-issue-#{issue.id}[disabled]")
+
+    view
+    |> form("#approve-form-issue-#{issue.id}", %{
+      "issue-id" => Integer.to_string(issue.id),
+      "review-count" => "1"
+    })
+    |> render_submit(%{"direct" => "true"})
+
+    assert render(view) =~ "Started directly, without a preparation round."
+
+    job = Repo.one!(Job)
+    assert job.issue_id == issue.id
+    assert job.required_review_count == 1
+    assert is_nil(Repo.get!(PtcManager.Operations.Approval, job.approval_id).proposal_id)
+  end
+
+  test "offers no direct start for an issue GitHub says cannot start", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{workflow_label: "ptc:blocked"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#planning-group-blocked #issue-#{issue.id}")
+    refute has_element?(view, "#fix-directly-issue-#{issue.id}")
+  end
+
+  test "offers a retrospective for a merged pull request that suggested follow-ups", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Shipped with loose ends"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {job, publication} = publication_fixture(job, "published")
+
+    job |> Job.changeset(%{state: "done", ended_at: DateTime.utc_now()}) |> Repo.update!()
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{
+        pr_state: "merged",
+        labels: %{"names" => ["ptc:follow-up"]},
+        pr_checked_at: DateTime.utc_now()
+      })
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#planning-group-follow_ups #follow-up-#{publication.id}",
+             "Shipped with loose ends"
+           )
+
+    assert has_element?(view, "#run-retrospective-#{publication.id}", "Run retrospective")
+
+    view |> element("#dismiss-follow-up-#{publication.id}") |> render_click()
+
+    assert render(view) =~ "The pull request and its labels are unchanged."
+    refute has_element?(view, "#follow-up-#{publication.id}")
+    assert Repo.get!(PrPublication, publication.id).follow_up_dismissed_at
+  end
+
   defp authenticated_conn(conn) do
     init_test_session(conn, %{authenticated: true, actor: "maintainer"})
+  end
+
+  # Planning shows a compact card until the maintainer asks for the rest, and
+  # keeps the groups that need no decision closed. Tests that read the detail
+  # have to open the same two things a person would.
+  defp open_issue(view, issue) do
+    Enum.each([:in_delivery, :waiting, :stale], fn group ->
+      if has_element?(view, "#planning-group-toggle-#{group}[aria-expanded=false]") do
+        view |> element("#planning-group-toggle-#{group}") |> render_click()
+      end
+    end)
+
+    view |> element("#toggle-issue-#{issue.id}") |> render_click()
+    view
   end
 
   defp dependency_fixture(issue, blocker, repository) do

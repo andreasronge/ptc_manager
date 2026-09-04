@@ -8,6 +8,15 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   alias PtcManager.Repo
   alias PtcManager.TestScenario
 
+  defmodule ClosingHerdrClient do
+    def list_agents, do: {:ok, []}
+
+    def close_pane(pane_id) do
+      send(Application.fetch_env!(:ptc_manager, :board_cancel_test_pid), {:closed, pane_id})
+      :ok
+    end
+  end
+
   test "separates queued, working, and blocked deliveries", %{conn: conn} do
     queued = approved_job("Queue this change")
     working = approved_job("Implement this change") |> set_job_state("working")
@@ -325,6 +334,68 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, card, "Merge conflicts must be resolved")
 
     assert has_element?(view, "#repair-and-merge-pr-#{publication.id}", "Fix and merge")
+  end
+
+  test "cancels a running implementation agent in two deliberate steps", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :herdr_client)
+    Application.put_env(:ptc_manager, :board_cancel_test_pid, self())
+    Application.put_env(:ptc_manager, :herdr_client, ClosingHerdrClient)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :herdr_client, previous)
+      Application.delete_env(:ptc_manager, :board_cancel_test_pid)
+    end)
+
+    job = approved_job("Stop this agent") |> set_job_state("working")
+    run = blocked_agent_run(job, "impl_j#{job.id}_f1")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#cancel-agent-#{job.id}")
+    refute has_element?(view, "#confirm-cancel-agent-#{job.id}")
+
+    view |> element("#cancel-agent-#{job.id}") |> render_click()
+
+    assert has_element?(view, "#confirm-cancel-agent-#{job.id}", "Confirm cancel")
+    assert Repo.get!(Job, job.id).state == "working"
+
+    view |> element("#confirm-cancel-agent-#{job.id}") |> render_click()
+
+    assert_receive {:closed, "w1:p1"}
+    assert Repo.get!(Job, job.id).state == "cancelled"
+    assert Repo.get!(AgentRun, run.id).state == "lost"
+    refute has_element?(view, "#board-job-#{job.id}")
+  end
+
+  test "offers no cancel once PtcManager owns the remaining delivery steps", %{conn: conn} do
+    job = approved_job("Verify this change") |> set_job_state("verifying_result")
+    blocked_agent_run(job, "impl_j#{job.id}_f1")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{job.id}")
+    refute has_element?(view, "#cancel-agent-#{job.id}")
+  end
+
+  test "marks a pull request whose retrospective asked for follow-up work", %{conn: conn} do
+    job = approved_job("Shipped with loose ends") |> set_job_state("working")
+    publication = publication_fixture(job, "success", "mergeable")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    refute has_element?(view, "#follow-ups-suggested-board-job-#{job.id}")
+
+    publication
+    |> PrPublication.changeset(%{labels: %{"names" => ["ptc:follow-up"]}})
+    |> Repo.update!()
+
+    Operations.notify_changed(:test)
+
+    assert has_element?(
+             view,
+             "#follow-ups-suggested-board-job-#{job.id}",
+             "Follow-ups suggested"
+           )
   end
 
   defp approved_job(title) do

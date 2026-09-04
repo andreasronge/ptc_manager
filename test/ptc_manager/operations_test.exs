@@ -1,8 +1,50 @@
 defmodule PtcManager.OperationsTest do
   use PtcManager.DataCase, async: false
 
+  defmodule ClosingHerdrClient do
+    def list_agents, do: {:ok, []}
+
+    def close_pane(pane_id) do
+      send(Application.fetch_env!(:ptc_manager, :operations_cancel_test_pid), {:closed, pane_id})
+      :ok
+    end
+  end
+
+  defmodule FailingHerdrClient do
+    def list_agents, do: {:ok, []}
+    def close_pane(_pane_id), do: {:error, :herdr_timeout}
+  end
+
+  defmodule RecordingLabelWriter do
+    @behaviour PtcManager.GitHub.IssueLabelWriter
+
+    @impl true
+    def write(repository, number, operation, label) do
+      send(
+        Application.fetch_env!(:ptc_manager, :operations_label_test_pid),
+        {:label_written, repository, number, operation, label}
+      )
+
+      Application.get_env(:ptc_manager, :operations_label_result, :ok)
+    end
+  end
+
+  defmodule LabelGitHubClient do
+    @behaviour PtcManager.GitHub
+
+    @impl true
+    def list_open_issues(_repository), do: {:ok, []}
+
+    @impl true
+    def get_issue(_repository, _number),
+      do: Application.fetch_env!(:ptc_manager, :operations_label_remote_issue)
+  end
+
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
+  alias PtcManager.GitHub.IssueLabels
+  alias PtcManager.Operations.PlanningGroup
+  alias PtcManager.Operations.Proposal
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -408,6 +450,343 @@ defmodule PtcManager.OperationsTest do
     end
   end
 
+  describe "cancel_running_job/2" do
+    setup do
+      previous = Application.get_env(:ptc_manager, :herdr_client)
+      Application.put_env(:ptc_manager, :operations_cancel_test_pid, self())
+      Application.put_env(:ptc_manager, :herdr_client, ClosingHerdrClient)
+
+      on_exit(fn ->
+        Application.put_env(:ptc_manager, :herdr_client, previous)
+        Application.delete_env(:ptc_manager, :operations_cancel_test_pid)
+      end)
+
+      :ok
+    end
+
+    test "ends the run, keeps the worktree for attention, and closes the pane" do
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("working")
+
+      assert {:ok, cancelled} = Operations.cancel_running_job(job.id, "andreas")
+      assert cancelled.state == "cancelled"
+      assert cancelled.ended_at
+      assert is_nil(cancelled.lease_expires_at)
+      assert cancelled.last_error =~ "Cancelled by andreas"
+
+      ended_run = Repo.get!(AgentRun, run.id)
+      assert ended_run.state == "lost"
+      assert ended_run.status_text == "Cancelled by maintainer"
+      assert ended_run.ended_at
+
+      preserved = Repo.get!(WorktreeAllocation, allocation.id)
+      assert preserved.state == "attention"
+      assert preserved.last_error =~ "partial worktree was preserved"
+
+      audit = Repo.get_by!(AuditEvent, action: "job.cancelled")
+      assert audit.details["agent_run_id"] == run.id
+      assert audit.details["herdr_pane"] == "w7:p1"
+      assert audit.details["worktree_preserved"] == true
+
+      assert_receive {:closed, "w7:p1"}
+    end
+
+    test "reports a pane that refused to close while keeping the job cancelled" do
+      Application.put_env(:ptc_manager, :herdr_client, FailingHerdrClient)
+      %{job: job} = running_job_fixture("blocked")
+
+      assert {:ok, cancelled, {:pane_close_failed, :herdr_timeout}} =
+               Operations.cancel_running_job(job.id, "andreas")
+
+      assert cancelled.state == "cancelled"
+    end
+
+    test "refuses the deterministic phases PtcManager owns itself" do
+      %{job: job} = running_job_fixture("verifying_result")
+
+      assert {:error, :job_not_cancellable} = Operations.cancel_running_job(job.id, "andreas")
+      assert Repo.get!(Job, job.id).state == "verifying_result"
+    end
+
+    test "the dispatcher does not pick a cancelled job up again" do
+      %{job: job} = running_job_fixture("working")
+
+      assert {:ok, _cancelled} = Operations.cancel_running_job(job.id, "andreas")
+      assert is_nil(Operations.next_queued_job())
+    end
+  end
+
+  describe "approve_issue_directly/3" do
+    test "starts implementation without any proposal" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{title: "One-line typo"})
+
+      assert {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas", 1)
+      assert job.state == "queued"
+      assert job.required_review_count == 1
+
+      approval = Repo.get!(Approval, job.approval_id)
+      assert approval.decision == "start_implementation_direct"
+      assert is_nil(approval.proposal_id)
+      assert is_nil(approval.proposal_digest)
+      assert approval.source_digest == issue.content_digest
+      assert approval.source_updated_at == issue.github_updated_at
+
+      audit = Repo.get_by!(AuditEvent, action: "issue.approved_for_direct_implementation")
+      assert audit.target_id == job.id
+      assert is_nil(audit.details["proposal_id"])
+    end
+
+    test "uses the repository default review count when none is chosen" do
+      repository = repository_fixture(%{required_pre_pr_reviews: 3})
+      issue = issue_fixture(repository)
+
+      assert {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+      assert job.required_review_count == 3
+    end
+
+    test "keeps every deterministic gate except the two proposal checks" do
+      repository = repository_fixture()
+
+      claimed =
+        issue_fixture(repository, %{github_assignees: %{"logins" => ["someone-else"]}})
+
+      assert {:error, :issue_claimed} =
+               Operations.approve_issue_directly(claimed.id, "andreas")
+
+      closed = issue_fixture(repository, %{state: "closed"})
+      assert {:error, :issue_closed} = Operations.approve_issue_directly(closed.id, "andreas")
+
+      blocked = issue_fixture(repository, %{workflow_label: "ptc:blocked"})
+
+      assert {:error, :issue_workflow_not_ready} =
+               Operations.approve_issue_directly(blocked.id, "andreas")
+
+      conflicted = issue_fixture(repository, %{workflow_label_conflict: true})
+
+      assert {:error, :issue_workflow_not_ready} =
+               Operations.approve_issue_directly(conflicted.id, "andreas")
+
+      dependent = issue_fixture(repository)
+      blocker = issue_fixture(repository)
+      dependency_fixture(dependent, blocker, repository)
+
+      assert {:error, :issue_dependencies_unresolved} =
+               Operations.approve_issue_directly(dependent.id, "andreas")
+
+      assert {:error, :invalid_review_count} =
+               Operations.approve_issue_directly(issue_fixture(repository).id, "andreas", 4)
+    end
+
+    test "removing the repository also removes an approval that had no proposal" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+      assert {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+
+      job |> Job.changeset(%{state: "cancelled", ended_at: now()}) |> Repo.update!()
+
+      Repo.update_all(PtcManager.Automations.Invocation, set: [state: "cancelled"])
+
+      assert {:ok, _repository} = Operations.remove_repository(repository.id)
+      assert Repo.aggregate(Approval, :count, :id) == 0
+    end
+  end
+
+  describe "IssueLabels.toggle/4" do
+    setup do
+      previous_writer = Application.get_env(:ptc_manager, :issue_label_writer)
+      previous_client = Application.get_env(:ptc_manager, :github_client)
+      Application.put_env(:ptc_manager, :operations_label_test_pid, self())
+      Application.put_env(:ptc_manager, :issue_label_writer, RecordingLabelWriter)
+      Application.put_env(:ptc_manager, :github_client, LabelGitHubClient)
+
+      on_exit(fn ->
+        Application.put_env(:ptc_manager, :issue_label_writer, previous_writer)
+        Application.put_env(:ptc_manager, :github_client, previous_client)
+
+        for key <- [
+              :operations_label_test_pid,
+              :operations_label_result,
+              :operations_label_remote_issue
+            ],
+            do: Application.delete_env(:ptc_manager, key)
+      end)
+
+      :ok
+    end
+
+    test "adds a configured label, audits it, and keeps the analysis fresh" do
+      %{repository: repository, issue: issue, proposal: proposal} = labelled_issue()
+      remote_answers(repository, issue, ["wait"])
+
+      assert {:ok, :added} = IssueLabels.toggle(repository, issue, "wait", "andreas")
+      assert_receive {:label_written, full_name, number, :add, "wait"}
+      assert full_name == "#{repository.github_owner}/#{repository.github_name}"
+      assert number == issue.number
+
+      audit = Repo.get_by!(AuditEvent, action: "issue.label_added")
+      assert audit.details["label"] == "wait"
+      assert audit.actor == "andreas"
+
+      synced = Repo.get!(Issue, issue.id)
+      assert synced.github_labels == %{"names" => ["wait"]}
+      refute synced.content_digest == issue.content_digest
+
+      restamped = Repo.get!(Proposal, proposal.id)
+      assert restamped.source_digest == synced.content_digest
+      assert restamped.source_updated_at == synced.github_updated_at
+      assert Repo.get_by(AuditEvent, action: "proposal.restamped_after_label_change")
+    end
+
+    test "removes a label that GitHub already reports" do
+      %{repository: repository, issue: issue} = labelled_issue(github_labels: ["wait"])
+      remote_answers(repository, issue, [])
+
+      assert {:ok, :removed} = IssueLabels.toggle(repository, issue, "wait", "andreas")
+      assert_receive {:label_written, _full_name, _number, :remove, "wait"}
+      assert Repo.get_by!(AuditEvent, action: "issue.label_removed")
+    end
+
+    test "a real edit during the write leaves the analysis stale" do
+      %{repository: repository, issue: issue, proposal: proposal} = labelled_issue()
+      remote_answers(repository, issue, ["wait"], title: "Somebody retitled it")
+
+      assert {:ok, :added} = IssueLabels.toggle(repository, issue, "wait", "andreas")
+
+      assert Repo.get!(Issue, issue.id).title == "Somebody retitled it"
+      assert Repo.get!(Proposal, proposal.id).source_digest == proposal.source_digest
+      refute Repo.get_by(AuditEvent, action: "proposal.restamped_after_label_change")
+    end
+
+    test "refuses anything the maintainer did not configure" do
+      %{repository: repository, issue: issue} = labelled_issue()
+
+      assert {:error, :label_not_configured} =
+               IssueLabels.toggle(repository, issue, "random", "andreas")
+
+      assert {:error, :reserved_label_name} =
+               IssueLabels.toggle(repository, issue, "ptc:ready", "andreas")
+
+      closed = issue |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+      assert {:error, :issue_closed} = IssueLabels.toggle(repository, closed, "wait", "andreas")
+
+      refute_receive {:label_written, _repository, _number, _operation, _label}
+    end
+
+    test "a failed wrapper writes nothing and reports its exit status" do
+      %{repository: repository, issue: issue} = labelled_issue()
+
+      Application.put_env(
+        :ptc_manager,
+        :operations_label_result,
+        {:error, {:label_wrapper_exit, 1}}
+      )
+
+      assert {:error, {:label_wrapper_exit, 1}} =
+               IssueLabels.toggle(repository, issue, "wait", "andreas")
+
+      assert Repo.get!(Issue, issue.id).github_labels == %{"names" => []}
+      refute Repo.get_by(AuditEvent, action: "issue.label_added")
+    end
+  end
+
+  describe "PlanningGroup.classify/2" do
+    @now ~U[2026-09-04 12:00:00.000000Z]
+
+    test "work that already started outranks every other signal" do
+      assert group(planning_item(active_job: %{state: "working"})) == :in_delivery
+
+      assert group(
+               planning_item(
+                 issue: %{workflow_label: "ptc:needs-decision"},
+                 publication: %{state: "published", pr_state: "open"}
+               )
+             ) == :in_delivery
+
+      assert group(planning_item(external_publication: %{pr_number: 7})) == :in_delivery
+    end
+
+    test "a parked label moves an otherwise ready issue out of the way" do
+      item = planning_item(issue: %{github_labels: %{"names" => ["wait", "bug"]}})
+
+      assert group(item) == :ready
+      assert group(item, parked_labels: ["wait"]) == :waiting
+    end
+
+    test "anything asking a question of the maintainer needs a decision" do
+      assert group(planning_item(issue: %{workflow_label: "ptc:needs-decision"})) ==
+               :needs_decision
+
+      assert group(planning_item(issue: %{workflow_label_conflict: true})) == :needs_decision
+      assert group(planning_item(dependency_cycle: [{"owner/repo", 1}])) == :needs_decision
+
+      assert group(
+               planning_item(
+                 dependencies: [
+                   %{lookup_state: "resolved", state: "closed", state_reason: "not_planned"}
+                 ]
+               )
+             ) == :needs_decision
+
+      assert group(planning_item(issue_agent_action: %{state: "failed"})) == :needs_decision
+    end
+
+    test "a fresh, ready, unclaimed issue is ready to start" do
+      assert group(planning_item()) == :ready
+      assert group(planning_item(issue: %{workflow_label: "ptc:ready"})) == :ready
+    end
+
+    test "GitHub or a dependency can block an otherwise ready issue" do
+      assert group(planning_item(issue: %{workflow_label: "ptc:blocked"})) == :blocked
+      assert group(planning_item(issue: %{dependencies_projected: false})) == :blocked
+      assert group(planning_item(issue: %{dependency_overflow: true})) == :blocked
+      assert group(planning_item(issue: %{dependency_unknown_count: 2})) == :blocked
+
+      assert group(
+               planning_item(
+                 dependencies: [%{lookup_state: "resolved", state: "open", state_reason: nil}]
+               )
+             ) == :blocked
+    end
+
+    test "everything else has no usable analysis yet" do
+      assert group(planning_item(proposal: nil)) == :not_prepared
+      assert group(planning_item(proposal: %{readiness: "needs_information"})) == :not_prepared
+
+      assert group(planning_item(issue: %{github_assignees: %{"logins" => ["x"]}})) ==
+               :not_prepared
+    end
+
+    test "staleness replaces only the two groups nobody is waiting on" do
+      old = DateTime.add(@now, -31 * 86_400, :second)
+
+      assert group(planning_item(proposal: nil, issue: %{github_updated_at: old})) == :stale
+
+      assert group(planning_item(issue: %{workflow_label: "ptc:blocked", github_updated_at: old})) ==
+               :stale
+
+      assert group(planning_item(issue: %{github_updated_at: old})) == :ready
+
+      assert group(
+               planning_item(
+                 issue: %{workflow_label: "ptc:needs-decision", github_updated_at: old}
+               )
+             ) == :needs_decision
+    end
+
+    test "display order puts what you can do next first" do
+      assert PlanningGroup.order() == [
+               :ready,
+               :needs_decision,
+               :follow_ups,
+               :not_prepared,
+               :blocked,
+               :in_delivery,
+               :waiting,
+               :stale
+             ]
+    end
+  end
+
   describe "create_agent_run/1" do
     test "requires an end time for a terminal run" do
       worker = worker_fixture()
@@ -516,6 +895,142 @@ defmodule PtcManager.OperationsTest do
 
       assert AgentHealth.needing_attention([healthy, blocked], @now) == [blocked]
     end
+  end
+
+  defp labelled_issue(opts \\ []) do
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+      })
+
+    body = "Decide later body"
+
+    issue =
+      issue_fixture(repository, %{
+        title: "Decide later",
+        body: body,
+        body_digest: PtcManager.GitHub.IssueSnapshot.digest(body),
+        github_labels: %{"names" => Keyword.get(opts, :github_labels, [])}
+      })
+
+    %{repository: repository, issue: issue, proposal: proposal_fixture(issue)}
+  end
+
+  defp remote_answers(repository, issue, label_names, opts \\ []) do
+    Application.put_env(
+      :ptc_manager,
+      :operations_label_remote_issue,
+      {:ok,
+       %{
+         "number" => issue.number,
+         "title" => Keyword.get(opts, :title, issue.title),
+         "html_url" => issue.html_url,
+         "body" => issue.body,
+         "state" => "open",
+         "labels" => Enum.map(label_names, &%{"name" => &1}),
+         "updated_at" =>
+           issue.github_updated_at |> DateTime.add(5, :second) |> DateTime.to_iso8601(),
+         "repository" => %{
+           "full_name" => "#{repository.github_owner}/#{repository.github_name}"
+         }
+       }}
+    )
+  end
+
+  defp group(item, opts \\ []),
+    do: PlanningGroup.classify(item, Keyword.put_new(opts, :now, @now))
+
+  # A dashboard item as `Operations.dashboard_issues/1` builds it, with only the
+  # fields the classifier reads. An `:issue` or `:proposal` override is merged
+  # into the ready default rather than replacing it.
+  defp planning_item(overrides \\ []) do
+    issue = %{
+      state: "open",
+      workflow_label: nil,
+      workflow_label_conflict: false,
+      github_assignees: %{"logins" => []},
+      github_assignment_projected: true,
+      dependencies_projected: true,
+      dependency_overflow: false,
+      dependency_unknown_count: 0,
+      github_labels: %{"names" => []},
+      content_digest: "digest",
+      github_updated_at: @now
+    }
+
+    overrides = Map.new(overrides)
+    issue = Map.merge(issue, Map.get(overrides, :issue, %{}))
+
+    # The default analysis stays fresh for whatever issue the test asked for, so
+    # a test about age is not accidentally a test about a stale proposal.
+    proposal = %{
+      readiness: "ready",
+      source_digest: issue.content_digest,
+      source_updated_at: issue.github_updated_at
+    }
+
+    %{
+      issue: issue,
+      proposal: merged_proposal(proposal, overrides),
+      active_job: Map.get(overrides, :active_job),
+      publication: Map.get(overrides, :publication),
+      external_publication: Map.get(overrides, :external_publication),
+      issue_agent_action: Map.get(overrides, :issue_agent_action),
+      dependencies: Map.get(overrides, :dependencies, []),
+      dependency_cycle: Map.get(overrides, :dependency_cycle)
+    }
+  end
+
+  defp merged_proposal(_proposal, %{proposal: nil}), do: nil
+
+  defp merged_proposal(proposal, overrides),
+    do: Map.merge(proposal, Map.get(overrides, :proposal, %{}))
+
+  defp running_job_fixture(state) do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    worker = worker_fixture(%{worker_key: "herdr:cancel"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: state,
+        fencing_token: 1,
+        lease_owner: worker.worker_key,
+        lease_expires_at: DateTime.add(now, 600, :second),
+        started_at: DateTime.add(now, -600, :second),
+        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+      })
+      |> Repo.update!()
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "active",
+        path: "/tmp/cancelled-agent-worktree",
+        last_used_at: now
+      })
+      |> Repo.insert!()
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "working",
+        started_at: job.started_at,
+        last_heartbeat_at: now,
+        herdr_workspace: "ptc-cancel",
+        herdr_pane: "w7:p1",
+        fencing_token: 1
+      })
+
+    %{job: job, run: run, allocation: allocation, worker: worker}
   end
 
   defp dependency_fixture(issue, blocker, repository) do

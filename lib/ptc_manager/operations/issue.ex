@@ -18,6 +18,9 @@ defmodule PtcManager.Operations.Issue do
     field :dependencies_projected, :boolean, default: false
     field :body_digest, :string
     field :content_digest, :string
+    field :github_author_login, :string
+    field :github_labels, :map, default: %{"names" => []}
+    field :github_created_at, :utc_datetime_usec
     field :github_updated_at, :utc_datetime_usec
 
     belongs_to :repository, PtcManager.Operations.Repository
@@ -47,6 +50,9 @@ defmodule PtcManager.Operations.Issue do
       :dependencies_projected,
       :body_digest,
       :content_digest,
+      :github_author_login,
+      :github_labels,
+      :github_created_at,
       :github_updated_at
     ])
     |> validate_required([

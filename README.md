@@ -9,12 +9,14 @@ authority. The product principles are in [PLAN.md](PLAN.md).
 
 The console has six views:
 
-- **Planning** — the issue backlog with private summaries, the canonical
-  `ptc:ready`, `ptc:blocked`, and `ptc:needs-decision` labels, `Blocked by
-  #<number>` dependencies, and the contextual issue actions;
+- **Planning** — the issue backlog grouped by what you can do next, with
+  private summaries, the canonical `ptc:ready`, `ptc:blocked`, and
+  `ptc:needs-decision` labels, `Blocked by #<number>` dependencies, your own
+  triage labels, and the contextual issue actions;
 - **Delivery** — the approval-to-merge Kanban fed by read-only GitHub check,
-  status, draft, and mergeability signals, with **Fix** and **Fix and merge**
-  actions and an **Approve for merge** decision bound to the exact PR version;
+  status, draft, and mergeability signals, with **Fix**, **Fix and merge**, and
+  **Cancel agent** actions and an **Approve for merge** decision bound to the
+  exact PR version;
 - **Updates** — private daily briefings of merged pull requests and commits;
 - **Operations** — machine capacity, the agent and expensive-command timeline,
   and bounded read-only terminal panels;
@@ -126,7 +128,10 @@ PTC_DEMO_MODE=true PTC_DATABASE_PATH=tmp/ptc_manager_demo.db PORT=4100 mix phx.s
 ```
 
 Open <http://localhost:4100>, sign in with `ptc-manager-dev`, and check
-Planning, Delivery, and Operations. No GitHub, Herdr, or LLM credentials are
+Planning, Delivery, and Operations. The demo seed fills every Planning group, so
+the groups, the collapsed cards, the two ages, the external-author badge, the
+triage-label chips, and one suggested follow-up are all visible without GitHub.
+Label writes are deliberately refused in demo mode. No GitHub, Herdr, or LLM credentials are
 used, even if effectful PtcManager variables exist in your shell. To restore
 the exact starting state, stop the demo Phoenix server, run the reset command
 again, and then restart it. The reset also refuses to continue when `lsof`
@@ -134,7 +139,8 @@ reports that another process still has the demo database open.
 
 The authenticated routes are:
 
-- `/` — Planning backlog and maintainer actions;
+- `/` — Planning backlog and maintainer actions. See
+  [The Planning page](#the-planning-page);
 - `/board` — active delivery Kanban;
 - `/updates` — easy-to-read daily briefings of merged pull requests and dated direct commits;
 - `/operations` — three tabs. **Now** shows live CPU, memory, build-disk and
@@ -155,7 +161,10 @@ The authenticated routes are:
   run history, versions, and cross-repository copying. `/automations/new`
   creates a paused custom automation with a key derived from its name;
 - `/configuration` — safe registration and health checks for dedicated repository
-  checkouts, with direct links to each repository's prompt and automation settings.
+  checkouts, your own triage labels per repository, the **Integrations** section
+  describing what GitHub synchronization, publication, private analysis, and the
+  dispatcher currently reach, and direct links to each repository's prompt and
+  automation settings.
 
 To choose a different local password:
 
@@ -342,6 +351,97 @@ same file-based structured-result protocol as other generic actions. Its result
 is stored only as a private PtcManager proposal; it cannot update GitHub. Queued,
 running, failed, and completed investigations remain visible in Operations.
 
+### The Planning page
+
+Planning groups the open backlog by what the maintainer can do next, instead of
+by GitHub's update time. The groups, in order, are **Ready to start**, **Needs
+your decision**, **Suggested follow-ups**, **Not prepared**, **Blocked**, **In
+delivery**, **Waiting**, and **Stale**. An empty group is not drawn. In
+delivery, Waiting, and Stale start collapsed; every other group starts open.
+Both the group and the card state live in the page's own memory, so a GitHub
+poll or an agent heartbeat cannot close what you just opened.
+
+A card is compact until you press **Expand**: repository and number, title, the
+badge row, the two ages, and one primary action. The primary action is the
+approve form in Ready to start and Not prepared, the first contextual action in
+Needs your decision, Blocked, Waiting, and Stale, and a link to the Delivery
+board — carrying that pull request's lane — in In delivery.
+
+Ages read "opened 12 d ago · updated 3 h ago", with the absolute UTC time in the
+tooltip. **Updated** means any GitHub activity on the issue, including changes
+PtcManager's own agents made.
+
+An issue counts as **In delivery** when PtcManager started it, when its managed
+pull request is open, or when an imported open pull request lists its number as
+a closing reference. A pull request you opened by hand therefore takes its issue
+out of the decision queue exactly as an agent-created one does.
+
+**Stale** means no GitHub activity for 30 days, and only replaces Blocked or Not
+prepared. A stale but ready issue stays in Ready to start, because it can still
+be started with one click.
+
+**Fix directly** starts implementation without a preparation round. Every
+deterministic gate still applies — the issue must be open, unclaimed, projected,
+free of a conflicting or blocking workflow label, and free of unresolved
+dependencies — and only the two proposal checks are skipped. The click is the
+approval, and it freezes the same review count as **Approve and start**. An
+ambiguous issue then ends in the Delivery board's **Needs attention** lane like
+any other job; use **Prepare issue** first when you are not sure the issue says
+what it wants.
+
+Each card shows who opened the issue only when that is somebody else: an
+**External · @login** badge appears when GitHub's issue author differs from the
+account behind `GITHUB_READ_TOKEN`. Nothing is shown until a synchronization has
+recorded that identity, which the Configuration page reports per repository.
+Follow-up issues PtcManager creates are opened through the worker's own `gh`, so
+GitHub attributes them to the maintainer and they never carry the badge.
+
+#### Your own triage labels
+
+Each repository can configure a short list of GitHub labels with a role. A
+**badge** label is shown on the card. A **park** label additionally moves the
+issue into the **Waiting** group; it is a placement, never an approval gate, and
+an issue can still be approved while parked. Names starting with `ptc:` are
+refused, because those three labels are PtcManager's own display projection.
+Configure the list under **Configuration → Your triage labels**; the label must
+already exist in the GitHub repository, because PtcManager never creates one.
+
+Configured labels render on every Planning card as toggle chips: filled when
+GitHub reports the label, outlined when it does not. One click adds or removes
+it. This is the single narrow exception to PtcManager's read-only GitHub client:
+a root-owned wrapper runs `gh issue edit` as the worker with exactly one
+repository, issue number, operation, and label, on a button press, with no agent
+and no new credential. A host without that wrapper reports that it cannot write
+labels and changes nothing.
+
+Writing a label moves GitHub's `updated_at`, which is part of the issue content
+digest, so the latest analysis would otherwise go stale and **Approve and
+start** would disappear for a change you just made deliberately. After the
+re-synchronization PtcManager therefore re-stamps that analysis, but only when
+the title, body, state, close reason, workflow label, assignees, and dependency
+projection are all unchanged. A comment posted in the few seconds between the
+label write and the re-synchronization is missed by that comparison and leaves
+the analysis fresh; synchronize GitHub again if that matters.
+
+#### Suggested follow-ups
+
+The implementation prompt asks every pull-request description for a
+`## Retrospective` section, and asks the agent to add the label `ptc:follow-up`
+to its own pull request when that section lists untracked follow-up work. Those
+pull requests appear in the **Suggested follow-ups** group, before and after
+merge, with two buttons: **Run retrospective** queues a read-only agent that
+proposes concrete follow-ups, and **Dismiss** removes the card without touching
+GitHub. Each proposed follow-up then has its own **Add as GitHub issue** button;
+nothing reaches GitHub without that second, explicit click. A card leaves the
+group when it is dismissed or when a retrospective reports that there is nothing
+to follow up.
+
+Nothing runs a retrospective automatically. The Delivery board shows the same
+**Follow-ups suggested** badge and offers the retrospective in every lane for a
+labelled pull request. The signal exists only while implementation agents
+publish their own pull requests: in broker mode the agent has no GitHub access
+and cannot set the label.
+
 Pressing any maintainer-action button stores that prompt in the durable queue and authorizes one
 agent to use the configured checkout and authenticated `gh` CLI. The initial
 catalog contains:
@@ -355,6 +455,14 @@ catalog contains:
   option or enter a custom answer; a queued agent then records that decision on
   GitHub and normally moves the issue to `ptc:ready`. Choices are tied to the
   exact synchronized issue version, so an edit requires a fresh analysis;
+- **Cancel agent**, on the Delivery board's **In progress** and **Needs
+  attention** cards and next to a running agent on Operations. It ends one
+  implementation agent the maintainer no longer wants to wait for: the job ends
+  as cancelled, its run ends, its Herdr pane is closed, and its partial worktree
+  is kept for attention rather than discarded. It takes two clicks and refuses
+  the deterministic phases that follow an agent — reconciliation, verification,
+  and publication — because PtcManager, not an agent, owns those. If the pane
+  cannot be closed, the console says so and the job stays cancelled;
 - **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr
@@ -779,6 +887,7 @@ sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bi
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-claude-trust /usr/local/bin/ptc-manager-worker-claude-trust
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-codex-arm /usr/local/bin/ptc-manager-worker-codex-arm
+sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-gh-label /usr/local/bin/ptc-manager-worker-gh-label
 sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
@@ -923,7 +1032,9 @@ that no longer exists inside a healthy worktree root, or that a credential-free
 Git check proves clean with no commit beyond the default branch, is removed
 automatically because nothing can be lost. Every other retained worktree waits
 until the maintainer chooses **Discard worktree** on the dashboard, which
-force-removes it and records who discarded it.
+force-removes it and records who discarded it. Cancelling a running agent uses
+the same path: its worktree is retained for attention so the partial work can be
+inspected before it is discarded.
 The separate `ptc-manager-publish` group lets only the coordinator and Git verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
 The coordinator and generic Herdr agents exchange task, schema, and result files

@@ -10,6 +10,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.DailyDigests
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
+  alias PtcManager.Publications
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -2182,15 +2183,6 @@ defmodule PtcManager.MaintainerActionsTest do
     assert unexpected_creation.last_error =~ "canonical_retrospective_proposal_mismatch"
   end
 
-  test "does not accept new retrospective actions after the workflow is retired" do
-    repository = repository_fixture()
-    issue = issue_fixture(repository)
-    publication = retrospective_publication_fixture(issue)
-
-    assert {:error, :unknown_agent_action} =
-             MaintainerActions.enqueue("pr_retrospective", publication.id, "andreas")
-  end
-
   test "defers a retrospective when its immediate pre-action GitHub sync fails" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
@@ -2624,6 +2616,147 @@ defmodule PtcManager.MaintainerActionsTest do
 
   defp restore_test_env(key, nil), do: Application.delete_env(:ptc_manager, key)
   defp restore_test_env(key, value), do: Application.put_env(:ptc_manager, key, value)
+
+  describe "queueing a retrospective" do
+    test "a merged managed pull request accepts one through the ordinary button path" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{title: "Merged and worth a look back"})
+      publication = retrospective_publication_fixture(issue)
+
+      assert {:ok, action} =
+               MaintainerActions.enqueue("pr_retrospective", publication.id, "andreas")
+
+      assert action.action_key == "pr_retrospective"
+      assert action.target_type == "pull_request"
+      assert action.target_id == publication.id
+      assert action.state == "queued"
+    end
+
+    test "an imported pull request has no retained session to look back at" do
+      repository = repository_fixture()
+      head_sha = String.duplicate("b", 40)
+
+      external =
+        %PrPublication{}
+        |> PrPublication.changeset(%{
+          repository_id: repository.id,
+          source: "external",
+          state: "published",
+          idempotency_key: String.duplicate("9", 64),
+          fencing_token: 0,
+          branch_name: "outside/fix",
+          base_sha: String.duplicate("a", 40),
+          head_sha: head_sha,
+          diff_digest: String.duplicate("c", 64),
+          attempt_count: 0,
+          pr_number: 903,
+          pr_url: "https://github.com/example/repo/pull/903",
+          remote_head_sha: head_sha,
+          remote_base_sha: String.duplicate("a", 40),
+          head_ref: "outside/fix",
+          head_repository: "example/repo",
+          title: "Outside work",
+          pr_state: "open"
+        })
+        |> Repo.insert!()
+
+      assert {:error, :pull_request_has_no_retained_session} =
+               MaintainerActions.enqueue("pr_retrospective", external.id, "andreas")
+    end
+  end
+
+  describe "follow_up_candidates/0" do
+    test "keeps a labelled managed pull request until it is dismissed or answered" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{title: "Merged with unfinished business"})
+      publication = retrospective_publication_fixture(issue)
+
+      assert Publications.follow_up_candidates() == []
+
+      labelled =
+        publication
+        |> PrPublication.changeset(%{labels: %{"names" => ["ptc:follow-up"]}})
+        |> Repo.update!()
+
+      assert [candidate] = Publications.follow_up_candidates()
+      assert candidate.id == labelled.id
+      assert candidate.job.issue.id == issue.id
+
+      assert {:ok, dismissed} = Publications.dismiss_follow_up(labelled.id, "andreas")
+      assert dismissed.follow_up_dismissed_at
+      assert Publications.follow_up_candidates() == []
+
+      audit = Repo.get_by!(AuditEvent, action: "pull_request.follow_up_dismissed")
+      assert audit.details["pr_number"] == labelled.pr_number
+    end
+
+    test "a retrospective that found nothing stops being a suggestion" do
+      repository = repository_fixture()
+      issue = issue_fixture(repository, %{title: "Nothing left to do"})
+
+      publication =
+        issue
+        |> retrospective_publication_fixture()
+        |> PrPublication.changeset(%{labels: %{"names" => ["ptc:follow-up"]}})
+        |> Repo.update!()
+
+      assert [_candidate] = Publications.follow_up_candidates()
+
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "pr_retrospective",
+        target_type: "pull_request",
+        target_id: publication.id,
+        target_label: "PR ##{publication.pr_number}",
+        prompt_version: 1,
+        prompt: "Review the pull request",
+        actor: "andreas",
+        state: "done",
+        attempt_count: 1,
+        requested_at: now,
+        started_at: now,
+        ended_at: now,
+        result_summary: Jason.encode!(%{"outcome" => "no-followups"})
+      })
+      |> Repo.insert!()
+
+      assert Publications.follow_up_candidates() == []
+    end
+
+    test "an imported pull request never becomes a suggestion" do
+      repository = repository_fixture()
+      head_sha = String.duplicate("b", 40)
+
+      %PrPublication{}
+      |> PrPublication.changeset(%{
+        repository_id: repository.id,
+        source: "external",
+        state: "published",
+        idempotency_key: String.duplicate("f", 64),
+        fencing_token: 0,
+        branch_name: "outside/fix",
+        base_sha: String.duplicate("a", 40),
+        head_sha: head_sha,
+        diff_digest: String.duplicate("c", 64),
+        attempt_count: 0,
+        pr_number: 902,
+        pr_url: "https://github.com/example/repo/pull/902",
+        remote_head_sha: head_sha,
+        remote_base_sha: String.duplicate("a", 40),
+        head_ref: "outside/fix",
+        head_repository: "example/repo",
+        title: "Outside work",
+        pr_state: "open",
+        labels: %{"names" => ["ptc:follow-up"]}
+      })
+      |> Repo.insert!()
+
+      assert Publications.follow_up_candidates() == []
+    end
+  end
 
   defp retrospective_publication_fixture(issue) do
     proposal_fixture(issue)

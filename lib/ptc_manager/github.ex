@@ -13,5 +13,13 @@ defmodule PtcManager.GitHub do
   @callback list_open_issues(Repository.t()) :: {:ok, [map()]} | {:error, term()}
   @callback get_issue(Repository.t(), pos_integer()) :: {:ok, map()} | {:error, term()}
 
-  @optional_callbacks get_repository: 2
+  @doc """
+  The login of the account whose token PtcManager reads GitHub with.
+
+  Planning marks an issue as external when its author is somebody else, so it
+  has to know who "me" is. GitHub answers that from the token itself.
+  """
+  @callback viewer_login() :: {:ok, String.t()} | {:error, term()}
+
+  @optional_callbacks get_repository: 2, viewer_login: 0
 end

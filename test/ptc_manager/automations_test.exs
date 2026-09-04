@@ -211,6 +211,16 @@ defmodule PtcManager.AutomationsTest do
     refute first.prompt =~ "Use a shorter maintainer explanation for future runs."
   end
 
+  test "the built-in implementation prompt asks for the follow-up label" do
+    repository = repository_fixture()
+    definition = Automations.get_definition(repository, "implement_issue")
+
+    assert definition.current_version.created_by == "system:built-in"
+
+    assert definition.current_version.prompt =~
+             "add the label `ptc:follow-up` to the pull request"
+  end
+
   test "implementation approval freezes its user-owned prompt" do
     repository = repository_fixture()
     issue = issue_fixture(repository)

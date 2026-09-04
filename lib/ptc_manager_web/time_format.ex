@@ -18,6 +18,10 @@ defmodule PtcManagerWeb.TimeFormat do
   def seconds(value),
     do: "#{div(value, 3_600)}h #{div(rem(value, 3_600), 60)}m"
 
+  @doc "The absolute UTC timestamp a maintainer can compare against GitHub."
+  def utc(nil), do: "never"
+  def utc(datetime), do: Calendar.strftime(datetime, "%Y-%m-%d %H:%M UTC")
+
   @doc "A coarse relative time such as \"12 min ago\" or \"in 3 h\"."
   def relative(_now, nil), do: nil
 

@@ -11,6 +11,7 @@ defmodule PtcManagerWeb.OperationsLive do
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.ReviewPolicy
+  alias PtcManagerWeb.AgentCancel
   alias PtcManagerWeb.TimeFormat
 
   embed_templates "operations_live/*"
@@ -51,6 +52,7 @@ defmodule PtcManagerWeb.OperationsLive do
      |> assign(:usage, nil)
      |> assign(:timeline_filter, "all")
      |> assign(:include_maintenance?, false)
+     |> assign(:cancel_agent_run_id, nil)
      |> assign(
        workers: [],
        active_runs: [],
@@ -119,6 +121,27 @@ defmodule PtcManagerWeb.OperationsLive do
   def handle_event("cancel_queued_action", %{"id" => id}, socket) do
     cancel_queued_work(socket, id, &Operations.cancel_queued_agent_action/2, "Agent action")
   end
+
+  def handle_event("confirm-cancel-agent", %{"run-id" => run_id}, socket),
+    do: {:noreply, assign(socket, :cancel_agent_run_id, run_id)}
+
+  def handle_event("dismiss-cancel-agent", _params, socket),
+    do: {:noreply, assign(socket, :cancel_agent_run_id, nil)}
+
+  def handle_event("cancel-agent", %{"job-id" => job_id}, socket) do
+    {kind, message} = AgentCancel.cancel(job_id, socket.assigns.actor)
+
+    {:noreply,
+     socket
+     |> assign(:cancel_agent_run_id, nil)
+     |> put_flash(kind, message)
+     |> load_operations()}
+  end
+
+  def cancellable_run?(%{job: job} = run), do: AgentCancel.cancellable?(job, run)
+  def cancellable_run?(_run), do: false
+
+  def confirming_run_cancel?(run_id, run), do: run_id == Integer.to_string(run.id)
 
   # Navigation ---------------------------------------------------------------
 

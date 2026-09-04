@@ -103,6 +103,87 @@ defmodule PtcManager.Publications do
     Repo.all(query) |> Repo.preload(:repository)
   end
 
+  @doc """
+  Managed pull requests whose retrospective proposed work nobody has tracked.
+
+  The signal is the `ptc:follow-up` label the implementation agent adds to its
+  own pull request. It survives the merge, because a suggestion is an issue
+  waiting to be decided, not a delivery step.
+  """
+  def follow_up_candidates do
+    PrPublication
+    |> where(
+      [publication],
+      publication.source in ["broker", "agent"] and not is_nil(publication.job_id) and
+        is_nil(publication.follow_up_dismissed_at)
+    )
+    |> order_by([publication], desc: publication.pr_checked_at, desc: publication.id)
+    |> preload(job: [:repository, :issue])
+    |> Repo.all()
+    |> Enum.filter(&PrPublication.follow_up_suggested?/1)
+    |> reject_finished_retrospectives()
+  end
+
+  @doc "Removes one follow-up suggestion from Planning without touching GitHub."
+  def dismiss_follow_up(publication_id, actor)
+      when is_integer(publication_id) and is_binary(actor) and actor != "" do
+    now = now()
+
+    outcome =
+      Repo.transaction(fn ->
+        publication = Repo.get!(PrPublication, publication_id)
+
+        updated =
+          publication
+          |> PrPublication.changeset(%{follow_up_dismissed_at: now})
+          |> Repo.update!()
+
+        insert_audit!(%{
+          actor: actor,
+          action: "pull_request.follow_up_dismissed",
+          target_type: "pr_publication",
+          target_id: publication_id,
+          details: %{"pr_number" => publication.pr_number}
+        })
+
+        updated
+      end)
+
+    notify(outcome)
+  end
+
+  # A retrospective that ran and found nothing is not a suggestion any more.
+  defp reject_finished_retrospectives([]), do: []
+
+  defp reject_finished_retrospectives(publications) do
+    ids = Enum.map(publications, & &1.id)
+
+    finished =
+      AgentAction
+      |> where(
+        [action],
+        action.target_type == "pull_request" and action.target_id in ^ids and
+          action.action_key == "pr_retrospective" and action.state == "done"
+      )
+      |> order_by([action], desc: action.id)
+      |> Repo.all()
+      |> Enum.reduce(%{}, &Map.put_new(&2, &1.target_id, &1))
+
+    Enum.reject(publications, fn publication ->
+      match?(%{}, Map.get(finished, publication.id)) and
+        no_follow_ups?(Map.get(finished, publication.id))
+    end)
+  end
+
+  defp no_follow_ups?(%{result_summary: body}) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"outcome" => "no-followups"}} -> true
+      _result -> false
+    end
+  end
+
+  defp no_follow_ups?(_action), do: false
+
   def agent_reconciliation_needed? do
     Repo.exists?(
       from job in Job,
@@ -516,7 +597,7 @@ defmodule PtcManager.Publications do
                     next_attempt_at: nil,
                     last_error: nil
                   },
-                  remote_health_attrs(result)
+                  remote_status_attrs(result)
                 )
               )
               |> Repo.update!()
@@ -870,7 +951,7 @@ defmodule PtcManager.Publications do
                     pr_url: result.pr_url,
                     last_error: nil
                   },
-                  remote_health_attrs(result)
+                  remote_status_attrs(result)
                 )
               )
               |> Repo.update!()
@@ -909,7 +990,7 @@ defmodule PtcManager.Publications do
                     pr_url: result.pr_url,
                     last_error: nil
                   },
-                  remote_health_attrs(result)
+                  remote_status_attrs(result)
                 )
               )
               |> Repo.update!()
@@ -1001,7 +1082,7 @@ defmodule PtcManager.Publications do
                     pr_url: result.pr_url,
                     last_error: nil
                   },
-                  remote_health_attrs(result)
+                  remote_status_attrs(result)
                 )
               )
               |> Repo.update!()
@@ -1160,7 +1241,7 @@ defmodule PtcManager.Publications do
         linked_issue_numbers: %{"numbers" => linked_issue_numbers(pull, repository)},
         last_error: nil
       }
-      |> Map.merge(remote_health_attrs(pull))
+      |> Map.merge(remote_status_attrs(pull))
 
     case Repo.get_by(PrPublication,
            repository_id: repository.id,
@@ -1238,7 +1319,7 @@ defmodule PtcManager.Publications do
         linked_issue_numbers: %{"numbers" => linked_issue_numbers(result, repository)},
         last_error: nil
       }
-      |> Map.merge(remote_health_attrs(result))
+      |> Map.merge(remote_status_attrs(result))
 
     publication |> PrPublication.changeset(attrs) |> Repo.update!()
   end
@@ -1392,8 +1473,9 @@ defmodule PtcManager.Publications do
       Regex.match?(~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/, result.head_repository)
   end
 
-  defp remote_health_attrs(result) do
-    Map.take(result, [
+  defp remote_status_attrs(result) do
+    result
+    |> Map.take([
       :draft,
       :mergeability,
       :mergeable_state,
@@ -1402,7 +1484,15 @@ defmodule PtcManager.Publications do
       :checks_failed,
       :checks_pending
     ])
+    |> label_attrs(result)
   end
+
+  # The follow-up signal is one label the implementation agent adds to its own
+  # pull request. It arrives on every status read, managed or imported.
+  defp label_attrs(attrs, %{labels: names}) when is_list(names),
+    do: Map.put(attrs, :labels, %{"names" => names})
+
+  defp label_attrs(attrs, _result), do: attrs
 
   defp valid_agent_result?(result) do
     valid_remote_status?(result) and is_integer(result[:pr_number]) and result.pr_number > 0 and

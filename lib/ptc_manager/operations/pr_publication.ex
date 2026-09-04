@@ -41,6 +41,8 @@ defmodule PtcManager.Operations.PrPublication do
     field :checks_failed, :integer, default: 0
     field :checks_pending, :integer, default: 0
     field :linked_issue_numbers, :map, default: %{"numbers" => []}
+    field :labels, :map, default: %{"names" => []}
+    field :follow_up_dismissed_at, :utc_datetime_usec
 
     belongs_to :job, PtcManager.Operations.Job
     belongs_to :repository, PtcManager.Operations.Repository
@@ -86,7 +88,9 @@ defmodule PtcManager.Operations.PrPublication do
       :checks_total,
       :checks_failed,
       :checks_pending,
-      :linked_issue_numbers
+      :linked_issue_numbers,
+      :labels,
+      :follow_up_dismissed_at
     ])
     |> validate_required([
       :state,
@@ -108,6 +112,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_number(:checks_failed, greater_than_or_equal_to: 0)
     |> validate_number(:checks_pending, greater_than_or_equal_to: 0)
     |> validate_linked_issue_numbers()
+    |> validate_labels()
     |> validate_number(:pr_number, greater_than: 0)
     |> validate_length(:idempotency_key, is: 64)
     |> validate_length(:branch_name, max: 240)
@@ -170,6 +175,28 @@ defmodule PtcManager.Operations.PrPublication do
     else
       validate_required(changeset, [:job_id])
     end
+  end
+
+  @doc "The label names GitHub last reported on this pull request."
+  def label_names(%__MODULE__{labels: %{"names" => names}}) when is_list(names), do: names
+  def label_names(%__MODULE__{}), do: []
+
+  @doc "True when the implementation agent marked its retrospective as unfinished business."
+  def follow_up_suggested?(%__MODULE__{} = publication),
+    do: "ptc:follow-up" in label_names(publication)
+
+  defp validate_labels(changeset) do
+    validate_change(changeset, :labels, fn :labels, value ->
+      case value do
+        %{"names" => names} ->
+          if is_list(names) and Enum.all?(names, &is_binary/1),
+            do: [],
+            else: [labels: "must contain label names"]
+
+        _other ->
+          [labels: "must contain a names list"]
+      end
+    end)
   end
 
   defp validate_linked_issue_numbers(changeset) do

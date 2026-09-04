@@ -57,6 +57,13 @@ herdr_sync_interval_ms =
 
 herdr_run_as_user = if(demo_mode, do: nil, else: System.get_env("PTC_HERDR_RUN_AS_USER"))
 
+# The label chips are the one GitHub write PtcManager makes itself. Demo mode
+# must never reach `gh`, so it gets the refusing writer instead of the wrapper.
+issue_label_writer =
+  if demo_mode,
+    do: PtcManager.GitHub.DisabledIssueLabelWriter,
+    else: PtcManager.GitHub.WorkerIssueLabelWriter
+
 workspace_bootstrap_wrapper =
   System.get_env(
     "PTC_WORKSPACE_BOOTSTRAP_WRAPPER",
@@ -168,6 +175,9 @@ config :ptc_manager,
   herdr_binary: System.get_env("PTC_HERDR_BINARY", "herdr"),
   herdr_run_as_user: herdr_run_as_user,
   workspace_bootstrap_wrapper: workspace_bootstrap_wrapper,
+  issue_label_writer: issue_label_writer,
+  issue_label_wrapper:
+    System.get_env("PTC_ISSUE_LABEL_WRAPPER", "/usr/local/bin/ptc-manager-worker-gh-label"),
   herdr_git_binary: herdr_git_binary,
   herdr_socket_path: System.get_env("PTC_HERDR_SOCKET_PATH"),
   herdr_timeout_ms: System.get_env("PTC_HERDR_TIMEOUT_MS", "15000") |> String.to_integer(),

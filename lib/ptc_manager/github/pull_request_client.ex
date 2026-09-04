@@ -110,11 +110,24 @@ defmodule PtcManager.GitHub.PullRequestClient do
       base_repository: base_repository,
       title: pull["title"],
       author_login: get_in(pull, ["user", "login"]),
+      labels: label_names(pull["labels"]),
       linked_issue_numbers: linked_issue_numbers(body, base_repository)
     }
 
     if valid_normalized?(result), do: {:ok, result}, else: {:error, :invalid_pull_request}
   end
+
+  defp label_names(labels) when is_list(labels) do
+    labels
+    |> Enum.map(fn
+      %{"name" => name} when is_binary(name) -> name
+      _label -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp label_names(_labels), do: []
 
   defp valid_normalized?(result) do
     is_integer(result.pr_number) and result.pr_number > 0 and is_binary(result.pr_url) and

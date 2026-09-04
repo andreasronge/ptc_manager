@@ -10,4 +10,15 @@ defmodule PtcManager.Herdr do
         }
 
   @callback list_agents() :: {:ok, [map()] | snapshot()} | {:error, term()}
+
+  @doc """
+  Closes one Herdr pane so a maintainer can end an agent that is still running.
+
+  This is the single control action PtcManager performs; it observes agents
+  otherwise. Only the deterministic cancel path uses it, and the bookkeeping is
+  already committed before the pane is asked to close.
+  """
+  @callback close_pane(pane_id :: String.t()) :: :ok | {:error, term()}
+
+  @optional_callbacks close_pane: 1
 end

@@ -20,7 +20,10 @@ without replacing the user interface or GitHub integration.
    PtcManager stores private summaries, approvals, execution state, and an audit
    log; it does not turn GitHub labels into an internal job queue. An optional
    mutually exclusive `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` label
-   is a display-only projection and never grants authority.
+   is a display-only projection and never grants authority. PtcManager's own
+   GitHub client stays read-only, except the label wrapper, which adds or
+   removes one configured maintainer label on a button press; such a label
+   changes where an issue is shown, never whether it may be approved.
    GitHub assignees are the advisory claim signal: an assigned issue is shown
    as taken and cannot receive a second PtcManager implementation approval.
 3. Simplified explanations are private. They may be cached in PtcManager but

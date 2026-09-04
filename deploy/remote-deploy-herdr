@@ -104,6 +104,7 @@ worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 claude_trust_candidate="/tmp/ptc-manager-worker-claude-trust-${release_id}"
 codex_arm_candidate="/tmp/ptc-manager-worker-codex-arm-${release_id}"
+gh_label_candidate="/tmp/ptc-manager-worker-gh-label-${release_id}"
 operation_wrapper_candidate="/tmp/ptc-operation-${release_id}"
 operation_recovery_candidate="/tmp/ptc-manager-operation-recover-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
@@ -126,6 +127,7 @@ cleanup_remote() {
   "$provision_runner_candidate" "$provision_service_candidate" \
   "$environment_file_parser" \
     "$worker_git_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
+    "$codex_arm_candidate" "$gh_label_candidate" \
     "$operation_wrapper_candidate" \
     "$operation_recovery_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
@@ -889,6 +891,7 @@ tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-claude-trust >"$claude_trust_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-codex-arm >"$codex_arm_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-gh-label >"$gh_label_candidate"
 tar -xOf "$source_archive" deploy/ptc-operation >"$operation_wrapper_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-operation-recover >"$operation_recovery_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
@@ -901,6 +904,7 @@ chmod 0755 "$worker_git_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$claude_trust_candidate"
 chmod 0755 "$codex_arm_candidate"
+chmod 0755 "$gh_label_candidate"
 chmod 0755 "$access_dropin_check"
 chmod 0755 "$provision_runner_candidate"
 chmod 0644 "$provision_service_candidate"
@@ -1089,6 +1093,8 @@ sudo install -o root -g root -m 0755 "$claude_trust_candidate" \
   /usr/local/bin/ptc-manager-worker-claude-trust
 sudo install -o root -g root -m 0755 "$codex_arm_candidate" \
   /usr/local/bin/ptc-manager-worker-codex-arm
+sudo install -o root -g root -m 0755 "$gh_label_candidate" \
+  /usr/local/bin/ptc-manager-worker-gh-label
 sudo install -o root -g root -m 0755 "$operation_wrapper_candidate" \
   /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 "$operation_recovery_candidate" \

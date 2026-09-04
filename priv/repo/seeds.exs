@@ -12,6 +12,17 @@ if Repo.aggregate(Repository, :count) == 0 do
       github_name: "ptc_runner",
       default_branch: "main",
       local_path: if(demo_mode, do: nil, else: System.get_env("PTC_REPOSITORY_PATH")),
+      github_viewer_login: if(demo_mode, do: "andreasronge"),
+      maintainer_labels:
+        if(demo_mode,
+          do: %{
+            "labels" => [
+              %{"name" => "wait", "role" => "park"},
+              %{"name" => "ux", "role" => "badge"}
+            ]
+          },
+          else: %{"labels" => []}
+        ),
       required_pre_pr_reviews:
         if(demo_mode,
           do: 2,
@@ -19,38 +30,81 @@ if Repo.aggregate(Repository, :count) == 0 do
         )
     })
 
-  issue_attrs = fn number, title, minutes_ago ->
+  issue_attrs = fn number, title, minutes_ago, overrides ->
     updated_at = DateTime.add(now, -minutes_ago, :minute)
     body_digest = Base.encode16(:crypto.hash(:sha256, "demo-body-#{number}"), case: :lower)
 
-    %{
-      repository_id: repository.id,
-      number: number,
-      title: title,
-      html_url: "https://github.com/andreasronge/ptc_runner/issues/#{number}",
-      body: "Demo issue body for local interface testing.",
-      state: "open",
-      workflow_label: "ptc:ready",
-      dependencies_projected: true,
-      github_assignment_projected: true,
-      body_digest: body_digest,
-      content_digest:
-        Base.encode16(:crypto.hash(:sha256, "#{title}:#{body_digest}"), case: :lower),
-      github_updated_at: updated_at
-    }
+    Map.merge(
+      %{
+        repository_id: repository.id,
+        number: number,
+        title: title,
+        html_url: "https://github.com/andreasronge/ptc_runner/issues/#{number}",
+        body: "Demo issue body for local interface testing.",
+        state: "open",
+        workflow_label: "ptc:ready",
+        dependencies_projected: true,
+        github_assignment_projected: true,
+        github_author_login: "andreasronge",
+        github_labels: %{"names" => []},
+        body_digest: body_digest,
+        content_digest:
+          Base.encode16(:crypto.hash(:sha256, "#{title}:#{body_digest}"), case: :lower),
+        github_created_at: DateTime.add(updated_at, -(minutes_ago * 8 + 2_880), :minute),
+        github_updated_at: updated_at
+      },
+      overrides
+    )
   end
 
   {:ok, active_issue} =
     Operations.create_issue(
-      issue_attrs.(1320, "Make remote tool failures easier to understand", 35)
+      issue_attrs.(1320, "Make remote tool failures easier to understand", 35, %{})
     )
 
   {:ok, ready_issue} =
-    Operations.create_issue(issue_attrs.(1318, "Add bounded retry evidence to run summaries", 95))
+    Operations.create_issue(
+      issue_attrs.(1318, "Add bounded retry evidence to run summaries", 95, %{})
+    )
 
   {:ok, unreviewed_issue} =
     Operations.create_issue(
-      issue_attrs.(1314, "Clarify the standalone install upgrade path", 180)
+      issue_attrs.(1314, "Clarify the standalone install upgrade path", 180, %{
+        workflow_label: nil,
+        github_author_login: "an-outside-reporter",
+        github_labels: %{"names" => ["ux", "documentation"]}
+      })
+    )
+
+  # One issue per Planning group, so the browser checkpoint shows the whole page.
+  {:ok, deciding_issue} =
+    Operations.create_issue(
+      issue_attrs.(1327, "Decide what a partial result should report", 220, %{
+        workflow_label: "ptc:needs-decision"
+      })
+    )
+
+  {:ok, blocked_issue} =
+    Operations.create_issue(
+      issue_attrs.(1329, "Ship the new packaging path", 300, %{workflow_label: "ptc:blocked"})
+    )
+
+  {:ok, _parked_issue} =
+    Operations.create_issue(
+      issue_attrs.(1331, "Rework the run summary layout", 640, %{
+        workflow_label: nil,
+        github_labels: %{"names" => ["wait", "ux"]}
+      })
+    )
+
+  {:ok, _stale_issue} =
+    Operations.create_issue(
+      issue_attrs.(1204, "Old idea nobody has picked up", 45 * 24 * 60, %{workflow_label: nil})
+    )
+
+  {:ok, followed_up_issue} =
+    Operations.create_issue(
+      issue_attrs.(1310, "Record why a retry happened", 1_500, %{workflow_label: nil})
     )
 
   proposal_attrs = fn issue, summary, why, scope, risk, evidence ->
@@ -91,6 +145,19 @@ if Repo.aggregate(Repository, :count) == 0 do
         "low",
         "The trace already records attempt boundaries. The summary projection needs a bounded retry count and final reason, covered by trace contract tests."
       )
+    )
+
+  {:ok, _proposal} =
+    Operations.create_proposal(
+      proposal_attrs.(
+        deciding_issue,
+        "A run that only half succeeded currently looks like a clean success.",
+        "A misleading success is worse than a clear failure.",
+        "small",
+        "medium",
+        "The summary projection has no partial state, so the decision is which one to introduce."
+      )
+      |> Map.put(:readiness, "needs_information")
     )
 
   {:ok, active_job} = Operations.approve_issue(active_issue.id, "demo-maintainer")
@@ -181,6 +248,51 @@ if Repo.aggregate(Repository, :count) == 0 do
       herdr_session: "implementer-demo",
       fencing_token: active_job.fencing_token
     })
+
+  if demo_mode do
+    # A merged pull request whose retrospective asked for work nobody tracked.
+    {:ok, merged_job} = Operations.approve_issue_directly(followed_up_issue.id, "demo-maintainer")
+
+    merged_job =
+      merged_job
+      |> Job.changeset(%{
+        state: "done",
+        fencing_token: 1,
+        branch_name: "ptc-manager/issue-1310-job-#{merged_job.id}",
+        ended_at: DateTime.add(now, -90, :minute),
+        result_base_sha: String.duplicate("a", 40),
+        result_head_sha: String.duplicate("b", 40),
+        result_diff_digest: String.duplicate("c", 64),
+        result_commit_count: 3,
+        result_verified_at: DateTime.add(now, -110, :minute)
+      })
+      |> Repo.update!()
+
+    %PtcManager.Operations.PrPublication{}
+    |> PtcManager.Operations.PrPublication.changeset(%{
+      job_id: merged_job.id,
+      state: "published",
+      idempotency_key: String.duplicate("e", 64),
+      fencing_token: merged_job.fencing_token,
+      branch_name: merged_job.branch_name,
+      base_sha: merged_job.result_base_sha,
+      head_sha: merged_job.result_head_sha,
+      diff_digest: merged_job.result_diff_digest,
+      attempt_count: 1,
+      pr_number: 1_311,
+      pr_url: "https://github.com/andreasronge/ptc_runner/pull/1311",
+      remote_head_sha: merged_job.result_head_sha,
+      remote_base_sha: String.duplicate("d", 40),
+      published_at: DateTime.add(now, -100, :minute),
+      pr_state: "merged",
+      pr_checked_at: DateTime.add(now, -80, :minute),
+      source: "agent",
+      title: "Record why a retry happened",
+      labels: %{"names" => ["ptc:follow-up"]},
+      linked_issue_numbers: %{"numbers" => [1_310]}
+    })
+    |> Repo.insert!()
+  end
 
   if demo_mode do
     Enum.with_index([18_000, 31_000, 44_000, 67_000, 96_000], 1)
@@ -321,6 +433,7 @@ if Repo.aggregate(Repository, :count) == 0 do
   end
 
   IO.puts(
-    "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation."
+    "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation " <>
+      "and issue ##{blocked_issue.number} blocked on GitHub."
   )
 end

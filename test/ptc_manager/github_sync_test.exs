@@ -7,8 +7,14 @@ defmodule PtcManager.GitHubSyncTest do
 
   defmodule FakeClient do
     @behaviour PtcManager.GitHub
+
+    @impl true
     def list_open_issues(_repository), do: Process.get(:github_result)
 
+    @impl true
+    def viewer_login, do: Process.get(:github_viewer_login, {:error, :not_configured})
+
+    @impl true
     def get_issue(_repository, number) do
       case Process.get(:github_issue_results) do
         results when is_map(results) -> Map.fetch!(results, number)
@@ -51,6 +57,72 @@ defmodule PtcManager.GitHubSyncTest do
              Sync.sync_repository(synced_repository, client: FakeClient)
 
     assert Repo.get!(Repository, repository.id).sync_status == "ok"
+  end
+
+  test "records when GitHub says the issue was opened without changing the digest" do
+    repository = repository_fixture()
+
+    remote =
+      45
+      |> remote_issue("Aged issue")
+      |> Map.put("created_at", "2026-07-01T09:15:00Z")
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 45)
+    assert issue.github_created_at == ~U[2026-07-01 09:15:00.000000Z]
+
+    # The creation time must stay outside the content digest, or every issue
+    # would look changed on the first sync after this release.
+    without_created_at = IssueSnapshot.normalize!(remote_issue(45, "Aged issue"), repository)
+    assert issue.content_digest == without_created_at.content_digest
+  end
+
+  test "records who PtcManager reads GitHub as, and who opened each issue" do
+    repository = repository_fixture()
+    Process.put(:github_viewer_login, {:ok, "andreasronge"})
+
+    remote =
+      50
+      |> remote_issue("Reported from outside")
+      |> Map.put("author_login", "a-stranger")
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    assert Repo.get!(Repository, repository.id).github_viewer_login == "andreasronge"
+
+    assert Repo.get_by!(Issue, repository_id: repository.id, number: 50).github_author_login ==
+             "a-stranger"
+
+    # An identity lookup that fails must not erase the last known one.
+    Process.put(:github_viewer_login, {:error, :github_graphql_token_required})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+    assert Repo.get!(Repository, repository.id).github_viewer_login == "andreasronge"
+  end
+
+  test "keeps every GitHub label name outside the content digest" do
+    repository = repository_fixture()
+
+    remote =
+      55
+      |> remote_issue("Labelled issue")
+      |> Map.put("labels", [%{"name" => "wait"}, %{"name" => "bug"}, %{"name" => "ptc:ready"}])
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 55)
+    assert issue.github_labels == %{"names" => ["bug", "ptc:ready", "wait"]}
+    assert issue.workflow_label == "ptc:ready"
+
+    only_managed =
+      remote_issue(55, "Labelled issue")
+      |> Map.put("labels", [%{"name" => "ptc:ready"}])
+      |> IssueSnapshot.normalize!(repository)
+
+    assert issue.content_digest == only_managed.content_digest
   end
 
   test "synchronizes the canonical managed workflow label" do

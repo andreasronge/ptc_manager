@@ -9,6 +9,7 @@ defmodule PtcManager.Operations do
 
   import Ecto.Query
   alias Ecto.Multi
+  alias PtcManager.Gateway
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
   alias PtcManager.ReviewPolicy
@@ -37,6 +38,8 @@ defmodule PtcManager.Operations do
   @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked)
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @capacity_run_states ~w(queued starting working idle unknown)
+  @cancellable_job_states ~w(starting working idle blocked)
+  @live_agent_run_states ~w(queued starting working idle blocked waiting unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @merge_action_key "repair_and_merge_pr"
   @planning_action_keys ~w(
@@ -292,6 +295,13 @@ defmodule PtcManager.Operations do
         select: proposal.id
       )
 
+    # A direct approval has no proposal, so the job it started is the only way
+    # back to this repository. Read the ids before the jobs are deleted.
+    approval_ids =
+      Repo.all(
+        from job in Job, where: job.repository_id == ^repository_id, select: job.approval_id
+      )
+
     Repo.delete_all(
       from operation in PtcManager.Operations.ResourceOperation,
         where: operation.repository_id == ^repository_id
@@ -332,7 +342,8 @@ defmodule PtcManager.Operations do
     Repo.delete_all(from action in AgentAction, where: action.repository_id == ^repository_id)
 
     Repo.delete_all(
-      from approval in Approval, where: approval.proposal_id in subquery(proposal_ids)
+      from approval in Approval,
+        where: approval.proposal_id in subquery(proposal_ids) or approval.id in ^approval_ids
     )
 
     Repo.delete_all(from proposal in Proposal, where: proposal.issue_id in subquery(issue_ids))
@@ -349,6 +360,133 @@ defmodule PtcManager.Operations do
 
     Repo.update_all(definitions, set: [current_version_id: nil])
     Repo.delete_all(definitions)
+  end
+
+  @doc """
+  Replaces one repository's configured maintainer labels.
+
+  The list is configuration, not GitHub state: adding a name here never creates
+  the label on GitHub, and the README says the label has to exist there first.
+  """
+  def update_maintainer_labels(repository_id, labels, actor)
+      when is_integer(repository_id) and is_map(labels) and is_binary(actor) do
+    case Repo.get(Repository, repository_id) do
+      nil ->
+        {:error, :repository_not_found}
+
+      repository ->
+        repository
+        |> Repository.changeset(%{maintainer_labels: labels})
+        |> Repo.update()
+        |> case do
+          {:ok, updated} ->
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.maintainer_labels_updated",
+              target_type: "repository",
+              target_id: repository_id,
+              details: %{"labels" => labels}
+            })
+
+            notify_and_return({:ok, updated})
+
+          {:error, changeset} ->
+            {:error, changeset}
+        end
+    end
+  end
+
+  @restamp_fields [
+    :title,
+    :body_digest,
+    :state,
+    :github_state_reason,
+    :workflow_label,
+    :workflow_label_conflict,
+    :github_assignees,
+    :dependencies_projected,
+    :dependency_overflow,
+    :dependency_unknown_count
+  ]
+
+  @doc """
+  Everything about an issue that a maintainer label write must not change.
+
+  Taken before the write and compared after the re-sync, so PtcManager can tell
+  a label-only difference from a real edit somebody else made in between.
+  """
+  def issue_restamp_snapshot(%Issue{} = issue) do
+    issue
+    |> Map.take(@restamp_fields)
+    |> Map.put(:dependencies, dependency_projection(issue.id))
+  end
+
+  @doc "Records that a maintainer added or removed one label on GitHub."
+  def record_issue_label_change(%Issue{} = issue, operation, name, actor)
+      when operation in [:add, :remove] and is_binary(name) and is_binary(actor) do
+    insert_audit!(%{
+      actor: actor,
+      action: if(operation == :add, do: "issue.label_added", else: "issue.label_removed"),
+      target_type: "issue",
+      target_id: issue.id,
+      details: %{
+        "issue_number" => issue.number,
+        "repository_id" => issue.repository_id,
+        "label" => name
+      }
+    })
+
+    notify_changed(__MODULE__)
+    :ok
+  end
+
+  @doc """
+  Restores the latest proposal's freshness after a label-only GitHub write.
+
+  Writing a label moves GitHub's `updated_at`, which is part of the content
+  digest, so the Approve button would otherwise disappear for a change the
+  maintainer just made deliberately. A comment posted in the seconds between the
+  write and the re-sync would be missed by this comparison; the README records
+  that trade-off.
+  """
+  def restamp_proposal_after_label_change(issue_id, before, actor)
+      when is_integer(issue_id) and is_map(before) and is_binary(actor) do
+    issue = Repo.get!(Issue, issue_id)
+
+    with true <- issue_restamp_snapshot(issue) == before,
+         %Proposal{} = proposal <- latest_proposal(Repo, issue_id) do
+      proposal
+      |> Proposal.changeset(%{
+        source_digest: issue.content_digest,
+        source_updated_at: issue.github_updated_at
+      })
+      |> Repo.update!()
+
+      insert_audit!(%{
+        actor: actor,
+        action: "proposal.restamped_after_label_change",
+        target_type: "proposal",
+        target_id: proposal.id,
+        details: %{"issue_id" => issue.id, "source_digest" => issue.content_digest}
+      })
+
+      notify_changed(__MODULE__)
+      {:ok, :restamped}
+    else
+      _unchanged -> {:ok, :not_restamped}
+    end
+  end
+
+  defp dependency_projection(issue_id) do
+    IssueDependency
+    |> where([dependency], dependency.issue_id == ^issue_id)
+    |> select(
+      [dependency],
+      {dependency.blocking_repository_full_name, dependency.blocking_issue_number,
+       dependency.blocking_state, dependency.blocking_state_reason, dependency.lookup_state}
+    )
+    |> Repo.all()
+    |> Enum.sort()
   end
 
   def create_issue(attrs),
@@ -528,6 +666,106 @@ defmodule PtcManager.Operations do
       when is_integer(action_id) and is_binary(actor) and actor != "" do
     cancel_queued(AgentAction, action_id, actor, "agent_action.cancelled")
   end
+
+  @doc """
+  Ends one running implementation agent on the maintainer's explicit request.
+
+  Only the agent phases are cancellable. The deterministic phases that follow an
+  agent — reconciliation, verification, and publication — are refused, because
+  PtcManager, not an agent, owns them. The bookkeeping mirrors releasing an idle
+  job: the job ends, its run ends, and the partial worktree is kept for
+  attention rather than discarded. Closing the Herdr pane happens after the
+  transaction commits, so a pane that outlives the cancel cannot resurrect the
+  run.
+  """
+  def cancel_running_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+    message = "Cancelled by #{actor}; the partial worktree was preserved."
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          Job
+          |> where([job], job.id == ^job_id and job.state in ^@cancellable_job_states)
+          |> Repo.update_all(
+            set: [
+              state: "cancelled",
+              lease_expires_at: nil,
+              ended_at: now,
+              last_error: message,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:job_not_cancellable)
+
+        job = Repo.get!(Job, job_id)
+        run = current_job_run(job)
+
+        if run do
+          run
+          |> AgentRun.changeset(%{
+            state: "lost",
+            status_text: "Cancelled by maintainer",
+            last_heartbeat_at: now,
+            ended_at: now
+          })
+          |> Repo.update!()
+        end
+
+        mark_allocation!(job_id, %{
+          state: "attention",
+          last_used_at: now,
+          last_error: message
+        })
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.cancelled",
+          target_type: "job",
+          target_id: job_id,
+          details: %{
+            "fencing_token" => job.fencing_token,
+            "worktree_preserved" => true,
+            "reason" => message,
+            "agent_run_id" => run && run.id,
+            "herdr_pane" => run && run.herdr_pane
+          }
+        })
+
+        {job, run}
+      end)
+
+    case outcome do
+      {:ok, {job, run}} ->
+        notify_changed(__MODULE__)
+        close_cancelled_pane(job, run)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp current_job_run(%Job{id: job_id, fencing_token: fencing_token}) do
+    AgentRun
+    |> where(
+      [run],
+      run.job_id == ^job_id and run.fencing_token == ^fencing_token and
+        run.state in ^@live_agent_run_states
+    )
+    |> Repo.one()
+  end
+
+  defp close_cancelled_pane(job, %AgentRun{herdr_pane: pane})
+       when is_binary(pane) and pane != "" do
+    case Gateway.call(Application.fetch_env!(:ptc_manager, :herdr_client), :close_pane, [pane]) do
+      :ok -> {:ok, job}
+      {:error, reason} -> {:ok, job, {:pane_close_failed, reason}}
+    end
+  end
+
+  defp close_cancelled_pane(job, _run), do: {:ok, job}
 
   def release_idle_job(job_id, actor)
       when is_integer(job_id) and is_binary(actor) and actor != "" do
@@ -1776,10 +2014,12 @@ defmodule PtcManager.Operations do
     agent_actions = latest_agent_actions()
     retrospective_actions = latest_agent_actions("pr_retrospective")
     retrospective_issue_actions = retrospective_issue_actions()
+    external_publications = external_publications_by_issue(issues)
 
     Enum.map(issues, fn issue ->
       %{
         issue: issue,
+        external_publication: Map.get(external_publications, issue.id),
         dependencies: Map.get(dependencies, issue.id, []),
         dependency_cycle: Map.get(dependency_cycles, issue.id),
         proposal: Map.get(proposals, issue.id),
@@ -1837,6 +2077,63 @@ defmodule PtcManager.Operations do
             nil -> []
             publication -> Map.get(retrospective_issue_actions, publication.id, [])
           end
+      }
+    end)
+  end
+
+  # An issue whose pull request the maintainer opened by hand is being delivered
+  # just as much as one PtcManager started. The link is the issue number that
+  # publication already parsed out of the pull request body.
+  defp external_publications_by_issue([]), do: %{}
+
+  defp external_publications_by_issue(issues) do
+    repository_ids = issues |> Enum.map(& &1.repository_id) |> Enum.uniq()
+
+    linked =
+      PrPublication
+      |> where(
+        [publication],
+        publication.source == "external" and publication.state == "published" and
+          publication.pr_state == "open" and publication.repository_id in ^repository_ids
+      )
+      |> Repo.all()
+      |> Enum.flat_map(fn publication ->
+        for number <- get_in(publication.linked_issue_numbers || %{}, ["numbers"]) || [],
+            do: {{publication.repository_id, number}, publication}
+      end)
+      |> Map.new()
+
+    issues
+    |> Enum.flat_map(fn issue ->
+      case Map.get(linked, {issue.repository_id, issue.number}) do
+        nil -> []
+        publication -> [{issue.id, publication}]
+      end
+    end)
+    |> Map.new()
+  end
+
+  @doc """
+  The pull requests Planning offers a retrospective for, with their context.
+
+  A candidate is a managed pull request the implementation agent labelled
+  `ptc:follow-up`, in any state, until a maintainer dismisses it or a
+  retrospective finds nothing.
+  """
+  def follow_up_items do
+    publications = PtcManager.Publications.follow_up_candidates()
+    pr_actions = latest_agent_actions()
+    retrospectives = latest_agent_actions("pr_retrospective")
+    suggestions = retrospective_issue_actions()
+
+    Enum.map(publications, fn publication ->
+      %{
+        publication: publication,
+        repository: publication.job.repository,
+        issue: publication.job.issue,
+        pr_agent_action: Map.get(pr_actions, {"pull_request", publication.id}),
+        pr_retrospective_action: Map.get(retrospectives, {"pull_request", publication.id}),
+        pr_retrospective_issue_actions: Map.get(suggestions, publication.id, [])
       }
     end)
   end
@@ -2390,11 +2687,29 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp do_approve_issue(issue_id, actor, requested_review_count) do
+  @doc """
+  Approves implementation for an issue that has no prepared proposal.
+
+  Every deterministic gate of `approve_issue/3` still applies: the issue must be
+  open, unclaimed, projected, free of a conflicting or blocking workflow label,
+  and free of unresolved dependencies. Only the two proposal checks are skipped,
+  because a small issue does not need a preparation round. The click is the
+  approval.
+  """
+  def approve_issue_directly(issue_id, actor, requested_review_count \\ nil)
+      when is_integer(issue_id) and is_binary(actor) do
+    with :ok <- valid_requested_review_count(requested_review_count) do
+      do_approve_issue(issue_id, actor, requested_review_count, :direct)
+    end
+  end
+
+  defp do_approve_issue(issue_id, actor, requested_review_count, mode \\ :prepared) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     Multi.new()
-    |> Multi.run(:snapshot, fn repo, _changes -> current_approvable_snapshot(repo, issue_id) end)
+    |> Multi.run(:snapshot, fn repo, _changes ->
+      current_approvable_snapshot(repo, issue_id, mode)
+    end)
     |> Multi.run(:automation, fn _repo, %{snapshot: {_issue, _proposal, repository}} ->
       with :ok <- PtcManager.Automations.ensure_defaults(repository),
            {:ok, version} <- PtcManager.Automations.current_version(repository, "implement_issue") do
@@ -2408,12 +2723,12 @@ defmodule PtcManager.Operations do
     end)
     |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}} ->
       Approval.changeset(%Approval{}, %{
-        proposal_id: proposal.id,
-        decision: "start_implementation",
+        proposal_id: proposal && proposal.id,
+        decision: approval_decision(mode),
         actor: actor,
         source_updated_at: issue.github_updated_at,
         source_digest: issue.content_digest,
-        proposal_digest: proposal.proposal_digest,
+        proposal_digest: proposal && proposal.proposal_digest,
         approved_at: now
       })
     end)
@@ -2440,15 +2755,15 @@ defmodule PtcManager.Operations do
                                      } ->
       AuditEvent.changeset(%AuditEvent{}, %{
         actor: actor,
-        action: "issue.approved_for_implementation",
+        action: audit_action(mode),
         target_type: "job",
         target_id: job.id,
         details: %{
           "issue_id" => issue.id,
           "issue_number" => issue.number,
-          "proposal_id" => proposal.id,
+          "proposal_id" => proposal && proposal.id,
           "required_review_count" => job.required_review_count,
-          "proposal_digest" => proposal.proposal_digest,
+          "proposal_digest" => proposal && proposal.proposal_digest,
           "source_digest" => issue.content_digest
         }
       })
@@ -2462,16 +2777,33 @@ defmodule PtcManager.Operations do
     |> broadcast_change()
   end
 
-  defp current_approvable_snapshot(repo, issue_id) do
+  defp approval_decision(:direct), do: "start_implementation_direct"
+  defp approval_decision(_mode), do: "start_implementation"
+
+  defp audit_action(:direct), do: "issue.approved_for_direct_implementation"
+  defp audit_action(_mode), do: "issue.approved_for_implementation"
+
+  defp current_approvable_snapshot(repo, issue_id, mode) do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
-         %Proposal{} = proposal <- latest_proposal(repo, issue_id),
          :ok <- issue_is_open(issue),
          :ok <- issue_unclaimed(issue),
          :ok <- issue_workflow_allows_implementation(issue),
          :ok <- issue_dependencies_resolved(repo, issue),
+         {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
+      {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
+    else
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp approvable_proposal(_repo, _issue, :direct), do: {:ok, nil}
+
+  defp approvable_proposal(repo, issue, _mode) do
+    with %Proposal{} = proposal <- latest_proposal(repo, issue.id),
          :ok <- proposal_is_ready(proposal),
          :ok <- proposal_matches_issue(proposal, issue) do
-      {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
+      {:ok, proposal}
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}

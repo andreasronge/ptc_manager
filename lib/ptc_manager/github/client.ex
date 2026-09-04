@@ -54,6 +54,20 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
+  @impl true
+  def viewer_login do
+    case graphql(viewer_query(), %{}) do
+      {:ok, %{"viewer" => %{"login" => login}}} when is_binary(login) and login != "" ->
+        {:ok, login}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_github_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @doc false
   def get_json(url) when is_binary(url) do
     with {:ok, body} <- get(url),
@@ -118,6 +132,8 @@ defmodule PtcManager.GitHub.Client do
       "body" => issue["body"] || "",
       "state" => normalize_enum(issue["state"]),
       "state_reason" => normalize_enum(issue["stateReason"]),
+      "author_login" => get_in(issue, ["author", "login"]),
+      "created_at" => issue["createdAt"],
       "updated_at" => issue["updatedAt"],
       "labels" => get_in(issue, ["labels", "nodes"]) || [],
       "assignees" => get_in(issue, ["assignees", "nodes"]) || [],
@@ -189,6 +205,8 @@ defmodule PtcManager.GitHub.Client do
     """
   end
 
+  defp viewer_query, do: "query { viewer { login } }"
+
   defp repository_query do
     """
     query($owner: String!, $name: String!) {
@@ -209,7 +227,8 @@ defmodule PtcManager.GitHub.Client do
 
   defp issue_fields do
     """
-    number title url body state stateReason updatedAt
+    number title url body state stateReason createdAt updatedAt
+    author { login }
     labels(first: 100) { nodes { name } }
     assignees(first: 100) { nodes { login } }
     blockedBy(first: 100) {

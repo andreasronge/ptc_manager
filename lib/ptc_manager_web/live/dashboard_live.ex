@@ -1,6 +1,10 @@
 defmodule PtcManagerWeb.DashboardLive do
   use PtcManagerWeb, :live_view
 
+  import PtcManagerWeb.PlanningComponents
+  import PtcManagerWeb.RetrospectiveComponents, only: [retrospective: 1]
+
+  alias PtcManager.GitHub.IssueLabels
   alias PtcManager.GitHub.Sync, as: GitHubSync
   alias PtcManager.Dispatch.Poller, as: DispatchPoller
   alias PtcManager.IssueDecision
@@ -8,19 +12,22 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
+  alias PtcManager.Operations.DeliveryLane
+  alias PtcManager.Operations.PlanningGroup
+  alias PtcManager.Repository.MaintainerLabels
   alias PtcManager.Worktrees
   alias PtcManager.Publications
   alias PtcManager.PublicationStatusPoller
   alias PtcManager.PublisherPoller
   alias PtcManager.ReviewPolicy
   alias PtcManager.ResultReconciler
-  alias PtcManagerWeb.TimeFormat
+  alias PtcManagerWeb.RetrospectiveComponents
 
   @impl true
   def mount(_params, session, socket) do
     if connected?(socket) do
       Operations.subscribe()
-      Process.send_after(self(), :tick, 1_000)
+      Process.send_after(self(), :tick, 60_000)
     end
 
     {:ok,
@@ -31,6 +38,9 @@ defmodule PtcManagerWeb.DashboardLive do
      |> assign(:now, DateTime.utc_now())
      |> assign(:github_syncing, false)
      |> assign(:reconciling_results, MapSet.new())
+     |> assign(:collapsed_groups, MapSet.new(PlanningGroup.collapsed_by_default()))
+     |> assign(:expanded_issue_ids, MapSet.new())
+     |> assign(:label_writes_in_flight, MapSet.new())
      |> load_dashboard()}
   end
 
@@ -53,10 +63,42 @@ defmodule PtcManagerWeb.DashboardLive do
   def handle_event("sync-github", _params, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_event("toggle-group", %{"group" => group}, socket) do
+    group = String.to_existing_atom(group)
+
+    {:noreply,
+     update(socket, :collapsed_groups, fn collapsed ->
+       if MapSet.member?(collapsed, group),
+         do: MapSet.delete(collapsed, group),
+         else: MapSet.put(collapsed, group)
+     end)}
+  end
+
+  def handle_event("toggle-issue", %{"issue-id" => issue_id}, socket) do
+    case parse_issue_id(issue_id) do
+      {:ok, issue_id} ->
+        {:noreply,
+         update(socket, :expanded_issue_ids, fn expanded ->
+           if MapSet.member?(expanded, issue_id),
+             do: MapSet.delete(expanded, issue_id),
+             else: MapSet.put(expanded, issue_id)
+         end)}
+
+      {:error, :invalid_issue_id} ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  # One form, two submit buttons: "Fix directly" is the same decision made
+  # without a preparation round, so it deliberately carries the same review
+  # count the maintainer picked next to it.
   def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
          {:ok, review_count} <- parse_review_count(params["review-count"]) do
-      approve_issue(issue_id, review_count, socket)
+      if params["direct"] == "true",
+        do: approve_directly(issue_id, review_count, socket),
+        else: approve_issue(issue_id, review_count, socket)
     else
       {:error, :invalid_issue_id} ->
         {:noreply, put_flash(socket, :error, "That issue could not be found.")}
@@ -146,6 +188,51 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  def handle_event("toggle-issue-label", %{"issue-id" => issue_id, "name" => name}, socket) do
+    with {:ok, issue_id} <- parse_issue_id(issue_id),
+         false <- MapSet.member?(socket.assigns.label_writes_in_flight, {issue_id, name}) do
+      issue = Operations.get_issue!(issue_id)
+      actor = socket.assigns.actor
+
+      {:noreply,
+       socket
+       |> update(:label_writes_in_flight, &MapSet.put(&1, {issue_id, name}))
+       |> start_async({:issue_label, issue_id, name}, fn ->
+         IssueLabels.toggle(issue.repository, issue, name, actor)
+       end)}
+    else
+      _busy -> {:noreply, socket}
+    end
+  end
+
+  def handle_event(
+        "create-retrospective-issue",
+        %{"source-action-id" => source_action_id, "suggestion-index" => suggestion_index},
+        socket
+      ) do
+    {kind, message} =
+      RetrospectiveComponents.queue_issue(
+        source_action_id,
+        suggestion_index,
+        socket.assigns.actor
+      )
+
+    {:noreply, socket |> put_flash(kind, message) |> load_dashboard()}
+  end
+
+  def handle_event("dismiss-follow-up", %{"publication-id" => publication_id}, socket) do
+    with {publication_id, ""} <- Integer.parse(publication_id),
+         {:ok, _publication} <-
+           Publications.dismiss_follow_up(publication_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Dismissed. The pull request and its labels are unchanged.")
+       |> load_dashboard()}
+    else
+      _error -> {:noreply, put_flash(socket, :error, "That suggestion could not be dismissed.")}
+    end
+  end
+
   def handle_event("discard-worktree", %{"allocation-id" => allocation_id}, socket) do
     with {allocation_id, ""} <- Integer.parse(allocation_id),
          :ok <- Worktrees.discard_attention(allocation_id, socket.assigns.actor) do
@@ -198,8 +285,20 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  defp approve_directly(issue_id, review_count, socket) do
+    issue_id
+    |> Operations.approve_issue_directly(socket.assigns.actor, review_count)
+    |> approval_result(review_count, socket, "Started directly, without a preparation round.")
+  end
+
   defp approve_issue(issue_id, review_count, socket) do
-    case Operations.approve_issue(issue_id, socket.assigns.actor, review_count) do
+    issue_id
+    |> Operations.approve_issue(socket.assigns.actor, review_count)
+    |> approval_result(review_count, socket, "Approved.")
+  end
+
+  defp approval_result(outcome, review_count, socket, prefix) do
+    case outcome do
       {:ok, _job} ->
         DispatchPoller.wake()
 
@@ -214,7 +313,7 @@ defmodule PtcManagerWeb.DashboardLive do
          socket
          |> put_flash(
            :info,
-           "Approved with #{review_message}. One implementation job is now queued."
+           "#{prefix} #{review_message}. One implementation job is now queued."
          )
          |> load_dashboard()}
 
@@ -250,6 +349,23 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  defp label_error(:label_writes_disabled),
+    do: "This host cannot write GitHub labels; no worker wrapper is installed."
+
+  defp label_error(:label_not_configured),
+    do: "That label is not configured for this repository any more."
+
+  defp label_error(:reserved_label_name),
+    do: "The ptc: labels are a read-only projection of GitHub."
+
+  defp label_error(:issue_closed), do: "This issue is closed."
+  defp label_error(:label_wrapper_timeout), do: "GitHub did not answer within 30 seconds."
+
+  defp label_error({:label_wrapper_exit, status}),
+    do: "The GitHub label change failed with status #{status}. Check that the label exists."
+
+  defp label_error(_reason), do: "The label could not be changed on GitHub."
+
   defp parse_review_count(nil), do: {:ok, nil}
 
   defp parse_review_count(value) when is_binary(value) do
@@ -268,7 +384,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
   @impl true
   def handle_info(:tick, socket) do
-    Process.send_after(self(), :tick, 1_000)
+    Process.send_after(self(), :tick, 60_000)
     {:noreply, assign(socket, :now, DateTime.utc_now())}
   end
 
@@ -296,6 +412,27 @@ defmodule PtcManagerWeb.DashboardLive do
      socket
      |> assign(:github_syncing, false)
      |> put_flash(:error, "GitHub synchronization stopped unexpectedly.")
+     |> load_dashboard()}
+  end
+
+  def handle_async({:issue_label, issue_id, name}, {:ok, result}, socket) do
+    socket =
+      socket
+      |> update(:label_writes_in_flight, &MapSet.delete(&1, {issue_id, name}))
+      |> load_dashboard()
+
+    case result do
+      {:ok, :added} -> {:noreply, put_flash(socket, :info, "Added #{name} on GitHub.")}
+      {:ok, :removed} -> {:noreply, put_flash(socket, :info, "Removed #{name} on GitHub.")}
+      {:error, reason} -> {:noreply, put_flash(socket, :error, label_error(reason))}
+    end
+  end
+
+  def handle_async({:issue_label, issue_id, name}, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> update(:label_writes_in_flight, &MapSet.delete(&1, {issue_id, name}))
+     |> put_flash(:error, "The label change stopped unexpectedly. Synchronize GitHub to check.")
      |> load_dashboard()}
   end
 
@@ -337,35 +474,60 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def elapsed(now, started_at), do: TimeFormat.elapsed(now, started_at)
 
-  def fresh?(%{proposal: nil}), do: false
+  defdelegate fresh?(item), to: PlanningGroup
+  defdelegate approvable?(item), to: PlanningGroup
+  defdelegate startable?(item), to: PlanningGroup
+  defdelegate dependencies_need_decision?(dependencies), to: PlanningGroup
 
-  def fresh?(%{issue: issue, proposal: proposal}) do
-    issue.content_digest == proposal.source_digest and
-      DateTime.compare(issue.github_updated_at, proposal.source_updated_at) == :eq
+  def collapsed_group?(collapsed, group), do: MapSet.member?(collapsed, group)
+  def writing_label?(in_flight, issue, name), do: MapSet.member?(in_flight, {issue.id, name})
+
+  def maintainer_label_chips(issue) do
+    present = MapSet.new(MaintainerLabels.reported_names(issue))
+
+    Enum.map(
+      MaintainerLabels.list(issue.repository),
+      &{&1["name"], MapSet.member?(present, &1["name"])}
+    )
   end
 
-  def approvable?(
-        %{issue: %{state: "open"}, proposal: %{readiness: "ready"}, active_job: nil} = item
-      ),
-      do:
-        fresh?(item) and not item.issue.workflow_label_conflict and
-          not claimed?(item.issue) and
-          item.issue.github_assignment_projected and
-          item.issue.workflow_label in [nil, "ptc:ready"] and
-          item.issue.dependencies_projected and
-          not item.issue.dependency_overflow and
-          item.issue.dependency_unknown_count == 0 and
-          is_nil(item.dependency_cycle) and
-          implementation_dependencies_resolved?(item.dependencies)
+  def expanded_issue?(expanded, item), do: MapSet.member?(expanded, item.issue.id)
 
-  def approvable?(_item), do: false
-
-  def claimed?(%{github_assignees: %{"logins" => [_login | _rest]}}), do: true
-  def claimed?(_issue), do: false
-
-  def claim_label(%{github_assignees: %{"logins" => logins}}) when is_list(logins) do
-    "Taken by " <> Enum.map_join(logins, ", ", &"@#{&1}")
+  @doc "The Delivery board lane an already-delivered issue currently sits in."
+  def delivery_lane(item) do
+    DeliveryLane.lane_for(%{
+      active_job: item.active_job,
+      publication: item.publication || item.external_publication
+    })
   end
+
+  @doc "The one button a collapsed card offers for issues that are not ready."
+  def primary_issue_action(item, :needs_decision) do
+    actions = ActionCatalog.issue_actions(item.issue)
+    Enum.find(actions, &(&1.key == "review_issue")) || List.first(actions)
+  end
+
+  def primary_issue_action(item, group) when group in [:not_prepared, :stale, :blocked, :waiting],
+    do: List.first(ActionCatalog.issue_actions(item.issue))
+
+  def primary_issue_action(_item, _group), do: nil
+
+  @doc "The actions the expanded card still has to offer after the primary one."
+  def secondary_issue_actions(item, group) do
+    case primary_issue_action(item, group) do
+      nil -> ActionCatalog.issue_actions(item.issue)
+      primary -> Enum.reject(ActionCatalog.issue_actions(item.issue), &(&1.key == primary.key))
+    end
+  end
+
+  @doc """
+  Groups whose cards still offer the approve form.
+
+  A blocked, parked, or already-delivered issue does not: its group already says
+  why it cannot start. An unprepared one does, disabled, because the maintainer
+  is looking at it precisely to find out what is missing.
+  """
+  def approval_group?(group), do: group in [:ready, :not_prepared]
 
   def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
     do: true
@@ -465,17 +627,7 @@ defmodule PtcManagerWeb.DashboardLive do
   def job_label("pr_open"), do: "PR open"
   def job_label(state), do: state |> String.replace("_", " ")
 
-  def sync_label(%{sync_status: "syncing"}), do: "syncing"
-  def sync_label(%{sync_status: "ok"}), do: "connected"
-  def sync_label(%{sync_status: "error"}), do: "needs attention"
-  def sync_label(_repository), do: "not synchronized"
-
-  def sync_classes(%{sync_status: "ok"}), do: "text-teal-300"
-  def sync_classes(%{sync_status: "error"}), do: "text-rose-300"
-  def sync_classes(_repository), do: "text-amber-300"
-
-  def short_time(nil), do: "never"
-  def short_time(datetime), do: Calendar.strftime(datetime, "%Y-%m-%d %H:%M UTC")
+  def short_time(datetime), do: TimeFormat.utc(datetime)
 
   def publication_error(nil), do: "PR verification needs attention."
 
@@ -534,36 +686,6 @@ defmodule PtcManagerWeb.DashboardLive do
     "#{count} review #{if(count == 1, do: "pass", else: "passes")}"
   end
 
-  def state_classes("working"), do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
-  def state_classes("blocked"), do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
-  def state_classes("failed"), do: "bg-rose-400/15 text-rose-300 ring-rose-400/20"
-  def state_classes("lost"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
-  def state_classes("reconciling"), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
-
-  def state_classes("sync_pending"),
-    do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
-
-  def state_classes("awaiting_reconciliation"),
-    do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
-
-  def state_classes("verifying_result"),
-    do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
-
-  def state_classes("ready_for_pr"),
-    do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
-
-  def state_classes("publishing_pr"),
-    do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
-
-  def state_classes("pr_open"),
-    do: "bg-teal-400/15 text-teal-300 ring-teal-400/20"
-
-  def state_classes("publish_blocked"),
-    do: "bg-amber-400/15 text-amber-300 ring-amber-400/20"
-
-  def state_classes("done"), do: "bg-sky-400/15 text-sky-300 ring-sky-400/20"
-  def state_classes(_state), do: "bg-slate-400/10 text-slate-300 ring-white/10"
-
   def agent_publication?(%{publication: %{source: "agent"}}), do: true
   def agent_publication?(%{active_job: %{publication_source: "agent"}}), do: true
   def agent_publication?(_item), do: false
@@ -597,10 +719,6 @@ defmodule PtcManagerWeb.DashboardLive do
     dependencies != [] and Enum.all?(dependencies, &dependency_completed?/1)
   end
 
-  defp implementation_dependencies_resolved?(dependencies) do
-    Enum.all?(dependencies, &dependency_completed?/1)
-  end
-
   def dependency_url(_repository, %{html_url: html_url}) when is_binary(html_url), do: html_url
   def dependency_url(_repository, %{issue: %{html_url: html_url}}), do: html_url
 
@@ -624,10 +742,6 @@ defmodule PtcManagerWeb.DashboardLive do
     )
   end
 
-  def dependencies_need_decision?(dependencies) do
-    Enum.any?(dependencies, &(dependency_status(&1) == "closed without completion"))
-  end
-
   defp dependency_completed?(%{lookup_state: "resolved", state: "closed", state_reason: reason}),
     do: reason == "completed"
 
@@ -641,9 +755,14 @@ defmodule PtcManagerWeb.DashboardLive do
       Operations.dashboard_issues(state: "open")
       |> filter_repository(selected_repository, & &1.issue.repository)
 
+    follow_ups =
+      Operations.follow_up_items()
+      |> filter_repository(selected_repository, & &1.repository)
+
     assign(socket,
       repositories: repositories,
       issues: issues,
+      grouped_issues: group_issues(issues, follow_ups, socket.assigns.now),
       active_agent_runs:
         Operations.list_active_agent_runs()
         |> filter_repository(selected_repository, &agent_run_repository/1),
@@ -652,15 +771,25 @@ defmodule PtcManagerWeb.DashboardLive do
         |> filter_repository(selected_repository, &agent_run_repository/1),
       recent_agent_runs: recent_agent_runs(repositories, selected_repository),
       workers: Operations.list_workers_with_worktrees(),
-      agent_actions_enabled: MaintainerActions.enabled?(),
-      dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),
-      agent_pr_enabled:
-        Application.get_env(:ptc_manager, :implementation_agent_publishes_pr, false),
-      publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false),
-      pr_reconcile_enabled:
-        Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
-          Publications.agent_reconciliation_needed?()
+      publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false)
     )
+  end
+
+  defp group_issues(issues, follow_ups, now) do
+    grouped =
+      issues
+      |> Enum.group_by(
+        &PlanningGroup.classify(&1,
+          now: now,
+          parked_labels: MaintainerLabels.parked_names(&1.issue.repository)
+        )
+      )
+      |> Map.put(:follow_ups, follow_ups)
+
+    for group <- PlanningGroup.order(),
+        items = Map.get(grouped, group, []),
+        items != [],
+        do: {group, items}
   end
 
   defp selected_repository(%{"repo" => key}, repositories) do

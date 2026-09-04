@@ -2,6 +2,8 @@ defmodule PtcManager.Operations.Repository do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias PtcManager.Repository.MaintainerLabels
+
   schema "repositories" do
     field :github_owner, :string
     field :github_name, :string
@@ -11,6 +13,8 @@ defmodule PtcManager.Operations.Repository do
     field :sync_status, :string, default: "never"
     field :last_synced_at, :utc_datetime_usec
     field :last_sync_error, :string
+    field :github_viewer_login, :string
+    field :maintainer_labels, :map, default: %{"labels" => []}
     field :required_pre_pr_reviews, :integer, default: 2
 
     has_many :issues, PtcManager.Operations.Issue
@@ -35,10 +39,13 @@ defmodule PtcManager.Operations.Repository do
       :sync_status,
       :last_synced_at,
       :last_sync_error,
+      :github_viewer_login,
+      :maintainer_labels,
       :required_pre_pr_reviews
     ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
+    |> MaintainerLabels.validate()
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,
       less_than_or_equal_to: 3

@@ -47,7 +47,9 @@
         <div>
           <div class="flex items-center gap-2">
             <span class={["size-2 rounded-full", lane.color]}></span>
-            <h2 id={"lane-title-#{lane.key}"} class="text-sm font-semibold">{lane.title}</h2>
+            <h2 id={"lane-title-#{lane.key}"} class="text-sm font-semibold">
+              {lane_title(lane.key)}
+            </h2>
           </div>
           <p class="mt-1 text-[11px] leading-4 text-slate-500">{lane.subtitle}</p>
         </div>
@@ -121,6 +123,13 @@
             >
               <.icon name="hero-exclamation-triangle-mini" class="size-3" />
               {health.label}
+            </span>
+            <span
+              :if={follow_up_suggested?(item)}
+              id={"follow-ups-suggested-#{card_id(item)}"}
+              class="rounded-full bg-violet-400/15 px-2 py-1 text-[10px] font-semibold text-violet-200 ring-1 ring-violet-400/25"
+            >
+              Follow-ups suggested
             </span>
             <span
               :for={{label, tone} <- health_badges(item)}
@@ -200,7 +209,9 @@
               {repair_and_merge_action(item).label}
             </button>
             <button
-              :if={lane.key == :ready && retrospective_action(item)}
+              :if={
+                (lane.key == :ready || follow_up_suggested?(item)) && retrospective_action(item)
+              }
               id={"retro-pr-#{item.publication.id}"}
               phx-click="run-agent-action"
               phx-value-action-key="pr_retrospective"
@@ -224,6 +235,35 @@
             >
               <.icon name="hero-check-mini" class="size-3.5" /> Approve and merge
             </button>
+            <%= if lane.key in [:working, :stuck] && cancellable_agent?(item) do %>
+              <%= if confirming_cancel?(@cancel_agent_job_id, item) do %>
+                <button
+                  id={"confirm-cancel-agent-#{item.active_job.id}"}
+                  phx-click="cancel-agent"
+                  phx-value-job-id={item.active_job.id}
+                  class="inline-flex items-center gap-1.5 rounded-lg bg-rose-400 px-3 py-2 font-semibold text-slate-950 hover:bg-rose-300"
+                >
+                  <.icon name="hero-exclamation-triangle-mini" class="size-3.5" /> Confirm cancel
+                </button>
+                <button
+                  id={"dismiss-cancel-agent-#{item.active_job.id}"}
+                  phx-click="dismiss-cancel-agent"
+                  class="rounded-lg border border-white/15 px-3 py-2 font-semibold text-slate-300 hover:bg-white/5"
+                >
+                  Keep running
+                </button>
+              <% else %>
+                <button
+                  id={"cancel-agent-#{item.active_job.id}"}
+                  phx-click="confirm-cancel-agent"
+                  phx-value-job-id={item.active_job.id}
+                  title="End this agent and keep its partial worktree for inspection"
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-rose-400/25 px-3 py-2 font-semibold text-rose-300 hover:bg-rose-400/10"
+                >
+                  <.icon name="hero-x-circle-mini" class="size-3.5" /> Cancel agent
+                </button>
+              <% end %>
+            <% end %>
             <a
               :if={item.publication && item.publication.pr_url}
               href={item.publication.pr_url}
@@ -244,89 +284,13 @@
             </a>
           </div>
 
-          <section
-            :if={
-              lane.key == :ready &&
-                (retrospective_summary(item.pr_retrospective_action) ||
-                   retrospective_suggestions(item.pr_retrospective_action) != [])
-            }
+          <.retrospective
+            :if={item.publication}
             id={"retro-results-#{item.publication.id}"}
-            class="mt-4 border-t border-white/10 pt-4"
-          >
-            <p class="text-[11px] font-semibold uppercase tracking-wider text-violet-300">
-              Private retrospective
-            </p>
-            <p
-              :if={retrospective_summary(item.pr_retrospective_action)}
-              class="mt-1 text-xs leading-5 text-slate-300"
-            >
-              {retrospective_summary(item.pr_retrospective_action)}
-            </p>
-
-            <div class="mt-3 space-y-3">
-              <div
-                :for={
-                  {suggestion, suggestion_index} <-
-                    retrospective_suggestions(item.pr_retrospective_action)
-                }
-                id={"retro-suggestion-#{item.pr_retrospective_action.id}-#{suggestion_index}"}
-                class="rounded-lg border border-violet-400/15 bg-violet-400/[0.05] p-3"
-              >
-                <div class="flex items-start justify-between gap-2">
-                  <p class="text-xs font-semibold leading-5 text-slate-100">
-                    {suggestion["title"]}
-                  </p>
-                  <span class="shrink-0 rounded-full bg-white/5 px-2 py-1 text-[9px] text-slate-400 ring-1 ring-white/10">
-                    {category_label(suggestion["category"])}
-                  </span>
-                </div>
-                <p class="mt-1 text-xs leading-5 text-slate-300">
-                  {suggestion["simple_summary"]}
-                </p>
-                <p class="mt-2 text-[11px] leading-4 text-slate-500">
-                  Why it matters: {suggestion["why_it_matters"]}
-                </p>
-
-                <% creation_action =
-                  suggestion_action(
-                    item,
-                    item.pr_retrospective_action.id,
-                    suggestion_index
-                  ) %>
-                <% created_number = created_issue_number(creation_action) %>
-
-                <div class="mt-3">
-                  <a
-                    :if={created_number}
-                    href={issue_url(item, created_number)}
-                    target="_blank"
-                    rel="noreferrer"
-                    class="text-xs font-semibold text-teal-300 hover:text-teal-200"
-                  >
-                    Created issue #{created_number} ↗
-                  </a>
-                  <p
-                    :if={suggestion_not_created?(creation_action)}
-                    class="text-xs font-semibold text-slate-400"
-                  >
-                    Already tracked; no duplicate was created.
-                  </p>
-                  <button
-                    :if={!created_number && !suggestion_not_created?(creation_action)}
-                    id={"create-retro-issue-#{item.pr_retrospective_action.id}-#{suggestion_index}"}
-                    phx-click="create-retrospective-issue"
-                    phx-value-source-action-id={item.pr_retrospective_action.id}
-                    phx-value-suggestion-index={suggestion_index}
-                    disabled={suggestion_action_active?(creation_action)}
-                    class="inline-flex items-center gap-1.5 rounded-lg bg-teal-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                  >
-                    <.icon name="hero-plus-mini" class="size-3.5" />
-                    {suggestion_action_label(creation_action)}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
+            action={item.pr_retrospective_action}
+            creation_actions={item.pr_retrospective_issue_actions}
+            repository={item.repository}
+          />
         </article>
 
         <div

@@ -10,6 +10,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
+  @gh_label Path.join(@project_root, "deploy/ptc-manager-worker-gh-label")
   @dropin_check Path.join(@project_root, "deploy/ptc-manager-check-access-dropin")
   @provision Path.join(@project_root, "deploy/ptc-manager-provision-repository")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
@@ -30,6 +31,7 @@ defmodule Mix.Tasks.PtcDeployTest do
           @worker_bootstrap,
           @claude_trust,
           @codex_arm,
+          @gh_label,
           @dropin_check,
           @provision,
           @failure_policy,
@@ -506,6 +508,42 @@ defmodule Mix.Tasks.PtcDeployTest do
     fixture = write_json_fixture(payload)
     {output, 0} = System.cmd("jq", ["-r", "-f", @agent_filter, fixture])
     output |> String.trim() |> String.to_integer()
+  end
+
+  @tag :nightly
+  test "the label wrapper refuses everything but one safe issue edit" do
+    directory = Path.join(System.tmp_dir!(), "ptc-gh-label-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(directory, "usr/bin"))
+    recording = Path.join(directory, "calls")
+    fake_gh = Path.join(directory, "usr/bin/gh")
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    printf '%s\n' "$*" >> #{recording}
+    """)
+
+    File.chmod!(fake_gh, 0o755)
+    on_exit(fn -> File.rm_rf(directory) end)
+
+    # The wrapper hard-codes /usr/bin/gh, so run it through a shell that maps
+    # that path onto the fake one rather than editing the shipped script.
+    run = fn args ->
+      script = File.read!(@gh_label) |> String.replace("/usr/bin/gh", fake_gh)
+      path = Path.join(directory, "wrapper")
+      File.write!(path, script)
+      File.chmod!(path, 0o755)
+      System.cmd(path, args, stderr_to_stdout: true)
+    end
+
+    assert {_output, 0} = run.(["owner/repo", "1701", "add", "wait"])
+    assert File.read!(recording) =~ "issue edit 1701 --repo owner/repo --add-label wait"
+
+    assert {_output, 64} = run.(["owner/repo", "1701", "merge", "wait"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "add", "ptc:ready"])
+    assert {_output, 64} = run.(["owner/repo; rm -rf /", "1701", "add", "wait"])
+    assert {_output, 64} = run.(["owner/repo", "not-a-number", "add", "wait"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "add", "$(whoami)"])
+    assert File.read!(recording) |> String.split("\n", trim: true) |> length() == 1
   end
 
   defp policy_for(phase) do

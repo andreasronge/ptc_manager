@@ -50,6 +50,7 @@ defmodule PtcManager.MaintainerActions do
   def enqueue(action_key, publication_id, actor)
       when action_key in [
              "prepare_merge_decision",
+             "pr_retrospective",
              "repair_pr",
              "repair_and_merge_pr"
            ] and

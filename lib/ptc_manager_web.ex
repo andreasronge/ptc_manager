@@ -90,6 +90,7 @@ defmodule PtcManagerWeb do
       # Common modules used in templates
       alias Phoenix.LiveView.JS
       alias PtcManagerWeb.Layouts
+      alias PtcManagerWeb.TimeFormat
 
       # Routes generation with the ~p sigil
       unquote(verified_routes())

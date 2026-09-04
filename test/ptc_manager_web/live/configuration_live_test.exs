@@ -589,6 +589,102 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "#repository-health-#{repository.id}", "Add .ptc-manager.yml")
   end
 
+  test "reports publication writes and read-only PR tracking independently", %{conn: conn} do
+    previous_publication = Application.get_env(:ptc_manager, :publication_enabled)
+    previous_reconciliation = Application.get_env(:ptc_manager, :pr_reconcile_enabled)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :publication_enabled, previous_publication)
+      Application.put_env(:ptc_manager, :pr_reconcile_enabled, previous_reconciliation)
+    end)
+
+    Application.put_env(:ptc_manager, :publication_enabled, true)
+    Application.put_env(:ptc_manager, :pr_reconcile_enabled, false)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert html =~ "Publication enabled · exact-SHA GitHub App broker"
+    assert html =~ "Read-only PR status tracking disabled"
+    refute html =~ "without GitHub writes"
+  end
+
+  test "reports agent-owned PR creation as an enabled GitHub write path", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert html =~ "New jobs use agent publication · authenticated worker creates the PR"
+    refute html =~ "without GitHub writes"
+  end
+
+  test "shows read-only GitHub synchronization state per repository", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "integrations"})
+
+    repository
+    |> Repository.changeset(%{sync_status: "ok", last_synced_at: DateTime.utc_now()})
+    |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(view, "#integrations", "andreas/integrations")
+    assert has_element?(view, "#integrations", "connected")
+    assert has_element?(view, "#integrations", "Last complete sync:")
+    assert has_element?(view, "#integrations", "GitHub identity unknown until the next sync")
+
+    repository
+    |> Repository.changeset(%{github_viewer_login: "andreasronge"})
+    |> Repo.update!()
+
+    {:ok, identified, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+    assert has_element?(identified, "#integrations", "Reads GitHub as @andreasronge")
+  end
+
+  test "configures the maintainer's own triage labels per repository", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "labelled"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> form("#add-maintainer-label-#{repository.id}", %{
+      "label" => %{
+        "repository_id" => Integer.to_string(repository.id),
+        "name" => "wait",
+        "role" => "park"
+      }
+    })
+    |> render_submit()
+
+    assert render(view) =~ "It must already exist on GitHub"
+    assert has_element?(view, "#maintainer-labels-#{repository.id}", "wait")
+
+    assert Repo.get!(Repository, repository.id).maintainer_labels == %{
+             "labels" => [%{"name" => "wait", "role" => "park"}]
+           }
+
+    view
+    |> form("#add-maintainer-label-#{repository.id}", %{
+      "label" => %{
+        "repository_id" => Integer.to_string(repository.id),
+        "name" => "ptc:ready",
+        "role" => "badge"
+      }
+    })
+    |> render_submit()
+
+    assert render(view) =~ "belong to PtcManager"
+
+    view
+    |> element("#maintainer-labels-#{repository.id} button[phx-value-name='wait']")
+    |> render_click()
+
+    assert Repo.get!(Repository, repository.id).maintainer_labels == %{"labels" => []}
+  end
+
   defp authenticated_conn(conn) do
     conn
     |> init_test_session(%{})

@@ -3,6 +3,32 @@ defmodule PtcManager.PullRequestHealthTest do
 
   alias PtcManager.GitHub.PullRequestClient
 
+  test "normalizes the labels GitHub reports on a pull request" do
+    pull = %{
+      "number" => 42,
+      "html_url" => "https://github.com/owner/repo/pull/42",
+      "state" => "open",
+      "title" => "Fix the thing",
+      "body" => "Closes #7",
+      "labels" => [%{"name" => "ptc:follow-up"}, %{"name" => "bug"}, %{"name" => "bug"}],
+      "head" => %{
+        "sha" => String.duplicate("b", 40),
+        "ref" => "fix",
+        "repo" => %{"full_name" => "owner/repo"}
+      },
+      "base" => %{
+        "sha" => String.duplicate("a", 40),
+        "ref" => "main",
+        "repo" => %{"full_name" => "owner/repo"}
+      }
+    }
+
+    assert {:ok, result} = PullRequestClient.normalize(pull)
+    assert result.labels == ["ptc:follow-up", "bug"]
+
+    assert {:ok, %{labels: []}} = PullRequestClient.normalize(Map.delete(pull, "labels"))
+  end
+
   test "combines GitHub statuses and check runs into a failing conflicting PR" do
     health =
       PullRequestClient.health_from_responses(
