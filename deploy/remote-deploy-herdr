@@ -1099,9 +1099,17 @@ restore_worker_herdr() {
   fi
 
   echo "Restoring the Herdr this release was deployed against." >&2
-  sudo rm -f -- "$worker_herdr"
-  sudo cp -a "$herdr_link_backup" "$worker_herdr"
-  sudo systemctl restart ptc_manager-herdr || true
+
+  # This function is always called where its result is tested, which switches
+  # `set -e` off for its body, so every step has to report for itself. Ending on
+  # a command that cannot fail would let a rollback call itself healthy while
+  # the link is missing and cleanup removes the only copy of what it replaced.
+  restore_status=0
+  sudo rm -f -- "$worker_herdr" || restore_status=1
+  sudo cp -a "$herdr_link_backup" "$worker_herdr" || restore_status=1
+  sudo systemctl restart ptc_manager-herdr || restore_status=1
+
+  return "$restore_status"
 }
 
 rollback() {
@@ -1167,7 +1175,8 @@ finish() {
     restart_existing)
       deployment_phase=handling_failure
       echo "Deployment stopped before the release swap; restarting the existing release." >&2
-      restore_worker_herdr || true
+      restore_worker_herdr ||
+        echo "Restoring the previous Herdr failed; check $worker_herdr and ptc_manager-herdr before deploying again." >&2
       restore_preexisting_maintenance_override || true
       sudo systemctl start "$service_name" || true
       ;;

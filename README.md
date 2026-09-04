@@ -1062,8 +1062,12 @@ ssh -t herdr-box sudo -u ptc-manager-worker -H claude auth login
 ssh -t herdr-box sudo -u ptc-manager-worker -H env NO_OPEN_BROWSER=1 cursor-agent login
 ```
 
-Every program the machine runs is pinned in `deploy/toolchain-versions`, and
-that file is the only place a version is written. The deployment installs
+Every program the deployment installs on the machine is pinned in
+`deploy/toolchain-versions`, and that file is the only place one of their
+versions is written. The asset build tools, esbuild and Tailwind, are the
+exception: `config/config.exs` pins them the way Phoenix does and the release
+build installs them, so they match a commit too, just not in this file. The
+deployment installs
 exactly what it names into a root-owned `/opt/ptc-manager-<program>-<version>`
 directory, checks the version it actually got, and links the entry point onto
 the worker's service `PATH`. Codex and Claude Code are installed from their npm

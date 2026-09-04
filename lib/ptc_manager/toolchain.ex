@@ -129,7 +129,7 @@ defmodule PtcManager.Toolchain do
       # A link is not a program: File.read_link/1 reads the text a symlink
       # holds without following it, so a link naming the pinned version can
       # still point at nothing, at a directory, or at something nobody can run.
-      runnable?: executable?(target),
+      runnable?: entry_point?(target, program.link),
       deferred?: Map.get(program, :deferred, false)
     }
 
@@ -161,13 +161,18 @@ defmodule PtcManager.Toolchain do
   end
 
   # Inspecting the target answers this; running it would hand a program the
-  # deployment has not vouched for the console's own process.
-  defp executable?(nil), do: false
+  # deployment has not vouched for the console's own process. The name has to
+  # match too, because every other executable in a pinned tree sits under the
+  # same versioned directory and would otherwise pass for the one that is linked.
+  defp entry_point?(nil, _command), do: false
 
-  defp executable?(target) do
+  defp entry_point?(target, command) do
     case File.stat(target) do
-      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
-      _unreadable -> false
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        Bitwise.band(mode, 0o111) != 0 and Path.basename(target) == command
+
+      _unreadable ->
+        false
     end
   end
 

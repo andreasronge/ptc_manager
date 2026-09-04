@@ -175,8 +175,13 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert byte_index(script, "restore_worker_herdr || rollback_status=1") <
              byte_index(script, "restore_preexisting_maintenance_override || rollback_status=1")
 
-    assert script =~ "restore_worker_herdr || true"
     assert length(String.split(script, "restore_worker_herdr")) == 4
+
+    # The function is always called where its result is tested, which switches
+    # set -e off for its body, so a failed step has to be reported rather than
+    # covered by a final command that cannot fail.
+    assert script =~ "return \"$restore_status\""
+    refute script =~ "sudo systemctl restart ptc_manager-herdr || true"
   end
 
   # A version written twice drifts. The manifest is the only place one belongs,

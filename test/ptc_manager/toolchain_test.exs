@@ -137,6 +137,22 @@ defmodule PtcManager.ToolchainTest do
     assert %{status: :staged} = program(report, :herdr)
   end
 
+  # Every other executable in a pinned tree sits under the same versioned
+  # directory, so the version in a link target does not say which program the
+  # link actually reaches.
+  test "a link to another executable inside the pinned tree is not a match", context do
+    install_pinned_programs(context)
+
+    node_tree = Path.join(context.install_root, "ptc-manager-node-#{pinned("node")}")
+    npm = Path.join(node_tree, "bin/npm")
+    File.write!(npm, "another program in the pinned tree")
+    File.chmod!(npm, 0o755)
+    link(context, "node", "ptc-manager-node-#{pinned("node")}/bin/npm")
+
+    assert %{linked: linked, status: :drifted} = Toolchain.report() |> program(:node)
+    assert linked == pinned("node")
+  end
+
   test "the manifest pins every digest the deployment verifies a download against" do
     pinned = Toolchain.pinned()
 
