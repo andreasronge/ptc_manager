@@ -181,9 +181,13 @@ defmodule PtcManager.Operations.PrPublication do
   def label_names(%__MODULE__{labels: %{"names" => names}}) when is_list(names), do: names
   def label_names(%__MODULE__{}), do: []
 
-  @doc "True when the implementation agent marked its retrospective as unfinished business."
+  @doc """
+  True when the implementation agent marked its retrospective as unfinished business.
+
+  GitHub matches label names case-insensitively, so this comparison does too.
+  """
   def follow_up_suggested?(%__MODULE__{} = publication),
-    do: "ptc:follow-up" in label_names(publication)
+    do: Enum.any?(label_names(publication), &(String.downcase(&1) == "ptc:follow-up"))
 
   defp validate_labels(changeset) do
     validate_change(changeset, :labels, fn :labels, value ->

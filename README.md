@@ -422,10 +422,12 @@ write, and treating the analysis as current would let implementation start on a
 question nobody had read. Run **Prepare issue** again, or use **Fix directly**,
 which needs no analysis.
 
-Label names are matched case-insensitively everywhere, as GitHub matches them.
-`PTC:ready` is refused for the same reason `ptc:ready` is: it would reach the
-same GitHub label, and the workflow labels must keep coming only from
-synchronization.
+Label names are matched case-insensitively everywhere, as GitHub matches them —
+in this configuration list, in the chips, in the parked-group check, in the
+wrapper, and when synchronization recognizes the three `ptc:` workflow labels.
+`PTC:ready` is refused as a triage label for the same reason `ptc:ready` is: it
+would reach the same GitHub label, and the workflow labels must keep coming only
+from synchronization.
 
 #### Suggested follow-ups
 

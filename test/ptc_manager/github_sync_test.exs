@@ -161,6 +161,53 @@ defmodule PtcManager.GitHubSyncTest do
     assert issue.github_labels == %{"names" => ["wait"]}
   end
 
+  test "recognizes a workflow label whatever casing GitHub reports" do
+    repository = repository_fixture()
+
+    blocked =
+      65
+      |> remote_issue("Blocked in shouty case")
+      |> Map.put("labels", [%{"name" => "PTC:Blocked"}])
+
+    Process.put(:github_result, {:ok, [blocked]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 65)
+
+    assert issue.workflow_label == "ptc:blocked"
+    refute issue.workflow_label_conflict
+
+    # A blocked issue must not be startable, and Fix directly reads the same
+    # projection the approve gate does.
+    assert {:error, :issue_workflow_not_ready} =
+             PtcManager.Operations.approve_issue_directly(issue.id, "andreas")
+
+    conflicting =
+      66
+      |> remote_issue("Two workflow labels")
+      |> Map.put("labels", [%{"name" => "PTC:ready"}, %{"name" => "ptc:blocked"}])
+
+    Process.put(:github_result, {:ok, [blocked, conflicting]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    conflicted = Repo.get_by!(Issue, repository_id: repository.id, number: 66)
+    assert conflicted.workflow_label_conflict
+    assert is_nil(conflicted.workflow_label)
+
+    # The same label twice in different casing is one label, not a conflict.
+    duplicated =
+      67
+      |> remote_issue("One label written twice")
+      |> Map.put("labels", [%{"name" => "PTC:ready"}, %{"name" => "ptc:ready"}])
+
+    Process.put(:github_result, {:ok, [blocked, conflicting, duplicated]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    single = Repo.get_by!(Issue, repository_id: repository.id, number: 67)
+    assert single.workflow_label == "ptc:ready"
+    refute single.workflow_label_conflict
+  end
+
   test "synchronizes the canonical managed workflow label" do
     repository = repository_fixture()
 

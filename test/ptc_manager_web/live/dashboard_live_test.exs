@@ -1386,6 +1386,16 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#planning-group-waiting #issue-#{issue.id}")
     assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=true]", "wait")
     assert has_element?(view, "#toggle-label-#{issue.id}-ux[aria-pressed=true]", "ux")
+
+    # GitHub may report the same label in another casing; the chip is still on.
+    issue
+    |> Issue.changeset(%{github_labels: %{"names" => ["needs-design", "Wait", "UX"]}})
+    |> Repo.update!()
+
+    Operations.notify_changed(:test)
+
+    assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=true]", "wait")
+    assert has_element?(view, "#toggle-label-#{issue.id}-ux[aria-pressed=true]", "ux")
     refute has_element?(view, "#issue-#{issue.id}", "needs-design")
 
     view |> element("#toggle-issue-#{issue.id}") |> render_click()
@@ -1564,6 +1574,18 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert render(view) =~ "The pull request and its labels are unchanged."
     refute has_element?(view, "#follow-up-#{publication.id}")
     assert Repo.get!(PrPublication, publication.id).follow_up_dismissed_at
+  end
+
+  test "survives a group name the page never rendered", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Still here afterwards"})
+    proposal_fixture(issue)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    render_click(view, "toggle-group", %{"group" => "not-a-group"})
+
+    assert has_element?(view, "#planning-group-ready #issue-#{issue.id}")
   end
 
   defp authenticated_conn(conn) do

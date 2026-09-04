@@ -2675,7 +2675,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
       labelled =
         publication
-        |> PrPublication.changeset(%{labels: %{"names" => ["ptc:follow-up"]}})
+        |> PrPublication.changeset(%{labels: %{"names" => ["PTC:Follow-Up"]}})
         |> Repo.update!()
 
       assert [candidate] = Publications.follow_up_candidates()

@@ -64,14 +64,20 @@ defmodule PtcManagerWeb.DashboardLive do
 
   @impl true
   def handle_event("toggle-group", %{"group" => group}, socket) do
-    group = String.to_existing_atom(group)
+    # The name arrives from the browser, so it is matched against the groups
+    # this page actually has rather than turned into an atom.
+    case Enum.find(PlanningGroup.order(), &(Atom.to_string(&1) == group)) do
+      nil ->
+        {:noreply, socket}
 
-    {:noreply,
-     update(socket, :collapsed_groups, fn collapsed ->
-       if MapSet.member?(collapsed, group),
-         do: MapSet.delete(collapsed, group),
-         else: MapSet.put(collapsed, group)
-     end)}
+      group ->
+        {:noreply,
+         update(socket, :collapsed_groups, fn collapsed ->
+           if MapSet.member?(collapsed, group),
+             do: MapSet.delete(collapsed, group),
+             else: MapSet.put(collapsed, group)
+         end)}
+    end
   end
 
   def handle_event("toggle-issue", %{"issue-id" => issue_id}, socket) do
@@ -496,11 +502,9 @@ defmodule PtcManagerWeb.DashboardLive do
   def writing_label?(in_flight, issue, name), do: MapSet.member?(in_flight, {issue.id, name})
 
   def maintainer_label_chips(issue) do
-    present = MapSet.new(MaintainerLabels.reported_names(issue))
-
     Enum.map(
       MaintainerLabels.list(issue.repository),
-      &{&1["name"], MapSet.member?(present, &1["name"])}
+      &{&1["name"], MaintainerLabels.reported?(issue, &1["name"])}
     )
   end
 

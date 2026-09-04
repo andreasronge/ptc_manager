@@ -189,12 +189,16 @@ defmodule PtcManager.GitHub.IssueSnapshot do
     |> Map.put("blocked_by_overflow", overflow)
   end
 
+  # GitHub matches label names case-insensitively, so `PTC:blocked` is the same
+  # label as `ptc:blocked`. Recognising only the lowercase spelling would leave
+  # such an issue with no workflow label at all, and every approval gate reads
+  # `nil` as "GitHub says nothing", which is the opposite of blocked.
   defp workflow_label(labels) when is_list(labels) do
     managed =
       labels
       |> Enum.map(fn
-        %{"name" => name} -> name
-        name when is_binary(name) -> name
+        %{"name" => name} when is_binary(name) -> String.downcase(String.trim(name))
+        name when is_binary(name) -> String.downcase(String.trim(name))
         _label -> nil
       end)
       |> Enum.filter(&(&1 in ["ptc:ready", "ptc:blocked", "ptc:needs-decision"]))
