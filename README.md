@@ -161,10 +161,12 @@ The authenticated routes are:
   run history, versions, and cross-repository copying. `/automations/new`
   creates a paused custom automation with a key derived from its name;
 - `/configuration` — safe registration and health checks for dedicated repository
-  checkouts, your own triage labels per repository, the **Integrations** section
-  describing what GitHub synchronization, publication, private analysis, and the
-  dispatcher currently reach, and direct links to each repository's prompt and
-  automation settings.
+  checkouts, your own triage labels and write-only encrypted implementation-agent
+  variables per repository, the **Integrations** section describing what GitHub
+  synchronization, publication, private analysis, and the dispatcher currently
+  reach, and direct links to each repository's prompt and automation settings.
+  Repository variables are sourced from protected per-pane files after setup
+  completes; they are never supplied to bootstrap or maintainer-action agents.
 
 To choose a different local password:
 

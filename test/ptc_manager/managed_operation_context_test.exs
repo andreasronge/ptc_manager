@@ -2,6 +2,7 @@ defmodule PtcManager.ManagedOperationContextTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.ManagedOperationContext
+  alias PtcManager.AgentEnvironmentVariables
 
   defmodule TransientPaneCommand do
     def run(["pane", "run", pane_id, command]) do
@@ -80,6 +81,10 @@ defmodule PtcManager.ManagedOperationContextTest do
     def run(["pane", "read" | _rest]), do: flunk("pane read must not run")
   end
 
+  defmodule UnusedPaneCommand do
+    def run(_args), do: flunk("dispatch must stop before touching the implementation pane")
+  end
+
   setup do
     previous_socket = Application.get_env(:ptc_manager, :resource_operation_socket_path)
     previous_directory = Application.get_env(:ptc_manager, :resource_operation_context_dir)
@@ -120,6 +125,94 @@ defmodule PtcManager.ManagedOperationContextTest do
     refute_receive {:pane_run, "w9:p1", _command}
   end
 
+  test "implementation pane command sources a protected environment file without exposing values" do
+    repository = repository_fixture()
+
+    {:ok, _variable} =
+      AgentEnvironmentVariables.put(
+        repository.id,
+        %{
+          "name" => "OPENROUTER_API_KEY",
+          "value" => "secret with ' quotes"
+        },
+        "maintainer"
+      )
+
+    assert {:ok, context} =
+             ManagedOperationContext.prepare_job(
+               SnapshotRecoveryPaneCommand,
+               "environment:pane",
+               job(repository.id)
+             )
+
+    assert_receive {:pane_run, "environment:pane", command}
+    environment_path = Path.rootname(context.path, ".json") <> ".env"
+
+    assert command =~ "set -a && . '#{environment_path}' && set +a"
+    refute command =~ "secret with"
+    assert File.read!(environment_path) == "OPENROUTER_API_KEY='secret with '\\'' quotes'\n"
+    assert {:ok, %{mode: mode}} = File.stat(environment_path)
+    assert Bitwise.band(mode, 0o777) == 0o440
+
+    shell =
+      ManagedOperationContext.shell_command(context.path, context.payload,
+        environment: environment_path
+      )
+
+    {output, 0} = System.cmd("sh", ["-c", shell <> " && printf '%s' \"$OPENROUTER_API_KEY\""])
+    assert output =~ "secret with ' quotes"
+  end
+
+  test "both plain and cgroup commands source the environment before managed exports" do
+    environment_path = "/protected/pane.env"
+    payload = %{"context_id" => "context-id", "cgroups" => false}
+
+    plain =
+      ManagedOperationContext.shell_command("/protected/pane.json", payload,
+        environment: environment_path
+      )
+
+    assert plain =~ "set -a && . '/protected/pane.env' && set +a && export"
+
+    cgroup =
+      ManagedOperationContext.shell_command(
+        "/protected/pane.json",
+        %{payload | "cgroups" => true},
+        environment: environment_path
+      )
+
+    assert cgroup =~
+             "set -a && . '/protected/pane.env' && set +a && . '/usr/local/libexec/ptc-manager-agent-context'"
+  end
+
+  test "an environment-file write failure prevents implementation dispatch" do
+    repository = repository_fixture()
+
+    {:ok, _variable} =
+      AgentEnvironmentVariables.put(
+        repository.id,
+        %{"name" => "TOKEN", "value" => "secret"},
+        "maintainer"
+      )
+
+    digest = :crypto.hash(:sha256, "unwritable:pane") |> Base.url_encode64(padding: false)
+
+    environment_path =
+      Path.join(
+        Application.fetch_env!(:ptc_manager, :resource_operation_context_dir),
+        "pane-#{digest}.env"
+      )
+
+    File.mkdir_p!(environment_path)
+
+    assert {:error, {:environment_file_write_failed, _reason}} =
+             ManagedOperationContext.prepare_job(
+               UnusedPaneCommand,
+               "unwritable:pane",
+               job(repository.id)
+             )
+  end
+
   test "accepts a marker visible in a terminal snapshot after wait-output times out" do
     assert {:ok, context} =
              ManagedOperationContext.prepare_job(SnapshotRecoveryPaneCommand, "w9:p1", job())
@@ -143,10 +236,10 @@ defmodule PtcManager.ManagedOperationContextTest do
     refute_receive :terminal_wait
   end
 
-  defp job do
+  defp job(repository_id \\ 7) do
     %{
       id: 42,
-      repository_id: 7,
+      repository_id: repository_id,
       fencing_token: 3,
       worktree_allocation: %{worker_id: 11}
     }
