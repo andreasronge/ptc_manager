@@ -23,6 +23,7 @@ defmodule PtcManager.Operations.DeliveryLane do
   @doc "The lane this delivery item belongs to."
   def lane_for(item) do
     cond do
+      stopped?(item) -> :stuck
       job_state(item) == "queued" -> :queued
       stuck?(item) -> :stuck
       ready?(item) -> :ready
@@ -30,8 +31,15 @@ defmodule PtcManager.Operations.DeliveryLane do
     end
   end
 
+  @doc "True when this card is a job whose agent reported that it could not finish."
+  def stopped?(%{active_job: %{stop_reported_at: %DateTime{}, stop_acknowledged_at: nil}}),
+    do: true
+
+  def stopped?(_item), do: false
+
   def stuck?(item) do
-    job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
+    stopped?(item) or
+      job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
       match?(%{checks_state: "failure"}, item.publication) or
       match?(%{mergeability: "conflicting"}, item.publication) or
       match?(

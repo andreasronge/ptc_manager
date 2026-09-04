@@ -43,7 +43,9 @@ defmodule PtcManager.OperationsTest do
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.GitHub.IssueLabels
+  alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PlanningGroup
+  alias PtcManager.Operations.StopReport
   alias PtcManager.Operations.Proposal
 
   alias PtcManager.Operations.{
@@ -515,6 +517,121 @@ defmodule PtcManager.OperationsTest do
     end
   end
 
+  describe "agent stop reports" do
+    setup do
+      previous = Application.get_env(:ptc_manager, :agent_action_output_dir)
+      directory = Path.join(System.tmp_dir!(), "ptc-stop-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(directory)
+      Application.put_env(:ptc_manager, :agent_action_output_dir, directory)
+
+      on_exit(fn ->
+        File.rm_rf(directory)
+
+        if is_nil(previous),
+          do: Application.delete_env(:ptc_manager, :agent_action_output_dir),
+          else: Application.put_env(:ptc_manager, :agent_action_output_dir, previous)
+      end)
+
+      :ok
+    end
+
+    test "reads a valid report and refuses anything else" do
+      %{job: job} = running_job_fixture("working")
+
+      assert StopReport.read(job) == :none
+
+      write_stop_report(job, %{
+        "reason_code" => "missing_prerequisite",
+        "summary" => "OPENROUTER_API_KEY is not set in this workspace.",
+        "detail" => "The recording step needs a live key and no environment file was found.",
+        "prerequisite" => "OPENROUTER_API_KEY",
+        "progress" => "none"
+      })
+
+      assert {:ok, report} = StopReport.read(job)
+      assert report["reason_code"] == "missing_prerequisite"
+      assert StopReport.prerequisite(report) == "OPENROUTER_API_KEY"
+      assert StopReport.nothing_committed?(report)
+
+      # A report PtcManager cannot understand is not a stop: the ordinary
+      # "no usable result" path has to stay in charge.
+      write_stop_report(job, %{"reason_code" => "because-i-said-so", "summary" => "x"})
+      assert {:error, :invalid_stop_report} = StopReport.read(job)
+
+      File.write!(StopReport.path_for(job), "not json at all")
+      assert {:error, :invalid_stop_report} = StopReport.read(job)
+    end
+
+    test "the reason decides which recovery is offered first" do
+      assert StopReport.primary_action("missing_prerequisite") == :retry
+      assert StopReport.primary_action("environment_broken") == :retry
+      assert StopReport.primary_action("ambiguous_requirement") == :ask_on_issue
+      # An agent calling something unsafe must not be one click from doing it.
+      assert StopReport.primary_action("unsafe_to_proceed") == :none
+    end
+
+    test "recording a stop ends the attempt and frees the heavy slot" do
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("working")
+      report = stop_report_attrs()
+
+      assert {:ok, stopped} = Operations.record_job_stop_report(job.id, report, "coordinator")
+      assert stopped.state == "failed"
+      assert stopped.ended_at
+      assert stopped.stop_reported_at
+      assert stopped.stop_report["prerequisite"] == "OPENROUTER_API_KEY"
+      assert stopped.last_error == report["summary"]
+
+      # A stopped agent must not keep holding capacity while it waits on a person.
+      refute stopped.state in ~w(starting working idle blocked reconciling)
+
+      assert Repo.get!(AgentRun, run.id).state == "lost"
+
+      preserved = Repo.get!(WorktreeAllocation, allocation.id)
+      assert preserved.state == "attention"
+
+      audit = Repo.get_by!(AuditEvent, action: "job.agent_stopped")
+      assert audit.details["reason_code"] == "missing_prerequisite"
+    end
+
+    test "a stopped job stays on the delivery board until it is answered" do
+      %{job: job} = running_job_fixture("working")
+      assert {:ok, stopped} = Operations.record_job_stop_report(job.id, stop_report_attrs())
+
+      assert [item] = Enum.filter(Operations.delivery_board_items(), & &1[:stopped?])
+      assert item.active_job.id == stopped.id
+      assert DeliveryLane.lane_for(item) == :stuck
+
+      assert {:ok, _job} = Operations.acknowledge_job_stop(stopped.id, "andreas")
+      assert Enum.filter(Operations.delivery_board_items(), & &1[:stopped?]) == []
+      assert Repo.get_by!(AuditEvent, action: "job.stop_acknowledged")
+    end
+
+    test "trying again reuses the approval and cannot run twice" do
+      %{job: job} = running_job_fixture("working")
+      assert {:ok, stopped} = Operations.record_job_stop_report(job.id, stop_report_attrs())
+
+      assert {:ok, retry} = Operations.retry_stopped_job(stopped.id, "andreas")
+      assert retry.id != stopped.id
+      assert retry.state == "queued"
+      assert retry.approval_id == stopped.approval_id
+      assert retry.issue_id == stopped.issue_id
+      assert retry.required_review_count == stopped.required_review_count
+      assert retry.prompt_instructions == stopped.prompt_instructions
+      assert retry.fencing_token == 0
+
+      # The stopped card is answered, so pressing again cannot queue a second.
+      assert {:error, :job_not_stopped} = Operations.retry_stopped_job(stopped.id, "andreas")
+      assert Repo.get_by!(AuditEvent, action: "job.retried_after_stop")
+    end
+
+    test "a job that never stopped cannot be retried or set aside" do
+      %{job: job} = running_job_fixture("working")
+
+      assert {:error, :job_not_stopped} = Operations.retry_stopped_job(job.id, "andreas")
+      assert {:error, :job_not_stopped} = Operations.acknowledge_job_stop(job.id, "andreas")
+    end
+  end
+
   describe "approve_issue_directly/3" do
     test "starts implementation without any proposal" do
       repository = repository_fixture()
@@ -912,7 +1029,22 @@ defmodule PtcManager.OperationsTest do
                )
 
       assert detail =~ "1d 5h"
-      assert detail =~ "answers it in Herdr"
+      assert detail =~ "answer it in Herdr or cancel the agent"
+    end
+
+    test "an idle agent past the grace period needs attention too" do
+      # Codex and Claude report idle, not blocked, when they end a turn with a
+      # question. An idle agent that stopped moving is exactly as stuck.
+      fresh = health_run(%{state: "idle", state_changed_at: health_minutes_ago(2)})
+      assert AgentHealth.assess(fresh, @now).status == :healthy
+      assert AgentHealth.assess(fresh, @now).label == "Idle"
+
+      parked = health_run(%{state: "idle", state_changed_at: health_minutes_ago(120)})
+      assessment = AgentHealth.assess(parked, @now)
+      assert assessment.status == :attention
+      assert assessment.label == "Waiting for a person"
+      assert assessment.detail =~ "idle for"
+      assert assessment.detail =~ "Nothing is watching its session"
     end
 
     test "a live heartbeat does not hide an agent Herdr stopped reporting" do
@@ -1041,6 +1173,20 @@ defmodule PtcManager.OperationsTest do
 
   defp merged_proposal(proposal, overrides),
     do: Map.merge(proposal, Map.get(overrides, :proposal, %{}))
+
+  defp stop_report_attrs do
+    %{
+      "reason_code" => "missing_prerequisite",
+      "summary" => "OPENROUTER_API_KEY is not set in this workspace.",
+      "detail" => "The recording step needs a live key and no environment file was found.",
+      "prerequisite" => "OPENROUTER_API_KEY",
+      "progress" => "none"
+    }
+  end
+
+  defp write_stop_report(job, report) do
+    File.write!(StopReport.path_for(job), Jason.encode!(report))
+  end
 
   defp running_job_fixture(state) do
     repository = repository_fixture()

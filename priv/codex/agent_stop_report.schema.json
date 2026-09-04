@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent stop report",
+  "description": "Written by an agent that cannot start or cannot continue. It is displayed to the maintainer and never acted on automatically.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason_code", "summary", "detail", "progress"],
+  "properties": {
+    "reason_code": {
+      "description": "Why the agent stopped. This decides which recovery PtcManager offers first.",
+      "type": "string",
+      "enum": [
+        "missing_prerequisite",
+        "environment_broken",
+        "ambiguous_requirement",
+        "unsafe_to_proceed"
+      ]
+    },
+    "summary": {
+      "description": "One plain sentence a maintainer can read on a card. No secrets, no command output.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "detail": {
+      "description": "What was attempted and what failed, in plain language. No secrets, no raw command output.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "prerequisite": {
+      "description": "The exact name of the one missing thing, when there is one: an environment variable, binary, or service. Used to report the gap on the Configuration page.",
+      "type": "string",
+      "maxLength": 120
+    },
+    "progress": {
+      "description": "Whether anything was committed to the branch before stopping.",
+      "type": "string",
+      "enum": ["none", "partial"]
+    }
+  }
+}

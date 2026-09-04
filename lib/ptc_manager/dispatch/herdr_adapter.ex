@@ -6,6 +6,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Herdr.Command
   alias PtcManager.Automations
   alias PtcManager.Gateway
+  alias PtcManager.Operations.StopReport
   alias PtcManager.CommandEnvironment
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerClaudeTrust
@@ -266,6 +267,11 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
        ) do
     agent_name = agent_name(job)
     worktree_path = job.worktree_allocation.path
+
+    # The agent needs its stop contract in place before it can read the prompt
+    # that names it. A failure here leaves it with no structured way to stop,
+    # which is only the behaviour that existed before the contract.
+    _ = StopReport.prepare(job)
 
     with {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
@@ -656,6 +662,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       Independent reviews: #{required_reviews} — the number of cold independent review sessions to run on the finished change; 0 skips review. Follow the repository's review workflow for running and following up each session.
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
+      Session: nobody is watching this session. No question you ask here will be answered, and waiting for input only stalls the work until PtcManager times it out.
+      If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{StopReport.path_for(job)} matching the schema at #{StopReport.schema_path_for(job)}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait.
       </context>
       <issue_data>
       Number: #{issue.number}

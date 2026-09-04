@@ -2,6 +2,7 @@ defmodule PtcManager.ResultReconciler do
   @moduledoc "Verifies committed implementation branches before GitHub write eligibility."
 
   alias PtcManager.Operations
+  alias PtcManager.Operations.StopReport
   alias PtcManager.Repository.Contract
 
   def run_once(opts \\ []) do
@@ -56,7 +57,28 @@ defmodule PtcManager.ResultReconciler do
     end
   end
 
+  # An agent that knew why it could not finish said so in a file. Prefer that
+  # over the probe's technical reason, which can only say the branch is not
+  # usable and never why.
   defp record_failure(job, reason) do
+    case StopReport.read(job) do
+      {:ok, report} -> record_stop(job, report)
+      _no_report -> record_probe_failure(job, reason)
+    end
+  end
+
+  defp record_stop(job, report) do
+    case Operations.record_job_stop_report(job.id, report) do
+      {:ok, _job} ->
+        StopReport.discard(job)
+        {:error, {:agent_stopped, report["reason_code"]}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp record_probe_failure(job, reason) do
     _ =
       Operations.record_result_error(
         job.id,

@@ -14,7 +14,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, Issue, PrPublication, Repository}
+  alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication, Repository}
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
   alias PtcManager.Repository.SourceSnapshot
@@ -85,6 +85,35 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  @doc """
+  Puts a stopped implementation's blocker onto its GitHub issue for a decision.
+
+  The agent could not resolve something and no one was watching to answer it.
+  This queues the ordinary issue preparation with that report as evidence, so
+  the question lands on GitHub and the issue returns through Planning's existing
+  decision flow rather than through a second, parallel one.
+  """
+  def enqueue_blocked_issue_review(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    job = Job |> Repo.get(job_id) |> Repo.preload([:issue, :repository])
+
+    with %Job{stop_report: report, stop_acknowledged_at: nil} when is_map(report) <- job,
+         {:ok, attrs} <-
+           Catalog.build("prepare_issue", %{
+             issue: job.issue,
+             repository: job.repository,
+             blocker: report
+           }),
+         {:ok, action} <- enqueue_versioned(job.repository, "prepare_issue", attrs, actor),
+         {:ok, _job} <- Operations.acknowledge_job_stop(job_id, actor) do
+      {:ok, action}
+    else
+      nil -> {:error, :not_found}
+      %Job{} -> {:error, :job_not_stopped}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   def enqueue_issue_decision(issue_id, source_action_id, choice, custom_answer, actor)
       when is_integer(issue_id) and is_integer(source_action_id) and is_binary(choice) and

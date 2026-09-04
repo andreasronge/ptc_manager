@@ -31,6 +31,7 @@ defmodule PtcManager.Operations do
     PrPublication,
     Proposal,
     Repository,
+    StopReport,
     Worker,
     WorktreeAllocation
   }
@@ -725,6 +726,181 @@ defmodule PtcManager.Operations do
   end
 
   defp close_cancelled_pane(job, _run), do: {:ok, job}
+
+  @doc """
+  Records that this job's agent said it could not finish, and ends the attempt.
+
+  The report only supplies a reason. The transition is the same one every other
+  unfinished attempt takes: the job ends, its run ends, and the partial worktree
+  is kept for attention. The heavy slot is released, because a stopped agent
+  waiting on a person must not hold capacity that other work needs.
+  """
+  def record_job_stop_report(job_id, report, actor \\ "coordinator")
+      when is_integer(job_id) and is_map(report) and is_binary(actor) do
+    now = utc_now()
+    summary = StopReport.summary(report)
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          Job
+          |> where([job], job.id == ^job_id and job.state in ^@active_job_states)
+          |> Repo.update_all(
+            set: [
+              state: "failed",
+              lease_expires_at: nil,
+              ended_at: now,
+              last_error: summary,
+              stop_report: report,
+              stop_reported_at: now,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:job_not_stoppable)
+
+        job = Repo.get!(Job, job_id)
+
+        AgentRun
+        |> where(
+          [run],
+          run.job_id == ^job_id and run.fencing_token == ^job.fencing_token and
+            run.state in ^@live_agent_run_states
+        )
+        |> Repo.update_all(
+          set: [
+            state: "lost",
+            status_text: "The agent reported that it could not continue.",
+            last_heartbeat_at: now,
+            ended_at: now,
+            updated_at: now
+          ]
+        )
+
+        mark_allocation!(job_id, %{state: "attention", last_used_at: now, last_error: summary})
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.agent_stopped",
+          target_type: "job",
+          target_id: job_id,
+          details: Map.merge(report, %{"fencing_token" => job.fencing_token})
+        })
+
+        job
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Jobs whose agent stopped and which the maintainer has not answered yet."
+  def unacknowledged_stopped_jobs do
+    Job
+    |> where([job], not is_nil(job.stop_reported_at) and is_nil(job.stop_acknowledged_at))
+    |> order_by([job], desc: job.stop_reported_at, desc: job.id)
+    |> preload([:issue, :repository])
+    |> Repo.all()
+  end
+
+  @doc "Removes one stopped job's card from the board without changing GitHub."
+  def acknowledge_job_stop(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          Job
+          |> where(
+            [job],
+            job.id == ^job_id and not is_nil(job.stop_reported_at) and
+              is_nil(job.stop_acknowledged_at)
+          )
+          |> Repo.update_all(set: [stop_acknowledged_at: now, updated_at: now])
+
+        if updated != 1, do: Repo.rollback(:job_not_stopped)
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.stop_acknowledged",
+          target_type: "job",
+          target_id: job_id,
+          details: %{"acknowledged_at" => DateTime.to_iso8601(now)}
+        })
+
+        Repo.get!(Job, job_id)
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Queues a fresh attempt at a stopped job, reusing the maintainer's approval.
+
+  The decision to implement this issue was already made and has not changed;
+  only the environment did. The new job repeats the frozen prompt and review
+  count so the retry is the same work, not a new one.
+  """
+  def retry_stopped_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        stopped = Repo.get!(Job, job_id)
+
+        if is_nil(stopped.stop_reported_at) or not is_nil(stopped.stop_acknowledged_at) do
+          Repo.rollback(:job_not_stopped)
+        end
+
+        {updated, _rows} =
+          Job
+          |> where([job], job.id == ^job_id and is_nil(job.stop_acknowledged_at))
+          |> Repo.update_all(set: [stop_acknowledged_at: now, updated_at: now])
+
+        if updated != 1, do: Repo.rollback(:job_not_stopped)
+
+        retry =
+          %Job{}
+          |> Job.changeset(%{
+            repository_id: stopped.repository_id,
+            issue_id: stopped.issue_id,
+            approval_id: stopped.approval_id,
+            automation_definition_version_id: stopped.automation_definition_version_id,
+            prompt_instructions: stopped.prompt_instructions,
+            kind: stopped.kind,
+            state: "queued",
+            fencing_token: 0,
+            required_review_count: stopped.required_review_count
+          })
+          |> Repo.insert!()
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.retried_after_stop",
+          target_type: "job",
+          target_id: retry.id,
+          details: %{
+            "stopped_job_id" => stopped.id,
+            "issue_id" => stopped.issue_id,
+            "reason_code" => get_in(stopped.stop_report || %{}, ["reason_code"])
+          }
+        })
+
+        retry
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   def release_idle_job(job_id, actor)
       when is_integer(job_id) and is_binary(actor) and actor != "" do
@@ -2101,6 +2277,8 @@ defmodule PtcManager.Operations do
   defp maybe_filter_issue_state(query, state), do: where(query, [issue], issue.state == ^state)
 
   def delivery_board_items do
+    stopped_items = stopped_board_items()
+
     managed_items =
       dashboard_issues()
       |> Enum.reject(&is_nil(&1.active_job))
@@ -2158,7 +2336,38 @@ defmodule PtcManager.Operations do
         }
       end)
 
-    managed_items ++ external_items
+    managed_items ++ stopped_items ++ external_items
+  end
+
+  # A stopped job is no longer active, so it holds no capacity, but its card has
+  # to stay until the maintainer decides what to do about it.
+  defp stopped_board_items do
+    Enum.map(unacknowledged_stopped_jobs(), fn job ->
+      %{
+        managed?: true,
+        stopped?: true,
+        repository: job.repository,
+        title: job.issue.title,
+        number: nil,
+        url: nil,
+        started_at: job.stop_reported_at,
+        issue: job.issue,
+        dependencies: [],
+        dependency_cycle: nil,
+        proposal: nil,
+        active_job: job,
+        latest_job: job,
+        publication: nil,
+        external_publication: nil,
+        pr_analysis: nil,
+        merge_approval: nil,
+        issue_agent_action: nil,
+        pr_agent_action: nil,
+        pr_retrospective_action: nil,
+        pr_retrospective_issue_actions: [],
+        linked_issues: [job.issue]
+      }
+    end)
   end
 
   defp linked_issues_for_publications(publications) do
@@ -2218,7 +2427,7 @@ defmodule PtcManager.Operations do
   def list_active_agent_runs do
     AgentRun
     |> without_orphaned_action_duplicates()
-    |> where([run], run.state in ~w(queued starting working blocked unknown))
+    |> where([run], run.state in ~w(queued starting working idle blocked unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
     |> preload([
       :worker,

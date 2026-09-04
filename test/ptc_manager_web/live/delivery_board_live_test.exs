@@ -329,7 +329,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert has_element?(view, card, "Waiting for a person")
     assert has_element?(view, "#agent-attention-board-job-#{job.id}", "impl_j#{job.id}_f1")
-    assert has_element?(view, card, "answers it in Herdr")
+    assert has_element?(view, card, "answer it in Herdr or cancel the agent")
     assert has_element?(view, card, "fail until it can run again")
     refute has_element?(view, card, "Merge conflicts must be resolved")
 
@@ -396,6 +396,91 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
              "#follow-ups-suggested-board-job-#{job.id}",
              "Follow-ups suggested"
            )
+  end
+
+  test "a stopped agent explains itself and offers the right recovery first", %{conn: conn} do
+    job = approved_job("Record a live session") |> set_job_state("working")
+
+    assert {:ok, stopped} =
+             Operations.record_job_stop_report(job.id, %{
+               "reason_code" => "missing_prerequisite",
+               "summary" => "OPENROUTER_API_KEY is not set in this workspace.",
+               "detail" => "The recording step needs a live key and no env file was found.",
+               "prerequisite" => "OPENROUTER_API_KEY",
+               "progress" => "none"
+             })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#lane-stuck #board-job-#{stopped.id}"
+    assert has_element?(view, card, "Agent stopped · Missing prerequisite")
+    assert has_element?(view, card, "OPENROUTER_API_KEY is not set")
+    assert has_element?(view, card, "committed nothing")
+    # The technical branch error must not replace the agent's own explanation.
+    refute has_element?(view, card, "The agent stopped before completing the task.")
+
+    # A missing prerequisite is a retry, so Try again is the filled button.
+    assert has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
+    refute has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
+
+    view |> element("#retry-stopped-#{stopped.id}") |> render_click()
+
+    assert render(view) =~ "Queued a fresh attempt"
+    retry = Repo.get_by!(Job, state: "queued", issue_id: stopped.issue_id)
+    assert retry.approval_id == stopped.approval_id
+    refute has_element?(view, "#board-job-#{stopped.id}")
+  end
+
+  test "an ambiguity is offered to the issue first, not retried", %{conn: conn} do
+    job = approved_job("Decide the export shape") |> set_job_state("working")
+
+    assert {:ok, stopped} =
+             Operations.record_job_stop_report(job.id, %{
+               "reason_code" => "ambiguous_requirement",
+               "summary" => "The issue does not say which export shape to use.",
+               "detail" => "Two incompatible readings, and no test distinguishes them.",
+               "progress" => "partial"
+             })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Needs a decision")
+    assert has_element?(view, "#board-job-#{stopped.id}", "worktree is kept")
+    assert has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
+    refute has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
+
+    view |> element("#ask-on-issue-#{stopped.id}") |> render_click()
+
+    assert render(view) =~ "put the blocker on the GitHub issue"
+
+    queued = Repo.get_by!(AgentAction, action_key: "prepare_issue", state: "queued")
+    assert queued.target_id == stopped.issue_id
+    assert queued.prompt =~ "blocked_implementation"
+    assert queued.prompt =~ "The issue does not say which export shape to use."
+    refute has_element?(view, "#board-job-#{stopped.id}")
+  end
+
+  test "an unsafe stop offers no filled recovery at all", %{conn: conn} do
+    job = approved_job("Delete the archive") |> set_job_state("working")
+
+    assert {:ok, stopped} =
+             Operations.record_job_stop_report(job.id, %{
+               "reason_code" => "unsafe_to_proceed",
+               "summary" => "The change would delete data with no backup path.",
+               "detail" => "The issue asks for a destructive migration with no rollback.",
+               "progress" => "none"
+             })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Judged unsafe")
+    refute has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
+    refute has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
+
+    view |> element("#acknowledge-stop-#{stopped.id}") |> render_click()
+
+    assert render(view) =~ "Set aside"
+    refute has_element?(view, "#board-job-#{stopped.id}")
   end
 
   defp approved_job(title) do

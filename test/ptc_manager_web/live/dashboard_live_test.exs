@@ -886,7 +886,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     refute has_element?(view, "#approve-issue-#{issue.id}")
   end
 
-  test "shows only active agents and limits recent history to five ended runs", %{conn: conn} do
+  test "shows working and idle agents and limits recent history to five ended runs", %{conn: conn} do
     worker = worker_fixture(%{name: "Hetzner build one"})
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -930,9 +930,11 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
-    assert has_element?(view, "#active-agent-count", "1")
+    # An idle agent is one that stopped moving, usually at a question nobody is
+    # watching for. Hiding it was how a stuck agent went unnoticed.
+    assert has_element?(view, "#active-agent-count", "2")
     assert has_element?(view, "#agent-run-#{active_run.id}", "Fixing the selected issue")
-    refute has_element?(view, "#agent-run-#{idle_run.id}")
+    assert has_element?(view, "#agent-run-#{idle_run.id}", "Waiting for work")
 
     for run <- Enum.take(historical_runs, 5) do
       assert has_element?(view, "#agent-history-run-#{run.id}")

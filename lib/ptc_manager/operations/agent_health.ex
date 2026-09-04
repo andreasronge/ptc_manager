@@ -16,9 +16,16 @@ defmodule PtcManager.Operations.AgentHealth do
 
   @attention_states ~w(failed lost unknown)
   @ended_states ~w(done)
-  @live_states ~w(queued starting working idle waiting)
+  @live_states ~w(queued starting working waiting)
+  @parked_states ~w(blocked idle)
 
-  @doc "Milliseconds a run may sit blocked before it counts as needing attention."
+  @doc """
+  Milliseconds a run may sit parked before it counts as needing attention.
+
+  This covers `blocked` and `idle` alike. Herdr reports a Codex or Claude agent
+  that ends its turn with a question as idle rather than blocked, and an idle
+  agent that has stopped moving is exactly as stuck as a blocked one.
+  """
   def blocked_grace_ms,
     do: Application.get_env(:ptc_manager, :agent_blocked_attention_ms, 600_000)
 
@@ -44,7 +51,7 @@ defmodule PtcManager.Operations.AgentHealth do
     }
   end
 
-  def assess(%AgentRun{state: "blocked"} = run, now) do
+  def assess(%AgentRun{state: state} = run, now) when state in @parked_states do
     waiting = held_for_ms(run, now)
 
     if waiting >= blocked_grace_ms() do
@@ -52,14 +59,14 @@ defmodule PtcManager.Operations.AgentHealth do
         status: :attention,
         label: "Waiting for a person",
         detail:
-          "The agent has been asking for an answer for #{humanize(waiting)}. " <>
-            "It cannot be resumed until someone answers it in Herdr."
+          "The agent has been #{parked_verb(state)} for #{humanize(waiting)}. " <>
+            "Nothing is watching its session, so answer it in Herdr or cancel the agent."
       }
     else
       %{
         status: :healthy,
-        label: "Asking for input",
-        detail: "The agent asked a question #{humanize(waiting)} ago."
+        label: parked_label(state),
+        detail: "The agent stopped moving #{humanize(waiting)} ago."
       }
     end
   end
@@ -93,8 +100,13 @@ defmodule PtcManager.Operations.AgentHealth do
   defp attention_detail("lost"), do: "No Herdr snapshot has reported this agent"
   defp attention_detail(_state), do: "Herdr could not classify this agent"
 
+  defp parked_verb("blocked"), do: "asking for an answer"
+  defp parked_verb(_state), do: "idle"
+
+  defp parked_label("blocked"), do: "Asking for input"
+  defp parked_label(_state), do: "Idle"
+
   defp healthy_label("waiting"), do: "Retained"
-  defp healthy_label("idle"), do: "Idle"
   defp healthy_label(state), do: String.capitalize(state)
 
   defp healthy_detail("waiting", run, now),

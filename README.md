@@ -485,6 +485,49 @@ catalog contains:
   be reviewed and repaired, but do not receive a generated implementation
   retrospective because PtcManager did not start their agent.
 
+### When an agent cannot finish
+
+Nothing watches a managed pane. An agent that asks a question there is asking
+nobody, and PtcManager never parses terminal output, so the question is
+invisible by design. Every agent is therefore told, in the runtime context it
+cannot edit away, that its session is unattended and that if it cannot start —
+or discovers part-way that it cannot continue — it must write a **stop report**
+and exit rather than wait.
+
+The report is a small JSON file validated against
+`priv/codex/agent_stop_report.schema.json`: a `reason_code`, one plain sentence,
+a detail paragraph, optionally the exact `prerequisite` that is missing, and
+whether anything was committed. It is data. It records a reason and never causes
+a state transition by itself.
+
+When one arrives, the attempt ends the way every unfinished attempt does: the
+job ends, its run ends, and the partial worktree is kept for attention. The
+heavy slot is released immediately, because an agent waiting on a person must
+not hold capacity other work needs. The card stays in the Delivery board's
+**Needs attention** lane, showing the agent's own explanation instead of a
+technical branch error, until you answer it with one of three buttons:
+
+- **Try again** queues a fresh attempt on the same approval, with the same
+  frozen prompt and review count. The decision to implement the issue has not
+  changed; only the environment did;
+- **Ask on the issue** queues **Prepare issue** with the blocker as evidence, so
+  the question is written onto GitHub and the issue comes back through
+  Planning's **Needs your decision** group and its existing decision form;
+- **Stop** sets the card aside. The worktree stays on Operations until you
+  discard it.
+
+`reason_code` decides which of those PtcManager offers first: a missing
+prerequisite or broken environment defaults to **Try again**, an ambiguous
+requirement to **Ask on the issue**, and an agent that judged something
+**unsafe** gets neither — it is never one click from being told to proceed
+anyway. You can still press any of them.
+
+An agent that crashes or wedges writes no report, so the contract does not
+replace the timeouts. A run that sits `blocked` or `idle` past the grace period
+is reported as **Waiting for a person** on both the Delivery board and
+Operations, and an implementation job that stays idle past its deadline is
+released with its worktree preserved.
+
 Maintainer actions use two deliberately separate resource pools. Heavy work is
 ordered **merge → repair → new implementation**, with oldest work first inside
 each priority. A merge action still serializes repository writers, so agents do

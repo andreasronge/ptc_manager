@@ -10,6 +10,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PrPublication
+  alias PtcManager.Operations.StopReport
   alias PtcManagerWeb.AgentCancel
   alias PtcManagerWeb.RetrospectiveComponents
 
@@ -86,6 +87,65 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      |> load_board()}
   end
 
+  def handle_event("retry-stopped-job", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.retry_stopped_job(job_id, socket.assigns.actor) do
+      PtcManager.Dispatch.Poller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "Queued a fresh attempt with the same approval and review count.")
+       |> load_board()}
+    else
+      {:error, :job_not_stopped} ->
+        {:noreply,
+         socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "A fresh attempt could not be queued.")}
+    end
+  end
+
+  def handle_event("ask-on-issue", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _action} <-
+           MaintainerActions.enqueue_blocked_issue_review(job_id, socket.assigns.actor) do
+      MaintainerActionPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(
+         :info,
+         "An agent will put the blocker on the GitHub issue for a decision."
+       )
+       |> load_board()}
+    else
+      {:error, :agent_action_already_active} ->
+        {:noreply, put_flash(socket, :error, "An action is already queued for that issue.")}
+
+      {:error, :job_not_stopped} ->
+        {:noreply,
+         socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "The issue could not be updated.")}
+    end
+  end
+
+  def handle_event("acknowledge-stop", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.acknowledge_job_stop(job_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Set aside. Its worktree is still on Operations if you need it.")
+       |> load_board()}
+    else
+      _error ->
+        {:noreply,
+         socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+    end
+  end
+
   def handle_event(
         "run-agent-action",
         %{"action-key" => action_key, "target-id" => target_id},
@@ -153,6 +213,19 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def linked_issues(item), do: Map.get(item, :linked_issues, [])
 
   def cancellable_agent?(item), do: item.managed? and AgentCancel.cancellable?(item)
+
+  @doc "The agent's own report of why it could not finish, when there is one."
+  def stop_report(%{active_job: %{stop_report: report}}) when is_map(report), do: report
+  def stop_report(_item), do: nil
+
+  @doc "Whether this recovery is the one PtcManager offers first for that reason."
+  def primary_recovery?(report, action), do: StopReport.primary_action(report) == action
+
+  def stop_reason_label("missing_prerequisite"), do: "Missing prerequisite"
+  def stop_reason_label("environment_broken"), do: "Environment broken"
+  def stop_reason_label("ambiguous_requirement"), do: "Needs a decision"
+  def stop_reason_label("unsafe_to_proceed"), do: "Judged unsafe"
+  def stop_reason_label(_code), do: "Stopped"
 
   def confirming_cancel?(job_id, %{active_job: %{id: id}}), do: job_id == Integer.to_string(id)
   def confirming_cancel?(_job_id, _item), do: false
