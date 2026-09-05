@@ -11,6 +11,10 @@ permissions:
 jobs:
   precommit:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -26,5 +30,6 @@ jobs:
       - run: ./scripts/ptc/bootstrap
       - run: ./scripts/ci/pre-publication
         env:
+          PTC_TEST_PARTITION_ONLY: ${{ matrix.partition }}
           ERL_FLAGS: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
       - run: git diff --exit-code
