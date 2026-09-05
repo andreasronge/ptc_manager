@@ -218,8 +218,15 @@ defmodule Mix.Tasks.PtcDeployTest do
     |> Enum.map(fn [_line, wrapper] -> wrapper end)
     |> Enum.uniq()
     |> Enum.each(fn wrapper ->
-      assert String.contains?(script, "deploy/#{wrapper}"),
-             "deploy/remote-deploy-herdr never reads deploy/#{wrapper}"
+      source =
+        if wrapper == "ptc-manager-worker-worktree-cleanup",
+          do: "priv/worktree_cleanup.py",
+          else: "deploy/#{wrapper}"
+
+      assert File.regular?(Path.join(@project_root, source))
+
+      assert String.contains?(script, source),
+             "deploy/remote-deploy-herdr never reads #{source}"
 
       assert String.contains?(script, "/usr/local/bin/#{wrapper}"),
              "deploy/remote-deploy-herdr never installs /usr/local/bin/#{wrapper}"

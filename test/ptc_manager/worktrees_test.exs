@@ -24,6 +24,17 @@ defmodule PtcManager.WorktreesTest do
   end
 
   setup do
+    previous_root = Application.fetch_env!(:ptc_manager, :worktree_root)
+    root = Path.join(System.tmp_dir!(), "cleanup-root-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o700)
+    Application.put_env(:ptc_manager, :worktree_root, root)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :worktree_root, previous_root)
+      File.rm_rf!(root)
+    end)
+
     Process.put(:worktree_test_pid, self())
     Process.put(:worktree_remove_result, :ok)
     Process.put(:worktree_probe_result, :ok)
@@ -127,6 +138,48 @@ defmodule PtcManager.WorktreesTest do
       assert allocation_id == allocation.id
       assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
       refute File.exists?(path)
+    end
+
+    test "forgotten cleanup never falls back to coordinator deletion when the worker is unavailable" do
+      path = existing_path()
+      allocation = attention_allocation!(path)
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})
+      previous = Application.get_env(:ptc_manager, :herdr_run_as_user)
+      Application.put_env(:ptc_manager, :herdr_run_as_user, "ptc-missing-cleanup-worker")
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ptc_manager, :herdr_run_as_user, previous),
+          else: Application.delete_env(:ptc_manager, :herdr_run_as_user)
+      end)
+
+      assert {:error, {:worktree_cleanup_failed, _reason}} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert File.dir?(path)
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
+    test "the cleanup helper rejects target and root symlinks and keeps linked contents" do
+      root = Application.fetch_env!(:ptc_manager, :worktree_root) |> Path.expand()
+      outside = existing_path()
+      File.write!(Path.join(outside, "valuable"), "keep")
+      link = missing_path()
+      File.ln_s!(outside, link)
+      helper = Application.app_dir(:ptc_manager, "priv/worktree_cleanup.py")
+
+      for {test_root, target} <- [
+            {root, link},
+            {link, Path.join(link, "valuable")},
+            {root, root},
+            {root, root <> "-outside"}
+          ] do
+        {_output, status} = System.cmd("/usr/bin/python3", ["-I", helper, test_root, target])
+        assert status != 0
+        assert File.read!(Path.join(outside, "valuable")) == "keep"
+      end
+
+      {"", 0} = System.cmd("/usr/bin/python3", ["-I", helper, root, missing_path()])
     end
 
     test "a forgotten workspace cannot traverse a symlink below the managed root" do

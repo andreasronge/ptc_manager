@@ -45,13 +45,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     args = remove_worktree_args(allocation)
     command = Keyword.get(opts, :command, Command)
 
-    case run_with(command, args) do
-      {:ok, _output} ->
-        :ok
-
-      {:error, reason} ->
-        if worktree_missing?(allocation), do: :ok, else: {:error, reason}
-    end
+    worktree_removal_result(run_with(command, args), allocation)
   end
 
   def remove_worktree(allocation, _opts) do
@@ -66,20 +60,23 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       when is_binary(workspace) and workspace != "" and is_list(opts) do
     command = Keyword.get(opts, :command, Command)
 
-    case run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]) do
-      {:ok, _output} ->
-        :ok
-
-      {:error, reason} = error ->
-        cond do
-          worktree_missing?(allocation) -> :ok
-          forgotten_workspace?(error) -> {:error, :worktree_workspace_forgotten}
-          true -> {:error, reason}
-        end
-    end
+    worktree_removal_result(
+      run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]),
+      allocation
+    )
   end
 
   def discard_worktree(allocation, _opts), do: remove_worktree(allocation, [])
+
+  defp worktree_removal_result({:ok, _output}, _allocation), do: :ok
+
+  defp worktree_removal_result({:error, reason} = error, allocation) do
+    cond do
+      worktree_missing?(allocation) -> :ok
+      forgotten_workspace?(error) -> {:error, :worktree_workspace_forgotten}
+      true -> {:error, reason}
+    end
+  end
 
   # Herdr answers `workspace_not_found` once it has dropped the registration, a
   # restart being enough to reach that. Its half of the removal is then already

@@ -284,25 +284,27 @@ defmodule PtcManager.Worktrees do
 
   defp discard_forgotten_directory(_allocation), do: {:error, :worktree_path_missing}
 
-  # A preflight lstat alone cannot prevent a worker replacing a directory
-  # during recursion. Python's fd-based rmtree checks inode identity and never
-  # traverses a substituted symlink. Refuse platforms without that protection.
-  @remove_directory_script """
-  import shutil, sys
-  if not shutil.rmtree.avoids_symlink_attacks:
-      sys.exit(2)
-  try:
-      shutil.rmtree(sys.argv[1])
-  except FileNotFoundError as error:
-      if error.filename != sys.argv[1]:
-          sys.exit(1)
-  except OSError:
-      sys.exit(1)
-  """
-
+  # The root is worker-owned in production. Use its OS identity for removal,
+  # keeping the coordinator's claim and path checks above as the authority.
   defp remove_directory(path) do
-    case System.cmd("/usr/bin/python3", ["-I", "-c", @remove_directory_script, path],
-           stderr_to_stdout: true
+    user = Application.get_env(:ptc_manager, :herdr_run_as_user)
+    root = Application.fetch_env!(:ptc_manager, :worktree_root) |> Path.expand()
+
+    {binary, args} =
+      if user in [nil, ""] do
+        {"/usr/bin/python3",
+         ["-I", Application.app_dir(:ptc_manager, "priv/worktree_cleanup.py"), root, path]}
+      else
+        PtcManager.CommandEnvironment.command(
+          "/usr/local/bin/ptc-manager-worker-worktree-cleanup",
+          [root, path],
+          user
+        )
+      end
+
+    case System.cmd(binary, args,
+           stderr_to_stdout: true,
+           env: PtcManager.CommandEnvironment.scrub()
          ) do
       {_output, 0} -> :ok
       {_output, status} -> {:error, {:worktree_directory_removal_failed, status}}

@@ -59,6 +59,11 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
             ~s("id":"cli:worktree:remove"})}}
 
       assert {:error, :worktree_workspace_forgotten} =
+               HerdrAdapter.remove_worktree(allocation,
+                 command: %WorktreeRemoveStub{result: forgotten}
+               )
+
+      assert {:error, :worktree_workspace_forgotten} =
                HerdrAdapter.discard_worktree(allocation,
                  command: %WorktreeRemoveStub{result: forgotten}
                )

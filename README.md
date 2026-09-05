@@ -1029,6 +1029,7 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager.env.example /etc/ptc_man
 sudo install -o root -g ptc-manager -m 0640 /safe/path/github-app.pem /etc/ptc_manager/github-app.pem
 sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/ptc_manager/herdr.env
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
+sudo install -o root -g root -m 0755 priv/worktree_cleanup.py /usr/local/bin/ptc-manager-worker-worktree-cleanup
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-claude-trust /usr/local/bin/ptc-manager-worker-claude-trust
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-codex-arm /usr/local/bin/ptc-manager-worker-codex-arm
@@ -1283,6 +1284,10 @@ service sandbox; planning snapshots remain read-only to agents. Before Herdr
 opens a coordinator-owned snapshot, the adapter grants the worker Git trust for
 that exact path and revokes it during cleanup, including when opening fails.
 The coordinator database directory is `0700`.
+When Herdr has forgotten a retained worktree, discard uses the root-owned
+`ptc-manager-worker-worktree-cleanup` helper as the worker account. The helper
+pins the validated root and removes only its direct child without following
+symlinks; it never falls back to deletion as the coordinator.
 
 The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed
