@@ -406,6 +406,10 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule SettledMergeClient do
+    def status(_publication), do: {:ok, Process.get(:settled_merge_status)}
+  end
+
   defmodule DeferredRepairSync do
     def sync_action(_action), do: {:ok, %{pull_request: Process.get(:repair_preflight_status)}}
 
@@ -1292,6 +1296,41 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed.prompt =~ "instructions captured when this repair was queued"
     refute executed.prompt =~ "later configuration must not rewrite"
     assert_receive {:repair_postflight, {:ok, %{"outcome" => "repaired"}}}
+  end
+
+  test "a merge the status reconciler recorded first is not reported as a failed repair" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    merged = %{merge_status(publication, repository) | state: "merged"}
+
+    # The status reconciler polls on its own schedule and wins the race: it
+    # records the merge and moves the job to `done` before this action's own
+    # postflight runs.
+    publication
+    |> PrPublication.changeset(%{state: "published", pr_state: "merged"})
+    |> Repo.update!()
+
+    PtcManager.Operations.Job
+    |> Repo.get!(publication.job_id)
+    |> PtcManager.Operations.Job.changeset(%{state: "done"})
+    |> Repo.update!()
+
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, SettledMergeClient)
+    Process.put(:settled_merge_status, merged)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    assert {:ok, %{publication: settled}} =
+             Sync.sync_action(queued, {:ok, %{"outcome" => "repaired"}})
+
+    assert settled.state == "published"
+    assert settled.pr_state == "merged"
   end
 
   test "queues approve-and-merge for an already clean pull request" do

@@ -70,12 +70,23 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       {:ok, _output} ->
         :ok
 
-      {:error, reason} ->
-        if worktree_missing?(allocation), do: :ok, else: {:error, reason}
+      {:error, reason} = error ->
+        cond do
+          worktree_missing?(allocation) -> :ok
+          forgotten_workspace?(error) -> {:error, :worktree_workspace_forgotten}
+          true -> {:error, reason}
+        end
     end
   end
 
   def discard_worktree(allocation, _opts), do: remove_worktree(allocation, [])
+
+  # Herdr answers `workspace_not_found` once it has dropped the registration, a
+  # restart being enough to reach that. Its half of the removal is then already
+  # done and it can never finish the rest, because it no longer knows the
+  # directory exists. Saying so separately lets the caller, which owns the
+  # managed root, remove what Herdr left behind.
+  defp forgotten_workspace?(error), do: action_workspace_removal_result(error) == :ok
 
   @doc "Starts a named Herdr agent in a fresh worktree rooted at an imported PR head."
   def start_pull_request_action(action, publication, repository) do
