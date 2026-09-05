@@ -66,7 +66,8 @@ reviewer agent, model, reasoning effort, and maximum reviews for three presets:
 | Other or unknown scope/risk | Codex `gpt-5.6-sol` | 2 |
 | Large scope or high risk | Codex `gpt-6-astra` | 5 |
 
-All three initially use Codex `gpt-6-astra` as reviewer. **Approve and start**
+All three initially use Codex `gpt-5.6-sol` with extra-high (`xhigh`) reasoning
+effort as reviewer. **Approve and start**
 and **Fix directly** offer a profile override and a 0–5 review limit; leaving
 the limit blank uses that preset's maximum. Approval freezes the selected
 models and issue context. Editing presets affects future approvals only.

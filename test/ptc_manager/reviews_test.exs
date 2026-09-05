@@ -47,13 +47,32 @@ defmodule PtcManager.ReviewsTest do
     assert ExecutionProfiles.suggested(%{scope: "large", risk: "medium"}) == "strong"
     assert ExecutionProfiles.suggested(nil) == "standard"
     assert Enum.map(ExecutionProfiles.list(), & &1.max_reviews) == [1, 2, 5]
+
+    for profile <- ExecutionProfiles.list() do
+      assert profile.reviewer_model == "gpt-5.6-sol"
+      assert profile.reviewer_effort == "xhigh"
+    end
+
     job = job!(5)
+    assert job.execution_settings["reviewer_model"] == "gpt-5.6-sol"
+    assert job.execution_settings["reviewer_effort"] == "xhigh"
     assert job.execution_settings["model"] == "gpt-5.6-sol"
 
     assert {:ok, _} =
-             ExecutionProfiles.save("standard", %{"model" => "another-model"}, "maintainer")
+             ExecutionProfiles.save(
+               "standard",
+               %{
+                 "model" => "another-model",
+                 "reviewer_model" => "another-reviewer",
+                 "reviewer_effort" => "low"
+               },
+               "maintainer"
+             )
 
-    assert Repo.get!(Job, job.id).execution_settings["model"] == "gpt-5.6-sol"
+    frozen = Repo.get!(Job, job.id).execution_settings
+    assert frozen["model"] == "gpt-5.6-sol"
+    assert frozen["reviewer_model"] == "gpt-5.6-sol"
+    assert frozen["reviewer_effort"] == "xhigh"
   end
 
   test "a duplicate request counts once and a clean review approves only its exact head" do

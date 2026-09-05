@@ -37,6 +37,21 @@ class ReviewerContract(unittest.TestCase):
                 self.assertEqual(review(self.request(kind)), expected)
             self.assertEqual(commands[0][commands[0].index('--model') + 1], 'chosen-model')
 
+    def test_sol_reviewer_uses_extra_high_effort(self):
+        request = self.request('codex', 'xhigh')
+        request['settings']['reviewer_model'] = 'gpt-5.6-sol'
+        expected = {'summary': 'clear', 'findings': []}
+
+        def fake_run(args, prompt, cwd):
+            self.assertEqual(args[args.index('--model') + 1], 'gpt-5.6-sol')
+            self.assertEqual(args[args.index('-c') + 1], 'model_reasoning_effort="xhigh"')
+            self.assertIn('independent code reviewer', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return ''
+
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request), expected)
+
     def test_invalid_model_or_effort_never_launches_an_agent(self):
         with patch.dict(context, run=lambda *_: self.fail('agent launched')):
             request = self.request()
