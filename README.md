@@ -1284,7 +1284,17 @@ setting the only profile is `PTC_IMPLEMENTATION_AGENT_KIND` started with
 `PTC_IMPLEMENTATION_AGENT_ARGS`, which default to Codex and its current
 unattended CLI flag `--dangerously-bypass-approvals-and-sandbox`. Override the
 arguments only when the installed agent CLI requires a different supported
-mode. After
+mode.
+
+A profile also names the model that kind runs, as `"model"` alongside its
+`"args"`. Left unset each kind takes its default from
+`PtcManager.AgentProfiles` — Codex `gpt-5.6-sol`, Claude `opus`, Cursor
+`cursor-grok-4.6-high` — because an agent given no model reaches for the
+strongest one its account offers, which is more than routine maintenance work
+needs. The model is passed as `--model` at startup, and for Codex it is also
+recorded in the worker's `config.toml`, since Herdr restores a pane with
+`codex resume` and no arguments. A profile that already passes `--model` in
+its own arguments keeps that choice. After
 `PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
 shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After

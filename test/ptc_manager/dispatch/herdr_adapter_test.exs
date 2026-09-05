@@ -112,7 +112,9 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
                  _timeout,
                  "--",
                  "--force",
-                 "--trust"
+                 "--trust",
+                 "--model",
+                 "cursor-grok-4.6-high"
                ]
              ] = TestGitWorkspace.HerdrCommand.agent_starts(command)
     end
@@ -134,16 +136,20 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
       worktree_path = Path.join(workspace.worktree_root, "job-1")
       trusted = [workspace.repository, worktree_path]
 
+      # Replacing the profile's own -c projects= override must not take the
+      # model with it: the trust rewrite drops matched pairs, not the tail.
       assert HerdrAdapter.agent_arguments("codex", worktree_path, trusted) ==
                [
                  "--dangerously-bypass-approvals-and-sandbox",
+                 "--model",
+                 "gpt-5.6-sol",
                  "-c",
                  ~s(projects={"#{workspace.repository}"={trust_level="trusted"},) <>
                    ~s("#{worktree_path}"={trust_level="trusted"}})
                ]
 
       assert HerdrAdapter.agent_arguments("cursor", worktree_path, trusted) ==
-               ["--force", "--trust", worktree_path]
+               ["--force", "--trust", worktree_path, "--model", "cursor-grok-4.6-high"]
     end
   end
 
