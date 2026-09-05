@@ -114,7 +114,7 @@ defmodule PtcManager.TestScenarioTest do
     task =
       Task.async(fn -> TestScenario.advance(scenario, :dispatch, lease_ms: 1_000) end)
 
-    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}
+    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}, 1_000
     assert job_id == job.id
     assert length(TestScenario.agents(scenario)) == 1
 
@@ -382,7 +382,7 @@ defmodule PtcManager.TestScenarioTest do
     :ok = TestScenario.dispatch_outcome(scenario, :pause_after_effect)
 
     task = Task.async(fn -> TestScenario.advance(scenario, :dispatch) end)
-    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}
+    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}, 1_000
     assert job_id == job.id
     assert Repo.get!(Job, job.id).state == "starting"
     assert Repo.aggregate(AgentRun, :count) == 0
@@ -602,7 +602,7 @@ defmodule PtcManager.TestScenarioTest do
 
     task = Task.async(fn -> TestScenario.advance(scenario, :dispatch) end)
 
-    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}
+    assert_receive {:scenario_paused_after_effect, reference, :dispatch, job_id}, 1_000
     assert job_id == job.id
     assert Repo.get!(Job, job.id).state == "starting"
     assert length(TestScenario.agents(scenario)) == 1
@@ -713,7 +713,8 @@ defmodule PtcManager.TestScenarioTest do
     task = Task.async(fn -> FreshWorktreeRepairAdapter.run(claimed, scenario) end)
 
     assert_receive {:scenario_paused_after_effect, reference, :start_pull_request_action,
-                    action_id}
+                    action_id},
+                   1_000
 
     assert action_id == action.id
     [started_agent] = TestScenario.agents(scenario)

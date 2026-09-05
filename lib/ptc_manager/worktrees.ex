@@ -1,6 +1,8 @@
 defmodule PtcManager.Worktrees do
   @moduledoc "Enforces worker-advertised worktree capacity and safe reclamation."
 
+  require Logger
+
   alias PtcManager.Operations
   alias PtcManager.Operations.WorktreeAllocation
   alias PtcManager.ExternalPrSessions
@@ -37,9 +39,28 @@ defmodule PtcManager.Worktrees do
         probe \\ GitProbe,
         external_adapter \\ configured_external_adapter()
       ) do
+    reap_investigation_worktree()
+
     case cleanup_terminal_once(adapter, probe, external_adapter) do
       {:ok, :empty} -> cleanup_abandoned_once(adapter, probe)
       other -> other
+    end
+  end
+
+  defp reap_investigation_worktree do
+    adapter =
+      Application.get_env(
+        :ptc_manager,
+        :investigation_workspace_adapter,
+        HerdrAdapter
+      )
+
+    case PtcManager.InvestigationWorkspaces.cleanup_terminal_once(adapter) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Investigation workspace cleanup deferred: #{inspect(reason)}")
     end
   end
 
@@ -222,8 +243,11 @@ defmodule PtcManager.Worktrees do
   defp remove_claimed(allocation, adapter, token, function \\ :remove_worktree, audit \\ nil) do
     case Gateway.call(adapter, removal_function(adapter, function), [allocation]) do
       :ok ->
-        case Operations.complete_worktree_cleanup(allocation.id, token, audit) do
-          {:ok, _allocation} -> :ok
+        complete_claimed(allocation, token, audit)
+
+      {:error, :worktree_workspace_forgotten} ->
+        case discard_forgotten_directory(allocation) do
+          :ok -> complete_claimed(allocation, token, audit)
           {:error, reason} -> {:error, reason, allocation, token}
         end
 
@@ -234,6 +258,30 @@ defmodule PtcManager.Worktrees do
         {:error, {:unexpected_worktree_cleanup_result, other}, allocation, token}
     end
   end
+
+  defp complete_claimed(allocation, token, audit) do
+    case Operations.complete_worktree_cleanup(allocation.id, token, audit) do
+      {:ok, _allocation} -> :ok
+      {:error, reason} -> {:error, reason, allocation, token}
+    end
+  end
+
+  # Herdr has forgotten the workspace, so nothing else will ever remove the
+  # directory it left behind and the cleanup would fail forever instead. Doing
+  # it here is only safe inside the validated managed root, which is the guard
+  # the abandonment probe already applies before it trusts a path.
+  defp discard_forgotten_directory(%{path: path}) when is_binary(path) do
+    if managed_path?(path) do
+      case File.rm_rf(path) do
+        {:ok, _removed} -> :ok
+        {:error, reason, _file} -> {:error, {:worktree_directory_removal_failed, reason}}
+      end
+    else
+      {:error, :worktree_path_outside_managed_root}
+    end
+  end
+
+  defp discard_forgotten_directory(_allocation), do: {:error, :worktree_path_missing}
 
   # Adapters may omit the forced removal; fall back to the ordinary one.
   defp removal_function(adapter, :discard_worktree) do

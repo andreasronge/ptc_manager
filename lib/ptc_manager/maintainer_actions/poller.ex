@@ -24,9 +24,8 @@ defmodule PtcManager.MaintainerActions.Poller do
   end
 
   def wake do
-    Enum.each([:planning, :writing], fn lane ->
-      Enum.each(1..8, &wake(name(lane, &1)))
-    end)
+    Enum.each(1..16, &wake(name(:planning, &1)))
+    Enum.each(1..16, &wake(name(:writing, &1)))
 
     :ok
   end
@@ -41,7 +40,10 @@ defmodule PtcManager.MaintainerActions.Poller do
     if enabled?() and admitted?(state) do
       task =
         Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
-          MaintainerActions.run_once(lane: state.lane)
+          MaintainerActions.run_once(
+            lane: state.lane,
+            resource_class: resource_class(state.lane, state.index)
+          )
         end)
 
       {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
@@ -88,12 +90,24 @@ defmodule PtcManager.MaintainerActions.Poller do
         "#{Macro.camelize(to_string(lane))}Poller#{index}"
       )
 
-  defp capacity_key(:planning), do: :light_agent_capacity
-  defp capacity_key(:writing), do: :heavy_agent_capacity
-
   defp admitted?(state) do
-    state.index <= Application.get_env(:ptc_manager, capacity_key(state.lane), 1)
+    state.index <= lane_capacity(state.lane)
   end
+
+  defp lane_capacity(lane) when lane in [:planning, :writing],
+    do: configured_capacity(:light) + configured_capacity(:heavy)
+
+  @doc false
+  def resource_class(lane, index)
+      when lane in [:planning, :writing] and is_integer(index) and index > 0 do
+    if index <= configured_capacity(:light), do: "light", else: "heavy"
+  end
+
+  defp configured_capacity(:light),
+    do: Application.get_env(:ptc_manager, :light_agent_capacity, 2)
+
+  defp configured_capacity(:heavy),
+    do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1)
 
   defp wake(name) do
     if Process.whereis(name), do: GenServer.cast(name, :wake)

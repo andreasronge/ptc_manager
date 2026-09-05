@@ -36,6 +36,27 @@ defmodule PtcManager.Repository.WorkerCodexArmingTest do
 
   test "arms the worker configuration before a Codex agent starts" do
     assert :ok = WorkerCodexArming.prepare("codex")
+    assert_receive {:arming, ["arm", "gpt-5.6-sol"]}
+  end
+
+  test "a profile model reaches the helper, and its absence leaves the model alone" do
+    previous = Application.get_env(:ptc_manager, :agent_profiles)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ptc_manager, :agent_profiles, previous),
+        else: Application.delete_env(:ptc_manager, :agent_profiles)
+    end)
+
+    Application.put_env(:ptc_manager, :agent_profiles, %{
+      "codex" => %{"enabled" => true, "args" => [], "model" => "gpt-5.6-luna"}
+    })
+
+    assert :ok = WorkerCodexArming.prepare("codex")
+    assert_receive {:arming, ["arm", "gpt-5.6-luna"]}
+
+    # A kind with no default and no profile model records no model at all.
+    assert :ok = WorkerCodexArming.arm(nil)
     assert_receive {:arming, ["arm"]}
   end
 

@@ -307,8 +307,19 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     File.write!(config, original)
 
+    assert {_output, 0} = arming(home, ["arm", "gpt-5.6-sol"])
+    assert File.read!(config) =~ ~s(model = "gpt-5.6-sol")
+
+    # A model is interpolated into a TOML string, so only an identifier is taken.
+    assert {output, 2} = arming(home, ["arm", ~s(evil" injected)])
+    assert output =~ "model must be"
+    assert {output, 2} = arming(home, ["disarm", "gpt-5.6-sol"])
+    assert output =~ "disarm takes no model"
+
+    assert {_output, 0} = arming(home, ["disarm"])
     assert {_output, 0} = arming(home, ["arm"])
     armed = File.read!(config)
+    refute armed =~ "model ="
     assert armed =~ ~s(approval_policy = "never")
     assert armed =~ ~s(sandbox_mode = "danger-full-access")
     assert armed =~ "[notice]\nhide_rate_limit_model_nudge = true"

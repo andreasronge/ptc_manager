@@ -268,14 +268,23 @@ and build artifacts, but changing tracked files, HEAD, or the job branch fails
 closed before any agent starts. Setup status, bounded output, and timings are
 shown on the Operations page.
 
-Issue planning, daily updates, and repository investigation automations use
-`generic_ephemeral` read-only source snapshots. Other `generic_ephemeral`
-actions also skip the writable build bootstrap. Writable implementation jobs
-run the full repository setup. This repository's bootstrap maintains an
-optional cache
+Issue preparation, daily updates, and repository investigation automations use
+`generic_ephemeral` read-only source snapshots and skip the writable build
+bootstrap. **Review issue** instead uses an `ephemeral_investigation` worktree:
+PtcManager pins the same source evidence, creates a writable disposable
+worktree at that exact commit, runs the checked-in bootstrap, and removes the
+worktree and its temporary branch after the review. The reviewer may run tests
+and create temporary reproduction tests, but must not implement, commit, push,
+or open a pull request. Writable implementation jobs also run the full
+repository setup. This repository's bootstrap maintains an optional cache
 beneath `${XDG_CACHE_HOME:-$HOME/.cache}/ptc-manager/workspaces`, keyed by the
 dependency lock, repository setup files, Mix environment, Elixir/OTP, OS, and
-architecture. A warm cache copies dependency sources, compiled dependency
+architecture. Before a planning snapshot or implementation worktree is
+prepared, PtcManager fetches the remote default branch and pins its exact
+commit without changing the persistent checkout's working tree. The cache key
+is calculated inside the resulting worktree, so a changed lockfile or setup
+file selects a new cache entry even when the persistent checkout remains on an
+older local commit. A warm cache copies dependency sources, compiled dependency
 artifacts, and pinned asset executables into the new worktree; agents never
 share writable `deps` or `_build` directories. Set `PTC_WORKSPACE_CACHE_ROOT`
 inside the repository setup environment to select another cache root. Cache
@@ -462,8 +471,10 @@ catalog contains:
 
 - **Prepare issue**, which rewrites or closes the issue and leaves exactly one
   of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
-- **Review issue**, which asks a configured Herdr agent to challenge and improve
-  issue readiness and apply the same canonical label rules as **Prepare issue**;
+- **Review issue**, which gives a configured Herdr agent a bootstrapped,
+  disposable worktree in which it can run tests or create temporary regression
+  tests, then asks it to challenge and improve issue readiness and apply the
+  same canonical label rules as **Prepare issue**;
 - **Apply decision**, shown after an issue action returns a schema-validated
   question with two to four plain-language choices. A maintainer can choose an
   option or enter a custom answer; a queued agent then records that decision on
@@ -568,12 +579,14 @@ is reported as **Waiting for a person** on both the Delivery board and
 Operations, and an implementation job that stays idle past its deadline is
 released with its worktree preserved.
 
-Maintainer actions use two deliberately separate resource pools. Heavy work is
-ordered **merge → repair → new implementation**, with oldest work first inside
-each priority. A merge action still serializes repository writers, so agents do
-not race to rewrite or merge branches. Light issue preparation, review,
-decision, investigation, and summary work can continue independently. The two
-limits are persisted and editable under **Configuration → Concurrent agents**;
+Maintainer actions use two deliberately separate resource pools. Heavy delivery
+work is ordered **merge → repair → new implementation**, with oldest work first
+inside each priority. Test-capable issue reviews share that heavy pool and yield
+to queued merge or repair work. A merge action still serializes repository
+writers, so agents do not race to rewrite or merge branches. Light issue
+preparation, decision, investigation, and summary work can continue
+independently. The two limits are persisted and editable under **Configuration
+→ Concurrent agents**;
 `PTC_LIGHT_AGENT_CAPACITY` and `PTC_HEAVY_AGENT_CAPACITY` only provide the
 initial values for a new database.
 
@@ -610,13 +623,18 @@ corresponding Updates entry.
 
 Before an issue-planning agent starts, PtcManager synchronizes the canonical
 GitHub issue, records its content digest, and captures the configured checkout's
-exact Git commit SHA and branch or ref. The action details show the source ref
-and SHA. The planning agent
-runs from a separate coordinator-owned Git clone whose complete tree is made
-read-only before the worker can see it; concurrent build agents therefore cannot
-alter the evidence. The temporary clone is removed when the agent exits, while
+remote default-branch ref and exact Git commit SHA. The action details show the
+source ref and SHA. Read-only planning agents run from a separate
+coordinator-owned Git clone whose complete tree is made read-only before the
+worker can see it. An issue reviewer receives a second, writable worktree at
+the same SHA after the repository bootstrap succeeds. Concurrent build agents
+therefore cannot alter the pinned evidence. Both temporary trees are removed
+when the agent exits, while
 its provenance remains in the action record. A durable reaper retries cleanup
-after an interrupted or expired run. This makes a review's issue and code
+after an interrupted or expired run. Worktree reconciliation continues this
+cleanup while new agent actions are disabled or the system is draining. Codex
+review agents trust both the parent checkout and their disposable worktree so
+startup does not wait for an interactive trust decision. This makes a review's issue and code
 evidence reproducible even if `main` advances while other agents are merging
 work. In production the snapshot directory is owned by the coordinator beneath
 the sticky shared-output parent, so the worker can traverse and read it but
@@ -1224,16 +1242,20 @@ restart both services. The deployment refuses to proceed while a configured
 checkout is read-only inside a running service.
 The `ptc-manager-repo` group gives the coordinator, verifier, and gate
 read/execute access without filesystem write access. The worker-owned
-`PTC_WORKTREE_ROOT` contains only job worktrees. It and every ancestor must be
+`PTC_WORKTREE_ROOT` contains implementation-job and disposable investigation
+worktrees. It and every ancestor must be
 non-writable by group and other identities; the deployment enforces mode
 `2750` on the worker-owned root and PtcManager refuses new work when that
 invariant is broken. This keeps private build artifacts safe while still
-allowing the coordinator read-only traversal. PtcManager removes a worktree
-through Herdr only after a credential-free Git check proves a non-terminal
-checkout is clean and its exact head is on the PR branch. Dirty, missing, or
-unpushed non-terminal work is retained for attention. A merged or closed PR is
-the explicit exception: its abandoned checkout is removed with Herdr's force
-option because GitHub has already made the work terminal. A retained worktree
+allowing the coordinator read-only traversal. For retained implementation and
+pull-request worktrees, PtcManager removes a worktree through Herdr only after a
+credential-free Git check proves a non-terminal checkout is clean and its exact
+head is on the PR branch. Dirty, missing, or unpushed non-terminal work is
+retained for attention. A merged or closed PR is the explicit exception: its
+abandoned checkout is removed with Herdr's force option because GitHub has
+already made the work terminal. Disposable investigation worktrees are also
+force-removed when their action ends; any temporary reproduction tests or
+other review changes are intentionally discarded. A retained worktree
 that no longer exists inside a healthy worktree root, or that a credential-free
 Git check proves clean with no commit beyond the default branch, is removed
 automatically because nothing can be lost. Every other retained worktree waits
@@ -1278,13 +1300,26 @@ socket or CLI path with which to prompt or control the observed session. Keep
 Ordinary Herdr CLI calls are bounded by `PTC_HERDR_TIMEOUT_MS`. Agent startup
 instead uses Herdr's `PTC_IMPLEMENTATION_AGENT_START_TIMEOUT_MS` readiness
 limit plus five seconds for the outer command to return its result; the generic
-timeout must not cut that longer startup wait short. Every agent starts with
+timeout must not cut that longer startup wait short. Default-branch refreshes
+use the worker Git identity and fail closed after `PTC_SOURCE_REFRESH_TIMEOUT_MS`
+(60 seconds by default), so a stalled remote cannot hold a dispatch poller
+indefinitely. Every agent starts with
 the arguments of its profile in `PTC_AGENT_PROFILES_JSON`; without that
 setting the only profile is `PTC_IMPLEMENTATION_AGENT_KIND` started with
 `PTC_IMPLEMENTATION_AGENT_ARGS`, which default to Codex and its current
 unattended CLI flag `--dangerously-bypass-approvals-and-sandbox`. Override the
 arguments only when the installed agent CLI requires a different supported
-mode. After
+mode.
+
+A profile also names the model that kind runs, as `"model"` alongside its
+`"args"`. Left unset each kind takes its default from
+`PtcManager.AgentProfiles` — Codex `gpt-5.6-sol`, Claude `opus`, Cursor
+`cursor-grok-4.6-high` — because an agent given no model reaches for the
+strongest one its account offers, which is more than routine maintenance work
+needs. The model is passed as `--model` at startup, and for Codex it is also
+recorded in the worker's `config.toml`, since Herdr restores a pane with
+`codex resume` and no arguments. A profile that already passes `--model` in
+its own arguments keeps that choice. After
 `PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
 shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After

@@ -218,12 +218,14 @@ defmodule PtcManager.Repository.CheckoutTest do
     end
   end
 
+  # System.unique_integer/1 restarts with the VM, so two runs pick the same
+  # names. A run killed before its on_exit hooks — the partition budget sends
+  # SIGTERM — leaves its directories behind, and every later run then collides
+  # with them. Random bytes keep the names unique across runs as well as within
+  # one, so a leftover can no longer fail the next run.
   defp temporary_directory!(name) do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "ptc-repository-checkout-#{name}-#{System.unique_integer([:positive, :monotonic])}"
-      )
+    suffix = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)
+    root = Path.join(System.tmp_dir!(), "ptc-repository-checkout-#{name}-#{suffix}")
 
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)

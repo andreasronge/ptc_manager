@@ -21,24 +21,32 @@ set -eu
 # It belongs to the [notice] table, which Codex writes itself the first time
 # anyone dismisses a notice, so it is managed inside whatever [notice] table the
 # file already has rather than from a block of its own.
+#
+# model is recorded for the same reason the policy is. PtcManager passes the
+# model at `herdr agent start`, but the restore runs `codex resume` with no
+# arguments, so without it here a restored pane returns on whatever model the
+# account defaults to rather than the one the maintainer chose.
 
 fail() {
   echo "ptc-manager-worker-codex-arm: $1" >&2
   exit 2
 }
 
-[ "$#" -eq 1 ] || fail "expected arm or disarm"
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "expected arm [model] or disarm"
 
 mode=$1
+model=${2-}
 
 case "$mode" in
-  arm|disarm) ;;
+  arm) ;;
+  disarm) [ -z "$model" ] || fail "disarm takes no model" ;;
   *) fail "mode must be arm or disarm" ;;
 esac
 
-exec /usr/bin/python3 - "$mode" <<'PY'
+exec /usr/bin/python3 - "$mode" "$model" <<'PY'
 import fcntl
 import os
+import re
 import sys
 import tempfile
 
@@ -50,21 +58,31 @@ def fail(message):
 
 
 mode = sys.argv[1]
+model = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# The model is interpolated into a TOML string, so accept only what a model
+# identifier is made of rather than trusting the caller to have escaped it.
+if model and not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", model):
+    fail("model must be 1-100 characters of letters, digits, dot, dash or underscore")
+
 home = os.path.expanduser("~")
 codex_home = os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
 config = os.path.join(codex_home, "config.toml")
 
 BEGIN = "# BEGIN ptc-manager managed agent policy"
 END = "# END ptc-manager managed agent policy"
-MANAGED_KEYS = ("approval_policy", "sandbox_mode")
+MANAGED_KEYS = ("approval_policy", "sandbox_mode", "model")
 NOTICE_TABLE = "[notice]"
 NOTICE_KEY = "hide_rate_limit_model_nudge"
-BLOCK = [
-    BEGIN,
-    'approval_policy = "never"',
-    'sandbox_mode = "danger-full-access"',
-    END,
-]
+BLOCK = (
+    [
+        BEGIN,
+        'approval_policy = "never"',
+        'sandbox_mode = "danger-full-access"',
+    ]
+    + (['model = "' + model + '"'] if model else [])
+    + [END]
+)
 
 
 def ensure_notice(lines, enable):

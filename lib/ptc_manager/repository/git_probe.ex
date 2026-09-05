@@ -3,8 +3,8 @@ defmodule PtcManager.Repository.GitProbe do
 
   @behaviour PtcManager.Repository.ResultProbe
 
-  alias PtcManager.Operations.{Job, Repository}
-  alias PtcManager.Repository.Checkout
+  alias PtcManager.Operations.{AgentAction, Job, Repository}
+  alias PtcManager.Repository.{Checkout, InvestigationWorkspace}
 
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
   @small_output_limit 64 * 1024
@@ -136,6 +136,23 @@ defmodule PtcManager.Repository.GitProbe do
   end
 
   def current_job_head(_path, _job), do: {:error, :unexpected_branch}
+
+  @doc "Reads HEAD only when a disposable review worktree retains its exact identity."
+  def current_investigation_head(path, %AgentAction{} = action) when is_binary(path) do
+    with {:ok, %{branch: branch, source_sha: source_sha}} <-
+           InvestigationWorkspace.identity(action),
+         true <- Path.type(path) == :absolute and File.dir?(path),
+         {:ok, ^branch} <- git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+         {:ok, ^source_sha} <- revision(path, "HEAD^{commit}") do
+      {:ok, source_sha}
+    else
+      false -> {:error, :worktree_path_unavailable}
+      {:ok, _other} -> {:error, :unexpected_branch}
+      error -> error
+    end
+  end
+
+  def current_investigation_head(_path, _action), do: {:error, :unexpected_branch}
 
   defp exact_base_available(path, expected_sha) do
     case revision(path, "#{expected_sha}^{commit}") do

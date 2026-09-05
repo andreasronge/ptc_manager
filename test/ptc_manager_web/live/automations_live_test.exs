@@ -120,6 +120,20 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
   end
 
   describe "detail" do
+    test "shows the test-capable execution boundary for issue reviews", %{conn: conn} do
+      repository = repository_fixture()
+      definition = Automations.get_definition(repository, "review_issue")
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/automations/#{definition.id}")
+
+      assert has_element?(
+               view,
+               "#automation-agent",
+               "Disposable test-capable investigation worktree"
+             )
+
+      assert PtcManagerWeb.AutomationsLive.prompt_preview(definition) =~ "Result protocol:"
+    end
+
     test "saves settings and prompt as a new version and lists only this automation's runs",
          %{conn: conn} do
       repository = repository_fixture(%{github_name: "ptc_runner"})

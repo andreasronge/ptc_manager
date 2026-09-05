@@ -10,6 +10,10 @@ defmodule PtcManager.Dispatch do
   def run_once(opts \\ []) do
     github = Keyword.get(opts, :github, Application.fetch_env!(:ptc_manager, :github_client))
     adapter = Keyword.get(opts, :adapter, Application.fetch_env!(:ptc_manager, :dispatch_adapter))
+
+    source_updater =
+      Keyword.get(opts, :source_updater, Application.fetch_env!(:ptc_manager, :source_updater))
+
     worker_key = Keyword.get(opts, :worker_key, configured_worker_key())
     lease_ms = Keyword.get(opts, :lease_ms, configured_lease_ms())
     clock = Keyword.get(opts, :clock, PtcManager.Clock.System)
@@ -26,17 +30,27 @@ defmodule PtcManager.Dispatch do
       job ->
         with {:ok, capacity} <- dispatch_capacity(worker_key, opts),
              :ok <- Worktrees.ensure_slot(worker_key, capacity, adapter) do
-          dispatch_job(job, github, adapter, worker_key, lease_ms, capacity, clock)
+          dispatch_job(
+            job,
+            github,
+            source_updater,
+            adapter,
+            worker_key,
+            lease_ms,
+            capacity,
+            clock
+          )
         end
     end
   end
 
-  defp dispatch_job(job, github, adapter, worker_key, lease_ms, capacity, clock) do
+  defp dispatch_job(job, github, source_updater, adapter, worker_key, lease_ms, capacity, clock) do
     lease_now = Clock.utc_now(clock)
     lifecycle_now = Clock.utc_now(PtcManager.Clock.System)
 
     with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
          {:ok, canonical} <- normalize_remote(remote, job.repository),
+         {:ok, source} <- Gateway.call(source_updater, :refresh, [job.repository]),
          {:ok, leased} <-
            Operations.lease_job(job.id, worker_key, canonical, lease_ms,
              capacity: capacity,
@@ -46,7 +60,8 @@ defmodule PtcManager.Dispatch do
       context = %{
         job: leased,
         issue: leased.issue,
-        repository: leased.repository
+        repository: leased.repository,
+        source: source
       }
 
       adapter_result = Gateway.call(adapter, :dispatch, [context])

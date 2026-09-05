@@ -3,7 +3,7 @@ defmodule PtcManager.Automations.DefinitionVersion do
   import Ecto.Changeset
 
   @target_types ~w(repository issue pull_request)
-  @profiles ~w(generic_ephemeral retained_pr_repair implementation_job private_daily_update)
+  @profiles ~w(generic_ephemeral ephemeral_investigation retained_pr_repair implementation_job private_daily_update)
   @github_access ~w(none read trusted_direct brokered_publish)
   @queue_lanes ~w(planning writing)
   @resource_classes ~w(light heavy)

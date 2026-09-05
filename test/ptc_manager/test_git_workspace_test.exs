@@ -82,7 +82,8 @@ defmodule PtcManager.TestGitWorkspaceTest do
            ]
 
     assert Enum.drop(start_options, 8) ==
-             PtcManager.CodexTrust.override_args([workspace.repository, allocation.path])
+             ["--model", PtcManager.AgentProfiles.model("codex")] ++
+               PtcManager.CodexTrust.override_args([workspace.repository, allocation.path])
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -172,7 +173,12 @@ defmodule PtcManager.TestGitWorkspaceTest do
 
     result =
       HerdrAdapter.dispatch(
-        %{job: leased, issue: leased.issue, repository: leased.repository},
+        %{
+          job: leased,
+          issue: leased.issue,
+          repository: leased.repository,
+          source: %{sha: workspace.source_sha, ref: "refs/remotes/origin/main"}
+        },
         command: command
       )
 
@@ -208,7 +214,12 @@ defmodule PtcManager.TestGitWorkspaceTest do
             {:uncertain,
              {:worktree_create_unconfirmed, _create_error, :worktree_create_identity_mismatch}}} =
              HerdrAdapter.dispatch(
-               %{job: leased, issue: leased.issue, repository: leased.repository},
+               %{
+                 job: leased,
+                 issue: leased.issue,
+                 repository: leased.repository,
+                 source: %{sha: workspace.source_sha, ref: "refs/remotes/origin/main"}
+               },
                command: command
              )
 

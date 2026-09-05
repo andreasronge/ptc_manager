@@ -73,15 +73,15 @@ defmodule PtcManager.Automations.Defaults do
       name: "Review issue",
       description: "Challenge and improve issue readiness without implementing it.",
       target_type: "issue",
-      execution_profile: "generic_ephemeral",
+      execution_profile: "ephemeral_investigation",
       github_access: "trusted_direct",
       queue_lane: "planning",
-      resource_class: "light",
+      resource_class: "heavy",
       lock_policy: %{"type" => "target"},
       timeout_seconds: 1_800,
       result_type: "issue_maintenance",
       prompt:
-        "Review whether the issue is genuinely ready to implement. Improve it and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Do not implement it, and explain the result simply."
+        "Review whether the issue is genuinely ready to implement. Use the disposable workspace to run relevant tests and create temporary reproduction tests when useful. Improve the issue and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Exploratory source changes will be discarded: do not implement the fix, commit, push, or open a pull request. Explain the result simply."
     },
     %{
       key: "resolve_issue_decision",
