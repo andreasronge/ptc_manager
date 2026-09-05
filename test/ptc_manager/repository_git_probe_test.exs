@@ -26,6 +26,29 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert result.diff_digest =~ ~r/\A[0-9a-f]{64}\z/
   end
 
+  test "review evidence matches publication exactly and refuses dirty work" do
+    path = repository_with_base()
+    branch = "ptc-manager/issue-42-job-7"
+    git!(path, ["switch", "-c", branch])
+    File.write!(Path.join(path, "README.md"), "base\nreviewed change\n")
+    git!(path, ["commit", "-am", "implementation"])
+    repository = %Repository{local_path: path, default_branch: "main"}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    assert {:ok, publication} = GitProbe.verify(repository, job)
+    assert {:ok, evidence} = GitProbe.review_patch(repository, job, path)
+    assert Map.drop(evidence, [:diff]) == publication
+
+    assert Base.encode16(:crypto.hash(:sha256, evidence.diff), case: :lower) ==
+             publication.diff_digest
+
+    File.write!(Path.join(path, "uncommitted.txt"), "preserve this work")
+
+    assert {:error, :review_requires_clean_text_commit} =
+             GitProbe.review_patch(repository, job, path)
+
+    assert File.read!(Path.join(path, "uncommitted.txt")) == "preserve this work"
+  end
+
   test "rejects an empty commit" do
     path = repository_with_base()
     branch = "ptc-manager/issue-42-job-8"

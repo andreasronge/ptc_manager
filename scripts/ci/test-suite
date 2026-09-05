@@ -11,6 +11,19 @@ case "$budget_seconds:$partitions" in
     ;;
 esac
 
+first_partition=${PTC_TEST_PARTITION_ONLY:-1}
+last_partition=${PTC_TEST_PARTITION_ONLY:-$partitions}
+case "$first_partition" in
+  '' | *[!0-9]*)
+    echo "PTC test partition must be an integer within the configured partitions" >&2
+    exit 2
+    ;;
+esac
+if [ "$first_partition" -lt 1 ] || [ "$first_partition" -gt "$partitions" ]; then
+  echo "PTC test partition must be between 1 and $partitions" >&2
+  exit 2
+fi
+
 timeout_binary=$(command -v timeout || command -v gtimeout || true)
 if [ -z "$timeout_binary" ]; then
   echo "PTC test budget requires GNU timeout (timeout or gtimeout)" >&2
@@ -33,9 +46,9 @@ trap cleanup EXIT HUP INT TERM
 partition_budget=$((budget_seconds - 1))
 started_at=$(date +%s)
 pids=""
-partition=1
+partition=$first_partition
 
-while [ "$partition" -le "$partitions" ]; do
+while [ "$partition" -le "$last_partition" ]; do
   log_path="$output_root/partition-$partition.log"
   partition_tmp="$output_root/partition-$partition"
   mkdir "$partition_tmp"
@@ -53,8 +66,8 @@ for pid in $pids; do
   fi
 done
 
-partition=1
-while [ "$partition" -le "$partitions" ]; do
+partition=$first_partition
+while [ "$partition" -le "$last_partition" ]; do
   echo "Test partition $partition/$partitions"
   sed -n '1,$p' "$output_root/partition-$partition.log"
   partition=$((partition + 1))

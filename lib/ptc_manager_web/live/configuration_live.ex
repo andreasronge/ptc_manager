@@ -9,7 +9,6 @@ defmodule PtcManagerWeb.ConfigurationLive do
   alias PtcManager.Publications
   alias PtcManager.Repository.Health
   alias PtcManager.Repository.MaintainerLabels
-  alias PtcManager.ReviewPolicy
   alias PtcManager.CapacitySettings
 
   @impl true
@@ -321,8 +320,6 @@ defmodule PtcManagerWeb.ConfigurationLive do
   def sync_classes(%{sync_status: "ok"}), do: "text-teal-300"
   def sync_classes(%{sync_status: "error"}), do: "text-rose-300"
   def sync_classes(_repository), do: "text-amber-300"
-
-  def required_reviews(repository), do: ReviewPolicy.default_count(repository)
 
   def health_classes(:ready), do: "bg-teal-400/15 text-teal-200"
   def health_classes(:attention), do: "bg-amber-400/15 text-amber-200"

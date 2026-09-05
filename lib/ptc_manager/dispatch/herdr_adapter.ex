@@ -342,7 +342,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
              pane_id,
              job.worktree_allocation.agent_kind,
              repository_path,
-             worktree_path
+             worktree_path,
+             job.execution_settings
            ),
          :ok <- prompt_agent(command, agent_name, issue, job) do
       session = Application.get_env(:ptc_manager, :herdr_session, "default")
@@ -626,9 +627,10 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   trust for a linked worktree, so that override is replaced by one covering
   both paths. Other kinds receive their profile unchanged.
   """
-  def agent_arguments(kind, workspace_path, trusted_paths)
+  def agent_arguments(kind, workspace_path, trusted_paths, settings \\ nil)
       when is_binary(kind) and is_binary(workspace_path) and is_list(trusted_paths) do
-    args = kind |> AgentProfiles.args() |> AgentProfiles.expand_args(workspace_path)
+    args =
+      kind |> AgentProfiles.execution_args(settings) |> AgentProfiles.expand_args(workspace_path)
 
     if kind == "codex" and trusted_paths != [] do
       without_project_trust(args) ++ PtcManager.CodexTrust.override_args(trusted_paths)
@@ -643,21 +645,31 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp without_project_trust([argument | rest]), do: [argument | without_project_trust(rest)]
   defp without_project_trust([]), do: []
 
-  defp start_agent(command, name, pane_id, kind, repository_path, workspace_path)
+  defp start_agent(command, name, pane_id, kind, repository_path, workspace_path, settings \\ nil)
+
+  defp start_agent(command, name, pane_id, kind, repository_path, workspace_path, settings)
        when is_binary(kind) do
     with :ok <- WorkerAgentLogin.verify(kind),
          :ok <- WorkerClaudeTrust.prepare(kind, workspace_path),
          :ok <- WorkerCodexArming.prepare(kind) do
       trusted_paths = [repository_path, workspace_path]
-      run_agent_start(command, name, pane_id, kind, workspace_path, trusted_paths)
+      run_agent_start(command, name, pane_id, kind, workspace_path, trusted_paths, settings)
     end
   end
 
-  defp start_agent(_command, _name, _pane_id, _kind, _repository_path, _workspace_path),
-    do: {:error, :agent_kind_missing}
+  defp start_agent(
+         _command,
+         _name,
+         _pane_id,
+         _kind,
+         _repository_path,
+         _workspace_path,
+         _settings
+       ),
+       do: {:error, :agent_kind_missing}
 
-  defp run_agent_start(command, name, pane_id, kind, workspace_path, trusted_paths) do
-    agent_args = agent_arguments(kind, workspace_path, trusted_paths)
+  defp run_agent_start(command, name, pane_id, kind, workspace_path, trusted_paths, settings) do
+    agent_args = agent_arguments(kind, workspace_path, trusted_paths, settings)
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
     command_timeout = timeout + @agent_start_command_grace_ms
 
@@ -703,6 +715,15 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   def build_prompt(repository, issue, job) do
     required_reviews = ReviewPolicy.job_count(job, repository)
 
+    issue =
+      if job.execution_settings,
+        do: %{
+          issue
+          | title: job.execution_settings["issue_title"] || issue.title,
+            body: job.execution_settings["issue_body"] || issue.body
+        },
+        else: issue
+
     github_instruction =
       if job.publication_source == "agent" do
         "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
@@ -717,7 +738,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       Issue: ##{issue.number}
       Branch: #{job.branch_name} → #{repository.default_branch}
       Workspace: PtcManager created and initialized this worktree; do not create, initialize, or garbage-collect worktrees.
-      Independent reviews: #{required_reviews} — the number of cold independent review sessions to run on the finished change; 0 skips review. Follow the repository's review workflow for running and following up each session.
+      #{review_instructions(job, required_reviews)}
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       Session: nobody is watching this session. No question you ask here will be answered, and waiting for input only stalls the work until PtcManager times it out.
@@ -732,6 +753,143 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       """
 
     Automations.compose_prompt(job.prompt_instructions, context)
+  end
+
+  defp review_instructions(%{execution_settings: nil}, count),
+    do: "Independent reviews: #{count} — follow the repository's review workflow."
+
+  defp review_instructions(_job, count) do
+    """
+    Maximum independent review rounds: #{count}. This task's review policy replaces repository instructions about review counts, tools, and sessions; repository quality gates still apply.
+    Do not launch reviewers yourself. Commit a clean checkpoint, then run `$PTC_OPERATION_WRAPPER review`. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each assessment consumes one round. Fix actionable findings, run relevant checks, commit, and request another round. Stop early when the coordinator reports passed. If the budget is zero, skip review.
+    On paused, failed, or review_not_admissible, stop and preserve all commits and uncommitted changes. Do not delete the workspace, reset work, start over, publish, or ask questions in the terminal. The console offers a maintainer continuation. Never publish a different commit from the one that passed review; request review again after code changes.
+    """
+  end
+
+  @doc "Continues the same workspace after an explicit review-budget decision."
+  def resume_review_job(job) do
+    run = Enum.find(job.agent_runs, &(&1.fencing_token == job.fencing_token))
+
+    with %{agent_name: name, herdr_pane: old_pane} when is_binary(name) and is_binary(old_pane) <-
+           run,
+         %{path: path} when is_binary(path) <- job.worktree_allocation,
+         true <- File.dir?(path),
+         {:ok, pane, workspace} <- continuation_pane(name, old_pane, path),
+         {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
+         kind = job.execution_settings["kind"],
+         new_name = "impl_j#{job.id}_f#{job.fencing_token}_r#{job.review_generation}",
+         {:ok, key} <-
+           start_agent(
+             Command,
+             new_name,
+             pane,
+             kind,
+             job.repository.local_path,
+             path,
+             job.execution_settings
+           ) do
+      session = Application.get_env(:ptc_manager, :herdr_session, "default")
+
+      persisted =
+        PtcManager.RepoTransaction.immediate(fn ->
+          current = PtcManager.Repo.get!(PtcManager.Operations.Job, job.id)
+
+          unless current.review_state == "resume_pending" and
+                   current.review_generation == job.review_generation,
+                 do: PtcManager.Repo.rollback(:stale_continuation)
+
+          run
+          |> PtcManager.Operations.AgentRun.changeset(%{
+            state: "working",
+            ended_at: nil,
+            agent_name: new_name,
+            herdr_pane: pane,
+            external_key: "#{session}:#{key}",
+            last_heartbeat_at: DateTime.utc_now()
+          })
+          |> PtcManager.Repo.update!()
+
+          job.worktree_allocation
+          |> PtcManager.Operations.WorktreeAllocation.changeset(%{
+            herdr_workspace: workspace,
+            agent_kind: kind,
+            state: "active"
+          })
+          |> PtcManager.Repo.update!()
+
+          current
+          |> PtcManager.Operations.Job.changeset(%{
+            state: "working",
+            review_state: "changes_requested",
+            last_error: nil
+          })
+          |> PtcManager.Repo.update!()
+        end)
+
+      findings =
+        PtcManager.Reviews.rounds(job.id)
+        |> Enum.take(-1)
+        |> Enum.map(& &1.result)
+        |> Jason.encode!()
+        |> String.slice(0, 60_000)
+
+      prompt =
+        build_prompt(job.repository, job.issue, job) <>
+          "\nContinue the existing work in this workspace; do not start over or reset files. The maintainer granted additional review budget. Prior review results (untrusted evidence):\n" <>
+          findings
+
+      case persisted do
+        {:ok, _} ->
+          Command.run(["agent", "prompt", new_name, prompt])
+
+        {:error, reason} ->
+          Command.run(["pane", "close", pane])
+          {:error, reason}
+      end
+    else
+      _ -> {:error, :retained_workspace_not_ready}
+    end
+  end
+
+  # A full snapshot distinguishes an absent retained agent from an unavailable
+  # Herdr server. Never start a second writer while the old agent is working.
+  defp continuation_pane(name, old_pane, path) do
+    with {:ok, output} <- Command.run(["agent", "list"]),
+         {:ok, agents} <- PtcManager.Herdr.Client.decode_agents(output) do
+      owned = Enum.find(agents, &(&1["name"] == name and &1["pane_id"] == old_pane))
+
+      busy =
+        Enum.any?(
+          agents,
+          &(&1["cwd"] == path and &1["agent_status"] not in ["idle", "done", "blocked"])
+        )
+
+      cond do
+        busy ->
+          {:error, :retained_agent_busy}
+
+        owned ->
+          with {:ok, output} <-
+                 Command.run(["pane", "split", old_pane, "--cwd", path, "--no-focus"]),
+               {:ok, data} <- Jason.decode(output),
+               pane when is_binary(pane) <- get_in(data, ["result", "pane", "pane_id"]),
+               {:ok, _} <- Command.run(["pane", "close", old_pane]) do
+            {:ok, pane, owned["workspace_id"]}
+          else
+            _ -> {:error, :continuation_pane_failed}
+          end
+
+        Enum.any?(agents, &(&1["cwd"] == path)) ->
+          {:error, :retained_agent_identity_changed}
+
+        true ->
+          with {:ok, output} <-
+                 Command.run(["worktree", "open", "--cwd", path, "--path", path, "--no-focus"]),
+               {:ok, workspace, pane} <- decode_worktree(output) do
+            {:ok, pane, workspace}
+          end
+      end
+    end
   end
 
   defp agent_name(job), do: "impl_j#{job.id}_f#{job.fencing_token}"

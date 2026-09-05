@@ -188,7 +188,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#planning-group-in_delivery")
     open_issue(view, issue)
     assert has_element?(view, "#in-delivery-#{issue.id}", "Queued")
-    assert has_element?(view, "#job-review-count-#{job.id}", "3 review passes")
+    assert has_element?(view, "#job-review-count-#{job.id}", "Up to 3 review rounds")
   end
 
   test "preserves the browser-managed technical evidence state across ticks", %{conn: conn} do

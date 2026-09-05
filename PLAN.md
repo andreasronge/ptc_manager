@@ -54,7 +54,7 @@ Each issue card shows:
 Available actions in the first product release:
 
 - **Approve and start** creates one queued implementation job and freezes the
-  maintainer's choice of zero to three independent review passes;
+  maintainer's execution profile, implementation/reviewer models, and maximum of zero to five review rounds;
 - **Investigate more** requests a deeper manager pass;
 - **Needs changes** records private guidance for a new analysis;
 - **Skip** dismisses the current proposal without changing GitHub;
@@ -220,24 +220,34 @@ non-terminal cleanup remains fail-closed and requires a clean, verified head.
 Version one polls GitHub instead of exposing a webhook endpoint. At the current
 backlog size this is simpler to operate and lets the web server remain private.
 
-The initial private-manager credential is read-only. The generated
-implementation command names the approved job branch, runs tests, invokes the
-configured `codex-review` skill passes, fixes findings, and commits locally.
-Review execution is deliberately part of the coding-agent prompt, not a second
-orchestration system in PtcManager. Once the local result is verified, a
-credential-isolated GitHub App broker stages the bounded commit, rechecks the
-authoritative base and diff, pushes only the deterministic job branch, and
-creates or reconciles one PR.
+The private-manager credential is read-only. Each implementation approval freezes
+an execution profile and review budget. Small scope with low risk suggests Small
+(one round); large scope or high risk suggests Strong (five rounds); otherwise
+Standard (two rounds). A maintainer may override both the profile and budget.
+The initial presets use Codex Mini, Sol, and Astra for implementation and Astra
+for independent review; agent kind, model, and effort remain editable presets.
+An unknown assessment uses Standard. Existing jobs keep their approved policy.
 
-GitHub remains authoritative for the remote branch, PR, checks, conflicts, and
-merge result; PtcManager is authoritative for private approvals, prompt policy,
-queue leases, publication fencing, worktree allocation, and its audit log.
+PtcManager owns review admission and evidence. The implementer commits a clean
+checkpoint and requests a review through its managed operation wrapper. One
+independent assessment consumes one round, including a follow-up assessment.
+The reviewer receives immutable, bounded issue/patch evidence and returns
+validated JSON. Findings require fixes and another assessment; a clean result
+permits early completion. Publication verification requires the reviewed head,
+base, and patch digest to match. Repository test gates still apply.
 
-The pre-PR quality policy is repository-configurable. Its initial default is
-two independent review-and-fix passes, but the required count, reviewer tools,
-test commands, and clean-review requirement are rendered into the coding-agent
-prompt rather than hard-coded. The coding agent owns that skill workflow;
-PtcManager does not record or verify review evidence.
+Exhaustion or a failed review preserves the job, branch, workspace, and findings.
+A maintainer can add rounds, change models, take over manually, or cancel with
+a reason. Continuation uses the existing workspace and review history; it does
+not create a replacement implementation job. Cancellation never discards work.
+An optional GitHub explanation has its own editable preview and explicit
+approval, executed by a named agent action and checked with a read-only query.
+
+GitHub remains authoritative for branches, PRs, checks, and merges. Reviews are
+one gate, not authority to merge or bypass the publication contract. The broker
+still verifies the exact commit before writing. In the explicit agent-publishes
+trial, review obedience remains a prompt boundary for direct GitHub writes;
+shared worker credentials do not provide isolation between hostile agents.
 
 ### Web access
 
@@ -355,10 +365,10 @@ GitHub mutation permission.
   cleaning up idempotently after merge or closure;
 - fencing tokens on worker state and external effects;
 - generate an implementation command that fixes the approved issue, runs tests,
-  invokes the configured number of `codex-review` skill passes, fixes findings,
-  and commits without using GitHub credentials;
-- treat reviews as coding-agent prompt policy rather than PtcManager state or
-  authority; PtcManager neither launches reviewers nor records review evidence;
+  requests independently dispatched reviews within the approved budget, fixes
+  findings, and commits without using broker credentials;
+- record review inputs and findings, bind clean results to the exact commit,
+  and preserve work for a maintainer decision when the budget is exhausted;
 - bounded local branch-result verification, followed by fenced exact-SHA
   publication through the GitHub App broker;
 - failure, blocked, cancellation, and recovery controls;

@@ -1,0 +1,108 @@
+"""Offline contract checks for the installed reviewer bridge; no provider calls."""
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+helper = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
+review = helper['review']
+context = review.__globals__
+
+
+class ReviewerContract(unittest.TestCase):
+    def request(self, kind='codex', effort=None):
+        return {'settings': {'reviewer_kind': kind, 'reviewer_model': 'chosen-model',
+                             'reviewer_effort': effort},
+                'schema': {'type': 'object'}, 'evidence': {'diff': 'untrusted diff'}}
+
+    def test_each_provider_uses_selected_model_and_structured_result(self):
+        expected = {'summary': 'clear', 'findings': []}
+        for kind in ('codex', 'claude', 'cursor'):
+            commands = []
+            def fake_run(args, prompt, cwd):
+                commands.append(args)
+                self.assertIn('untrusted diff', prompt)
+                if kind == 'codex':
+                    Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+                    return 'terminal text is ignored'
+                return json.dumps({'structured_output': expected} if kind == 'claude'
+                                  else {'result': json.dumps(expected)})
+            with patch.dict(context, run=fake_run):
+                self.assertEqual(review(self.request(kind)), expected)
+            self.assertEqual(commands[0][commands[0].index('--model') + 1], 'chosen-model')
+
+    def test_sol_reviewer_uses_extra_high_effort(self):
+        request = self.request('codex', 'xhigh')
+        request['settings']['reviewer_model'] = 'gpt-5.6-sol'
+        expected = {'summary': 'clear', 'findings': []}
+
+        def fake_run(args, prompt, cwd):
+            self.assertEqual(args[args.index('--model') + 1], 'gpt-5.6-sol')
+            self.assertEqual(args[args.index('-c') + 1], 'model_reasoning_effort="xhigh"')
+            self.assertIn('independent code reviewer', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return ''
+
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request), expected)
+
+    def test_invalid_model_or_effort_never_launches_an_agent(self):
+        with patch.dict(context, run=lambda *_: self.fail('agent launched')):
+            request = self.request()
+            request['settings']['reviewer_model'] = 'model; rm -rf /'
+            with self.assertRaises(RuntimeError):
+                review(request)
+            with self.assertRaises(RuntimeError):
+                review(self.request('cursor', 'high'))
+
+    def test_output_link_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'request.json')
+            source.write_text('{}')
+            victim = Path(directory, 'victim')
+            victim.write_text('preserve')
+            output = Path(directory, 'output.json')
+            output.symlink_to(victim)
+            main = helper['main']
+            with patch.dict(main.__globals__, review=lambda _: {'summary': 'x', 'findings': []}), \
+                 patch.object(sys, 'argv', ['helper', 'review', str(source), str(output)]):
+                with self.assertRaises(FileExistsError):
+                    main()
+            self.assertEqual(victim.read_text(), 'preserve')
+
+    def test_reads_reject_links_fifos_and_oversized_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'data.json')
+            source.write_text('{"findings": []}')
+            link = Path(directory, 'link')
+            link.symlink_to(source)
+            fifo = Path(directory, 'fifo')
+            os.mkfifo(fifo)
+            with self.assertRaises(OSError):
+                helper['read_json_file'](str(link), 100)
+            for path, limit in ((fifo, 100), (source, 1)):
+                with self.assertRaises(RuntimeError):
+                    helper['read_json_file'](str(path), limit)
+
+    def test_review_wrapper_without_context_preserves_work_and_reports_failure(self):
+        environment = dict(os.environ)
+        environment.pop('PTC_MANAGED_OPERATION_CONTEXT', None)
+        result = subprocess.run([sys.executable, str(ROOT / 'deploy/ptc-operation'), 'review'],
+                                env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn('preserve your work', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_process_timeout_is_bounded(self):
+        with self.assertRaisesRegex(RuntimeError, 'review_timeout'):
+            helper['run']([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.05)
+
+
+if __name__ == '__main__':
+    unittest.main()

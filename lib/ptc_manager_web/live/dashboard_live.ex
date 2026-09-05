@@ -103,14 +103,14 @@ defmodule PtcManagerWeb.DashboardLive do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
          {:ok, review_count} <- parse_review_count(params["review-count"]) do
       if params["direct"] == "true",
-        do: approve_directly(issue_id, review_count, socket),
-        else: approve_issue(issue_id, review_count, socket)
+        do: approve_directly(issue_id, review_count, params["execution-profile"], socket),
+        else: approve_issue(issue_id, review_count, params["execution-profile"], socket)
     else
       {:error, :invalid_issue_id} ->
         {:noreply, put_flash(socket, :error, "That issue could not be found.")}
 
       {:error, :invalid_review_count} ->
-        {:noreply, put_flash(socket, :error, "Choose between zero and three reviews.")}
+        {:noreply, put_flash(socket, :error, "Choose between zero and five reviews.")}
     end
   end
 
@@ -296,29 +296,26 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
-  defp approve_directly(issue_id, review_count, socket) do
+  defp approve_directly(issue_id, review_count, profile, socket) do
     issue_id
-    |> Operations.approve_issue_directly(socket.assigns.actor, review_count)
+    |> Operations.approve_issue_directly(socket.assigns.actor, review_count, profile)
     |> approval_result(review_count, socket, "Started directly, without a preparation round.")
   end
 
-  defp approve_issue(issue_id, review_count, socket) do
+  defp approve_issue(issue_id, review_count, profile, socket) do
     issue_id
-    |> Operations.approve_issue(socket.assigns.actor, review_count)
+    |> Operations.approve_issue(socket.assigns.actor, review_count, profile)
     |> approval_result(review_count, socket, "Approved.")
   end
 
-  defp approval_result(outcome, review_count, socket, prefix) do
+  defp approval_result(outcome, _review_count, socket, prefix) do
     case outcome do
-      {:ok, _job} ->
+      {:ok, job} ->
         DispatchPoller.wake()
+        review_count = job.required_review_count
 
         review_message =
-          if is_integer(review_count) do
-            "#{review_count} review #{if(review_count == 1, do: "pass", else: "passes")}"
-          else
-            "the repository's default review count"
-          end
+          "Maximum #{review_count} review #{if(review_count == 1, do: "round", else: "rounds")} · #{job.execution_settings["name"]} / #{job.execution_settings["model"]}"
 
         {:noreply,
          socket
@@ -353,7 +350,7 @@ defmodule PtcManagerWeb.DashboardLive do
         {:noreply, put_flash(socket, :error, "This issue still has an unresolved dependency.")}
 
       {:error, :invalid_review_count} ->
-        {:noreply, put_flash(socket, :error, "Choose between zero and three reviews.")}
+        {:noreply, put_flash(socket, :error, "Choose between zero and five reviews.")}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Approval failed: #{inspect(reason)}")}
@@ -377,11 +374,11 @@ defmodule PtcManagerWeb.DashboardLive do
 
   defp label_error(_reason), do: "The label could not be changed on GitHub."
 
-  defp parse_review_count(nil), do: {:ok, nil}
+  defp parse_review_count(value) when value in [nil, ""], do: {:ok, nil}
 
   defp parse_review_count(value) when is_binary(value) do
     case Integer.parse(value) do
-      {count, ""} when count in 0..3 -> {:ok, count}
+      {count, ""} when count in 0..5 -> {:ok, count}
       _ -> {:error, :invalid_review_count}
     end
   end
@@ -705,7 +702,10 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def job_review_label(job, repository) do
     count = ReviewPolicy.job_count(job, repository)
-    "#{count} review #{if(count == 1, do: "pass", else: "passes")}"
+
+    if job.execution_settings,
+      do: "Up to #{count} review #{if(count == 1, do: "round", else: "rounds")}",
+      else: "#{count} review #{if(count == 1, do: "pass", else: "passes")}"
   end
 
   def agent_publication?(%{publication: %{source: "agent"}}), do: true
@@ -783,6 +783,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
     assign(socket,
       repositories: repositories,
+      execution_profiles: PtcManager.ExecutionProfiles.list(),
       issues: issues,
       grouped_issues: group_issues(issues, follow_ups, socket.assigns.now),
       active_agent_runs:

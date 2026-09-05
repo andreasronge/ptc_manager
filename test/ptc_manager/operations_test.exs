@@ -73,7 +73,7 @@ defmodule PtcManager.OperationsTest do
       assert job.repository_id == repository.id
       assert job.state == "queued"
       assert job.fencing_token == 0
-      assert job.required_review_count == 2
+      assert job.required_review_count == 1
 
       approval = Repo.get!(Approval, job.approval_id)
       assert approval.proposal_id == proposal.id
@@ -85,10 +85,10 @@ defmodule PtcManager.OperationsTest do
       assert audit.target_id == job.id
       assert audit.details["issue_number"] == issue.number
       assert audit.details["proposal_digest"] == proposal.proposal_digest
-      assert audit.details["required_review_count"] == 2
+      assert audit.details["required_review_count"] == 1
     end
 
-    test "freezes a per-task review count between zero and three" do
+    test "freezes a per-task review count between zero and five" do
       repository = repository_fixture(%{required_pre_pr_reviews: 2})
       easy = issue_fixture(repository, %{number: 501})
       tricky = issue_fixture(repository, %{number: 502})
@@ -102,7 +102,7 @@ defmodule PtcManager.OperationsTest do
       assert tricky_job.required_review_count == 3
 
       assert {:error, :invalid_review_count} =
-               Operations.approve_issue(tricky.id, "andreas", 4)
+               Operations.approve_issue(tricky.id, "andreas", 6)
     end
 
     test "fails closed when the latest proposal no longer matches the issue" do
@@ -895,12 +895,12 @@ defmodule PtcManager.OperationsTest do
       assert is_nil(audit.details["proposal_id"])
     end
 
-    test "uses the repository default review count when none is chosen" do
+    test "uses Standard without a scope and risk assessment" do
       repository = repository_fixture(%{required_pre_pr_reviews: 3})
       issue = issue_fixture(repository)
 
       assert {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
-      assert job.required_review_count == 3
+      assert job.required_review_count == 2
     end
 
     test "keeps every deterministic gate except the two proposal checks" do
@@ -933,7 +933,7 @@ defmodule PtcManager.OperationsTest do
                Operations.approve_issue_directly(dependent.id, "andreas")
 
       assert {:error, :invalid_review_count} =
-               Operations.approve_issue_directly(issue_fixture(repository).id, "andreas", 4)
+               Operations.approve_issue_directly(issue_fixture(repository).id, "andreas", 6)
     end
 
     test "removing the repository also removes an approval that had no proposal" do

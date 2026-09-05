@@ -28,6 +28,7 @@ defmodule PtcManager.TestSuiteScriptTest do
           {"PATH", bin <> ":" <> System.get_env("PATH")},
           {"TMPDIR", root <> "/"},
           {"PTC_TEST_PARTITIONS", "3"},
+          {"PTC_TEST_PARTITION_ONLY", nil},
           {"PTC_TEST_BUDGET_SECONDS", "10"}
         ],
         stderr_to_stdout: true

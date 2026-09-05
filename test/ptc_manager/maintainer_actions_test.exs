@@ -2972,7 +2972,7 @@ defmodule PtcManager.MaintainerActionsTest do
       end
     end
 
-    defp blocked_job_fixture(repository, issue, report) do
+    defp blocked_job_fixture(_repository, issue, report) do
       proposal_fixture(issue)
       {:ok, job} = PtcManager.Operations.approve_issue(issue.id, "andreas")
 

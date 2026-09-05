@@ -565,7 +565,9 @@ defmodule PtcManager.GitHubSyncTest do
     send(first_fetch, {:release_github_fetch, {:ok, [remote_issue(44, "Older")]}})
     assert {:ok, _summary} = Task.await(first)
 
-    assert_receive {:github_fetch_started, second_fetch}, 1_000
+    # :global.trans retries contended locks with randomized backoff; releasing
+    # the first sync does not immediately wake the second one.
+    assert_receive {:github_fetch_started, second_fetch}, 5_000
 
     send(second_fetch, {
       :release_github_fetch,

@@ -37,18 +37,36 @@ defmodule PtcManager.Scripts.TestSuiteTest do
     assert output =~ "failed or exceeded its 2s budget"
   end
 
+  test "runs only the selected CI partition", %{bin: bin} do
+    fake_mix!(bin, "printf 'partition=%s\\n' \"$MIX_TEST_PARTITION\"\n")
+
+    assert {output, 0} = run_suite(bin, "10", "2")
+    assert output =~ "partition=2"
+    refute output =~ "partition=1"
+    refute output =~ "partition=3"
+  end
+
+  test "rejects invalid partition selections", %{bin: bin} do
+    fake_mix!(bin, "exit 99\n")
+
+    for partition <- ["0", "4", "invalid"] do
+      assert {_output, 2} = run_suite(bin, "10", partition)
+    end
+  end
+
   defp fake_mix!(bin, body) do
     path = Path.join(bin, "mix")
     File.write!(path, "#!/bin/sh\nset -eu\n" <> body)
     File.chmod!(path, 0o755)
   end
 
-  defp run_suite(bin, budget) do
+  defp run_suite(bin, budget, partition \\ nil) do
     System.cmd(@suite, [],
       env: [
         {"PATH", bin <> ":" <> System.fetch_env!("PATH")},
         {"PTC_TEST_BUDGET_SECONDS", budget},
-        {"PTC_TEST_PARTITIONS", "3"}
+        {"PTC_TEST_PARTITIONS", "3"},
+        {"PTC_TEST_PARTITION_ONLY", partition}
       ],
       stderr_to_stdout: true
     )

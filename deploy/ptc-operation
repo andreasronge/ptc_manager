@@ -19,10 +19,14 @@ import uuid
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="ptc-operation")
-    run = parser.add_subparsers(dest="subcommand", required=True).add_parser("run")
+    commands = parser.add_subparsers(dest="subcommand", required=True)
+    commands.add_parser("review")
+    run = commands.add_parser("run")
     run.add_argument("--label", required=True)
     run.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.subcommand == "review":
+        return args
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
     if not args.command:
@@ -348,6 +352,19 @@ def managed_run(args, context):
 
 def main():
     args = parse_args()
+    if args.subcommand == "review":
+        try:
+            with open(os.environ["PTC_MANAGED_OPERATION_CONTEXT"], encoding="utf-8") as source:
+                context = json.load(source)
+            response = broker_request_with_retry(context, {"operation": "review", "request_id": str(uuid.uuid4())})
+            while response.get("state") in ("queued", "running"):
+                time.sleep(2)
+                response = broker_request_with_retry(context, {"operation": "review_status", "round_id": response["round_id"]})
+            print(json.dumps(response))
+            return 0 if response.get("state") in ("passed", "skipped") else 2
+        except Exception:
+            print("ptc-operation: review unavailable; preserve your work and check the console.", file=sys.stderr)
+            return 75
     if os.environ.get("PTC_OPERATION_ACTIVE"):
         execute_direct(args.command)
 

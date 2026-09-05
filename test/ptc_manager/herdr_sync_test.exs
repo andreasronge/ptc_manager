@@ -730,6 +730,59 @@ defmodule PtcManager.HerdrSyncTest do
     assert leased_second_job.state == "starting"
   end
 
+  test "a continued agent keeps the same job and run after its session identity changes" do
+    %{job: job, run: run} = managed_job_fixture("review-resume", %{agent_name: :deterministic})
+    name = "impl_j#{job.id}_f1_r1"
+
+    job
+    |> Job.changeset(%{
+      review_generation: 1,
+      review_state: "changes_requested",
+      state: "reconciling"
+    })
+    |> Repo.update!()
+
+    run |> AgentRun.changeset(%{agent_name: name}) |> Repo.update!()
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         remote_agent("working")
+         |> Map.put("name", name)
+         |> Map.put("agent_session", %{"value" => "resumed-session"})
+       ]}
+    )
+
+    assert {:ok, _} = Sync.sync(client: FakeClient, session: "review-resume")
+    assert Repo.get!(Job, job.id).state == "working"
+    assert Repo.get!(AgentRun, run.id).agent_name == name
+    assert Repo.aggregate(from(r in AgentRun, where: r.job_id == ^job.id), :count) == 1
+  end
+
+  test "missing agents do not terminalize jobs held for review decisions" do
+    %{job: job} = managed_job_fixture("review-held", %{agent_name: :deterministic})
+
+    for state <- ~w(paused running manual resume_pending) do
+      job
+      |> Job.changeset(%{
+        state: "reconciling",
+        review_state: state,
+        reconciling_at: DateTime.add(now(), -120, :second),
+        absence_observed_at: DateTime.add(now(), -60, :second)
+      })
+      |> Repo.update!()
+
+      Process.put(:herdr_result, {:ok, []})
+
+      assert {:ok, %{absent_count: 0}} =
+               Sync.sync(client: FakeClient, session: "review-held", reconcile_after_ms: 0)
+
+      assert Repo.get!(Job, job.id).state not in ~w(failed lost cancelled)
+      assert Repo.get!(Job, job.id).review_state == state
+    end
+  end
+
   test "a successful empty snapshot terminates an old uncertain launch" do
     repository = repository_fixture()
     issue = issue_fixture(repository)

@@ -334,7 +334,7 @@ defmodule PtcManager.AutomationsTest do
     repository = repository_fixture()
 
     definitions = Automations.list_definitions(repository)
-    assert length(definitions) == 12
+    assert length(definitions) == 13
     assert Enum.all?(definitions, &match?(%DefinitionVersion{version: 1}, &1.current_version))
 
     assert Enum.all?(definitions, fn definition ->
@@ -343,7 +343,7 @@ defmodule PtcManager.AutomationsTest do
            end)
 
     assert :ok = Automations.ensure_defaults(repository)
-    assert length(Automations.list_definitions(repository)) == 12
+    assert length(Automations.list_definitions(repository)) == 13
 
     review = Automations.get_definition(repository, "review_issue")
     assert review.current_version.execution_profile == "ephemeral_investigation"
