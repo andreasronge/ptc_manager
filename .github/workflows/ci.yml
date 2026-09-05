@@ -27,5 +27,5 @@ jobs:
       - run: ./scripts/ci/pre-publication
         env:
           PTC_TEST_PARTITIONS: "12"
-          ERL_FLAGS: "+S 1:1"
+          ERL_FLAGS: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
       - run: git diff --exit-code
