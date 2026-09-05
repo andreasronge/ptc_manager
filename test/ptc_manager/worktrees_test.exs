@@ -116,6 +116,29 @@ defmodule PtcManager.WorktreesTest do
                Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
     end
 
+    test "a discard finishes the job Herdr can no longer do once it forgot the workspace" do
+      path = existing_path()
+      allocation = attention_allocation!(path)
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})
+
+      assert :ok = Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert_receive {:discard_worktree, allocation_id}
+      assert allocation_id == allocation.id
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
+      refute File.exists?(path)
+    end
+
+    test "a forgotten workspace outside the managed root keeps the worktree for attention" do
+      allocation = attention_allocation!("/tmp/ptc-manager-unmanaged-worktree")
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})
+
+      assert {:error, {:worktree_cleanup_failed, :worktree_path_outside_managed_root}} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
     test "a failed discard keeps the worktree for attention with the Herdr error" do
       allocation = attention_allocation!(existing_path())
       Process.put(:worktree_remove_result, {:error, :workspace_busy})

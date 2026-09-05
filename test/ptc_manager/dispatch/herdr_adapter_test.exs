@@ -19,11 +19,59 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
     def run(%__MODULE__{}, args, _timeout), do: {:error, {:unexpected_test_herdr_command, args}}
   end
 
+  defmodule WorktreeRemoveStub do
+    @moduledoc false
+    defstruct [:result]
+
+    def run(%__MODULE__{result: result}, ["worktree", "remove" | _options], _timeout), do: result
+
+    def run(%__MODULE__{}, args, _timeout), do: {:error, {:unexpected_test_herdr_command, args}}
+  end
+
   setup do
     workspace = TestGitWorkspace.configure_dispatch!("ptc-manager-herdr-adapter")
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
 
     %{scenario: scenario, workspace: workspace}
+  end
+
+  describe "discarding a retained worktree" do
+    setup do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "ptc-manager-forgotten-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(path)
+      on_exit(fn -> File.rm_rf!(path) end)
+
+      %{allocation: %{herdr_workspace: "w3V", path: path}}
+    end
+
+    test "a workspace Herdr has forgotten is separated from a removal that failed", %{
+      allocation: allocation
+    } do
+      forgotten =
+        {:error,
+         {:herdr_exit, 1,
+          ~s({"error":{"code":"workspace_not_found","message":"workspace w3V not found"},) <>
+            ~s("id":"cli:worktree:remove"})}}
+
+      assert {:error, :worktree_workspace_forgotten} =
+               HerdrAdapter.discard_worktree(allocation,
+                 command: %WorktreeRemoveStub{result: forgotten}
+               )
+    end
+
+    test "a genuine removal failure still surfaces the Herdr error", %{allocation: allocation} do
+      busy = {:error, {:herdr_exit, 1, "workspace busy"}}
+
+      assert {:error, {:herdr_exit, 1, "workspace busy"}} =
+               HerdrAdapter.discard_worktree(allocation,
+                 command: %WorktreeRemoveStub{result: busy}
+               )
+    end
   end
 
   describe "worktree creation" do
