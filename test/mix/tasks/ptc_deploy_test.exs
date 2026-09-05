@@ -311,7 +311,14 @@ defmodule Mix.Tasks.PtcDeployTest do
     armed = File.read!(config)
     assert armed =~ ~s(approval_policy = "never")
     assert armed =~ ~s(sandbox_mode = "danger-full-access")
+    assert armed =~ "notice.hide_rate_limit_model_nudge = true"
     assert armed =~ ~s([projects."/srv/ptc_runner"])
+
+    # The nudge is a dotted key so the keys the maintainer already had at the
+    # top level are not swallowed into a [notice] table opened above them.
+    assert armed =~
+             "notice.hide_rate_limit_model_nudge = true\n" <>
+               "# END ptc-manager managed agent policy\n"
 
     assert {_output, 0} = arming(home, ["arm"])
     assert File.read!(config) == armed
@@ -326,6 +333,14 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert {output, 2} = arming(home, ["arm"])
     assert output =~ "already sets approval_policy"
     assert File.read!(config) == ~s(approval_policy = "on-request"\n)
+
+    # Codex refuses a config that sets notice.x as a dotted key and also opens
+    # [notice] as a table, so a maintainer who owns that table has to be told.
+    owned = "[notice]\nhide_full_access_warning = true\n"
+    File.write!(config, owned)
+    assert {output, 2} = arming(home, ["arm"])
+    assert output =~ "declares [notice]"
+    assert File.read!(config) == owned
   end
 
   # The drop-in is installed into a unit that runs as root, and systemd only

@@ -292,9 +292,23 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   @doc "Why PtcManager could not finish this phase, in its own words."
   def phase_error(%{active_job: %{last_error: error}}) when is_binary(error) and error != "",
-    do: error
+    do: error_sentence(error)
 
   def phase_error(_item), do: nil
+
+  # The reconciliation probe records its own reason as an atom. Spell out the
+  # ones a maintainer actually meets, keeping the atom so a card still matches
+  # what the database and the audit trail call it, and pass anything else on.
+  defp error_sentence(":no_commits"),
+    do: "The agent's branch carries no commits (:no_commits)."
+
+  defp error_sentence(":no_tree_changes"),
+    do: "The agent's commits change no files (:no_tree_changes)."
+
+  defp error_sentence(":branch_missing"),
+    do: "The agent's branch does not exist (:branch_missing)."
+
+  defp error_sentence(error), do: error
 
   @doc "The agent's own report of why it could not finish, when there is one."
   def stop_report(%{active_job: %{stop_report: report}}) when is_map(report), do: report
@@ -550,6 +564,11 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
       health = agent_attention(item, DateTime.utc_now()) ->
         health.detail
+
+      DeliveryLane.unreconciled?(item) ->
+        "PtcManager checked the agent's branch and could not take it. Read the agent's " <>
+          "Herdr session before discarding the worktree: a session parked at a prompt " <>
+          "nobody answered leaves its work uncommitted and still reports as finished."
 
       match?(%{publication: %{mergeability: "conflicting"}}, item) ->
         "Merge conflicts must be resolved by the implementation agent."
