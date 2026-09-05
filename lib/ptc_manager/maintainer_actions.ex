@@ -48,6 +48,14 @@ defmodule PtcManager.MaintainerActions do
     invalid_github_head_sha
   )a
 
+  @doc """
+  The evidence errors a daily digest does not retry.
+
+  Anything absent from this list is deferred and asked again, so a transient
+  answer from GitHub must stay out of it.
+  """
+  def terminal_daily_digest_evidence_errors, do: @terminal_daily_digest_evidence_errors
+
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
   def enqueue(action_key, issue_id, actor)
