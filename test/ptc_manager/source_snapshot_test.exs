@@ -66,6 +66,38 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
     assert snapshot.ref == "refs/heads/main"
   end
 
+  test "prepares the captured commit after the source ref advances" do
+    root =
+      Path.join(System.tmp_dir!(), "ptc-source-advance-#{System.unique_integer([:positive])}")
+
+    workspace = PtcManager.TestGitWorkspace.new!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+    repository = %Repository{local_path: workspace.repository, default_branch: "main"}
+    assert {:ok, captured} = SourceSnapshot.capture(repository)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", workspace.repository, "commit", "--allow-empty", "-m", "advance"],
+               stderr_to_stdout: true
+             )
+
+    assert {:ok, snapshot} =
+             SourceSnapshot.prepare(repository, 44, %{
+               "source_sha" => captured.sha,
+               "source_ref" => captured.ref
+             })
+
+    assert snapshot.sha == captured.sha
+    assert :ok = SourceSnapshot.verify(repository, snapshot.path, captured.sha)
+
+    assert :ok =
+             SourceSnapshot.release(repository, 44, %{
+               "source_sha" => snapshot.sha,
+               "source_path" => snapshot.path
+             })
+  end
+
   @tag nightly: false
   test "rejects an unavailable checkout" do
     repository = %Repository{local_path: "/missing/ptc-source-snapshot", default_branch: "main"}

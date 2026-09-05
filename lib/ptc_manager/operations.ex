@@ -9,6 +9,7 @@ defmodule PtcManager.Operations do
 
   import Ecto.Query
   alias Ecto.Multi
+  alias PtcManager.Gateway
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
   alias PtcManager.ReviewPolicy
@@ -30,6 +31,7 @@ defmodule PtcManager.Operations do
     PrPublication,
     Proposal,
     Repository,
+    StopReport,
     Worker,
     WorktreeAllocation
   }
@@ -37,12 +39,20 @@ defmodule PtcManager.Operations do
   @active_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked)
   @capacity_job_states ~w(starting working idle blocked reconciling)
   @capacity_run_states ~w(queued starting working idle unknown)
+  @cancellable_job_states ~w(starting working idle blocked)
+  # Deliberately excludes `reconciling`: that state can mean an agent whose
+  # remote state is unknown rather than an agent-free phase, so ending the job
+  # would free its slot while the agent may still be writing to the worktree.
+  # Cancel agent, which closes the Herdr pane, is the right tool there.
+  @abandonable_job_states ~w(awaiting_reconciliation verifying_result publish_blocked)
+  @live_agent_run_states ~w(queued starting working idle blocked waiting unknown)
   @repair_action_keys ~w(repair_pr repair_and_merge_pr)
   @legacy_heavy_action_keys ["review_issue" | @repair_action_keys]
   @merge_action_key "repair_and_merge_pr"
   @planning_action_keys ~w(
     daily_digest
     prepare_issue
+    report_issue_blocker
     review_issue
     resolve_issue_decision
   )
@@ -67,6 +77,9 @@ defmodule PtcManager.Operations do
 
   def get_issue!(id), do: Issue |> preload(:repository) |> Repo.get!(id)
 
+  @doc "The issue and its repository, or nil when the id no longer resolves."
+  def get_issue(id), do: Issue |> preload(:repository) |> Repo.get(id)
+
   def create_repository(attrs) do
     insert_repository(attrs)
   end
@@ -74,7 +87,52 @@ defmodule PtcManager.Operations do
   def onboard_repository(attrs) do
     with {:ok, attrs} <- prepare_repository(attrs),
          :ok <- verify_repository(attrs) do
-      insert_repository(attrs)
+      # Synchronization covers enabled repositories only, and a repository is
+      # added disabled, so the label snapshet Configuration checks against has
+      # to be taken here or it would stay empty until after enabling.
+      attrs |> Map.merge(onboarding_labels(attrs)) |> insert_repository()
+    end
+  end
+
+  @doc """
+  Turns one repository's participation on or off, recording who decided.
+
+  A repository is registered disabled so a maintainer can verify its checkout,
+  contract, and access before any agent work or synchronization reaches it.
+  Enabling is that decision, and disabling is how it is withdrawn: neither
+  touches GitHub, the checkout, or work already in flight.
+  """
+  def set_repository_enabled(repository_id, enabled, actor)
+      when is_integer(repository_id) and is_boolean(enabled) and is_binary(actor) and actor != "" do
+    case Repo.get(Repository, repository_id) do
+      nil ->
+        {:error, :repository_not_found}
+
+      repository ->
+        outcome =
+          RepoTransaction.immediate(fn ->
+            updated =
+              repository
+              |> Repository.changeset(%{enabled: enabled})
+              |> Repo.update!()
+
+            insert_audit!(%{
+              actor: actor,
+              action: if(enabled, do: "repository.enabled", else: "repository.disabled"),
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}"
+              }
+            })
+
+            updated
+          end)
+
+        case outcome do
+          {:ok, updated} -> notify_and_return({:ok, updated})
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
@@ -124,9 +182,9 @@ defmodule PtcManager.Operations do
   end
 
   defp prepare_repository(attrs) do
-    owner = Map.get(attrs, :github_owner) || Map.get(attrs, "github_owner")
-    name = Map.get(attrs, :github_name) || Map.get(attrs, "github_name")
-    default_branch = Map.get(attrs, :default_branch) || Map.get(attrs, "default_branch")
+    owner = onboarding_value(attrs, :github_owner)
+    name = onboarding_value(attrs, :github_name)
+    default_branch = onboarding_value(attrs, :default_branch)
 
     if safe_github_component?(owner) and safe_github_component?(name) do
       {:ok,
@@ -139,6 +197,15 @@ defmodule PtcManager.Operations do
        }}
     else
       {:error, :unsafe_repository_name}
+    end
+  end
+
+  # A maintainer pastes these fields, and a paste routinely carries a leading or
+  # trailing space or newline. That is not a name to reject; it is one to trim.
+  defp onboarding_value(attrs, key) do
+    case Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key)) do
+      value when is_binary(value) -> String.trim(value)
+      value -> value
     end
   end
 
@@ -159,6 +226,33 @@ defmodule PtcManager.Operations do
       {:ok, _repository} -> :ok
       {:error, :repository_not_found} -> {:error, :repository_not_found}
       {:error, _reason} -> {:error, :github_unavailable}
+    end
+  end
+
+  defp onboarding_labels(attrs) do
+    client = Application.fetch_env!(:ptc_manager, :github_client)
+    repository = %Repository{github_owner: attrs.github_owner, github_name: attrs.github_name}
+
+    case read_repository_labels(client, repository) do
+      nil -> %{}
+      names -> %{github_label_names: %{"names" => names}, github_labels_checked_at: utc_now()}
+    end
+  end
+
+  @doc """
+  The label names GitHub reports for one repository, or nil when unavailable.
+
+  A failure is never fatal: the caller records nothing and Configuration keeps
+  saying the labels have not been checked.
+  """
+  def read_repository_labels(client, %Repository{} = repository) do
+    {module, arity} = if is_atom(client), do: {client, 1}, else: {client.__struct__, 2}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :list_labels, arity) do
+      case Gateway.call(client, :list_labels, [repository]) do
+        {:ok, names} when is_list(names) -> names
+        _unavailable -> nil
+      end
     end
   end
 
@@ -243,6 +337,13 @@ defmodule PtcManager.Operations do
         select: proposal.id
       )
 
+    # A direct approval has no proposal, so the job it started is the only way
+    # back to this repository. Read the ids before the jobs are deleted.
+    approval_ids =
+      Repo.all(
+        from job in Job, where: job.repository_id == ^repository_id, select: job.approval_id
+      )
+
     Repo.delete_all(
       from operation in PtcManager.Operations.ResourceOperation,
         where: operation.repository_id == ^repository_id
@@ -283,7 +384,8 @@ defmodule PtcManager.Operations do
     Repo.delete_all(from action in AgentAction, where: action.repository_id == ^repository_id)
 
     Repo.delete_all(
-      from approval in Approval, where: approval.proposal_id in subquery(proposal_ids)
+      from approval in Approval,
+        where: approval.proposal_id in subquery(proposal_ids) or approval.id in ^approval_ids
     )
 
     Repo.delete_all(from proposal in Proposal, where: proposal.issue_id in subquery(issue_ids))
@@ -300,6 +402,59 @@ defmodule PtcManager.Operations do
 
     Repo.update_all(definitions, set: [current_version_id: nil])
     Repo.delete_all(definitions)
+  end
+
+  @doc """
+  Replaces one repository's configured maintainer labels.
+
+  The list is configuration, not GitHub state: adding a name here never creates
+  the label on GitHub, and the README says the label has to exist there first.
+  """
+  def update_maintainer_labels(repository_id, labels, actor)
+      when is_integer(repository_id) and is_map(labels) and is_binary(actor) do
+    case Repo.get(Repository, repository_id) do
+      nil ->
+        {:error, :repository_not_found}
+
+      repository ->
+        repository
+        |> Repository.changeset(%{maintainer_labels: labels})
+        |> Repo.update()
+        |> case do
+          {:ok, updated} ->
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.maintainer_labels_updated",
+              target_type: "repository",
+              target_id: repository_id,
+              details: %{"labels" => labels}
+            })
+
+            notify_and_return({:ok, updated})
+
+          {:error, changeset} ->
+            {:error, changeset}
+        end
+    end
+  end
+
+  @doc "Records that a maintainer added or removed one label on GitHub."
+  def record_issue_label_change(%Issue{} = issue, operation, name, actor)
+      when operation in [:add, :remove] and is_binary(name) and is_binary(actor) do
+    insert_audit!(%{
+      actor: actor,
+      action: if(operation == :add, do: "issue.label_added", else: "issue.label_removed"),
+      target_type: "issue",
+      target_id: issue.id,
+      details: %{
+        "issue_number" => issue.number,
+        "repository_id" => issue.repository_id,
+        "label" => name
+      }
+    })
+
+    notify_changed(__MODULE__)
+    :ok
   end
 
   def create_issue(attrs),
@@ -480,6 +635,435 @@ defmodule PtcManager.Operations do
   def cancel_queued_agent_action(action_id, actor)
       when is_integer(action_id) and is_binary(actor) and actor != "" do
     cancel_queued(AgentAction, action_id, actor, "agent_action.cancelled")
+  end
+
+  @doc """
+  Ends one running implementation agent on the maintainer's explicit request.
+
+  Only the agent phases are cancellable. The deterministic phases that follow an
+  agent — reconciliation, verification, and publication — are refused, because
+  PtcManager, not an agent, owns them. The bookkeeping mirrors releasing an idle
+  job: the job ends, its run ends, and the partial worktree is kept for
+  attention rather than discarded. Closing the Herdr pane happens after the
+  transaction commits, so a pane that outlives the cancel cannot resurrect the
+  run.
+  """
+  def cancel_running_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+    message = "Cancelled by #{actor}; the partial worktree was preserved."
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          Job
+          |> where([job], job.id == ^job_id and job.state in ^@cancellable_job_states)
+          |> Repo.update_all(
+            set: [
+              state: "cancelled",
+              lease_expires_at: nil,
+              ended_at: now,
+              last_error: message,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:job_not_cancellable)
+
+        job = Repo.get!(Job, job_id)
+        run = current_job_run(job)
+
+        if run do
+          run
+          |> AgentRun.changeset(%{
+            state: "lost",
+            status_text: "Cancelled by maintainer",
+            last_heartbeat_at: now,
+            ended_at: now
+          })
+          |> Repo.update!()
+        end
+
+        mark_allocation!(job_id, %{
+          state: "attention",
+          last_used_at: now,
+          last_error: message
+        })
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.cancelled",
+          target_type: "job",
+          target_id: job_id,
+          details: %{
+            "fencing_token" => job.fencing_token,
+            "worktree_preserved" => true,
+            "reason" => message,
+            "agent_run_id" => run && run.id,
+            "herdr_pane" => run && run.herdr_pane
+          }
+        })
+
+        {job, run}
+      end)
+
+    case outcome do
+      {:ok, {job, run}} ->
+        notify_changed(__MODULE__)
+        close_cancelled_pane(job, run)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp current_job_run(%Job{id: job_id, fencing_token: fencing_token}) do
+    AgentRun
+    |> where(
+      [run],
+      run.job_id == ^job_id and run.fencing_token == ^fencing_token and
+        run.state in ^@live_agent_run_states
+    )
+    |> Repo.one()
+  end
+
+  defp close_cancelled_pane(job, %AgentRun{herdr_pane: pane})
+       when is_binary(pane) and pane != "" do
+    case Gateway.call(Application.fetch_env!(:ptc_manager, :herdr_client), :close_pane, [pane]) do
+      :ok -> {:ok, job}
+      {:error, reason} -> {:ok, job, {:pane_close_failed, reason}}
+    end
+  end
+
+  defp close_cancelled_pane(job, _run), do: {:ok, job}
+
+  @doc """
+  Issues this attempt's stop-report identifier and returns the reloaded job.
+
+  The token keeps two attempts from colliding and makes the file name
+  impractical to guess. It is not a capability: every managed agent runs as the
+  same worker identity and can list the shared results directory. See
+  `PtcManager.Operations.StopReport` for what a forged report is bounded to.
+  """
+  def issue_stop_report_token(%Job{} = job) do
+    job
+    |> Job.changeset(%{stop_report_token: StopReport.new_token()})
+    |> Repo.update()
+  end
+
+  @doc """
+  Records that this job's agent said it could not finish, and ends the attempt.
+
+  The report only supplies a reason. The transition is the same one every other
+  unfinished attempt takes: the job ends, its run ends, and the partial worktree
+  is kept for attention. The heavy slot is released, because a stopped agent
+  waiting on a person must not hold capacity that other work needs.
+  """
+  def record_job_stop_report(job_id, fencing_token, attempt_token, report, actor \\ "coordinator")
+      when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) and
+             is_map(report) and is_binary(actor) do
+    now = utc_now()
+    summary = StopReport.summary(report)
+
+    outcome =
+      Repo.transaction(fn ->
+        # Same fencing as every other result write: only the verifier that
+        # currently holds this attempt may end the job, and only from the state
+        # it claimed. A stale verifier must never overwrite a newer success or a
+        # job that already published.
+        {updated, _rows} =
+          Job
+          |> where(
+            [job],
+            job.id == ^job_id and job.state == "verifying_result" and
+              job.fencing_token == ^fencing_token and
+              job.result_attempt_token == ^attempt_token
+          )
+          |> Repo.update_all(
+            set: [
+              state: "failed",
+              lease_expires_at: nil,
+              ended_at: now,
+              last_error: summary,
+              stop_report: report,
+              stop_reported_at: now,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:stale_result_attempt)
+
+        job = Repo.get!(Job, job_id)
+
+        AgentRun
+        |> where(
+          [run],
+          run.job_id == ^job_id and run.fencing_token == ^job.fencing_token and
+            run.state in ^@live_agent_run_states
+        )
+        |> Repo.update_all(
+          set: [
+            state: "lost",
+            status_text: "The agent reported that it could not continue.",
+            last_heartbeat_at: now,
+            ended_at: now,
+            updated_at: now
+          ]
+        )
+
+        mark_allocation!(job_id, %{state: "attention", last_used_at: now, last_error: summary})
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.agent_stopped",
+          target_type: "job",
+          target_id: job_id,
+          details: Map.merge(report, %{"fencing_token" => job.fencing_token})
+        })
+
+        job
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Jobs whose agent stopped and which the maintainer has not answered yet."
+  def unacknowledged_stopped_jobs do
+    Job
+    |> where([job], not is_nil(job.stop_reported_at) and is_nil(job.stop_acknowledged_at))
+    |> order_by([job], desc: job.stop_reported_at, desc: job.id)
+    |> preload([:issue, :repository])
+    |> Repo.all()
+  end
+
+  @doc "Removes one stopped job's card from the board without changing GitHub."
+  def acknowledge_job_stop(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          Job
+          |> where(
+            [job],
+            job.id == ^job_id and not is_nil(job.stop_reported_at) and
+              is_nil(job.stop_acknowledged_at)
+          )
+          |> Repo.update_all(set: [stop_acknowledged_at: now, updated_at: now])
+
+        if updated != 1, do: Repo.rollback(:job_not_stopped)
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.stop_acknowledged",
+          target_type: "job",
+          target_id: job_id,
+          details: %{"acknowledged_at" => DateTime.to_iso8601(now)}
+        })
+
+        Repo.get!(Job, job_id)
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Queues a fresh attempt at a stopped job, reusing the maintainer's approval.
+
+  The decision to implement this issue was already made and has not changed;
+  only the environment did. The new job repeats the frozen prompt and review
+  count so the retry is the same work, not a new one.
+  """
+  def retry_stopped_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        stopped = Repo.get!(Job, job_id)
+
+        if is_nil(stopped.stop_reported_at) or not is_nil(stopped.stop_acknowledged_at) do
+          Repo.rollback(:job_not_stopped)
+        end
+
+        # A hidden button is not a guard. An agent that judged the work unsafe
+        # must not be restartable through a crafted event either.
+        unless StopReport.allows?(stopped.stop_report, :retry) do
+          Repo.rollback(:recovery_not_offered)
+        end
+
+        {updated, _rows} =
+          Job
+          |> where([job], job.id == ^job_id and is_nil(job.stop_acknowledged_at))
+          |> Repo.update_all(set: [stop_acknowledged_at: now, updated_at: now])
+
+        if updated != 1, do: Repo.rollback(:job_not_stopped)
+
+        retry =
+          %Job{}
+          |> Job.changeset(%{
+            repository_id: stopped.repository_id,
+            issue_id: stopped.issue_id,
+            approval_id: stopped.approval_id,
+            automation_definition_version_id: stopped.automation_definition_version_id,
+            prompt_instructions: stopped.prompt_instructions,
+            kind: stopped.kind,
+            state: "queued",
+            fencing_token: 0,
+            required_review_count: stopped.required_review_count
+          })
+          |> Repo.insert!()
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.retried_after_stop",
+          target_type: "job",
+          target_id: retry.id,
+          details: %{
+            "stopped_job_id" => stopped.id,
+            "issue_id" => stopped.issue_id,
+            "reason_code" => get_in(stopped.stop_report || %{}, ["reason_code"])
+          }
+        })
+
+        retry
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Ends a job stuck in a phase PtcManager owns and can never finish.
+
+  An agent that committed nothing leaves its branch unverifiable, so the check
+  fails identically every time and no button helps. Cancel deliberately refuses
+  these phases because they are not agent phases; that leaves the maintainer
+  with a card and no way out, which this closes.
+
+  It refuses a phase that is still moving, and one that already produced a pull
+  request, because abandoning either would discard real work. The bookkeeping
+  matches cancelling: the job ends, the partial worktree is kept for attention,
+  and the reason the phase was stuck is preserved beside the abandonment.
+  """
+  def abandon_stuck_job(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      Repo.transaction(fn ->
+        job =
+          Job
+          |> where([item], item.id == ^job_id and item.state in ^@abandonable_job_states)
+          |> Repo.one()
+
+        if is_nil(job), do: Repo.rollback(:job_not_abandonable)
+
+        # A verifier holding a live claim is still working; ending the job
+        # underneath it would race its result write.
+        if verification_claim_live?(job, now), do: Repo.rollback(:verification_in_progress)
+
+        # A blocked publication can already have an open pull request. Ending
+        # the job would orphan it: status reconciliation keeps selecting it and
+        # then refuses it for a cancelled job, while the issue becomes free for
+        # a second approval beside a pull request that still stands.
+        if publication_open?(job_id), do: Repo.rollback(:pull_request_open)
+
+        stuck_state = job.state
+        stuck_error = job.last_error
+
+        message =
+          bounded_error(
+            "Abandoned by #{actor} while #{stuck_state}" <>
+              if(stuck_error, do: " (#{stuck_error})", else: "") <>
+              "; the partial worktree was preserved."
+          )
+
+        # Guarded by the same state and claim the read saw, so a verifier claim
+        # or a publication retry landing in between loses rather than colliding
+        # with an unconditional write.
+        {updated, _rows} =
+          Job
+          |> where([item], item.id == ^job_id and item.state == ^stuck_state)
+          |> where(
+            [item],
+            is_nil(item.result_attempt_expires_at) or item.result_attempt_expires_at <= ^now
+          )
+          |> Repo.update_all(
+            set: [
+              state: "cancelled",
+              lease_expires_at: nil,
+              ended_at: now,
+              last_error: message,
+              updated_at: now
+            ]
+          )
+
+        if updated != 1, do: Repo.rollback(:verification_in_progress)
+
+        end_live_run!(job, message, now)
+
+        mark_allocation!(job_id, %{state: "attention", last_used_at: now, last_error: message})
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.abandoned",
+          target_type: "job",
+          target_id: job_id,
+          details: %{
+            "abandoned_state" => stuck_state,
+            "last_error" => stuck_error,
+            "fencing_token" => job.fencing_token,
+            "worktree_preserved" => true
+          }
+        })
+
+        Repo.get!(Job, job_id)
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp publication_open?(job_id) do
+    Repo.exists?(
+      from publication in PrPublication,
+        where: publication.job_id == ^job_id and not is_nil(publication.pr_number)
+    )
+  end
+
+  defp verification_claim_live?(%Job{result_attempt_expires_at: %DateTime{} = expires_at}, now),
+    do: DateTime.compare(expires_at, now) == :gt
+
+  defp verification_claim_live?(%Job{}, _now), do: false
+
+  defp end_live_run!(%Job{} = job, message, now) do
+    AgentRun
+    |> where(
+      [run],
+      run.job_id == ^job.id and run.fencing_token == ^job.fencing_token and
+        run.state in ^@live_agent_run_states
+    )
+    |> Repo.update_all(
+      set: [
+        state: "lost",
+        status_text: String.slice(message, 0, 240),
+        last_heartbeat_at: now,
+        ended_at: now,
+        updated_at: now
+      ]
+    )
   end
 
   def release_idle_job(job_id, actor)
@@ -1115,14 +1699,17 @@ defmodule PtcManager.Operations do
     lease_now = Keyword.get_lazy(opts, :now, &utc_now/0)
     lifecycle_now = Keyword.get_lazy(opts, :lifecycle_now, &utc_now/0)
     capacity = Keyword.get(opts, :capacity, configured_agent_capacity())
-    agent_kind = Keyword.get(opts, :agent_kind, configured_agent_kind())
     publication_source = configured_publication_source()
 
     result =
       Repo.transaction(fn ->
-        job = Job |> preload([:approval, :issue, :repository]) |> Repo.get!(job_id)
+        job =
+          Job
+          |> preload([:approval, :issue, :repository, :automation_definition_version])
+          |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             {:ok, %{kind: agent_kind}} <- implementation_profile(job),
              :ok <- heavy_delivery_priority_unlocked(),
              :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
@@ -1887,10 +2474,12 @@ defmodule PtcManager.Operations do
     agent_actions = latest_agent_actions()
     retrospective_actions = latest_agent_actions("pr_retrospective")
     retrospective_issue_actions = retrospective_issue_actions()
+    external_publications = external_publications_by_issue(issues)
 
     Enum.map(issues, fn issue ->
       %{
         issue: issue,
+        external_publication: Map.get(external_publications, issue.id),
         dependencies: Map.get(dependencies, issue.id, []),
         dependency_cycle: Map.get(dependency_cycles, issue.id),
         proposal: Map.get(proposals, issue.id),
@@ -1952,10 +2541,69 @@ defmodule PtcManager.Operations do
     end)
   end
 
+  # An issue whose pull request the maintainer opened by hand is being delivered
+  # just as much as one PtcManager started. The link is the issue number that
+  # publication already parsed out of the pull request body.
+  defp external_publications_by_issue([]), do: %{}
+
+  defp external_publications_by_issue(issues) do
+    repository_ids = issues |> Enum.map(& &1.repository_id) |> Enum.uniq()
+
+    linked =
+      PrPublication
+      |> where(
+        [publication],
+        publication.source == "external" and publication.state == "published" and
+          publication.pr_state == "open" and publication.repository_id in ^repository_ids
+      )
+      |> Repo.all()
+      |> Enum.flat_map(fn publication ->
+        for number <- get_in(publication.linked_issue_numbers || %{}, ["numbers"]) || [],
+            do: {{publication.repository_id, number}, publication}
+      end)
+      |> Map.new()
+
+    issues
+    |> Enum.flat_map(fn issue ->
+      case Map.get(linked, {issue.repository_id, issue.number}) do
+        nil -> []
+        publication -> [{issue.id, publication}]
+      end
+    end)
+    |> Map.new()
+  end
+
+  @doc """
+  The pull requests Planning offers a retrospective for, with their context.
+
+  A candidate is a managed pull request the implementation agent labelled
+  `ptc:follow-up`, in any state, until a maintainer dismisses it or a
+  retrospective finds nothing.
+  """
+  def follow_up_items do
+    publications = PtcManager.Publications.follow_up_candidates()
+    pr_actions = latest_agent_actions()
+    retrospectives = latest_agent_actions("pr_retrospective")
+    suggestions = retrospective_issue_actions()
+
+    Enum.map(publications, fn publication ->
+      %{
+        publication: publication,
+        repository: publication.job.repository,
+        issue: publication.job.issue,
+        pr_agent_action: Map.get(pr_actions, {"pull_request", publication.id}),
+        pr_retrospective_action: Map.get(retrospectives, {"pull_request", publication.id}),
+        pr_retrospective_issue_actions: Map.get(suggestions, publication.id, [])
+      }
+    end)
+  end
+
   defp maybe_filter_issue_state(query, nil), do: query
   defp maybe_filter_issue_state(query, state), do: where(query, [issue], issue.state == ^state)
 
   def delivery_board_items do
+    stopped_items = stopped_board_items()
+
     managed_items =
       dashboard_issues()
       |> Enum.reject(&is_nil(&1.active_job))
@@ -2013,7 +2661,38 @@ defmodule PtcManager.Operations do
         }
       end)
 
-    managed_items ++ external_items
+    managed_items ++ stopped_items ++ external_items
+  end
+
+  # A stopped job is no longer active, so it holds no capacity, but its card has
+  # to stay until the maintainer decides what to do about it.
+  defp stopped_board_items do
+    Enum.map(unacknowledged_stopped_jobs(), fn job ->
+      %{
+        managed?: true,
+        stopped?: true,
+        repository: job.repository,
+        title: job.issue.title,
+        number: nil,
+        url: nil,
+        started_at: job.stop_reported_at,
+        issue: job.issue,
+        dependencies: [],
+        dependency_cycle: nil,
+        proposal: nil,
+        active_job: job,
+        latest_job: job,
+        publication: nil,
+        external_publication: nil,
+        pr_analysis: nil,
+        merge_approval: nil,
+        issue_agent_action: nil,
+        pr_agent_action: nil,
+        pr_retrospective_action: nil,
+        pr_retrospective_issue_actions: [],
+        linked_issues: [job.issue]
+      }
+    end)
   end
 
   defp linked_issues_for_publications(publications) do
@@ -2073,7 +2752,7 @@ defmodule PtcManager.Operations do
   def list_active_agent_runs do
     AgentRun
     |> without_orphaned_action_duplicates()
-    |> where([run], run.state in ~w(queued starting working blocked unknown))
+    |> where([run], run.state in ~w(queued starting working idle blocked unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
     |> preload([
       :worker,
@@ -2511,11 +3190,29 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp do_approve_issue(issue_id, actor, requested_review_count) do
+  @doc """
+  Approves implementation for an issue that has no prepared proposal.
+
+  Every deterministic gate of `approve_issue/3` still applies: the issue must be
+  open, unclaimed, projected, free of a conflicting or blocking workflow label,
+  and free of unresolved dependencies. Only the two proposal checks are skipped,
+  because a small issue does not need a preparation round. The click is the
+  approval.
+  """
+  def approve_issue_directly(issue_id, actor, requested_review_count \\ nil)
+      when is_integer(issue_id) and is_binary(actor) do
+    with :ok <- valid_requested_review_count(requested_review_count) do
+      do_approve_issue(issue_id, actor, requested_review_count, :direct)
+    end
+  end
+
+  defp do_approve_issue(issue_id, actor, requested_review_count, mode \\ :prepared) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     Multi.new()
-    |> Multi.run(:snapshot, fn repo, _changes -> current_approvable_snapshot(repo, issue_id) end)
+    |> Multi.run(:snapshot, fn repo, _changes ->
+      current_approvable_snapshot(repo, issue_id, mode)
+    end)
     |> Multi.run(:automation, fn _repo, %{snapshot: {_issue, _proposal, repository}} ->
       with :ok <- PtcManager.Automations.ensure_defaults(repository),
            {:ok, version} <- PtcManager.Automations.current_version(repository, "implement_issue") do
@@ -2529,12 +3226,12 @@ defmodule PtcManager.Operations do
     end)
     |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}} ->
       Approval.changeset(%Approval{}, %{
-        proposal_id: proposal.id,
-        decision: "start_implementation",
+        proposal_id: proposal && proposal.id,
+        decision: approval_decision(mode),
         actor: actor,
         source_updated_at: issue.github_updated_at,
         source_digest: issue.content_digest,
-        proposal_digest: proposal.proposal_digest,
+        proposal_digest: proposal && proposal.proposal_digest,
         approved_at: now
       })
     end)
@@ -2561,15 +3258,15 @@ defmodule PtcManager.Operations do
                                      } ->
       AuditEvent.changeset(%AuditEvent{}, %{
         actor: actor,
-        action: "issue.approved_for_implementation",
+        action: audit_action(mode),
         target_type: "job",
         target_id: job.id,
         details: %{
           "issue_id" => issue.id,
           "issue_number" => issue.number,
-          "proposal_id" => proposal.id,
+          "proposal_id" => proposal && proposal.id,
           "required_review_count" => job.required_review_count,
-          "proposal_digest" => proposal.proposal_digest,
+          "proposal_digest" => proposal && proposal.proposal_digest,
           "source_digest" => issue.content_digest
         }
       })
@@ -2583,16 +3280,33 @@ defmodule PtcManager.Operations do
     |> broadcast_change()
   end
 
-  defp current_approvable_snapshot(repo, issue_id) do
+  defp approval_decision(:direct), do: "start_implementation_direct"
+  defp approval_decision(_mode), do: "start_implementation"
+
+  defp audit_action(:direct), do: "issue.approved_for_direct_implementation"
+  defp audit_action(_mode), do: "issue.approved_for_implementation"
+
+  defp current_approvable_snapshot(repo, issue_id, mode) do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
-         %Proposal{} = proposal <- latest_proposal(repo, issue_id),
          :ok <- issue_is_open(issue),
          :ok <- issue_unclaimed(issue),
          :ok <- issue_workflow_allows_implementation(issue),
          :ok <- issue_dependencies_resolved(repo, issue),
+         {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
+      {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
+    else
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp approvable_proposal(_repo, _issue, :direct), do: {:ok, nil}
+
+  defp approvable_proposal(repo, issue, _mode) do
+    with %Proposal{} = proposal <- latest_proposal(repo, issue.id),
          :ok <- proposal_is_ready(proposal),
          :ok <- proposal_matches_issue(proposal, issue) do
-      {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
+      {:ok, proposal}
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -3889,8 +4603,12 @@ defmodule PtcManager.Operations do
   defp configured_agent_capacity,
     do: Application.get_env(:ptc_manager, :heavy_agent_capacity, 1)
 
-  defp configured_agent_kind,
-    do: Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
+  # The automation version captured at approval chooses the agent kind, so
+  # editing the selector later cannot change work that is already queued.
+  defp implementation_profile(%Job{automation_definition_version: %{agent_selector: selector}}),
+    do: PtcManager.AgentProfiles.select(selector)
+
+  defp implementation_profile(%Job{}), do: PtcManager.AgentProfiles.select(%{})
 
   defp notify_and_return(result) do
     notify_changed(__MODULE__)

@@ -148,6 +148,9 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     {:ok, terminal} =
       ManagedOperationContext.issue(%{owner_type: "job", owner_id: 20}, directory: directory)
 
+    terminal_environment = Path.rootname(terminal.path, ".json") <> ".env"
+    File.write!(terminal_environment, "TOKEN='secret'\n")
+
     assert :ok =
              ManagedOperationContext.cleanup_inactive(
                &(&1["owner_id"] == 10),
@@ -156,6 +159,7 @@ defmodule PtcManager.ResourceOperationBrokerTest do
 
     assert File.exists?(active.path)
     refute File.exists?(terminal.path)
+    refute File.exists?(terminal_environment)
     File.rm_rf!(directory)
   end
 
@@ -183,8 +187,11 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
 
     assert {:ok, rebound} = ManagedOperationContext.rebind_action("pane-operation-test", action)
+    environment_path = Path.rootname(rebound.path, ".json") <> ".env"
+    File.write!(environment_path, "SHOULD_NOT_REACH_ACTIONS='secret'\n")
     assert {:ok, repeated} = ManagedOperationContext.rebind_action("pane-operation-test", action)
     assert repeated.path == rebound.path
+    refute File.exists?(environment_path)
     assert {:ok, payload} = ManagedOperationContext.verify(rebound.token)
     assert payload["owner_type"] == "agent_action"
     assert payload["owner_id"] == action.id

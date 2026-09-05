@@ -9,11 +9,18 @@ defmodule Mix.Tasks.PtcDeployTest do
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
+  @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
+  @gh_label Path.join(@project_root, "deploy/ptc-manager-worker-gh-label")
+  @dropin_check Path.join(@project_root, "deploy/ptc-manager-check-access-dropin")
+  @provision Path.join(@project_root, "deploy/ptc-manager-provision-repository")
   @failure_policy Path.join(@project_root, "deploy/deployment-failure-policy")
   @self_deploy_command Path.join(@project_root, "scripts/ptc/deploy")
   @self_deploy_runner Path.join(@project_root, "deploy/ptc-manager-self-deploy-runner")
   @operation_recovery Path.join(@project_root, "deploy/ptc-manager-operation-recover")
   @agent_filter Path.join(@project_root, "deploy/herdr-busy-agent-count.jq")
+  @sudoers Path.join(@project_root, "deploy/ptc_manager.sudoers")
+  @toolchain_manifest Path.join(@project_root, "deploy/toolchain-versions")
+  @toolchain_reader Path.join(@project_root, "deploy/ptc-manager-toolchain-version")
   @environment_file_parser Path.join(
                              @project_root,
                              "deploy/systemd-environment-file-paths.awk"
@@ -26,10 +33,15 @@ defmodule Mix.Tasks.PtcDeployTest do
           @worker_git,
           @worker_bootstrap,
           @claude_trust,
+          @codex_arm,
+          @gh_label,
+          @dropin_check,
+          @provision,
           @failure_policy,
           @self_deploy_command,
           @self_deploy_runner,
-          @operation_recovery
+          @operation_recovery,
+          @toolchain_reader
         ] do
       assert {"", 0} = System.cmd("sh", ["-n", script], stderr_to_stdout: true)
     end
@@ -76,8 +88,323 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert Jason.decode!(File.read!(config)) == revoked
   end
 
+  # The deployment builds installation paths out of what the reader prints, so
+  # anything it cannot read exactly has to stop the deployment rather than yield
+  # an empty version and link a path like /opt/ptc-manager-codex- into place.
+  test "the toolchain reader prints one pinned version and refuses anything else" do
+    assert {version, 0} = reader([@toolchain_manifest, "codex"])
+    assert String.trim(version) == Map.fetch!(PtcManager.Toolchain.pinned(), "codex")
+
+    assert {output, 2} = reader([@toolchain_manifest, "vim"])
+    assert output =~ "pins no version for vim"
+
+    assert {output, 2} = reader([@toolchain_manifest, "Codex"])
+    assert output =~ "not a lowercase word"
+
+    assert {output, 2} = reader(["/nonexistent/toolchain-versions", "codex"])
+    assert output =~ "manifest is missing"
+
+    manifest =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-toolchain-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(manifest) end)
+
+    File.write!(manifest, "codex=0.1.0\ncodex=0.2.0\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "pins codex more than once"
+
+    # A line the reader cannot read stops the deployment even when the key it
+    # was asked for is pinned elsewhere in the file. Skipping it would leave the
+    # previous version installed while the edit looks applied.
+    File.write!(manifest, "codex=0.1.0\ncodex=\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "line 2 is not a pinned version"
+
+    File.write!(manifest, "codex = 0.1.0\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "line 1 is not a pinned version"
+
+    File.write!(manifest, "codex=$(id -u)\nherdr=0.8.2\n")
+    assert {output, 2} = reader([manifest, "herdr"])
+    assert output =~ "line 1 is not a pinned version"
+
+    File.write!(manifest, "# only a comment\n\n")
+    assert {output, 2} = reader([manifest, "codex"])
+    assert output =~ "pins no version for codex"
+  end
+
+  # The version a program reports is the program's own claim, so a download
+  # nobody hashed can pass a version check by printing the expected string.
+  test "the deployment verifies a pinned digest for every download it does not take from npm" do
+    script = File.read!(@remote_script)
+
+    for digest <- ~w(cursor_agent_sha256 herdr_sha256 mise_sha256) do
+      assert script =~ ~s|!= "$#{digest}"|, digest
+    end
+
+    # Cursor's archive is proven before anything is unpacked from it.
+    assert byte_index(script, ~s|!= "$cursor_agent_sha256"|) <
+             byte_index(script, ~s|tar --strip-components=1 -xzf "$cursor_archive"|)
+
+    # An executable an interrupted deployment left at the pinned path is what a
+    # later restart would link, so it is proven on every run, not only on the
+    # run that downloaded it.
+    assert script =~ ~s|sudo sha256sum "$worker_herdr_dir/herdr"|
+    assert script =~ ~s|sudo sha256sum "$worker_mise_dir/mise"|
+
+    # An unpacked tree cannot be hashed back into its archive, so the digest
+    # that proved it stays beside it and a tree without one is replaced.
+    assert script =~ ~s|.ptc-manager-archive-sha256|
+    assert script =~ ~s|sudo rm -rf -- "$worker_cursor_agent_dir"|
+  end
+
+  # The Herdr link moves during the stopped window, before the release swap. A
+  # deployment that then goes back to the previous release has to go back to the
+  # Herdr that release was built against, or an old coordinator is left speaking
+  # to a server whose protocol it does not expect.
+  test "a deployment that restores the previous release restores its Herdr" do
+    script = File.read!(@remote_script)
+
+    assert script =~ ~s|sudo cp -a "$worker_herdr" "$herdr_link_backup"|
+    assert script =~ "restore_worker_herdr"
+
+    # Both failure paths that bring the previous release back call it, and the
+    # one that keeps the new release in maintenance does not.
+    assert byte_index(script, "restore_worker_herdr || rollback_status=1") <
+             byte_index(script, "restore_preexisting_maintenance_override || rollback_status=1")
+
+    assert length(String.split(script, "restore_worker_herdr")) == 4
+
+    # The function is always called where its result is tested, which switches
+    # set -e off for its body, so a failed step has to be reported rather than
+    # covered by a final command that cannot fail.
+    assert script =~ "return \"$restore_status\""
+    refute script =~ "sudo systemctl restart ptc_manager-herdr || true"
+
+    # A restoration that failed leaves the backup as the only copy of the Herdr
+    # the running release expects, so cleanup must not take it away.
+    assert script =~ "herdr_link_backup_retained=true"
+    assert script =~ ~s|if [ "$herdr_link_backup_retained" != true ]; then|
+  end
+
+  # The deployment and the release read the same manifest, so a pin one of them
+  # needs and the other does not know about is a deployment that fails on the
+  # machine or a release that compiled against a manifest it cannot use.
+  test "the deployment reads exactly the pins the release requires" do
+    script = File.read!(@remote_script)
+
+    read =
+      ~r/"\$toolchain_reader" "\$toolchain_manifest" ([a-z0-9_]+)/
+      |> Regex.scan(script)
+      |> Enum.map(fn [_line, key] -> key end)
+      |> Enum.sort()
+
+    assert read == Enum.sort(PtcManager.Toolchain.required_pins())
+  end
+
+  # A version written twice drifts. The manifest is the only place one belongs,
+  # and the release reads the same file the deployment does.
+  # A wrapper PtcManager calls through sudo is useless unless the deployment
+  # installs it and the policy authorizes it, and neither failure shows up until
+  # a managed pane tries to start on the machine.
+  test "every worker wrapper the policy authorizes is installed by the deployment" do
+    script = File.read!(@remote_script)
+
+    ~r{/usr/local/bin/(ptc-manager-worker-[a-z-]+)}
+    |> Regex.scan(File.read!(@sudoers))
+    |> Enum.map(fn [_line, wrapper] -> wrapper end)
+    |> Enum.uniq()
+    |> Enum.each(fn wrapper ->
+      assert String.contains?(script, "deploy/#{wrapper}"),
+             "deploy/remote-deploy-herdr never reads deploy/#{wrapper}"
+
+      assert String.contains?(script, "/usr/local/bin/#{wrapper}"),
+             "deploy/remote-deploy-herdr never installs /usr/local/bin/#{wrapper}"
+    end)
+  end
+
+  # Claude Code updates itself by default. The deployment installs it into a
+  # root-owned tree so an agent cannot rewrite the CLI it runs, which makes the
+  # attempt fail every time, in the process holding the agent's credentials.
+  test "the Herdr server disables the Claude Code auto-updater for its panes" do
+    launch = File.read!(Path.join(@project_root, "deploy/ptc-manager-herdr-launch"))
+
+    assert launch =~ ~r/^DISABLE_AUTOUPDATER=1$/m
+    assert launch =~ ~r/^export DISABLE_AUTOUPDATER$/m
+  end
+
+  test "the deployment script writes no version of its own" do
+    script = File.read!(@remote_script)
+
+    for {program, version} <- PtcManager.Toolchain.pinned() do
+      refute String.contains?(script, version),
+             "deploy/remote-deploy-herdr repeats the #{program} version #{version}"
+    end
+
+    assert script =~ "read_pinned_versions"
+  end
+
+  # `sudo mktemp -d` creates the staging root 0700 and `cp -a` preserves the
+  # modes of what it copies, not of the root it copies into. A pinned tree left
+  # 0700 belongs to root alone: the worker cannot run the program linked inside
+  # it, and the deploying user's own glob over the tree expands to nothing, which
+  # the deployment then reports as a malformed package rather than as the
+  # permission problem it is. Every staged tree therefore goes through the one
+  # helper that both owns and opens it.
+  test "every staged /opt tree is made traversable before it is moved into place" do
+    script = File.read!(@remote_script)
+
+    staged =
+      ~r/\$\(sudo mktemp -d "\$?\{?(?:\/opt\/)?[^"]*"\)/
+      |> Regex.scan(script)
+      |> length()
+
+    claimed =
+      ~r/^ *root_own_pinned_tree "\$[a-z_]+"$/m
+      |> Regex.scan(script)
+      |> length()
+
+    assert staged > 0
+
+    assert claimed == staged,
+           "#{staged} staged /opt trees but #{claimed} go through root_own_pinned_tree"
+
+    refute script =~ ~r/^ *sudo chown -R root:root "\$[a-z_]*staging"/m,
+           "a staging tree is owned without being made traversable"
+
+    assert script =~
+             ~r/root_own_pinned_tree\(\) \{\n  sudo chown -R root:root "\$1"\n  sudo chmod 0755 "\$1"\n\}/
+  end
+
+  defp reader(args) do
+    System.cmd("sh", [@toolchain_reader | args], stderr_to_stdout: true)
+  end
+
   defp helper(home, args) do
     System.cmd("sh", [@claude_trust | args], env: [{"HOME", home}], stderr_to_stdout: true)
+  end
+
+  # Herdr restores a pane after a server restart by running `codex resume` with
+  # no arguments, so the approval bypass PtcManager passes at `herdr agent start`
+  # is gone and the resumed agent stops at a prompt nobody answers. The same
+  # policy recorded in config.toml survives that restore.
+  test "the worker Codex arming helper records and removes the managed policy" do
+    home =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-codex-arm-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(Path.join(home, ".codex"))
+    on_exit(fn -> File.rm_rf!(home) end)
+    config = Path.join(home, ".codex/config.toml")
+
+    original =
+      "[features]\nhooks = true\n\n[projects.\"/srv/ptc_runner\"]\ntrust_level = \"trusted\"\n"
+
+    File.write!(config, original)
+
+    assert {_output, 0} = arming(home, ["arm", "gpt-5.6-sol"])
+    assert File.read!(config) =~ ~s(model = "gpt-5.6-sol")
+
+    # A model is interpolated into a TOML string, so only an identifier is taken.
+    assert {output, 2} = arming(home, ["arm", ~s(evil" injected)])
+    assert output =~ "model must be"
+    assert {output, 2} = arming(home, ["disarm", "gpt-5.6-sol"])
+    assert output =~ "disarm takes no model"
+
+    assert {_output, 0} = arming(home, ["disarm"])
+    assert {_output, 0} = arming(home, ["arm"])
+    armed = File.read!(config)
+    refute armed =~ "model ="
+    assert armed =~ ~s(approval_policy = "never")
+    assert armed =~ ~s(sandbox_mode = "danger-full-access")
+    assert armed =~ "notice.hide_rate_limit_model_nudge = true"
+    assert armed =~ ~s([projects."/srv/ptc_runner"])
+
+    # The nudge is a dotted key so the keys the maintainer already had at the
+    # top level are not swallowed into a [notice] table opened above them.
+    assert armed =~
+             "notice.hide_rate_limit_model_nudge = true\n" <>
+               "# END ptc-manager managed agent policy\n"
+
+    assert {_output, 0} = arming(home, ["arm"])
+    assert File.read!(config) == armed
+
+    assert {_output, 0} = arming(home, ["disarm"])
+    assert File.read!(config) == original
+
+    assert {output, 2} = arming(home, ["forget"])
+    assert output =~ "arm or disarm"
+
+    File.write!(config, ~s(approval_policy = "on-request"\n))
+    assert {output, 2} = arming(home, ["arm"])
+    assert output =~ "already sets approval_policy"
+    assert File.read!(config) == ~s(approval_policy = "on-request"\n)
+
+    # Codex refuses a config that sets notice.x as a dotted key and also opens
+    # [notice] as a table, so a maintainer who owns that table has to be told.
+    owned = "[notice]\nhide_full_access_warning = true\n"
+    File.write!(config, owned)
+    assert {output, 2} = arming(home, ["arm"])
+    assert output =~ "declares [notice]"
+    assert File.read!(config) == owned
+  end
+
+  # The drop-in is installed into a unit that runs as root, and systemd only
+  # warns about a directive it cannot parse, so the generated content is the
+  # only thing that can be checked before it lands.
+  test "the access drop-in check accepts generated grants and rejects anything else" do
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-dropin-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    header = "# Generated by the PtcManager deployment. Do not edit.\n[Service]\n"
+
+    write = fn name, body ->
+      path = Path.join(directory, name)
+      File.write!(path, body)
+      System.cmd("sh", [@dropin_check, path], stderr_to_stdout: true)
+    end
+
+    assert {"", 0} =
+             write.(
+               "good.conf",
+               header <>
+                 "ReadWritePaths=-/srv/ptc_runner/.git\nReadWritePaths=-/srv/ptc-fs-mcp/.git\n"
+             )
+
+    assert {output, 1} =
+             write.("injected.conf", header <> "ReadWritePaths=-/srv/ok\nExecStart=/bin/evil\n")
+
+    assert output =~ "unexpected line"
+
+    assert {output, 1} = write.("traversal.conf", header <> "ReadWritePaths=-/srv/../etc\n")
+    assert output =~ "unnormalized path"
+
+    assert {output, 1} = write.("outside.conf", header <> "ReadWritePaths=-/etc/shadow\n")
+    assert output =~ "unexpected line"
+
+    assert {output, 1} = write.("empty.conf", header)
+    assert output =~ "grants nothing"
+
+    assert {output, 1} = write.("headerless.conf", "ReadWritePaths=-/srv/ok\n")
+    assert output =~ "generated header"
+  end
+
+  defp arming(home, args) do
+    System.cmd("sh", [@codex_arm | args],
+      env: [{"HOME", home}, {"CODEX_HOME", nil}],
+      stderr_to_stdout: true
+    )
   end
 
   test "self-deploy command runs from its immutable archive without a Git checkout" do
@@ -267,7 +594,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   test "remote deployment exposes the pinned Node runtime to managed agents" do
     script = File.read!(@remote_script)
 
-    assert script =~ "node_version=22.23.2"
+    assert script =~ ~s|node_version=$("$toolchain_reader" "$toolchain_manifest" node)|
     assert script =~ "install_worker_node"
     assert script =~ "/opt/ptc-manager-node-${node_version}"
     assert script =~ "lib/node_modules/npm/bin/npm-cli.js"
@@ -277,13 +604,54 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "sudo -u ptc-manager-worker -H /usr/local/bin/npm --version"
   end
 
+  test "remote deployment installs every agent CLI at the version it pins" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "install_worker_codex"
+    assert script =~ "install_worker_claude_code"
+    assert script =~ "install_worker_cursor_agent"
+    assert script =~ "install_worker_herdr"
+
+    # An unverified download never becomes the program on the worker's PATH.
+    assert script =~ ~s|!= "codex-cli $codex_version"|
+    assert script =~ ~s|!= "$claude_code_version (Claude Code)"|
+    assert script =~ ~s|!= "$cursor_agent_version"|
+    assert script =~ ~s|!= "$herdr_sha256"|
+    assert script =~ ~s|!= "herdr $herdr_version"|
+
+    # The Cursor CLI no longer comes from a per-user installation, and the
+    # hand-placed trees the pinned ones replace are removed.
+    refute script =~ "/home/agent/.local/share/cursor-agent"
+    assert script =~ "sudo rm -rf -- /opt/codex /opt/ptc-manager-cursor-agent"
+
+    # A client whose protocol does not match the running server breaks the
+    # coordinator, so Herdr's link moves in the one step that restarts it.
+    assert script =~
+             ~s|sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"\n    sudo systemctl restart ptc_manager-herdr|
+
+    # A deployment is the only thing that moves the link, so the deferred branch
+    # must not tell a maintainer that restarting the service by hand will do it.
+    assert script =~ "a deployment is what moves the link"
+    refute script =~ "Restart it when none is retained"
+
+    assert String.split(script, ~s|"$worker_herdr_dir/herdr" "$worker_herdr"|) |> length() == 2
+  end
+
   test "remote deployment exposes mise for repository-owned worker setup" do
     script = File.read!(@remote_script)
 
     assert script =~ "worker_mise=/usr/local/bin/mise"
     assert script =~ "install_worker_mise"
-    assert script =~ ~s(sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise")
+    assert script =~ ~s|sudo ln -sfn "$worker_mise_dir/mise" "$worker_mise"|
     assert script =~ ~s(sudo -u ptc-manager-worker -H "$worker_mise" --version)
+
+    # The worker's mise is a pinned program, not a copy of whatever the
+    # deploying user happens to have installed, and it is the only mise the
+    # deployment runs: the user-owned one was executed through sudo to provision
+    # the gate, which made an unverified binary root on this machine.
+    refute script =~ "mise_binary"
+    refute script =~ "/home/agent/.local/bin/mise"
+    assert script =~ ~s|"$worker_mise" install "node@${node_version}"|
 
     assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
              byte_index(script, "echo \"Building production release...\"")
@@ -323,8 +691,21 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~
              "/bin/sh -c 'cd /var/lib/ptc_manager-gate && exec /usr/local/bin/mix help hex'"
 
-    assert script =~ "local.hex --force --if-missing"
-    assert script =~ "local.rebar --force --if-missing"
+    # Mix installs a mismatched --sha512 once --force is given, so the gate
+    # hashes the Rebar it received instead of asking mix to check it.
+    assert script =~ ~s|gate_mix local.hex "$hex_version" --force|
+    assert script =~ "gate_mix local.rebar --force"
+    assert script =~ ~s|!= "$rebar3_sha512"|
+    assert script =~ "gate_rebar_digest"
+
+    # Mix keeps one Rebar per Elixir series, so the digest names the series this
+    # revision pins and copies from older ones are removed rather than left to
+    # answer for a series that has none.
+    assert script =~ "gate_rebar_series"
+    assert script =~ ~s|! -name "$rebar_series"|
+    refute script =~ "local.hex --force --if-missing"
+    refute script =~ "local.rebar --force --if-missing"
+    refute script =~ "local.rebar --force --sha512"
     assert script =~ "gate toolchain symlink escapes its root-owned prefix"
     refute script =~ "verify_gate_contract"
     refute script =~ "./scripts/ci/pre-publication"
@@ -406,6 +787,44 @@ defmodule Mix.Tasks.PtcDeployTest do
     fixture = write_json_fixture(payload)
     {output, 0} = System.cmd("jq", ["-r", "-f", @agent_filter, fixture])
     output |> String.trim() |> String.to_integer()
+  end
+
+  @tag :nightly
+  test "the label wrapper refuses everything but one safe issue edit" do
+    directory = Path.join(System.tmp_dir!(), "ptc-gh-label-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(directory, "usr/bin"))
+    recording = Path.join(directory, "calls")
+    fake_gh = Path.join(directory, "usr/bin/gh")
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    printf '%s\n' "$*" >> #{recording}
+    """)
+
+    File.chmod!(fake_gh, 0o755)
+    on_exit(fn -> File.rm_rf(directory) end)
+
+    # The wrapper hard-codes /usr/bin/gh, so run it through a shell that maps
+    # that path onto the fake one rather than editing the shipped script.
+    run = fn args ->
+      script = File.read!(@gh_label) |> String.replace("/usr/bin/gh", fake_gh)
+      path = Path.join(directory, "wrapper")
+      File.write!(path, script)
+      File.chmod!(path, 0o755)
+      System.cmd(path, args, stderr_to_stdout: true)
+    end
+
+    assert {_output, 0} = run.(["owner/repo", "1701", "add", "wait"])
+    assert File.read!(recording) =~ "issue edit 1701 --repo owner/repo --add-label wait"
+
+    assert {_output, 64} = run.(["owner/repo", "1701", "merge", "wait"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "add", "ptc:ready"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "add", "PTC:ready"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "remove", "Ptc:Blocked"])
+    assert {_output, 64} = run.(["owner/repo; rm -rf /", "1701", "add", "wait"])
+    assert {_output, 64} = run.(["owner/repo", "not-a-number", "add", "wait"])
+    assert {_output, 64} = run.(["owner/repo", "1701", "add", "$(whoami)"])
+    assert File.read!(recording) |> String.split("\n", trim: true) |> length() == 1
   end
 
   defp policy_for(phase) do

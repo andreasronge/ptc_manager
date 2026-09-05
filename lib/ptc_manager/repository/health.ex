@@ -2,7 +2,12 @@ defmodule PtcManager.Repository.Health do
   @moduledoc "Builds a read-only configuration health summary for one repository."
 
   alias PtcManager.Operations.Repository
-  alias PtcManager.Repository.{Checkout, Contract, GitProbe}
+  alias PtcManager.Repository.{Checkout, Contract, GitProbe, MaintainerLabels, ServiceAccess}
+
+  # Every label an agent or the label wrapper is told to write. PtcManager never
+  # creates one, and `gh` fails against a label that does not exist, so a missing
+  # one turns into a failed agent step rather than a visible error.
+  @required_labels ~w(ptc:ready ptc:blocked ptc:needs-decision ptc:follow-up)
 
   def summarize(%Repository{} = repository) do
     summarize(repository, Checkout.available_path(repository))
@@ -15,7 +20,9 @@ defmodule PtcManager.Repository.Health do
       repository: repository,
       checkout: checkout,
       gate: gate_health(repository, checkout),
-      github: github_health(repository)
+      github: github_health(repository),
+      labels: label_health(repository),
+      service_access: ServiceAccess.summarize(repository)
     }
   end
 
@@ -93,12 +100,62 @@ defmodule PtcManager.Repository.Health do
     }
   end
 
+  defp github_health(%Repository{enabled: false}) do
+    %{
+      status: :unchecked,
+      label: "GitHub read access not synchronized",
+      detail:
+        "Access was verified when this repository was added. Synchronization covers enabled " <>
+          "repositories, so this turns green once it is enabled."
+    }
+  end
+
   defp github_health(_repository) do
     %{
       status: :unchecked,
       label: "GitHub read access not checked",
       detail: "Run GitHub synchronization to verify access."
     }
+  end
+
+  @doc "The labels this repository must already have on GitHub."
+  def required_labels(%Repository{} = repository),
+    do: @required_labels ++ MaintainerLabels.names(repository)
+
+  defp label_health(%Repository{github_labels_checked_at: nil}) do
+    %{
+      status: :unchecked,
+      label: "GitHub labels not checked",
+      detail: "Run GitHub synchronization to read the repository's labels."
+    }
+  end
+
+  defp label_health(%Repository{} = repository) do
+    existing =
+      repository.github_label_names
+      |> then(fn
+        %{"names" => names} when is_list(names) -> names
+        _absent -> []
+      end)
+      |> MapSet.new(&String.downcase/1)
+
+    case Enum.reject(required_labels(repository), &MapSet.member?(existing, String.downcase(&1))) do
+      [] ->
+        %{
+          status: :ready,
+          label: "GitHub labels present",
+          detail: "Every label an agent is told to write exists in the repository."
+        }
+
+      missing ->
+        %{
+          status: :attention,
+          label: "GitHub labels missing",
+          detail:
+            "Create #{Enum.join(missing, ", ")} on GitHub; PtcManager never creates a label, " <>
+              "and the agent step that writes one fails without it."
+        }
+    end
   end
 
   defp checkout_error(:repository_path_unavailable), do: "Configure an existing absolute path."

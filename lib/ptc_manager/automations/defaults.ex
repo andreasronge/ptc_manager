@@ -36,7 +36,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 7_200,
       result_type: "implementation",
       prompt:
-        "Fix the issue completely. Follow the repository instructions, validate the change, perform the configured reviews, commit it, and publish a pull request that closes the issue. Its description needs a summary, what you verified beyond the repository hooks, and a `## Retrospective` section with two items that may each be `none`: untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or that you had to guess at. Do not merge it."
+        "Fix the issue completely. Follow the repository instructions, validate the change, perform the configured reviews, commit it, and publish a pull request that closes the issue. Its description needs a summary, what you verified beyond the repository hooks, and a `## Retrospective` section with two items that may each be `none`: untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or that you had to guess at. If the Retrospective lists untracked follow-up work, add the label `ptc:follow-up` to the pull request. Do not merge it."
     },
     %{
       key: "prepare_issue",
@@ -52,6 +52,21 @@ defmodule PtcManager.Automations.Defaults do
       result_type: "issue_maintenance",
       prompt:
         "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Do not implement it, and explain the result simply."
+    },
+    %{
+      key: "report_issue_blocker",
+      name: "Report implementation blocker",
+      description: "Put an agent's reason for stopping on the issue for a maintainer decision.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 900,
+      result_type: "issue_maintenance",
+      prompt:
+        "An implementation agent stopped on this issue and reported why. Verify that claim against the issue and the code, then write one comment saying what a person has to settle before implementation can start again, and leave the issue blocked (`ptc:blocked`) or needing a decision (`ptc:needs-decision`). Do not implement anything, do not mark the issue ready, and do not close it."
     },
     %{
       key: "review_issue",

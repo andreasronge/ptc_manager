@@ -12,6 +12,12 @@ defmodule PtcManager.AutomationsTest do
     def git_command(_args), do: {"", 0}
   end
 
+  # Every managed pane now asks whether the kind it is about to start is still
+  # signed in. The real wrapper is only on the worker machine.
+  defmodule AgentLoginCommand do
+    def login_command(_args), do: {"", 0}
+  end
+
   defmodule ClaudeTrustCommand do
     def trust_command(args) do
       send(
@@ -317,7 +323,7 @@ defmodule PtcManager.AutomationsTest do
     repository = repository_fixture()
 
     definitions = Automations.list_definitions(repository)
-    assert length(definitions) == 11
+    assert length(definitions) == 12
     assert Enum.all?(definitions, &match?(%DefinitionVersion{version: 1}, &1.current_version))
 
     assert Enum.all?(definitions, fn definition ->
@@ -326,7 +332,7 @@ defmodule PtcManager.AutomationsTest do
            end)
 
     assert :ok = Automations.ensure_defaults(repository)
-    assert length(Automations.list_definitions(repository)) == 11
+    assert length(Automations.list_definitions(repository)) == 12
 
     review = Automations.get_definition(repository, "review_issue")
     assert review.current_version.execution_profile == "ephemeral_investigation"
@@ -372,6 +378,66 @@ defmodule PtcManager.AutomationsTest do
     assert run.workspace_setup_exit_status == 0
     assert run.workspace_setup_output == "ready\n"
     assert run.workspace_setup_cache_state == "hit"
+  end
+
+  test "Codex investigations trust both the parent checkout and disposable worktree" do
+    %{action: action} = claimed_investigation_fixture!()
+
+    Application.put_env(:ptc_manager, :agent_profiles, %{
+      "codex" => %{
+        "enabled" => true,
+        "args" => ["-c", ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})]
+      }
+    })
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    assert_receive {:investigation_command, ["agent", "start" | args]}
+    override = Enum.find(args, &String.starts_with?(&1, "projects="))
+    assert override =~ PtcManager.CodexTrust.toml_basic_string(action.repository.local_path)
+    assert_receive {:investigation_command, ["worktree", "create" | create_args]}
+    path = create_args |> Enum.drop_while(&(&1 != "--path")) |> Enum.at(1)
+    assert override =~ PtcManager.CodexTrust.toml_basic_string(path)
+  end
+
+  test "worktree reconciliation retries investigation cleanup while actions are disabled and draining" do
+    %{action: action, token: token} = claimed_investigation_fixture!()
+    Process.put(:investigation_remove_result, {:error, :herdr_unavailable})
+
+    assert {:ok, %{"outcome" => "ready"}} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    assert {:ok, _completed} =
+             PtcManager.Operations.complete_agent_action(
+               action.id,
+               token,
+               {:ok, %{"outcome" => "ready"}}
+             )
+
+    previous_enabled = Application.get_env(:ptc_manager, :agent_actions_enabled)
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    previous_adapter = Application.get_env(:ptc_manager, :investigation_workspace_adapter)
+    Application.put_env(:ptc_manager, :agent_actions_enabled, false)
+    Application.put_env(:ptc_manager, :operational_mode, :draining)
+
+    Application.put_env(
+      :ptc_manager,
+      :investigation_workspace_adapter,
+      InvestigationCleanupAdapter
+    )
+
+    on_exit(fn ->
+      restore_env(:agent_actions_enabled, previous_enabled)
+      restore_env(:operational_mode, previous_mode)
+      restore_env(:investigation_workspace_adapter, previous_adapter)
+    end)
+
+    PtcManager.Worktrees.cleanup_once()
+
+    assert_receive {:investigation_cleanup, "investigation-workspace"}
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    assert run.disposable_cleanup_state == nil
   end
 
   test "failed investigation setup retains its bounded diagnostics" do
@@ -859,6 +925,16 @@ defmodule PtcManager.AutomationsTest do
     refute first.prompt =~ "Use a shorter maintainer explanation for future runs."
   end
 
+  test "the built-in implementation prompt asks for the follow-up label" do
+    repository = repository_fixture()
+    definition = Automations.get_definition(repository, "implement_issue")
+
+    assert definition.current_version.created_by == "system:built-in"
+
+    assert definition.current_version.prompt =~
+             "add the label `ptc:follow-up` to the pull request"
+  end
+
   test "implementation approval freezes its user-owned prompt" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
@@ -1093,7 +1169,8 @@ defmodule PtcManager.AutomationsTest do
       :worktree_root,
       :worker_repository_trust_command,
       :worker_claude_trust_command,
-      :worker_claude_trust_test_pid
+      :worker_claude_trust_test_pid,
+      :worker_agent_login_command
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
@@ -1112,6 +1189,7 @@ defmodule PtcManager.AutomationsTest do
 
     Application.put_env(:ptc_manager, :worker_claude_trust_command, ClaudeTrustCommand)
     Application.put_env(:ptc_manager, :worker_claude_trust_test_pid, self())
+    Application.put_env(:ptc_manager, :worker_agent_login_command, AgentLoginCommand)
 
     Application.put_env(:ptc_manager, :agent_profiles, %{
       "claude" => %{
@@ -1189,7 +1267,7 @@ defmodule PtcManager.AutomationsTest do
 
   test "agent profile workspace placeholders preserve one argument and quote TOML paths" do
     assert ["--cwd=/tmp/a b", ~s(projects={"/tmp/a b"={trust_level="trusted"}})] ==
-             PtcManager.MaintainerActions.GenericHerdrAdapter.expand_agent_args(
+             PtcManager.AgentProfiles.expand_args(
                [
                  "--cwd={{workspace_path}}",
                  ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})

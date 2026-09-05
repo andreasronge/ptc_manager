@@ -11,7 +11,7 @@ defmodule PtcManager.Repository.WorkerClaudeTrust do
   disposable workspace is closed.
   """
 
-  alias PtcManager.CommandEnvironment
+  alias PtcManager.Repository.WorkerHelper
 
   @doc "Trusts the workspace when the agent kind needs it; other kinds need nothing."
   def prepare("claude", path) when is_binary(path) do
@@ -55,31 +55,27 @@ defmodule PtcManager.Repository.WorkerClaudeTrust do
     end)
   end
 
-  defp worker_boundary?,
-    do: Application.get_env(:ptc_manager, :herdr_run_as_user) not in [nil, ""]
+  defp worker_boundary?, do: WorkerHelper.worker_boundary?()
 
   defp run(args) do
     command = Application.get_env(:ptc_manager, :worker_claude_trust_command, __MODULE__.Runner)
     command.trust_command(args)
   end
 
-  defp bounded(output), do: output |> String.trim() |> String.slice(-1_000, 1_000)
+  defp bounded(output), do: WorkerHelper.bounded(output)
 
   defmodule Runner do
     @moduledoc false
 
+    alias PtcManager.Repository.WorkerHelper
+
     @helper "/usr/local/bin/ptc-manager-worker-claude-trust"
 
     def trust_command(args) when is_list(args) do
-      user = Application.fetch_env!(:ptc_manager, :herdr_run_as_user)
-      helper = Application.get_env(:ptc_manager, :worker_claude_trust_helper, @helper)
-
-      System.cmd("/usr/bin/sudo", ["-n", "-H", "-u", user, "--", helper | args],
-        env: CommandEnvironment.scrub(),
-        stderr_to_stdout: true
+      WorkerHelper.run(
+        Application.get_env(:ptc_manager, :worker_claude_trust_helper, @helper),
+        args
       )
-    rescue
-      error -> {inspect(error.__struct__), 127}
     end
   end
 end

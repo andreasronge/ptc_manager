@@ -3,28 +3,21 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
-  alias PtcManager.MaintainerActions.{ExternalPrRepairAdapter, RetainedHerdrAdapter}
+  alias PtcManager.MaintainerActions.{FreshWorktreeRepairAdapter, RetainedHerdrAdapter}
   alias PtcManager.IssueDecision
   alias PtcManager.Operations.{AgentAction, PrPublication}
   alias PtcManager.Repo
   alias PtcManager.MaintainerActions.GenericHerdrAdapter
+
+  @repair_action_keys ~w(repair_pr repair_and_merge_pr)
 
   @impl true
   def run(%AgentAction{action_key: "daily_digest"} = action),
     do: GenericHerdrAdapter.run(action)
 
   def run(%AgentAction{action_key: action_key} = action)
-      when action_key in ["repair_pr", "repair_and_merge_pr"] do
-    publication = Repo.get!(PrPublication, action.target_id)
-
-    default_adapter =
-      if PrPublication.external?(publication),
-        do: ExternalPrRepairAdapter,
-        else: RetainedHerdrAdapter
-
-    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, default_adapter)
-    adapter.run(action)
-  end
+      when action_key in @repair_action_keys,
+      do: action |> repair_adapter() |> then(& &1.run(action))
 
   def run(
         %AgentAction{
@@ -38,6 +31,37 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   end
 
   def run(%AgentAction{}), do: {:error, :unsupported_agent_action_profile}
+
+  @impl true
+  def ensure_ready(%AgentAction{action_key: action_key} = action)
+      when action_key in @repair_action_keys do
+    adapter = Application.get_env(:ptc_manager, :repair_agent_adapter, RetainedHerdrAdapter)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :ensure_ready, 1),
+      do: adapter.ensure_ready(action),
+      else: :ok
+  end
+
+  def ensure_ready(%AgentAction{}), do: :ok
+
+  # Preflight recorded which worktree this repair runs in, so routing follows that
+  # decision rather than deriving its own and risking a different answer.
+  defp repair_adapter(%AgentAction{} = action) do
+    Application.get_env(:ptc_manager, :repair_agent_adapter, default_repair_adapter(action))
+  end
+
+  defp default_repair_adapter(%AgentAction{target_snapshot: %{"repair_mode" => "fresh"}}),
+    do: FreshWorktreeRepairAdapter
+
+  defp default_repair_adapter(%AgentAction{target_snapshot: %{"repair_mode" => "retained"}}),
+    do: RetainedHerdrAdapter
+
+  # Actions recorded before repair mode existed keep the routing they ran under.
+  defp default_repair_adapter(%AgentAction{target_id: publication_id}) do
+    if PrPublication.external?(Repo.get!(PrPublication, publication_id)),
+      do: FreshWorktreeRepairAdapter,
+      else: RetainedHerdrAdapter
+  end
 
   @doc false
   def validate_result(result, "daily_digest") when is_map(result) do
@@ -53,6 +77,26 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   end
 
   def validate_result(_result, _action_key), do: {:error, :invalid_agent_action_output}
+
+  @doc """
+  Validates a result against the outcomes this particular action may return.
+
+  Some actions are queued with a narrower set than their key allows, because
+  their whole input came from a model. Saying so in the prompt is not a
+  restriction — the prompt is what the model reads, and this is where
+  deterministic code decides — so the permitted set is persisted on the action
+  and enforced here.
+  """
+  def validate_result(result, action_key, %{"allowed_outcomes" => allowed})
+      when is_map(result) and is_list(allowed) and allowed != [] do
+    with :ok <- validate_result(result, action_key) do
+      if Map.get(result, "outcome") in allowed,
+        do: :ok,
+        else: {:error, :outcome_not_permitted_for_action}
+    end
+  end
+
+  def validate_result(result, action_key, _snapshot), do: validate_result(result, action_key)
 
   defp validate_daily_digest_result(%{
          "status" => status,
@@ -156,6 +200,12 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
 
+  # This action may only report a blocker. It cannot mark an issue ready or
+  # close it, whatever the model-written evidence it was given asks for.
+  defp validate_outcome("report_issue_blocker", outcome)
+       when outcome in ["blocked", "needs-decision"],
+       do: :ok
+
   defp validate_outcome("review_issue", outcome)
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
        do: :ok
@@ -215,7 +265,12 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   end
 
   defp validate_decision(action_key, "needs-decision", question, options)
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+       when action_key in [
+              "prepare_issue",
+              "report_issue_blocker",
+              "review_issue",
+              "resolve_issue_decision"
+            ] do
     case IssueDecision.from_result(%{
            "outcome" => "needs-decision",
            "decision_question" => question,
@@ -250,6 +305,7 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   defp validate_created_issue_numbers("private_issue_analysis", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("report_issue_blocker", _outcome, []), do: :ok
   defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("resolve_issue_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok

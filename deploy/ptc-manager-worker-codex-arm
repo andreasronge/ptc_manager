@@ -1,0 +1,149 @@
+#!/bin/sh
+set -eu
+
+# PtcManager invokes this root-owned wrapper through its narrowly scoped sudo
+# rule so the Herdr worker's own Codex configuration keeps the approval and
+# sandbox policy that managed agents are started with.
+#
+# PtcManager starts Codex with --dangerously-bypass-approvals-and-sandbox so an
+# unattended agent never stops at an approval prompt. Those arguments belong to
+# that one process. When the Herdr server restarts it restores a pane by running
+# `codex resume <session-id>` with no arguments, and the agent comes back asking
+# permission before every command, with nobody watching to answer. Codex reads
+# the same policy from config.toml, so recording it there survives the restore.
+# Only this worker account runs managed agents and it already receives the flags
+# on every start, so the recorded policy widens nothing that was narrower.
+#
+# notice.hide_rate_limit_model_nudge silences the interactive "switch model"
+# menu Codex raises when it approaches a rate limit. No argument suppresses it,
+# and an unattended agent that meets it stops mid-task at a menu nobody answers,
+# leaving its branch uncommitted while Herdr still reports the pane as done.
+#
+# model is recorded for the same reason the policy is. PtcManager passes the
+# model at `herdr agent start`, but the restore runs `codex resume` with no
+# arguments, so without it here a restored pane returns on whatever model the
+# account defaults to rather than the one the maintainer chose.
+
+fail() {
+  echo "ptc-manager-worker-codex-arm: $1" >&2
+  exit 2
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "expected arm [model] or disarm"
+
+mode=$1
+model=${2-}
+
+case "$mode" in
+  arm) ;;
+  disarm) [ -z "$model" ] || fail "disarm takes no model" ;;
+  *) fail "mode must be arm or disarm" ;;
+esac
+
+exec /usr/bin/python3 - "$mode" "$model" <<'PY'
+import fcntl
+import os
+import re
+import sys
+import tempfile
+
+
+
+def fail(message):
+    sys.stderr.write("ptc-manager-worker-codex-arm: " + message + "\n")
+    raise SystemExit(2)
+
+
+mode = sys.argv[1]
+model = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# The model is interpolated into a TOML string, so accept only what a model
+# identifier is made of rather than trusting the caller to have escaped it.
+if model and not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", model):
+    fail("model must be 1-100 characters of letters, digits, dot, dash or underscore")
+
+home = os.path.expanduser("~")
+codex_home = os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
+config = os.path.join(codex_home, "config.toml")
+
+BEGIN = "# BEGIN ptc-manager managed agent policy"
+END = "# END ptc-manager managed agent policy"
+MANAGED_KEYS = (
+    "approval_policy",
+    "sandbox_mode",
+    "model",
+    "notice.hide_rate_limit_model_nudge",
+)
+BLOCK = (
+    [
+        BEGIN,
+        'approval_policy = "never"',
+        'sandbox_mode = "danger-full-access"',
+    ]
+    + (['model = "' + model + '"'] if model else [])
+    + [
+        "notice.hide_rate_limit_model_nudge = true",
+        END,
+    ]
+)
+
+os.makedirs(codex_home, mode=0o700, exist_ok=True)
+
+with open(os.path.join(codex_home, "config.toml.ptc-lock"), "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    existing = []
+    if os.path.exists(config):
+        with open(config) as handle:
+            existing = handle.read().splitlines()
+
+    kept = []
+    inside = False
+
+    for line in existing:
+        if not inside and line.strip() == BEGIN:
+            inside = True
+        elif inside:
+            if line.strip() == END:
+                inside = False
+        else:
+            kept.append(line)
+
+    if inside:
+        fail("config.toml has an unterminated managed block")
+
+    # Codex applies these keys only at the top level, so a maintainer's own value
+    # there would collide with the managed block instead of layering under it.
+    # Stop rather than silently take it over.
+    for line in kept:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if "=" in stripped and stripped.split("=", 1)[0].strip() in MANAGED_KEYS:
+            fail(
+                "config.toml already sets "
+                + stripped.split("=", 1)[0].strip()
+                + " outside the managed block"
+            )
+
+    # The nudge suppression is written as a dotted key so the block stays flat
+    # and every key after it still belongs to the top level. Codex then rejects
+    # a config that also opens [notice] as a table, so a maintainer who owns
+    # that table is told rather than handed a config Codex refuses to load.
+    for line in kept:
+        header = line.split("#", 1)[0].strip()
+        if header == "[notice]" or header.startswith("[notice."):
+            fail("config.toml declares " + header + ", which the managed block would break")
+
+    if mode == "arm":
+        kept = BLOCK + kept
+
+    descriptor, temporary = tempfile.mkstemp(prefix="config.toml.", dir=codex_home)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write("".join(line + "\n" for line in kept))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, config)
+PY

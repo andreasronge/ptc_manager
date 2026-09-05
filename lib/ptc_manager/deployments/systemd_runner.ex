@@ -6,6 +6,7 @@ defmodule PtcManager.Deployments.SystemdRunner do
   alias PtcManager.CommandEnvironment
   alias PtcManager.Deployments.Deployment
   alias PtcManager.Repository.Contract
+  alias PtcManager.SystemdUnit
 
   @unit "ptc-manager-self-deploy.service"
 
@@ -108,19 +109,11 @@ defmodule PtcManager.Deployments.SystemdRunner do
             ["-n", "/bin/systemctl", "start", "--no-block", @unit]
           )
 
-        case System.cmd(command, args,
-               env: CommandEnvironment.scrub(),
-               stderr_to_stdout: true
-             ) do
-          {_output, 0} -> :ok
-          {output, status} -> {:error, {:deployment_trigger_failed, status, bounded(output)}}
-        end
+        SystemdUnit.start(command, args, :deployment_trigger_failed)
 
       _missing ->
         {:error, :deployment_runner_not_configured}
     end
-  rescue
-    error -> {:error, {:deployment_trigger_failed, error.__struct__}}
   end
 
   defp retire_stale_requests(spool) do

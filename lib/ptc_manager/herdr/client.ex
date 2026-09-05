@@ -15,6 +15,16 @@ defmodule PtcManager.Herdr.Client do
     end
   end
 
+  @impl true
+  def close_pane(pane_id) when is_binary(pane_id) and pane_id != "" do
+    timeout = Application.get_env(:ptc_manager, :herdr_timeout_ms, 15_000)
+
+    case Command.run(["pane", "close", pane_id], timeout) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   def decode_agents(output) when is_binary(output) do
     with {:ok, snapshot} <- decode_snapshot(output) do
       case snapshot do

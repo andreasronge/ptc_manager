@@ -23,6 +23,7 @@ defmodule PtcManager.GitHub.IssueSnapshot do
     assignee_logins = assignee_logins(remote["assignees"] || [])
 
     updated_at = parse_datetime!(remote["updated_at"])
+    created_at = parse_optional_datetime(remote["created_at"])
     blocking_issues = blocking_issues(remote, repository_full_name)
     dependency_unknown_count = normalize_unknown_count(remote["blocked_by_unknown_count"])
 
@@ -62,6 +63,9 @@ defmodule PtcManager.GitHub.IssueSnapshot do
       dependencies_projected: true,
       body_digest: digest(body),
       content_digest: canonical |> Jason.encode!() |> digest(),
+      github_author_login: author_login(remote["author_login"]),
+      github_labels: %{"names" => label_names(remote["labels"] || [])},
+      github_created_at: created_at,
       github_updated_at: updated_at
     }
   end
@@ -185,12 +189,16 @@ defmodule PtcManager.GitHub.IssueSnapshot do
     |> Map.put("blocked_by_overflow", overflow)
   end
 
+  # GitHub matches label names case-insensitively, so `PTC:blocked` is the same
+  # label as `ptc:blocked`. Recognising only the lowercase spelling would leave
+  # such an issue with no workflow label at all, and every approval gate reads
+  # `nil` as "GitHub says nothing", which is the opposite of blocked.
   defp workflow_label(labels) when is_list(labels) do
     managed =
       labels
       |> Enum.map(fn
-        %{"name" => name} -> name
-        name when is_binary(name) -> name
+        %{"name" => name} when is_binary(name) -> String.downcase(String.trim(name))
+        name when is_binary(name) -> String.downcase(String.trim(name))
         _label -> nil
       end)
       |> Enum.filter(&(&1 in ["ptc:ready", "ptc:blocked", "ptc:needs-decision"]))
@@ -214,4 +222,42 @@ defmodule PtcManager.GitHub.IssueSnapshot do
   end
 
   defp parse_datetime!(_value), do: raise(ArgumentError, "missing GitHub updated_at")
+
+  # Also outside the canonical map. Only the three ptc: labels decide anything,
+  # and `workflow_labels` already carries those into the content digest; a
+  # maintainer's own label must not make every proposal stale.
+  defp label_names(labels) when is_list(labels) do
+    labels
+    |> Enum.map(fn
+      %{"name" => name} when is_binary(name) -> String.trim(name)
+      name when is_binary(name) -> String.trim(name)
+      _label -> ""
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp label_names(_labels), do: []
+
+  # Also outside the canonical map: GitHub cannot change who opened an issue.
+  defp author_login(login) when is_binary(login) do
+    case String.trim(login) do
+      "" -> nil
+      login -> login
+    end
+  end
+
+  defp author_login(_login), do: nil
+
+  # Deliberately outside the canonical map: an issue's creation time never
+  # changes, so it cannot make a proposal stale and must not enter the digest.
+  defp parse_optional_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :microsecond)
+      _invalid -> nil
+    end
+  end
+
+  defp parse_optional_datetime(_value), do: nil
 end

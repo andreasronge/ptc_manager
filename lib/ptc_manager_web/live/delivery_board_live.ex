@@ -1,36 +1,24 @@
 defmodule PtcManagerWeb.DeliveryBoardLive do
   use PtcManagerWeb, :live_view
 
+  import PtcManagerWeb.RetrospectiveComponents, only: [retrospective: 1]
+
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
   alias PtcManager.Operations
+  alias PtcManager.Operations.AgentHealth
+  alias PtcManager.Operations.DeliveryLane
+  alias PtcManager.Operations.PrPublication
+  alias PtcManager.Operations.StopReport
+  alias PtcManagerWeb.AgentCancel
+  alias PtcManagerWeb.RetrospectiveComponents
 
   @lane_definitions [
-    %{
-      key: :queued,
-      title: "Queued",
-      subtitle: "Approved · waiting for capacity",
-      color: "bg-sky-400"
-    },
-    %{
-      key: :working,
-      title: "In progress",
-      subtitle: "Agent, verification, or publishing",
-      color: "bg-teal-400"
-    },
-    %{
-      key: :stuck,
-      title: "Needs attention",
-      subtitle: "Failure, conflict, or decision",
-      color: "bg-amber-400"
-    },
-    %{
-      key: :ready,
-      title: "Ready to merge",
-      subtitle: "Clean checks and no conflicts",
-      color: "bg-emerald-400"
-    }
+    %{key: :queued, subtitle: "Approved · waiting for capacity", color: "bg-sky-400"},
+    %{key: :working, subtitle: "Agent, verification, or publishing", color: "bg-teal-400"},
+    %{key: :stuck, subtitle: "Failure, conflict, or decision", color: "bg-amber-400"},
+    %{key: :ready, subtitle: "Clean checks and no conflicts", color: "bg-emerald-400"}
   ]
 
   @impl true
@@ -48,6 +36,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      |> assign(:repositories, Operations.list_repositories())
      |> assign(:now, DateTime.utc_now())
      |> assign(:lane_definitions, @lane_definitions)
+     |> assign(:cancel_agent_job_id, nil)
+     |> assign(:abandon_job_id, nil)
      |> load_board()}
   end
 
@@ -80,6 +70,132 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   @impl true
+  def handle_event("confirm-cancel-agent", %{"job-id" => job_id}, socket) do
+    {:noreply, assign(socket, :cancel_agent_job_id, job_id)}
+  end
+
+  def handle_event("dismiss-cancel-agent", _params, socket) do
+    {:noreply, assign(socket, :cancel_agent_job_id, nil)}
+  end
+
+  def handle_event("cancel-agent", %{"job-id" => job_id}, socket) do
+    {kind, message} = AgentCancel.cancel(job_id, socket.assigns.actor)
+
+    {:noreply,
+     socket
+     |> assign(:cancel_agent_job_id, nil)
+     |> put_flash(kind, message)
+     |> load_board()}
+  end
+
+  def handle_event("retry-stopped-job", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.retry_stopped_job(job_id, socket.assigns.actor) do
+      PtcManager.Dispatch.Poller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "Queued a fresh attempt with the same approval and review count.")
+       |> load_board()}
+    else
+      {:error, :job_not_stopped} ->
+        {:noreply,
+         socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "A fresh attempt could not be queued.")}
+    end
+  end
+
+  def handle_event("ask-on-issue", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _action} <-
+           MaintainerActions.enqueue_blocked_issue_review(job_id, socket.assigns.actor) do
+      MaintainerActionPoller.wake()
+
+      {:noreply,
+       socket
+       |> put_flash(
+         :info,
+         "An agent will put the blocker on the GitHub issue for a decision."
+       )
+       |> load_board()}
+    else
+      {:error, :agent_action_already_active} ->
+        {:noreply, put_flash(socket, :error, "An action is already queued for that issue.")}
+
+      {:error, :recovery_not_offered} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The agent judged this unsafe. Read its evidence before asking on the issue."
+         )}
+
+      {:error, :job_not_stopped} ->
+        {:noreply,
+         socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "The issue could not be updated.")}
+    end
+  end
+
+  def handle_event("confirm-abandon", %{"job-id" => job_id}, socket) do
+    {:noreply, assign(socket, :abandon_job_id, job_id)}
+  end
+
+  def handle_event("dismiss-abandon", _params, socket) do
+    {:noreply, assign(socket, :abandon_job_id, nil)}
+  end
+
+  def handle_event("abandon-job", %{"job-id" => job_id}, socket) do
+    socket = assign(socket, :abandon_job_id, nil)
+
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.abandon_stuck_job(job_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Abandoned. Its worktree is kept on Operations if you need it.")
+       |> load_board()}
+    else
+      {:error, :verification_in_progress} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "A check is running right now. Try again when it finishes.")
+         |> load_board()}
+
+      {:error, :pull_request_open} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :error,
+           "This job already has a pull request. Close or merge it on GitHub instead."
+         )
+         |> load_board()}
+
+      {:error, :job_not_abandonable} ->
+        {:noreply, socket |> put_flash(:info, "That job has already moved on.") |> load_board()}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "That job could not be abandoned.")}
+    end
+  end
+
+  def handle_event("acknowledge-stop", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.acknowledge_job_stop(job_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Set aside. Its worktree is still on Operations if you need it.")
+       |> load_board()}
+    else
+      _error ->
+        {:noreply,
+         socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+    end
+  end
+
   def handle_event(
         "run-agent-action",
         %{"action-key" => action_key, "target-id" => target_id},
@@ -113,30 +229,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
         %{"source-action-id" => source_action_id, "suggestion-index" => suggestion_index},
         socket
       ) do
-    with {source_action_id, ""} <- Integer.parse(source_action_id),
-         {suggestion_index, ""} <- Integer.parse(suggestion_index),
-         {:ok, _action} <-
-           MaintainerActions.enqueue_retrospective_issue(
-             source_action_id,
-             suggestion_index,
-             socket.assigns.actor
-           ) do
-      MaintainerActionPoller.wake()
+    {kind, message} =
+      RetrospectiveComponents.queue_issue(
+        source_action_id,
+        suggestion_index,
+        socket.assigns.actor
+      )
 
-      {:noreply,
-       socket
-       |> put_flash(:info, "Approved follow-up queued for GitHub issue creation.")
-       |> load_board()}
-    else
-      {:error, :suggestion_already_handled} ->
-        {:noreply, put_flash(socket, :info, "That follow-up is already queued or handled.")}
-
-      {:error, :agent_action_already_active} ->
-        {:noreply, put_flash(socket, :error, "Another PR action is already queued or running.")}
-
-      _error ->
-        {:noreply, put_flash(socket, :error, "The follow-up issue could not be queued.")}
-    end
+    {:noreply, socket |> put_flash(kind, message) |> load_board()}
   end
 
   def lane_items(lanes, key) do
@@ -161,6 +261,76 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def linked_issues(item), do: Map.get(item, :linked_issues, [])
+
+  def cancellable_agent?(item), do: item.managed? and AgentCancel.cancellable?(item)
+
+  @doc """
+  True when PtcManager owns this job's phase and cannot finish it on its own.
+
+  These are the phases Cancel agent refuses, because there is no agent to
+  cancel. Without a way out they can repeat the same failure forever.
+
+  `reconciling` is not one of them: it can mean an agent whose remote state is
+  unknown, and Cancel agent, which closes the pane, is the right tool there. Nor
+  is any card that already has a pull request, which abandoning would orphan.
+  """
+  def abandonable?(%{managed?: true, active_job: %{state: state}} = item)
+      when state in ~w(awaiting_reconciliation verifying_result publish_blocked),
+      do: not verification_running?(item) and not published?(item)
+
+  def abandonable?(_item), do: false
+
+  # A blocked publication normally has a row with no pull request yet; only an
+  # actual PR number means there is something abandoning would orphan.
+  defp published?(%{publication: %{pr_number: number}}) when is_integer(number), do: true
+  defp published?(_item), do: false
+
+  defp verification_running?(%{active_job: %{result_attempt_expires_at: %DateTime{} = at}}),
+    do: DateTime.compare(at, DateTime.utc_now()) == :gt
+
+  defp verification_running?(_item), do: false
+
+  @doc "Why PtcManager could not finish this phase, in its own words."
+  def phase_error(%{active_job: %{last_error: error}}) when is_binary(error) and error != "",
+    do: error_sentence(error)
+
+  def phase_error(_item), do: nil
+
+  # The reconciliation probe records its own reason as an atom. Spell out the
+  # ones a maintainer actually meets, keeping the atom so a card still matches
+  # what the database and the audit trail call it, and pass anything else on.
+  defp error_sentence(":no_commits"),
+    do: "The agent's branch carries no commits (:no_commits)."
+
+  defp error_sentence(":no_tree_changes"),
+    do: "The agent's commits change no files (:no_tree_changes)."
+
+  defp error_sentence(":branch_missing"),
+    do: "The agent's branch does not exist (:branch_missing)."
+
+  defp error_sentence(error), do: error
+
+  @doc "The agent's own report of why it could not finish, when there is one."
+  def stop_report(%{active_job: %{stop_report: report}}) when is_map(report), do: report
+  def stop_report(_item), do: nil
+
+  @doc "Whether this recovery is the one PtcManager offers first for that reason."
+  def primary_recovery?(report, action), do: StopReport.primary_action(report) == action
+
+  @doc "Whether this recovery may be offered at all for that reason."
+  def recovery_offered?(report, action), do: StopReport.allows?(report, action)
+
+  @doc "Every recovery offered for this report; empty means a person must read it."
+  def recoveries(report), do: StopReport.recoveries(report)
+
+  def stop_reason_label("missing_prerequisite"), do: "Missing prerequisite"
+  def stop_reason_label("environment_broken"), do: "Environment broken"
+  def stop_reason_label("ambiguous_requirement"), do: "Needs a decision"
+  def stop_reason_label("unsafe_to_proceed"), do: "Judged unsafe"
+  def stop_reason_label(_code), do: "Stopped"
+
+  def confirming_cancel?(job_id, %{active_job: %{id: id}}), do: job_id == Integer.to_string(id)
+  def confirming_cancel?(_job_id, _item), do: false
 
   def status_label(state) do
     case state do
@@ -199,6 +369,24 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
+  @doc """
+  Returns the health of this card's agent when a person has to look at it.
+
+  A retained agent keeps a live Herdr heartbeat while it sits at a question no
+  maintainer is watching for, so the card would otherwise blame the pull request
+  for standing still and every action queued against it fails a second later.
+  """
+  def agent_attention(%{agent_run: nil}, _now), do: nil
+
+  def agent_attention(%{agent_run: run}, now) do
+    case AgentHealth.assess(run, now) do
+      %{status: :attention} = health -> health
+      _healthy -> nil
+    end
+  end
+
+  def agent_attention(_item, _now), do: nil
+
   def repair_action(%{publication: nil}), do: nil
 
   def repair_action(%{publication: publication}) do
@@ -221,6 +409,17 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def retrospective_action(%{publication: publication}) do
     Enum.find(ActionCatalog.pull_request_actions(publication), &(&1.key == "pr_retrospective"))
   end
+
+  @doc """
+  True when this pull request's own retrospective asked for follow-up work.
+
+  The implementation agent adds the label when its retrospective lists untracked
+  work, so the badge is GitHub's answer rather than PtcManager's guess.
+  """
+  def follow_up_suggested?(%{publication: %PrPublication{} = publication}),
+    do: PrPublication.follow_up_suggested?(publication)
+
+  def follow_up_suggested?(_item), do: false
 
   def active_agent_action?(%{state: state}) when state in ["queued", "running", "sync_pending"],
     do: true
@@ -299,80 +498,6 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   def queue_feedback(_item), do: nil
 
-  def retrospective_suggestions(%{state: "done", result_summary: body})
-      when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body),
-         suggestions when is_list(suggestions) <- result["suggestions"] do
-      Enum.with_index(suggestions)
-    else
-      _result -> []
-    end
-  end
-
-  def retrospective_suggestions(_action), do: []
-
-  def retrospective_summary(%{state: "done", result_summary: body}) when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body),
-         summary when is_binary(summary) <- result["private_summary"] do
-      summary
-    else
-      _result -> nil
-    end
-  end
-
-  def retrospective_summary(_action), do: nil
-
-  def suggestion_action(item, source_action_id, suggestion_index) do
-    Enum.find(item.pr_retrospective_issue_actions, fn action ->
-      action.target_snapshot["source_action_id"] == source_action_id and
-        action.target_snapshot["suggestion_index"] == suggestion_index
-    end)
-  end
-
-  def suggestion_action_active?(%{state: state})
-      when state in ["queued", "running", "sync_pending"],
-      do: true
-
-  def suggestion_action_active?(_action), do: false
-
-  def suggestion_action_label(%{state: "queued"}), do: "Issue queued"
-  def suggestion_action_label(%{state: "running"}), do: "Creating issue"
-  def suggestion_action_label(%{state: "sync_pending"}), do: "Checking GitHub"
-  def suggestion_action_label(%{state: "failed"}), do: "Try again"
-  def suggestion_action_label(_action), do: "Add as GitHub issue"
-
-  def created_issue_number(%{state: "done", result_summary: body}) when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body),
-         [number] <- result["created_issue_numbers"],
-         true <- is_integer(number) do
-      number
-    else
-      _result -> nil
-    end
-  end
-
-  def created_issue_number(_action), do: nil
-
-  def suggestion_not_created?(%{state: "done", result_summary: body}) when is_binary(body) do
-    with {:ok, result} <- Jason.decode(body) do
-      result["outcome"] == "no-followups"
-    else
-      _result -> false
-    end
-  end
-
-  def suggestion_not_created?(_action), do: false
-
-  def issue_url(item, issue_number) do
-    "https://github.com/#{item.issue.repository.github_owner}/#{item.issue.repository.github_name}/issues/#{issue_number}"
-  end
-
-  def category_label(category) when is_binary(category) do
-    category |> String.replace("-", " ") |> String.capitalize()
-  end
-
-  def category_label(_category), do: "Follow-up"
-
   def health_badges(item) do
     publication = item.publication
 
@@ -436,6 +561,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
       work_state(item) == "sync_pending" ->
         "The repair finished; PtcManager is verifying the new PR head against GitHub."
+
+      health = agent_attention(item, DateTime.utc_now()) ->
+        health.detail
+
+      DeliveryLane.unreconciled?(item) ->
+        "PtcManager checked the agent's branch and could not take it. Read the agent's " <>
+          "Herdr session before discarding the worktree: a session parked at a prompt " <>
+          "nobody answered leaves its work uncommitted and still reports as finished."
 
       match?(%{publication: %{mergeability: "conflicting"}}, item) ->
         "Merge conflicts must be resolved by the implementation agent."
@@ -516,7 +649,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     lanes =
       @lane_definitions
       |> Map.new(&{&1.key, []})
-      |> Map.merge(Enum.group_by(items, &lane_for/1))
+      |> Map.merge(Enum.group_by(items, &DeliveryLane.lane_for/1))
 
     assign(socket, lanes: lanes, item_count: length(items))
   end
@@ -536,35 +669,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  defp lane_for(item) do
-    cond do
-      job_state(item) == "queued" -> :queued
-      stuck?(item) -> :stuck
-      ready?(item) -> :ready
-      true -> :working
-    end
-  end
-
-  defp stuck?(item) do
-    job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
-      match?(%{checks_state: "failure"}, item.publication) or
-      match?(%{mergeability: "conflicting"}, item.publication) or
-      match?(
-        %{draft: false, checks_state: checks_state, mergeability: "blocked"}
-        when checks_state in ["success", "none"],
-        item.publication
-      )
-  end
-
-  defp ready?(item) do
-    open_pull_request?(item) and
-      match?(%{state: "published", pr_state: "open", draft: false}, item.publication) and
-      item.publication.checks_state in ["success", "none"] and
-      item.publication.mergeability == "mergeable"
-  end
-
-  defp open_pull_request?(%{publication: %{state: "published", pr_state: "open"}}), do: true
-  defp open_pull_request?(_item), do: false
+  def lane_title(key), do: DeliveryLane.label(key)
 
   defp job_state(%{active_job: %{state: state}}), do: state
   defp job_state(_item), do: nil

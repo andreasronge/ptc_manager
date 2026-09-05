@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+# Adds or removes exactly one label on one GitHub issue as the worker account.
+# This is the single narrow exception to PtcManager's read-only GitHub client:
+# a maintainer pressed a button, and no agent is involved.
+
+repository=${1:-}
+number=${2:-}
+operation=${3:-}
+label=${4:-}
+
+case "$repository" in
+  *[!A-Za-z0-9_./-]*|*/*/*|/*|*/|"") echo "invalid GitHub repository" >&2; exit 64 ;;
+  */*) ;;
+  *) echo "invalid GitHub repository" >&2; exit 64 ;;
+esac
+
+case "$number" in
+  *[!0-9]*|"") echo "invalid issue number" >&2; exit 64 ;;
+esac
+
+case "$label" in
+  *[!A-Za-z0-9\ ._/:-]*|"") echo "invalid label" >&2; exit 64 ;;
+esac
+
+# GitHub matches label names case-insensitively, so the reserved-prefix check
+# must too; otherwise PTC:ready reaches the protected ptc:ready label.
+lowered=$(printf '%s' "$label" | /usr/bin/tr '[:upper:]' '[:lower:]')
+case "$lowered" in
+  ptc:*) echo "reserved label" >&2; exit 64 ;;
+esac
+
+if [ "${#label}" -gt 50 ]; then
+  echo "invalid label" >&2
+  exit 64
+fi
+
+case "$operation" in
+  add) flag=--add-label ;;
+  remove) flag=--remove-label ;;
+  *) echo "invalid operation" >&2; exit 64 ;;
+esac
+
+exec /usr/bin/gh issue edit "$number" --repo "$repository" "$flag" "$label" </dev/null

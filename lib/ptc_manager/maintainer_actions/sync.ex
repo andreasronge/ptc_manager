@@ -138,11 +138,32 @@ defmodule PtcManager.MaintainerActions.Sync do
     end
   end
 
+  # Where a repair ran decides what can be trusted afterwards. A retained session
+  # produced its commit in the worktree being inspected, so the range can be
+  # verified locally. A fresh worktree has no such history, so the only evidence
+  # is the head the agent pushed matching what GitHub reports.
   defp reconcile_repair_status(
          action,
-         %PrPublication{source: "external", job_id: nil} = publication,
+         publication,
+         %{state: "open"} = result,
+         {:postflight, execution_result} = postflight
+       ) do
+    if fresh_repair?(action, publication),
+      do: reconcile_fresh_repair(action, publication, result, execution_result),
+      else: reconcile_retained_repair(action, publication, result, postflight)
+  end
+
+  defp fresh_repair?(%{target_snapshot: %{"repair_mode" => mode}}, _publication),
+    do: mode == "fresh"
+
+  # Actions recorded before repair mode existed keep the behaviour they ran under.
+  defp fresh_repair?(_action, publication), do: PrPublication.external?(publication)
+
+  defp reconcile_fresh_repair(
+         action,
+         publication,
          %{state: "open", head_sha: head_sha} = result,
-         {:postflight, execution_result}
+         execution_result
        ) do
     intended_head = repair_intended_head(action)
 
@@ -191,7 +212,7 @@ defmodule PtcManager.MaintainerActions.Sync do
     end
   end
 
-  defp reconcile_repair_status(
+  defp reconcile_retained_repair(
          action,
          publication,
          %{state: "open", head_sha: head_sha} = result,
@@ -221,7 +242,7 @@ defmodule PtcManager.MaintainerActions.Sync do
     end
   end
 
-  defp reconcile_repair_status(
+  defp reconcile_retained_repair(
          action,
          publication,
          %{state: "open", head_sha: head_sha} = result,

@@ -3,7 +3,8 @@ defmodule PtcManager.DeploymentsTest do
 
   alias PtcManager.Deployments
   alias PtcManager.Deployments.Deployment
-  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent}
+  alias PtcManager.Operations
+  alias PtcManager.Operations.{AgentAction, AgentRun, AuditEvent, Job}
   alias PtcManager.Repository.GitProbe
   alias PtcManager.{OperationalMode, Repo}
 
@@ -129,6 +130,38 @@ defmodule PtcManager.DeploymentsTest do
     assert started.requested_sha == deployment.requested_sha
     assert contract.deployment_command == "./scripts/ptc/deploy"
     assert Repo.get!(Deployment, deployment.id).state == "running"
+  end
+
+  # PtcManager drains until drain_blockers/0 is empty and only then hands the
+  # deployment to the host runner, whose own guard reads the same database. A run
+  # one guard counts and the other does not refuses every deployment the instant
+  # it is handed over, which is how a retained agent parked on a prompt for an
+  # open pull request blocked every deployment while PtcManager saw nothing.
+  test "the host deploy guard counts exactly the runs that hold the drain" do
+    repository = deployable_repository()
+    worker = worker_fixture()
+
+    assert host_active_run_count() == 0
+    assert Deployments.drain_blockers() == []
+
+    agent_run!(worker, %{state: "working", agent_name: "impl_j7_f1"})
+    agent_run!(worker, %{state: "blocked", agent_name: "impl_j25_f1"})
+    agent_run!(worker, %{state: "unknown", agent_action_id: action!(repository, "done").id})
+
+    guarded_action = action!(repository, "running")
+    agent_run!(worker, %{state: "blocked", agent_action_id: guarded_action.id})
+
+    driving_job = driving_job!(repository)
+    agent_run!(worker, %{state: "blocked", job_id: driving_job.id, fencing_token: 1})
+
+    assert host_active_run_count() == length(Deployments.drain_blockers())
+    assert host_active_run_count() == 3
+
+    driving_job |> Job.changeset(%{state: "pr_open"}) |> Repo.update!()
+    guarded_action |> AgentAction.changeset(%{state: "done", ended_at: now()}) |> Repo.update!()
+
+    assert host_active_run_count() == length(Deployments.drain_blockers())
+    assert host_active_run_count() == 1
   end
 
   test "a waiting deployment fails as soon as the default branch moves on" do
@@ -405,6 +438,56 @@ defmodule PtcManager.DeploymentsTest do
     git!(path, ["commit", "-m", "add deployment contract"])
 
     repository_fixture(%{github_owner: owner, github_name: name, local_path: path, enabled: true})
+  end
+
+  # The deployment prepares a checkout and grants it to both services from this
+  # query, so a repository the maintainer has added but not yet enabled has to
+  # appear in it: that is exactly the state onboarding leaves them in.
+  test "the host repository query names every configured repository, enabled or not" do
+    enabled = repository_fixture(%{github_owner: "acme", github_name: "one", enabled: true})
+    disabled = repository_fixture(%{github_owner: "acme", github_name: "two", enabled: false})
+
+    for {repository, path} <- [{enabled, "/srv/one"}, {disabled, "/srv/two"}] do
+      repository |> Ecto.Changeset.change(local_path: path) |> Repo.update!()
+    end
+
+    repository_fixture(%{github_owner: "acme", github_name: "three"})
+
+    assert host_configured_repositories() == ["acme|one|/srv/one", "acme|two|/srv/two"]
+  end
+
+  defp host_configured_repositories do
+    sql =
+      Path.expand("../../deploy/ptc-manager-configured-repositories.sql", __DIR__)
+      |> File.read!()
+
+    %{rows: rows} = Repo.query!(sql)
+    Enum.map(rows, fn [value] -> value end)
+  end
+
+  defp host_active_run_count do
+    sql =
+      Path.expand("../../deploy/ptc-manager-active-managed-runs.sql", __DIR__)
+      |> File.read!()
+
+    %{rows: [[count]]} = Repo.query!(sql)
+    count
+  end
+
+  defp driving_job!(repository) do
+    issue = issue_fixture(repository, %{title: "Drive one job"})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
+
+    job
+    |> Job.changeset(%{
+      state: "working",
+      started_at: now(),
+      branch_name: "ptc-manager/issue-job-#{job.id}",
+      fencing_token: 1,
+      publication_source: "agent"
+    })
+    |> Repo.update!()
   end
 
   defp agent_run!(worker, attrs) do

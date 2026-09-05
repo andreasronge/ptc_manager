@@ -180,6 +180,18 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       refute has_element?(view, "#metric-cpu")
       refute has_element?(view, "#work-queue")
 
+      # A blocked agent keeps a live heartbeat while its pull request stands
+      # still, so the tab has to say a person is the thing it waits on.
+      assert has_element?(
+               view,
+               "#attention-run-#{context.stalled_run.id}",
+               "Waiting for a person"
+             )
+
+      assert has_element?(view, "#agents-needing-attention", "impl_j")
+      assert has_element?(view, "#timeline-run-#{context.stalled_run.id}", "Waiting for a person")
+      assert has_element?(view, "#timeline-run-#{context.run.id}", "Working")
+
       view |> element("#timeline-filters a[data-filter=failed]") |> render_click()
       assert_patch(view, ~p"/operations/agents?state=failed")
       assert has_element?(view, "#timeline-run-#{context.failed_run.id}")
@@ -456,6 +468,19 @@ defmodule PtcManagerWeb.OperationsLiveTest do
         ended_at: DateTime.add(now, -3_000, :second)
       })
 
+    {:ok, stalled_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "blocked",
+        agent_name: "impl_j#{job.id}_f1",
+        fencing_token: 1,
+        started_at: DateTime.add(now, -100_000, :second),
+        state_changed_at: DateTime.add(now, -100_000, :second),
+        last_heartbeat_at: now
+      })
+
     {:ok, maintenance_run} =
       Operations.create_agent_run(%{
         worker_id: worker.id,
@@ -483,6 +508,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       run: run,
       planning_run: planning_run,
       failed_run: failed_run,
+      stalled_run: stalled_run,
       maintenance_run: maintenance_run,
       queued_job: queued_job,
       resource_operation: resource_operation,

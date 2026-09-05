@@ -9,12 +9,14 @@ authority. The product principles are in [PLAN.md](PLAN.md).
 
 The console has six views:
 
-- **Planning** — the issue backlog with private summaries, the canonical
-  `ptc:ready`, `ptc:blocked`, and `ptc:needs-decision` labels, `Blocked by
-  #<number>` dependencies, and the contextual issue actions;
+- **Planning** — the issue backlog grouped by what you can do next, with
+  private summaries, the canonical `ptc:ready`, `ptc:blocked`, and
+  `ptc:needs-decision` labels, `Blocked by #<number>` dependencies, your own
+  triage labels, and the contextual issue actions;
 - **Delivery** — the approval-to-merge Kanban fed by read-only GitHub check,
-  status, draft, and mergeability signals, with **Fix** and **Fix and merge**
-  actions and an **Approve for merge** decision bound to the exact PR version;
+  status, draft, and mergeability signals, with **Fix**, **Fix and merge**, and
+  **Cancel agent** actions and an **Approve for merge** decision bound to the
+  exact PR version;
 - **Updates** — private daily briefings of merged pull requests and commits;
 - **Operations** — machine capacity, the agent and expensive-command timeline,
   and bounded read-only terminal panels;
@@ -126,7 +128,10 @@ PTC_DEMO_MODE=true PTC_DATABASE_PATH=tmp/ptc_manager_demo.db PORT=4100 mix phx.s
 ```
 
 Open <http://localhost:4100>, sign in with `ptc-manager-dev`, and check
-Planning, Delivery, and Operations. No GitHub, Herdr, or LLM credentials are
+Planning, Delivery, and Operations. The demo seed fills every Planning group, so
+the groups, the collapsed cards, the two ages, the external-author badge, the
+triage-label chips, and one suggested follow-up are all visible without GitHub.
+Label writes are deliberately refused in demo mode. No GitHub, Herdr, or LLM credentials are
 used, even if effectful PtcManager variables exist in your shell. To restore
 the exact starting state, stop the demo Phoenix server, run the reset command
 again, and then restart it. The reset also refuses to continue when `lsof`
@@ -134,7 +139,8 @@ reports that another process still has the demo database open.
 
 The authenticated routes are:
 
-- `/` — Planning backlog and maintainer actions;
+- `/` — Planning backlog and maintainer actions. See
+  [The Planning page](#the-planning-page);
 - `/board` — active delivery Kanban;
 - `/updates` — easy-to-read daily briefings of merged pull requests and dated direct commits;
 - `/operations` — three tabs. **Now** shows live CPU, memory, build-disk and
@@ -155,7 +161,12 @@ The authenticated routes are:
   run history, versions, and cross-repository copying. `/automations/new`
   creates a paused custom automation with a key derived from its name;
 - `/configuration` — safe registration and health checks for dedicated repository
-  checkouts, with direct links to each repository's prompt and automation settings.
+  checkouts, your own triage labels and write-only encrypted implementation-agent
+  variables per repository, the **Integrations** section describing what GitHub
+  synchronization, publication, private analysis, and the dispatcher currently
+  reach, and direct links to each repository's prompt and automation settings.
+  Repository variables are sourced from protected per-pane files after setup
+  completes; they are never supplied to bootstrap or maintainer-action agents.
 
 To choose a different local password:
 
@@ -351,6 +362,109 @@ same file-based structured-result protocol as other generic actions. Its result
 is stored only as a private PtcManager proposal; it cannot update GitHub. Queued,
 running, failed, and completed investigations remain visible in Operations.
 
+### The Planning page
+
+Planning groups the open backlog by what the maintainer can do next, instead of
+by GitHub's update time. The groups, in order, are **Ready to start**, **Needs
+your decision**, **Suggested follow-ups**, **Not prepared**, **Blocked**, **In
+delivery**, **Waiting**, and **Stale**. An empty group is not drawn. In
+delivery, Waiting, and Stale start collapsed; every other group starts open.
+Both the group and the card state live in the page's own memory, so a GitHub
+poll or an agent heartbeat cannot close what you just opened.
+
+A card is compact until you press **Expand**: repository and number, title, the
+badge row, the two ages, and one primary action. The primary action is the
+approve form in Ready to start and Not prepared, the first contextual action in
+Needs your decision, Blocked, Waiting, and Stale, and a link to the Delivery
+board — carrying that pull request's lane — in In delivery.
+
+Ages read "opened 12 d ago · updated 3 h ago", with the absolute UTC time in the
+tooltip. **Updated** means any GitHub activity on the issue, including changes
+PtcManager's own agents made.
+
+An issue counts as **In delivery** when PtcManager started it, when its managed
+pull request is open, or when an imported open pull request lists its number as
+a closing reference. A pull request you opened by hand therefore takes its issue
+out of the decision queue exactly as an agent-created one does.
+
+**Stale** means no GitHub activity for 30 days, and only replaces Blocked or Not
+prepared. A stale but ready issue stays in Ready to start, because it can still
+be started with one click.
+
+**Fix directly** starts implementation without a preparation round. Every
+deterministic gate still applies — the issue must be open, unclaimed, projected,
+free of a conflicting or blocking workflow label, and free of unresolved
+dependencies — and only the two proposal checks are skipped. The click is the
+approval, and it freezes the same review count as **Approve and start**. An
+ambiguous issue then ends in the Delivery board's **Needs attention** lane like
+any other job; use **Prepare issue** first when you are not sure the issue says
+what it wants.
+
+Each card shows who opened the issue only when that is somebody else: an
+**External · @login** badge appears when GitHub's issue author differs from the
+account behind `GITHUB_READ_TOKEN`. Nothing is shown until a synchronization has
+recorded that identity, which the Configuration page reports per repository.
+Follow-up issues PtcManager creates are opened through the worker's own `gh`, so
+GitHub attributes them to the maintainer and they never carry the badge.
+
+#### Your own triage labels
+
+Each repository can configure a short list of GitHub labels with a role. A
+**badge** label is shown on the card. A **park** label additionally moves the
+issue into the **Waiting** group; it is a placement, never an approval gate, and
+an issue can still be approved while parked. Names starting with `ptc:` are
+refused, because those three labels are PtcManager's own display projection.
+Configure the list under **Configuration → Your triage labels**; the label must
+already exist in the GitHub repository, because PtcManager never creates one.
+
+Configured labels render on every Planning card as toggle chips: filled when
+GitHub reports the label, outlined when it does not. One click adds or removes
+it. This is the single narrow exception to PtcManager's read-only GitHub client:
+a root-owned wrapper runs `gh issue edit` as the worker with exactly one
+repository, issue number, operation, and label, on a button press, with no agent
+and no new credential. A host without that wrapper reports that it cannot write
+labels and changes nothing.
+
+Writing a label moves GitHub's `updated_at`, which is part of the issue content
+digest, so the latest analysis goes stale and **Approve and start** disappears —
+exactly as it would after a comment. PtcManager deliberately does not paper over
+that: a comment posted in the same second is indistinguishable from the label
+write, and treating the analysis as current would let implementation start on a
+question nobody had read. Run **Prepare issue** again, or use **Fix directly**,
+which needs no analysis.
+
+Label names are matched case-insensitively everywhere, as GitHub matches them —
+in this configuration list, in the chips, in the parked-group check, in the
+wrapper, and when synchronization recognizes the three `ptc:` workflow labels.
+`PTC:ready` is refused as a triage label for the same reason `ptc:ready` is: it
+would reach the same GitHub label, and the workflow labels must keep coming only
+from synchronization.
+
+#### Suggested follow-ups
+
+The implementation prompt asks every pull-request description for a
+`## Retrospective` section, and asks the agent to add the label `ptc:follow-up`
+to its own pull request when that section lists untracked follow-up work.
+
+That label has to exist in the repository already, like every other `ptc:`
+label; `gh` fails against one that does not, and no pull request ever reaches
+this group. Creating them is step 2 of
+[onboarding a repository](#generic-automations-and-additional-repositories).
+
+A labelled pull request appears in the **Suggested follow-ups** group, before
+and after merge, with two buttons: **Run retrospective** queues a read-only
+agent that proposes concrete follow-ups, and **Dismiss** removes the card
+without touching GitHub. Each proposed follow-up then has its own **Add as GitHub issue** button;
+nothing reaches GitHub without that second, explicit click. A card leaves the
+group when it is dismissed or when a retrospective reports that there is nothing
+to follow up.
+
+Nothing runs a retrospective automatically. The Delivery board shows the same
+**Follow-ups suggested** badge and offers the retrospective in every lane for a
+labelled pull request. The signal exists only while implementation agents
+publish their own pull requests: in broker mode the agent has no GitHub access
+and cannot set the label.
+
 Pressing any maintainer-action button stores that prompt in the durable queue and authorizes one
 agent to use the configured checkout and authenticated `gh` CLI. The initial
 catalog contains:
@@ -366,6 +480,25 @@ catalog contains:
   option or enter a custom answer; a queued agent then records that decision on
   GitHub and normally moves the issue to `ptc:ready`. Choices are tied to the
   exact synchronized issue version, so an edit requires a fresh analysis;
+- **Abandon**, on a Delivery board card whose job is stuck in a phase
+  PtcManager owns — checking a committed branch, verifying it, or a blocked
+  publication with no pull request yet. **Cancel agent** deliberately refuses
+  those, because there is no agent to cancel; without this the card could repeat
+  the same failure forever.
+  An agent that committed nothing, for example, leaves `:no_commits` and the
+  check can never pass. The card shows that reason in PtcManager's own words,
+  takes two clicks to abandon, keeps the worktree for attention, and refuses
+  while a verifier still holds a live claim, once a pull request exists, or
+  while the agent's remote state is merely unknown — **Cancel agent** closes the
+  pane in that case, which abandoning would not;
+- **Cancel agent**, on the Delivery board's **In progress** and **Needs
+  attention** cards and next to a running agent on Operations. It ends one
+  implementation agent the maintainer no longer wants to wait for: the job ends
+  as cancelled, its run ends, its Herdr pane is closed, and its partial worktree
+  is kept for attention rather than discarded. It takes two clicks and refuses
+  the deterministic phases that follow an agent — reconciliation, verification,
+  and publication — because PtcManager, not an agent, owns those. If the pane
+  cannot be closed, the console says so and the job stays cancelled;
 - **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr
@@ -375,6 +508,76 @@ catalog contains:
   retains the session until the PR is merged or closed. Imported PRs can still
   be reviewed and repaired, but do not receive a generated implementation
   retrospective because PtcManager did not start their agent.
+
+### When an agent cannot finish
+
+Nothing watches a managed pane. An agent that asks a question there is asking
+nobody, and PtcManager never parses terminal output, so the question is
+invisible by design. Every agent is therefore told, in the runtime context it
+cannot edit away, that its session is unattended and that if it cannot start —
+or discovers part-way that it cannot continue — it must write a **stop report**
+and exit rather than wait.
+
+The report is a small JSON file validated against
+`priv/codex/agent_stop_report.schema.json`: a `reason_code`, one plain sentence,
+a detail paragraph, optionally the exact `prerequisite` that is missing, and
+whether anything was committed. It is data. It records a reason and never causes
+a state transition by itself.
+
+When one arrives, the attempt ends the way every unfinished attempt does: the
+job ends, its run ends, and the partial worktree is kept for attention. The
+heavy slot is released immediately, because an agent waiting on a person must
+not hold capacity other work needs. The card stays in the Delivery board's
+**Needs attention** lane, showing the agent's own explanation instead of a
+technical branch error, until you answer it with one of three buttons:
+
+- **Try again** queues a fresh attempt on the same approval, with the same
+  frozen prompt and review count. The decision to implement the issue has not
+  changed; only the environment did;
+- **Ask on the issue** queues **Report implementation blocker** with the stop
+  report as evidence, so the question is written onto GitHub and the issue comes
+  back through Planning's **Needs your decision** group and its existing
+  decision form;
+- **Stop** sets the card aside. The worktree stays on Operations until you
+  discard it.
+
+`reason_code` decides which of those PtcManager offers: a missing prerequisite
+or broken environment defaults to **Try again**, an ambiguous requirement to
+**Ask on the issue**, and an agent that judged something **unsafe** is offered
+neither. That last one is a refusal, not a default — the buttons are absent and
+the server refuses the action, because restarting the work and asking an agent
+to reword it are both ways of proceeding anyway. Only **Stop** remains, and you
+read the evidence.
+
+The report is written by a model, so it is treated as untrusted throughout.
+Recording one takes the same fencing token and result-attempt token as any other
+result write, so a stale verifier cannot overwrite a newer result or an
+already-published job. Reading one is bounded and deadlined, so an oversized or
+endless file cannot exhaust or stall the coordinator. **Ask on the issue**
+queues a dedicated **Report implementation blocker** action rather than ordinary
+issue preparation. That distinction matters: preparation's prompt tells the
+agent it may mark the issue ready or close it, and a check on the returned
+result would arrive after the agent had already used its `gh` session. The
+blocker action's own prompt permits only a comment and a blocked or
+needs-decision label, and the same set is persisted on the action and checked
+again on the result. The stop text reaches it as fenced JSON with its delimiter
+characters stripped, framed as a claim to verify.
+
+One limit is worth stating plainly: the report's file name carries a random
+per-attempt token, but that is defence in depth and not a capability. Every
+managed agent runs as the same worker identity and can list the shared results
+directory, so a hostile agent can still find and forge another job's report.
+That is the same deferred technical separation described above for the
+authenticated `gh` session, and per-agent OS identities are the only thing that
+would close it. What a forged report can do is bounded: end one attempt whose
+verifier currently holds it, preserve its worktree, and show text to a
+maintainer. It cannot approve, publish, merge, or write to GitHub.
+
+An agent that crashes or wedges writes no report, so the contract does not
+replace the timeouts. A run that sits `blocked` or `idle` past the grace period
+is reported as **Waiting for a person** on both the Delivery board and
+Operations, and an implementation job that stays idle past its deadline is
+released with its worktree preserved.
 
 Maintainer actions use two deliberately separate resource pools. Heavy delivery
 work is ordered **merge → repair → new implementation**, with oldest work first
@@ -428,7 +631,10 @@ the same SHA after the repository bootstrap succeeds. Concurrent build agents
 therefore cannot alter the pinned evidence. Both temporary trees are removed
 when the agent exits, while
 its provenance remains in the action record. A durable reaper retries cleanup
-after an interrupted or expired run. This makes a review's issue and code
+after an interrupted or expired run. Worktree reconciliation continues this
+cleanup while new agent actions are disabled or the system is draining. Codex
+review agents trust both the parent checkout and their disposable worktree so
+startup does not wait for an interactive trust decision. This makes a review's issue and code
 evidence reproducible even if `main` advances while other agents are merging
 work. In production the snapshot directory is owned by the coordinator beneath
 the sticky shared-output parent, so the worker can traverse and read it but
@@ -499,7 +705,13 @@ expression), a time, and a time zone, and shows its next three runs in that
 zone with the UTC equivalent. Issue and pull-request automations get contextual
 buttons on the Planning or Delivery surface instead. The agent kind selector
 offers the kinds reported by online workers and the configured agent profiles,
-marking profiles no online worker currently reports as offline. Built-in
+marking profiles no online worker currently reports as offline. Every
+automation starts the kind its selector resolves to with that profile's
+arguments, the implementation job and pull-request repairs included; a job
+records the kind when it is leased, and a job whose required kind has no
+enabled profile is cancelled with `no_healthy_agent_profile` instead of
+starting a different agent. `PTC_IMPLEMENTATION_AGENT_KIND` is only the kind
+tried first when an automation accepts any capable agent. Built-in
 triggers can be paused but not removed, because the bootstrap would recreate
 them. Custom automations run in a read-only snapshot of the default branch; a
 writable workspace that can open a pull request is a planned follow-up.
@@ -521,18 +733,68 @@ memory.
 
 To onboard another public or private repository:
 
-1. create a dedicated clone on the worker and authenticate the existing `gh`
-   CLI identity for it;
-2. commit a `.ptc-manager.yml` contract whose bootstrap command prepares that
-   repository; add broker verification only if PtcManager will publish for the agent;
+1. commit a `.ptc-manager.yml` contract to that repository whose bootstrap
+   command prepares it, and an `AGENTS.md` describing its own conventions; add
+   broker verification only if PtcManager will publish for the agent;
+2. create the four `ptc:` labels on GitHub. PtcManager never creates a label, and
+   `gh` fails against one that does not exist, so a missing label makes the agent
+   step that writes it fail:
+
+   ```sh
+   repo='<owner>/<name>'
+   gh label create 'ptc:ready' --repo "$repo" --color 0E8A16 \
+     --description 'Maintainer decision is resolved and the issue is ready for implementation'
+   gh label create 'ptc:blocked' --repo "$repo" --color B60205 \
+     --description 'Implementation is blocked by an unresolved dependency or external condition'
+   gh label create 'ptc:needs-decision' --repo "$repo" --color D93F0B \
+     --description 'A specific maintainer decision is required before implementation'
+   gh label create 'ptc:follow-up' --repo "$repo" --color 5319E7 \
+     --description 'The pull-request retrospective lists untracked follow-up work'
+   ```
+
+   The first three are what **Prepare issue** and **Review issue** leave on an
+   issue; the fourth is how an implementation agent marks its own pull request as
+   having left work behind. Any triage label configured under **Your triage
+   labels** has to exist on GitHub for the same reason. Configuration health
+   names whichever are still missing, so this can be done after registering the
+   repository and checked before enabling it;
 3. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
    GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
    and creates the repository disabled;
-4. verify checkout, GitHub, and gate health, then review or copy the desired
+4. press **Prepare checkouts** on Configuration, or deploy. Either clones any
+   configured checkout that does not exist yet, gives it to the worker identity,
+   and regenerates the drop-in that grants every configured checkout to both
+   services; the button does it without building a release;
+5. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
-5. enable only the definitions and schedules that repository needs, then test a
-   read-only action before approving implementation work.
+6. enable the repository on **Configuration**, then enable only the definitions
+   and schedules it needs and test a read-only action before approving
+   implementation work.
+
+A repository is registered disabled so its checkout, contract, and access can be
+verified before anything reaches it. Synchronization covers enabled repositories
+only, so its GitHub check stays unsynchronized until that step; access itself was
+already proven when the repository was added. Enabling and disabling are recorded
+in the audit trail and change nothing on GitHub, in the checkout, or in work
+already in flight.
+
+PtcManager cannot prepare a checkout itself. The coordinator runs with
+`ProtectSystem=strict`, so `/srv` is read-only inside its mount namespace even
+for root, and a new path only enters a namespace when the service restarts.
+The deployment runs outside that namespace and already restarts the coordinator,
+so it is the one place that can do this; onboarding is therefore add, deploy,
+enable rather than a hand-run clone and a hand-edited unit.
+
+A grant only enters a service's mount namespace when that service starts. The
+deployment restarts the coordinator anyway, and it restarts `ptc_manager-herdr`
+too when PtcManager records no live agent run and Herdr reports no live agent:
+that restart ends every retained session, so it is taken only when there is
+nothing to end. While a session is held the deployment says so and leaves the
+service alone, and the **Prepare checkouts** button never restarts anything,
+because nothing is drained around it. Each repository's **service access**
+health names what is outstanding: a grant that is missing, a grant loaded but
+waiting for a service to start, or access already in force.
 
 The Configuration page displays the derived checkout path. A repository can be
 removed there after explicit confirmation, but only when all managed jobs,
@@ -662,8 +924,10 @@ uploads a Git archive rather than uncommitted files, and builds the production
 release on the server with its mise-managed
 Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
 checks both managed runs and the manual and worker Herdr sessions. Non-idle
-agents make deployment stop safely; idle Herdr sessions continue running and
-are not restarted. Immediately before the release swap, the task stops the
+agents make deployment stop safely, and a retained agent session keeps
+`ptc_manager-herdr` running even when it is idle. When no run and no agent is
+retained there is nothing to lose, so the deployment restarts it, which is also
+the moment a pinned Herdr takes effect. Immediately before the release swap, the task stops the
 coordinator and checks the database again so no new managed work can race the
 deployment. The new release always starts in maintenance mode: the web UI and
 `/health` remain readable, while pollers, button-triggered mutations, agents,
@@ -750,6 +1014,8 @@ sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 /var/lib/ptc_man
 sudo install -d -o ptc-manager -g ptc-manager-publish -m 2750 /var/lib/ptc_manager-publish
 sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2750 /srv/ptc_manager-worktrees
 sudo install -d -o ptc-manager-external -g ptc-manager-external -m 2770 /srv/ptc_manager-external
+# The two bootstrap checkouts; every repository added later is prepared by the
+# deployment instead.
 sudo chown -R ptc-manager-worker:ptc-manager-repo /srv/ptc_runner /srv/ptc_manager
 sudo chmod -R g-w,g+rX,o-rwx /srv/ptc_runner /srv/ptc_manager
 sudo find /srv/ptc_runner /srv/ptc_manager -type d -exec chmod g+s {} +
@@ -763,9 +1029,12 @@ sudo install -o root -g root -m 0600 deploy/ptc_manager-herdr.env.example /etc/p
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-git /usr/local/bin/ptc-manager-worker-git
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-bootstrap /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-claude-trust /usr/local/bin/ptc-manager-worker-claude-trust
+sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-codex-arm /usr/local/bin/ptc-manager-worker-codex-arm
+sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-gh-label /usr/local/bin/ptc-manager-worker-gh-label
 sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
+sudo install -o root -g root -m 0755 deploy/ptc-manager-health-snapshot /usr/local/bin/ptc-manager-health-snapshot
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0644 deploy/ptc-manager-agent-context /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-git /usr/local/bin/ptc-manager-external-git
@@ -783,6 +1052,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ptc_manager-herdr ptc_manager
 sudo systemctl status ptc_manager
 ```
+
+`ptc-manager-health-snapshot` runs as root, on demand or from a timer, and
+writes `/var/lib/ptc_manager-output/ptc-health.json`: capacity settings, live
+agent runs, agent actions, resource operations, jobs, and the service journal
+filtered down to its error lines. That file is group-readable by
+`ptc-manager-output`, so a managed agent inspects the console's own runtime
+without holding any privilege itself, which is what lets a repository
+automation look for disagreements between what a record claims and what it is
+doing. The script refuses to run when it cannot read the database or the
+journal, because a snapshot whose sections are all empty reads exactly like a
+healthy console.
 
 The coordinator, implementation worker, external-PR repairer, and Git verifier
 run as separate OS identities. Herdr, implementation agents, and the initial
@@ -822,9 +1102,93 @@ ssh -t herdr-box sudo -u ptc-manager-worker -H claude auth login
 ssh -t herdr-box sudo -u ptc-manager-worker -H env NO_OPEN_BROWSER=1 cursor-agent login
 ```
 
-The deployment links `claude` from the worker Node directory and copies the
-pinned Cursor CLI from `/home/agent/.local/share/cursor-agent/versions/` into
-`/opt/ptc-manager-cursor-agent/` so both are on the worker's service `PATH`.
+Every program the deployment installs on the machine is pinned in
+`deploy/toolchain-versions`, and that file is the only place one of their
+versions is written. The asset build tools, esbuild and Tailwind, are the
+exception: `config/config.exs` pins them the way Phoenix does and the release
+build installs them, so they match a commit too, just not in this file. The
+deployment installs
+exactly what it names into a root-owned `/opt/ptc-manager-<program>-<version>`
+directory, checks the version it actually got, and links the entry point onto
+the worker's service `PATH`. Codex and Claude Code are installed from their npm
+packages with the pinned Node, and Codex is linked to the native binary its
+platform package carries rather than to the Node shim in front of it. Node, npm,
+corepack, pnpm, Erlang, and Elixir come through mise, and the worker's own mise
+is itself a pinned download rather than a copy of whatever the deploying user
+has. An agent therefore cannot rewrite the CLI it runs, and updating any of them
+is a change to `deploy/toolchain-versions` and a deployment, never a command run
+on the host, so the running program always matches a commit.
+
+A version a program reports is that program's own claim, so every download that
+does not come from npm carries a pinned sha256 that is checked before anything
+is unpacked or installed: the Cursor CLI archive, the Herdr release asset named
+by `https://herdr.dev/latest.json`, and the mise release binary. Herdr and mise
+are single files, so the deployment re-checks the digest of what stands at the
+pinned path on every run rather than trusting the run that installed it. The
+pre-publication gate pins its build tools the same way: Hex by version, and
+Rebar by the sha512 of the script Hex's CDN serves, hashed after installation
+because `mix local.rebar` accepts a mismatched `--sha512` once `--force` is
+given.
+
+Herdr is the one program that does not take effect at once. A client whose
+protocol does not match the running server breaks the coordinator's view of
+every agent, so the deployment installs the pinned build but moves
+`/usr/local/bin/herdr` only where it already restarts `ptc_manager-herdr`
+because nothing is retained. Until that restart happens the pinned build sits
+installed beside the running one. The interactive client in the `agent` account
+belongs to the person rather than to the deployment, which reports when it has
+drifted instead of replacing it.
+
+The Deployments page reads link targets and never runs the programs it reports
+on. To ask the machine what its agent CLIs actually are, run
+
+```sh
+mix ptc.agents
+mix ptc.agents --target another-host
+```
+
+which prints, for each agent CLI, the version this release pins beside the
+version the program reports when `ptc-manager-worker` runs it, and whether that
+identity is still signed in — a linked binary matching the manifest can be
+signed out, and a signed-out agent stalls on its login prompt rather than
+failing. It also prints the live agent and live run counts that decide whether
+the next deployment may move Herdr's link, and the repository variables an
+implementation agent is given, by name. The report is read-only and pipes its
+probe over SSH rather than installing it, so it needs no deployment of its own
+and always runs the revision checked out locally.
+
+PtcManager refuses to start a pane with an agent kind whose worker identity is
+signed out, rather than letting the CLI print its login prompt and wait for
+nobody until the run times out. The check runs immediately before the pane, in
+the same place the workspace trust and the Codex policy are recorded, so an
+implementation job and a maintainer action refuse alike; the wrapper answers in
+its exit status and its output is never parsed. Sign the identity back in with
+the commands above, as `ptc-manager-worker`. The Herdr server also runs its
+panes with `DISABLE_AUTOUPDATER=1`, because Claude Code updates itself by
+default and the root-owned tree it is installed into exists precisely so an
+agent cannot rewrite the CLI it runs: the attempt can only fail, and versions
+come from the manifest.
+
+What pinning ends is drift, not the deploying account. A deployment runs as the
+`agent` user with passwordless `sudo`, so everything on this machine is
+downstream of that account: the toolchain trees mise installed before the
+deployment used a pinned mise of its own keep whatever provenance that account
+gave them, and they are recreated only when their pinned version changes. The
+pins say which version runs and prove each download against a digest; they do
+not make the machine safe from the person deploying to it.
+
+The Deployments page reports, for each program, the version this release pins
+beside the version `/usr/local/bin` links, so something installed by hand is
+visible without logging in to the machine. It reads link targets rather than
+running any of these programs, and it never changes them: the fix for drift is a
+commit and a deployment, which the same page offers.
+
+pnpm earns its place for repositories that use it: it links a worktree's
+`node_modules` into a shared content-addressed store instead of copying a tree
+into each one, which is the only way a package cache can be shared while no
+agent writes into another's workspace. The store lives in the worker's home,
+which is on the same filesystem as the worktree root, so the links are hard
+links rather than copies.
 
 Each agent kind has its own way past interactive start-up questions. Codex
 receives a per-process `-c projects=...` trust override, the Cursor CLI takes
@@ -840,6 +1204,32 @@ Managed Codex agents trust their repository checkout and worktree through a
 per-process configuration override, so no checkout needs a persistent trust
 entry in the worker's Codex configuration and no agent waits on Codex's
 interactive trust question.
+
+Approval and sandbox policy cannot stay per-process. A Herdr server restart
+restores an agent's pane by running `codex resume <session-id>` with no
+arguments, which drops the `--dangerously-bypass-approvals-and-sandbox` that
+PtcManager passes at `herdr agent start`. The resumed agent then stops at an
+approval prompt that no maintainer is watching for, and every action on its
+pull request fails until someone answers it by hand. Before starting a Codex
+agent the coordinator therefore records the same policy in the worker's
+`~/.codex/config.toml` through the root-owned `ptc-manager-worker-codex-arm`
+helper, inside a delimited managed block:
+
+```toml
+# BEGIN ptc-manager managed agent policy
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+# END ptc-manager managed agent policy
+```
+
+Codex honours these keys only at the top level, so the block sits above every
+table and the helper refuses to run when the file already sets either key
+outside it. Arming is idempotent, and
+`sudo -u ptc-manager-worker /usr/local/bin/ptc-manager-worker-codex-arm disarm`
+removes the block again. The worker account runs managed agents only and
+already receives the same arguments on every start, so the recorded policy
+widens nothing that was previously narrower; it only stops a resumed agent
+from being less capable than the one it replaces.
 
 Each checkout persisted as a repository's `local_path` is owned and writable
 only by the worker. Both services run with `ProtectSystem=strict`, so every
@@ -870,7 +1260,9 @@ that no longer exists inside a healthy worktree root, or that a credential-free
 Git check proves clean with no commit beyond the default branch, is removed
 automatically because nothing can be lost. Every other retained worktree waits
 until the maintainer chooses **Discard worktree** on the dashboard, which
-force-removes it and records who discarded it.
+force-removes it and records who discarded it. Cancelling a running agent uses
+the same path: its worktree is retained for attention so the partial work can be
+inspected before it is discarded.
 The separate `ptc-manager-publish` group lets only the coordinator and Git verifier
 exchange a bounded Git bundle; the worker cannot access publication staging.
 The coordinator and generic Herdr agents exchange task, schema, and result files
@@ -911,11 +1303,23 @@ limit plus five seconds for the outer command to return its result; the generic
 timeout must not cut that longer startup wait short. Default-branch refreshes
 use the worker Git identity and fail closed after `PTC_SOURCE_REFRESH_TIMEOUT_MS`
 (60 seconds by default), so a stalled remote cannot hold a dispatch poller
-indefinitely. Codex implementation agents
-default to the current unattended CLI flag
-`--dangerously-bypass-approvals-and-sandbox`; override
-`PTC_IMPLEMENTATION_AGENT_ARGS` only when the installed agent CLI requires a
-different supported mode. After
+indefinitely. Every agent starts with
+the arguments of its profile in `PTC_AGENT_PROFILES_JSON`; without that
+setting the only profile is `PTC_IMPLEMENTATION_AGENT_KIND` started with
+`PTC_IMPLEMENTATION_AGENT_ARGS`, which default to Codex and its current
+unattended CLI flag `--dangerously-bypass-approvals-and-sandbox`. Override the
+arguments only when the installed agent CLI requires a different supported
+mode.
+
+A profile also names the model that kind runs, as `"model"` alongside its
+`"args"`. Left unset each kind takes its default from
+`PtcManager.AgentProfiles` — Codex `gpt-5.6-sol`, Claude `opus`, Cursor
+`cursor-grok-4.6-high` — because an agent given no model reaches for the
+strongest one its account offers, which is more than routine maintenance work
+needs. The model is passed as `--model` at startup, and for Codex it is also
+recorded in the worker's `config.toml`, since Herdr restores a pane with
+`codex resume` and no arguments. A profile that already passes `--model` in
+its own arguments keeps that choice. After
 `PTC_HERDR_STALE_AFTER_MS` without a successful snapshot, standalone agents are
 shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After
@@ -943,8 +1347,31 @@ managed PR is open, its named Herdr session and worktree move to a
 passive `waiting` state: they remain available for CI repairs or review feedback
 without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
-Deployments may proceed while agents are only `waiting`; the deploy guard still
-stops for queued, starting, working, blocked, or unknown runs.
+Deployments may proceed while agents are only `waiting`. A deployment waits for
+every run the coordinator is driving, and for a blocked or unknown run only
+while its agent action or its job is still in flight: a retained agent sitting
+on a prompt for an open pull request holds nothing, because restarting
+PtcManager never touches Herdr agents. The host runner reads the same database
+before it installs anything, through the identical rule kept in
+`deploy/ptc-manager-active-managed-runs.sql`; a run one guard counts and the
+other does not would refuse every deployment the instant it is handed over.
+A deployment the host guard does refuse finishes seconds after it is requested,
+so the Deployments page reports the last outcome, its exact instant, and the
+host's own reason beside the button that asked for it rather than only in the
+history below.
+
+Every run also carries a derived health, because a Herdr snapshot refreshes each
+agent every few seconds: a live heartbeat proves only that the pane still
+exists. An agent parked at a question nobody is watching for keeps that
+heartbeat while its pull request stops moving. PtcManager therefore records when
+a run last changed state and judges health from the state it holds and how long
+it has held it. A run blocked past `PTC_AGENT_BLOCKED_ATTENTION_MS` (ten minutes
+by default), or silent past `PTC_AGENT_SILENT_ATTENTION_MS`, or ended as failed,
+lost, or unknown, needs a person. Operations lists those under **Needs a
+person** on the Agents tab and badges every run card, and the delivery board
+names the stalled agent on the pull request it holds instead of blaming the pull
+request for standing still. The health is derived on read from the run
+PtcManager already reconciled, so no stored copy can disagree with Herdr.
 When GitHub reports the PR merged or closed, the job becomes terminal and the
 cleanup worker removes the Herdr worktree and session idempotently. This final
 cleanup is authorized to discard a dirty checkout because GitHub has already
@@ -960,6 +1387,22 @@ also authorizes that same agent to watch and repair CI until green and merge onl
 that exact PR. PtcManager keeps the action durable, reserves repository priority,
 records the Herdr identity for read-only output, and independently confirms the
 GitHub result before releasing the repository and cleaning the worktree.
+
+A managed pull request is normally repaired by resuming its retained
+implementation session. When Herdr no longer reports that session, the repair
+still runs: preflight falls back to the way an imported pull request is always
+repaired, in a fresh worktree at the exact head GitHub reports. Preflight
+decides once and freezes the answer as `repair_mode` in the action's target
+snapshot, so the adapter that runs and the postflight that judges the result
+cannot disagree about which evidence applies.
+
+The two modes carry different evidence. A retained session produced its commit
+in the worktree being inspected, so PtcManager verifies the commit range,
+ancestry, and cleanliness locally before recording a repaired status. A fresh
+worktree has no local history worth trusting, so the only evidence is the head
+that agent pushed matching what GitHub reports — the same guarantee imported
+pull requests have always had, including for an authorized merge, which still
+waits for GitHub itself to report the pull request merged.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

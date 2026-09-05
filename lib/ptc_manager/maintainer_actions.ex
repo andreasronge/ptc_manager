@@ -14,12 +14,28 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Manager
   alias PtcManager.MergeDecisions
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AgentAction, Issue, PrPublication, Repository}
+  alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication, Repository}
+  alias PtcManager.Operations.StopReport
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
   alias PtcManager.Repository.SourceSnapshot
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Automations
+
+  # Actions that operate on one GitHub issue through the worker's `gh` session.
+  # Each needs the same treatment: a fresh synchronization and an open-issue
+  # check before it starts, a read-only source snapshot to work from, that
+  # snapshot released afterwards, and a decision digest recorded when it returns
+  # a question. Keeping one list is what stops a new action getting three of the
+  # four.
+  @issue_maintenance_action_keys ~w(
+    prepare_issue
+    report_issue_blocker
+    review_issue
+    resolve_issue_decision
+  )
+
+  @snapshot_action_keys ["daily_digest" | @issue_maintenance_action_keys]
 
   @max_daily_digest_prompt_bytes 100_000
   @terminal_daily_digest_evidence_errors ~w(
@@ -31,6 +47,14 @@ defmodule PtcManager.MaintainerActions do
     unexpected_github_commit_date
     invalid_github_head_sha
   )a
+
+  @doc """
+  The evidence errors a daily digest does not retry.
+
+  Anything absent from this list is deferred and asked again, so a transient
+  answer from GitHub must stay out of it.
+  """
+  def terminal_daily_digest_evidence_errors, do: @terminal_daily_digest_evidence_errors
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
@@ -50,6 +74,7 @@ defmodule PtcManager.MaintainerActions do
   def enqueue(action_key, publication_id, actor)
       when action_key in [
              "prepare_merge_decision",
+             "pr_retrospective",
              "repair_pr",
              "repair_and_merge_pr"
            ] and
@@ -63,7 +88,7 @@ defmodule PtcManager.MaintainerActions do
                  :repository,
                  job: [:issue, :repository, :worktree_allocation]
                ]),
-             repository when not is_nil(repository) <- publication_repository(publication),
+             repository when not is_nil(repository) <- PrPublication.repository(publication),
              {:ok, attrs} <-
                Catalog.build(action_key, %{
                  publication: publication,
@@ -84,6 +109,49 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  @doc """
+  Puts a stopped implementation's blocker onto its GitHub issue for a decision.
+
+  The agent could not resolve something and no one was watching to answer it.
+  This queues a dedicated action whose own prompt permits only a comment and a
+  blocked or needs-decision label, so the issue returns through Planning's
+  existing decision flow. It deliberately does not reuse issue preparation:
+  that prompt tells the agent it may mark the issue ready or close it, and by
+  the time a result could be rejected the agent has already used its `gh`
+  session. A restriction that arrives after the write is not a restriction.
+  """
+  def enqueue_blocked_issue_review(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    job = Job |> Repo.get(job_id) |> Repo.preload([:issue, :repository])
+
+    with %Job{stop_report: report, stop_acknowledged_at: nil} when is_map(report) <- job,
+         true <- StopReport.allows?(report, :ask_on_issue) do
+      # Acknowledging and queueing must not be able to half-happen: a queued
+      # GitHub-writing action beside an unanswered card would let the same
+      # blocker be sent twice.
+      RepoTransaction.immediate(fn ->
+        with {:ok, _job} <- Operations.acknowledge_job_stop(job_id, actor),
+             {:ok, attrs} <-
+               Catalog.build("report_issue_blocker", %{
+                 issue: job.issue,
+                 repository: job.repository,
+                 blocker: report
+               }),
+             {:ok, action} <-
+               enqueue_versioned(job.repository, "report_issue_blocker", attrs, actor) do
+          action
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+    else
+      nil -> {:error, :not_found}
+      %Job{} -> {:error, :job_not_stopped}
+      false -> {:error, :recovery_not_offered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   def enqueue_issue_decision(issue_id, source_action_id, choice, custom_answer, actor)
       when is_integer(issue_id) and is_integer(source_action_id) and is_binary(choice) and
@@ -185,10 +253,7 @@ defmodule PtcManager.MaintainerActions do
     resource_class = Keyword.get(opts, :resource_class, :any)
     Operations.expire_agent_action_attempts()
 
-    if lane in [:planning, :any] do
-      reap_planning_worktrees()
-      reap_investigation_worktree()
-    end
+    if lane in [:planning, :any], do: reap_planning_worktrees()
 
     case Operations.next_agent_action_sync_pending_for_lane(lane) do
       nil -> execute_next(adapter, sync, lane, resource_class)
@@ -206,7 +271,7 @@ defmodule PtcManager.MaintainerActions do
         {:ok, :empty}
 
       candidate ->
-        case prepare_and_claim(candidate, sync) do
+        case prepare_and_claim(candidate, adapter, sync) do
           {:ok, {action, token}} -> execute_claimed(adapter, sync, action, token)
           {:skip, :no_longer_queued} -> {:ok, :empty}
           {:deferred, action} -> {:ok, action}
@@ -216,7 +281,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_and_claim(candidate, sync) do
+  defp prepare_and_claim(candidate, adapter, sync) do
     lock_id = {{__MODULE__, :agent_action_preflight, candidate.id}, self()}
 
     case :global.trans(lock_id, fn ->
@@ -229,7 +294,7 @@ defmodule PtcManager.MaintainerActions do
              end
 
            if match?(%AgentAction{state: "queued"}, current) do
-             with {:ok, prepared} <- prepare_for_execution(current, sync),
+             with {:ok, prepared} <- prepare_for_execution(current, adapter, sync),
                   {:ok, {_action, _token}} = claimed <-
                     Operations.claim_agent_action(prepared.id) do
                claimed
@@ -277,7 +342,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+  defp prepare_for_execution(%{action_key: action_key} = action, _adapter, sync)
        when action_key in ["pr_retrospective", "create_retrospective_issue"] do
     case call_sync(sync, action) do
       {:ok, _summary} ->
@@ -299,7 +364,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "resolve_issue_decision"} = action, sync) do
+  defp prepare_for_execution(%{action_key: "resolve_issue_decision"} = action, _adapter, sync) do
     case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
@@ -323,8 +388,8 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: action_key} = action, sync)
-       when action_key in ["private_issue_analysis", "prepare_issue", "review_issue"] do
+  defp prepare_for_execution(%{action_key: action_key} = action, _adapter, sync)
+       when action_key in ["private_issue_analysis" | @issue_maintenance_action_keys] do
     case call_sync(sync, action) do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
@@ -345,7 +410,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "daily_digest"} = action, _sync) do
+  defp prepare_for_execution(%{action_key: "daily_digest"} = action, _adapter, _sync) do
     case DailyDigests.get_digest(action.target_id) do
       %{agent_action_id: action_id, published_at: nil} = digest when action_id == action.id ->
         prepare_daily_digest_source_snapshot(action, digest)
@@ -366,6 +431,7 @@ defmodule PtcManager.MaintainerActions do
            target_type: "repository",
            automation_definition_version: %{execution_profile: "generic_ephemeral"}
          } = action,
+         _adapter,
          sync
        ) do
     case call_sync(sync, action) do
@@ -375,7 +441,7 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, sync) do
+  defp prepare_for_execution(%{action_key: "prepare_merge_decision"} = action, _adapter, sync) do
     publication = Repo.get!(PrPublication, action.target_id)
 
     if PrPublication.external?(publication) do
@@ -406,18 +472,20 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(%{action_key: action_key} = action, sync)
+  defp prepare_for_execution(%{action_key: action_key} = action, adapter, sync)
        when action_key in ["repair_pr", "repair_and_merge_pr"] do
     case call_sync(sync, action) do
       {:ok, %{pull_request: status}} ->
         if action_key == "repair_and_merge_pr" or repair_needed?(status) do
+          mode = repair_mode(adapter, action)
+
           with {:ok, prepared} <-
                  Operations.record_agent_action_target_snapshot(
                    action.id,
-                   MergeDecisions.snapshot(status),
+                   status |> MergeDecisions.snapshot() |> Map.put("repair_mode", mode),
                    action.prompt
                  ) do
-            case reserve_repair_worktree(action) do
+            case reserve_repair_worktree(prepared, mode) do
               {:ok, _allocation} ->
                 {:ok, prepared}
 
@@ -448,7 +516,43 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
-  defp prepare_for_execution(action, _sync), do: {:ok, action}
+  defp prepare_for_execution(action, _adapter, _sync), do: {:ok, action}
+
+  @doc false
+  # A managed pull request is repaired by resuming its retained implementation
+  # session. When that session is gone the repair still has to be possible, so it
+  # runs the way an imported pull request always has: a fresh worktree at the
+  # exact head GitHub reports. Preflight decides once and records the answer, so
+  # the adapter that runs and the postflight that judges the result cannot
+  # disagree about which evidence applies.
+  defp repair_mode(adapter, action) do
+    publication = Repo.get!(PrPublication, action.target_id)
+
+    cond do
+      PrPublication.external?(publication) -> "fresh"
+      retained_session_available?(adapter, action) -> "retained"
+      true -> "fresh"
+    end
+  end
+
+  defp retained_session_available?(adapter, action),
+    do: ensure_adapter_ready(adapter, action) == :ok
+
+  defp ensure_adapter_ready(adapter, action) do
+    if ready_check_supported?(adapter),
+      do: Gateway.call(adapter, :ensure_ready, [action]),
+      else: :ok
+  end
+
+  # A stateful scenario adapter receives itself as the first argument, exactly
+  # as PtcManager.Gateway calls it, so its readiness callback is one arity wider.
+  defp ready_check_supported?(adapter) when is_atom(adapter),
+    do: Code.ensure_loaded?(adapter) and function_exported?(adapter, :ensure_ready, 1)
+
+  defp ready_check_supported?(%module{}),
+    do: Code.ensure_loaded?(module) and function_exported?(module, :ensure_ready, 2)
+
+  defp ready_check_supported?(_adapter), do: false
 
   defp prepare_repository_source_snapshot(action) do
     source_snapshot =
@@ -647,12 +751,7 @@ defmodule PtcManager.MaintainerActions do
   defp release_planning_source_snapshot(
          %AgentAction{action_key: action_key, repository: repository} = action
        )
-       when action_key in [
-              "daily_digest",
-              "prepare_issue",
-              "review_issue",
-              "resolve_issue_decision"
-            ] or action.target_type == "repository" do
+       when action_key in @snapshot_action_keys or action.target_type == "repository" do
     source_snapshot =
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
@@ -690,12 +789,7 @@ defmodule PtcManager.MaintainerActions do
     |> where(
       [action],
       (action.target_type == "repository" or
-         action.action_key in [
-           "daily_digest",
-           "prepare_issue",
-           "review_issue",
-           "resolve_issue_decision"
-         ]) and
+         action.action_key in ^@snapshot_action_keys) and
         action.state in ["sync_pending", "done", "failed"]
     )
     |> where(
@@ -715,23 +809,6 @@ defmodule PtcManager.MaintainerActions do
     |> preload(:repository)
     |> Repo.all()
     |> Enum.each(&release_planning_source_snapshot/1)
-  end
-
-  defp reap_investigation_worktree do
-    adapter =
-      Application.get_env(
-        :ptc_manager,
-        :investigation_workspace_adapter,
-        HerdrAdapter
-      )
-
-    case PtcManager.InvestigationWorkspaces.cleanup_terminal_once(adapter) do
-      {:ok, _result} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Investigation workspace cleanup deferred: #{inspect(reason)}")
-    end
   end
 
   defp repair_needed?(status) do
@@ -768,26 +845,20 @@ defmodule PtcManager.MaintainerActions do
 
   defp settle_repair_result(_action, result, _summary), do: result
 
-  defp reserve_repair_worktree(action) do
+  defp reserve_repair_worktree(action, "retained") do
+    publication = Repo.get!(PrPublication, action.target_id)
+    Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+  end
+
+  # A fresh repair takes no reservation: the adapter creates its own worktree, so
+  # only the root it will be created under has to be sound.
+  defp reserve_repair_worktree(action, "fresh") do
     publication = PrPublication |> Repo.get!(action.target_id) |> Repo.preload(:repository)
 
-    if PrPublication.external?(publication),
-      do: preflight_external_repair_worktree(publication),
-      else: Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
-  end
-
-  defp preflight_external_repair_worktree(publication) do
     with :ok <- HerdrAdapter.validate_pull_request_worktree_root(publication.repository) do
-      {:ok, :external_workspace_created_by_adapter}
+      {:ok, :workspace_created_by_adapter}
     end
   end
-
-  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
-
-  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
-    do: repository
-
-  defp publication_repository(_publication), do: nil
 
   defp fail_preflight(action_id, reason) do
     case Operations.fail_agent_action_preflight(action_id, reason) do
@@ -885,7 +956,7 @@ defmodule PtcManager.MaintainerActions do
          {:ok, result},
          _summary
        )
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+       when action_key in @issue_maintenance_action_keys do
     issue = Repo.get!(Issue, issue_id)
 
     analysis = %{
@@ -1026,7 +1097,7 @@ defmodule PtcManager.MaintainerActions do
     do: {:error, :issue_decision_not_current}
 
   defp record_decision_source(action_id, action_key, issue, %{"outcome" => "needs-decision"})
-       when action_key in ["prepare_issue", "review_issue", "resolve_issue_decision"] do
+       when action_key in @issue_maintenance_action_keys do
     case Operations.record_agent_action_decision_digest(action_id, issue.content_digest) do
       {:ok, _action} -> :ok
       {:error, reason} -> {:error, reason}

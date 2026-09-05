@@ -1,16 +1,21 @@
 defmodule PtcManagerWeb.DeploymentsLive do
   use PtcManagerWeb, :live_view
 
-  alias PtcManager.Deployments
+  alias PtcManager.{Deployments, Toolchain}
+  alias PtcManagerWeb.TimeFormat
 
   @impl true
   def mount(_params, session, socket) do
-    if connected?(socket), do: PtcManager.Operations.subscribe()
+    if connected?(socket) do
+      PtcManager.Operations.subscribe()
+      Process.send_after(self(), :deployment_tick, 30_000)
+    end
 
     {:ok,
      socket
      |> assign(:page_title, "Deployments")
      |> assign(:actor, session["actor"] || "maintainer")
+     |> assign(:now, DateTime.utc_now())
      |> assign(:revision_results, %{})
      |> load()}
   end
@@ -66,6 +71,11 @@ defmodule PtcManagerWeb.DeploymentsLive do
   @impl true
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, load(socket)}
 
+  def handle_info(:deployment_tick, socket) do
+    Process.send_after(self(), :deployment_tick, 30_000)
+    {:noreply, assign(socket, :now, DateTime.utc_now())}
+  end
+
   @impl true
   def handle_async({:latest_revision, repository_id}, {:ok, {:ok, sha}}, socket) do
     {:noreply,
@@ -96,6 +106,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
       socket
       |> assign(:repositories, repositories)
       |> assign(:recent_deployments, Deployments.list_recent())
+      |> assign(:toolchain, Toolchain.report())
       |> assign_statuses()
 
     if connected?(socket) do
@@ -129,6 +140,24 @@ defmodule PtcManagerWeb.DeploymentsLive do
     assign(socket, :deployment_statuses, statuses)
   end
 
+  @doc "An exact UTC instant, so a deployment can be matched against host logs."
+  def timestamp(nil), do: nil
+  def timestamp(at), do: Calendar.strftime(at, "%d %b %Y · %H:%M:%S UTC")
+
+  @doc "How long ago something happened, in the reader's own terms."
+  def since(now, at), do: TimeFormat.relative(now, at)
+
+  @doc """
+  How long the deployment took, or has been running.
+
+  A deployment that never started has no duration to report: the time between
+  requesting it and giving up is the wait, not the work.
+  """
+  def deployment_duration(_now, %{started_at: nil}), do: nil
+
+  def deployment_duration(now, %{started_at: started_at, finished_at: finished_at}),
+    do: TimeFormat.duration(now, started_at, finished_at)
+
   def short_sha(nil), do: "Unknown"
   def short_sha(sha), do: String.slice(sha, 0, 12)
 
@@ -140,6 +169,43 @@ defmodule PtcManagerWeb.DeploymentsLive do
   def state_label("failed"), do: "Failed"
   def state_label("cancelled"), do: "Cancelled"
   def state_label(state), do: state
+
+  def outcome_classes("completed"), do: "border-teal-400/20 bg-teal-400/[0.07] text-teal-100"
+
+  def outcome_classes(state) when state in ~w(failed cancelled),
+    do: "border-rose-400/25 bg-rose-400/[0.07] text-rose-100"
+
+  def outcome_classes(_state), do: "border-white/10 bg-white/[0.035] text-slate-200"
+
+  @doc """
+  What the machine links, compared with what this release pins.
+
+  Staged is not drift: Herdr is installed before its link moves, because only a
+  deployment that finds no agent session retained moves it.
+  """
+  def program_label(:matched), do: "Pinned version"
+  def program_label(:staged), do: "Installed, awaiting deployment"
+  def program_label(:drifted), do: "Not this release"
+  def program_label(:absent), do: "Not on this machine"
+
+  def program_classes(:matched), do: "bg-teal-400/15 text-teal-200"
+  def program_classes(:staged), do: "bg-amber-400/15 text-amber-200"
+  def program_classes(:drifted), do: "bg-rose-400/15 text-rose-200"
+  def program_classes(:absent), do: "bg-white/5 text-slate-500"
+
+  def toolchain_note(:matched),
+    do: "Each program below links the version this release pins."
+
+  def toolchain_note(:staged),
+    do:
+      "A pinned program is installed but not linked yet. A deployment is what moves Herdr's link, and only one that finds no agent session retained, so deploy again when none is rather than restarting the service by hand."
+
+  def toolchain_note(:drifted),
+    do:
+      "The machine links something this release does not pin, or nothing at all. Deploy this revision to put the pinned version in place, or pin what the machine has in deploy/toolchain-versions."
+
+  def toolchain_note(:absent),
+    do: "This machine links none of these programs, so there is nothing to compare."
 
   def state_classes(state) when state in ~w(completed), do: "bg-teal-400/15 text-teal-200"
   def state_classes(state) when state in ~w(failed cancelled), do: "bg-rose-400/15 text-rose-200"

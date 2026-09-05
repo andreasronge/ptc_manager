@@ -15,7 +15,7 @@ defmodule PtcManager.TestScenario do
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.GitHub.Sync, as: GitHubSync
   alias PtcManager.Herdr.Sync, as: HerdrSync
-  alias PtcManager.MaintainerActions.ExternalPrRepairAdapter
+  alias PtcManager.MaintainerActions.FreshWorktreeRepairAdapter
   alias PtcManager.Operations
   alias PtcManager.Operations.{Repository, Worker}
   alias PtcManager.OperationsFixtures
@@ -264,7 +264,7 @@ defmodule PtcManager.TestScenario do
   end
 
   def run(%__MODULE__{} = scenario, action) do
-    ExternalPrRepairAdapter.run(action, scenario)
+    FreshWorktreeRepairAdapter.run(action, scenario)
   end
 
   def run(%__MODULE__{} = scenario, command, args, options) do

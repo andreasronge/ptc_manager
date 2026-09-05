@@ -45,6 +45,27 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
 
   def run(%AgentAction{}), do: {:error, :unsupported_retained_herdr_action}
 
+  @doc """
+  Says whether the retained implementation session this repair resumes still exists.
+
+  Only a run Herdr still reports as waiting can be resumed. Answering before
+  preflight reserves the repair worktree keeps a pull request whose agent is
+  gone reporting the missing agent, rather than holding its worktree reserved
+  with no live attempt and stopping every later repair at preflight instead.
+  """
+  @impl true
+  def ensure_ready(%AgentAction{action_key: action_key, target_id: publication_id})
+      when action_key in ["repair_pr", "repair_and_merge_pr"] do
+    publication = PrPublication |> Repo.get(publication_id) |> Repo.preload(:job)
+
+    case publication && retained_run(publication.job) do
+      %AgentRun{} -> :ok
+      _missing -> {:error, :retained_herdr_agent_unavailable}
+    end
+  end
+
+  def ensure_ready(%AgentAction{}), do: :ok
+
   defp retained_run(job) do
     AgentRun
     |> where(

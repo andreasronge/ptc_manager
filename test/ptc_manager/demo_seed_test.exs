@@ -5,6 +5,7 @@ defmodule PtcManager.DemoSeedTest do
     AgentRun,
     Issue,
     Job,
+    PrPublication,
     Repository,
     ResourceOperation,
     WorktreeAllocation
@@ -29,12 +30,23 @@ defmodule PtcManager.DemoSeedTest do
     Code.eval_file("priv/repo/seeds.exs")
 
     assert Repo.aggregate(Repository, :count) == 1
-    assert Repo.aggregate(Issue, :count) == 3
+    assert Repo.aggregate(Issue, :count) == 8
     assert Repo.aggregate(AgentRun, :count) == 2
     assert Repo.aggregate(ResourceOperation, :count) == 6
     assert Repo.get_by!(ResourceOperation, state: "running").label == "test"
 
-    job = Repo.one!(Job)
+    # Every issue carries the ages, author, and labels Planning groups by.
+    assert Enum.all?(Repo.all(Issue), & &1.github_created_at)
+    assert Repo.get_by!(Issue, number: 1314).github_author_login == "an-outside-reporter"
+    assert Repo.get_by!(Issue, number: 1331).github_labels == %{"names" => ["wait", "ux"]}
+    assert Repo.one!(Repository).github_viewer_login == "andreasronge"
+
+    # One merged pull request the agent labelled as having unfinished business.
+    follow_up = Repo.get_by!(PrPublication, pr_number: 1_311)
+    assert follow_up.pr_state == "merged"
+    assert PrPublication.follow_up_suggested?(follow_up)
+
+    job = Repo.get_by!(Job, state: "working")
     repository = Repo.one!(Repository)
     allocation = Repo.one!(WorktreeAllocation)
 

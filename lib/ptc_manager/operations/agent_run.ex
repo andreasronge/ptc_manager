@@ -14,6 +14,7 @@ defmodule PtcManager.Operations.AgentRun do
     field :agent_name, :string
     field :started_at, :utc_datetime_usec
     field :last_heartbeat_at, :utc_datetime_usec
+    field :state_changed_at, :utc_datetime_usec
     field :ended_at, :utc_datetime_usec
     field :herdr_workspace, :string
     field :herdr_pane, :string
@@ -61,6 +62,7 @@ defmodule PtcManager.Operations.AgentRun do
       :agent_name,
       :started_at,
       :last_heartbeat_at,
+      :state_changed_at,
       :ended_at,
       :herdr_workspace,
       :herdr_pane,
@@ -111,8 +113,24 @@ defmodule PtcManager.Operations.AgentRun do
     )
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> unique_constraint([:job_id, :fencing_token], name: :agent_runs_one_per_job_attempt)
+    |> stamp_state_change()
     |> validate_terminal_time()
   end
+
+  # Every writer records when the run entered its current state, so a caller
+  # never has to remember to. A Herdr snapshot rewrites the same state every
+  # few seconds; only a real transition moves this stamp.
+  defp stamp_state_change(changeset) do
+    cond do
+      get_change(changeset, :state_changed_at) -> changeset
+      is_nil(get_field(changeset, :state_changed_at)) -> put_state_change(changeset)
+      get_change(changeset, :state) -> put_state_change(changeset)
+      true -> changeset
+    end
+  end
+
+  defp put_state_change(changeset),
+    do: put_change(changeset, :state_changed_at, DateTime.utc_now())
 
   defp validate_terminal_time(changeset) do
     state = get_field(changeset, :state)

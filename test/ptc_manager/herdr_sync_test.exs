@@ -11,7 +11,12 @@ defmodule PtcManager.HerdrSyncTest do
 
   defmodule FakeClient do
     @behaviour PtcManager.Herdr
+
+    @impl true
     def list_agents, do: Process.get(:herdr_result)
+
+    @impl true
+    def close_pane(_pane_id), do: :ok
   end
 
   defmodule PausedClient do
@@ -220,6 +225,127 @@ defmodule PtcManager.HerdrSyncTest do
     lost_run = Repo.get!(AgentRun, run.id)
     assert lost_run.state == "lost"
     assert lost_run.ended_at
+  end
+
+  # Every snapshot rewrites the same blocked state and refreshes the heartbeat,
+  # so an agent parked at a question nobody answers looks as fresh on its
+  # thirtieth hour as on its first. Only the moment the state last changed can
+  # tell them apart, and repeated snapshots must not move it.
+  test "a pane that outlives a cancelled agent cannot resurrect its run" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    worker =
+      worker_fixture(%{
+        worker_key: "herdr:cancelled",
+        capabilities: %{"herdr" => true, "implementation_slots" => 1}
+      })
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: "working",
+        fencing_token: 1,
+        lease_owner: worker.worker_key,
+        lease_expires_at: DateTime.add(now, 600, :second),
+        started_at: now,
+        branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+      })
+      |> Repo.update!()
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "working",
+        agent_name: "impl_j#{job.id}_f1",
+        started_at: now,
+        last_heartbeat_at: now,
+        herdr_workspace: "ptc-cancelled",
+        herdr_pane: "w9:p1",
+        herdr_session: "cancelled",
+        external_key: "cancelled:agent-cancel",
+        fencing_token: 1
+      })
+
+    previous = Application.get_env(:ptc_manager, :herdr_client)
+    Application.put_env(:ptc_manager, :herdr_client, FakeClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :herdr_client, previous) end)
+
+    assert {:ok, _cancelled} = Operations.cancel_running_job(job.id, "andreas")
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "impl_j#{job.id}_f1",
+           "agent_status" => "working",
+           "pane_id" => "w9:p1",
+           "workspace_id" => "ptc-cancelled",
+           "agent_session" => %{"value" => "agent-cancel"}
+         }
+       ]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "cancelled")
+
+    assert Repo.get!(AgentRun, run.id).state == "lost"
+    assert Repo.get!(Job, job.id).state == "cancelled"
+  end
+
+  test "records when a run entered its state and holds it across repeated snapshots" do
+    blocked = fn ->
+      {:ok,
+       [
+         %{
+           "agent" => "Codex manager",
+           "agent_status" => "blocked",
+           "pane_id" => "w1:p1",
+           "workspace_id" => "ptc-manager",
+           "agent_session" => %{"value" => "agent-blocked"}
+         }
+       ]}
+    end
+
+    Process.put(:herdr_result, blocked.())
+    assert {:ok, %{agent_count: 1}} = Sync.sync(client: FakeClient, session: "state-age")
+
+    run = Repo.one!(from run in AgentRun, where: run.external_key == "state-age:agent-blocked")
+    assert run.state == "blocked"
+    assert run.state_changed_at
+
+    Process.put(:herdr_result, blocked.())
+    assert {:ok, %{agent_count: 1}} = Sync.sync(client: FakeClient, session: "state-age")
+
+    unchanged = Repo.get!(AgentRun, run.id)
+    assert unchanged.state_changed_at == run.state_changed_at
+    assert DateTime.compare(unchanged.last_heartbeat_at, run.last_heartbeat_at) != :lt
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "Codex manager",
+           "agent_status" => "working",
+           "pane_id" => "w1:p1",
+           "workspace_id" => "ptc-manager",
+           "agent_session" => %{"value" => "agent-blocked"}
+         }
+       ]}
+    )
+
+    assert {:ok, %{agent_count: 1}} = Sync.sync(client: FakeClient, session: "state-age")
+
+    resumed = Repo.get!(AgentRun, run.id)
+    assert resumed.state == "working"
+    assert DateTime.compare(resumed.state_changed_at, run.state_changed_at) == :gt
   end
 
   test "binds the final Herdr session identity to its action run and hides startup duplicates" do

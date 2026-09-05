@@ -4,18 +4,24 @@ defmodule PtcManager.ManagedOperationContext do
   @max_age_seconds 7 * 24 * 60 * 60
   @pane_handshake_attempts 2
 
+  alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.Operations.AgentRun
   alias PtcManager.Repo
 
   def prepare_job(command, pane_id, job) do
-    prepare(command, pane_id, %{
-      owner_type: "job",
-      owner_id: job.id,
-      repository_id: job.repository_id,
-      worker_id: job.worktree_allocation.worker_id,
-      pane_id: pane_id,
-      fencing_token: job.fencing_token
-    })
+    prepare(
+      command,
+      pane_id,
+      %{
+        owner_type: "job",
+        owner_id: job.id,
+        repository_id: job.repository_id,
+        worker_id: job.worktree_allocation.worker_id,
+        pane_id: pane_id,
+        fencing_token: job.fencing_token
+      },
+      environment: AgentEnvironmentVariables.list(job.repository_id)
+    )
   end
 
   def prepare_action(command, pane_id, action) do
@@ -24,7 +30,11 @@ defmodule PtcManager.ManagedOperationContext do
 
   def rebind_action(pane_id, action) do
     if enabled?() do
-      issue(action_attrs(action, pane_id), path: pane_context_path(pane_id))
+      with {:ok, context} <-
+             issue(action_attrs(action, pane_id), path: pane_context_path(pane_id)),
+           {:ok, nil} <- write_environment(context.path, nil) do
+        {:ok, context}
+      end
     else
       {:ok, nil}
     end
@@ -85,7 +95,16 @@ defmodule PtcManager.ManagedOperationContext do
     end
   end
 
-  def shell_command(path, payload) do
+  def shell_command(path, payload, opts \\ []) do
+    environment_prefix =
+      case Keyword.get(opts, :environment) do
+        path when is_binary(path) ->
+          "set -a && . " <> shell_quote(path) <> " && set +a && "
+
+        nil ->
+          ""
+      end
+
     marker_command =
       "printf '\\n%s:%s\\n' " <>
         shell_quote("PTC_OPERATION_CONTEXT_READY") <>
@@ -93,7 +112,8 @@ defmodule PtcManager.ManagedOperationContext do
         shell_quote(payload["context_id"])
 
     if payload["cgroups"] do
-      ". " <>
+      environment_prefix <>
+        ". " <>
         shell_quote(agent_context_path()) <>
         " " <>
         Enum.map_join(
@@ -110,7 +130,8 @@ defmodule PtcManager.ManagedOperationContext do
         " && " <>
         marker_command
     else
-      "export PTC_MANAGED_OPERATION_CONTEXT=" <>
+      environment_prefix <>
+        "export PTC_MANAGED_OPERATION_CONTEXT=" <>
         shell_quote(path) <>
         " PTC_OPERATION_WRAPPER=" <>
         shell_quote(wrapper_path()) <>
@@ -128,8 +149,11 @@ defmodule PtcManager.ManagedOperationContext do
           path = Path.join(directory, name)
 
           case File.stat(path, time: :posix) do
-            {:ok, %{type: :regular, mtime: mtime}} when mtime < cutoff -> File.rm(path)
-            _other -> :ok
+            {:ok, %{type: :regular, mtime: mtime}} when mtime < cutoff ->
+              remove_context_pair(path)
+
+            _other ->
+              :ok
           end
         end)
 
@@ -149,7 +173,7 @@ defmodule PtcManager.ManagedOperationContext do
           with {:ok, body} <- File.read(path),
                {:ok, payload} when is_map(payload) <- Jason.decode(body),
                false <- active?.(payload) do
-            File.rm(path)
+            remove_context_pair(path)
           else
             _active_or_unreadable -> :ok
           end
@@ -162,23 +186,44 @@ defmodule PtcManager.ManagedOperationContext do
     :ok
   end
 
-  defp prepare(command, pane_id, attrs) do
+  defp prepare(command, pane_id, attrs, opts \\ []) do
     if enabled?() do
-      with {:ok, context} <- issue(attrs, path: pane_context_path(pane_id)),
-           {:ok, _output} <-
-             establish_pane_context(command, pane_id, context, @pane_handshake_attempts) do
-        {:ok, context}
+      case issue(attrs, path: pane_context_path(pane_id)) do
+        {:ok, context} ->
+          with {:ok, environment_path} <- write_environment(context.path, opts[:environment]),
+               {:ok, _output} <-
+                 establish_pane_context(
+                   command,
+                   pane_id,
+                   context,
+                   environment_path,
+                   @pane_handshake_attempts
+                 ) do
+            {:ok, context}
+          else
+            {:error, _reason} = error ->
+              remove_context_pair(context.path)
+              error
+          end
+
+        {:error, _reason} = error ->
+          error
       end
     else
       {:ok, nil}
     end
   end
 
-  defp establish_pane_context(command, pane_id, context, attempts_left) do
+  defp establish_pane_context(command, pane_id, context, environment_path, attempts_left) do
     marker = "PTC_OPERATION_CONTEXT_READY:#{context.payload["context_id"]}"
 
     with {:ok, _output} <-
-           command.run(["pane", "run", pane_id, shell_command(context.path, context.payload)]) do
+           command.run([
+             "pane",
+             "run",
+             pane_id,
+             shell_command(context.path, context.payload, environment: environment_path)
+           ]) do
       await_pane_context(command, pane_id, marker, attempts_left)
     end
   end
@@ -296,6 +341,37 @@ defmodule PtcManager.ManagedOperationContext do
         {:error, reason}
     end
   end
+
+  defp write_environment(context_path, nil) do
+    File.rm(environment_path(context_path))
+    {:ok, nil}
+  end
+
+  defp write_environment(context_path, variables) do
+    path = environment_path(context_path)
+
+    body =
+      Enum.map_join(variables, "", fn variable ->
+        variable.name <> "=" <> shell_quote(variable.value) <> "\n"
+      end)
+
+    case write_context(path, body) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, {:environment_file_write_failed, reason}}
+    end
+  end
+
+  defp remove_context_pair(path) do
+    File.rm(path)
+
+    if Path.extname(path) == ".json" do
+      File.rm(environment_path(path))
+    end
+
+    :ok
+  end
+
+  defp environment_path(context_path), do: Path.rootname(context_path, ".json") <> ".env"
 
   defp sign(payload) do
     encoded = payload |> Jason.encode!() |> Base.url_encode64(padding: false)

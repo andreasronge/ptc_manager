@@ -117,7 +117,7 @@ defmodule PtcManager.MergeDecisions do
       status.head_sha != publication.remote_head_sha ->
         {:error, :pull_request_head_changed}
 
-      not intended_base?(status, publication_repository(publication)) ->
+      not intended_base?(status, PrPublication.repository(publication)) ->
         {:error, :pull_request_base_changed}
 
       true ->
@@ -153,7 +153,7 @@ defmodule PtcManager.MergeDecisions do
       publication.diff_digest != analysis.diff_digest ->
         {:error, :merge_analysis_stale}
 
-      not intended_base?(status, publication_repository(publication)) ->
+      not intended_base?(status, PrPublication.repository(publication)) ->
         {:error, :pull_request_base_changed}
 
       true ->
@@ -190,11 +190,6 @@ defmodule PtcManager.MergeDecisions do
   end
 
   defp publication_open?(_publication), do: false
-
-  defp publication_repository(%PrPublication{repository: %{} = repository}), do: repository
-
-  defp publication_repository(%PrPublication{job: %{repository: %{} = repository}}),
-    do: repository
 
   defp normalize_status_result({:ok, status}), do: {:ok, status}
 

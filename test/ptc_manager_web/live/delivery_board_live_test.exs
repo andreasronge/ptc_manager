@@ -3,10 +3,19 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
   alias PtcManager.Operations
 
-  alias PtcManager.Operations.{AgentAction, Job, PrAnalysis, PrPublication}
+  alias PtcManager.Operations.{AgentAction, AgentRun, Job, PrAnalysis, PrPublication}
   alias PtcManager.Publications
   alias PtcManager.Repo
   alias PtcManager.TestScenario
+
+  defmodule ClosingHerdrClient do
+    def list_agents, do: {:ok, []}
+
+    def close_pane(pane_id) do
+      send(Application.fetch_env!(:ptc_manager, :board_cancel_test_pid), {:closed, pane_id})
+      :ok
+    end
+  end
 
   test "separates queued, working, and blocked deliveries", %{conn: conn} do
     queued = approved_job("Queue this change")
@@ -306,12 +315,349 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
              "queued"
   end
 
+  # A retained agent parked at a question keeps a live Herdr heartbeat, so the
+  # card used to blame the pull request for standing still while every action
+  # queued against it failed a second later.
+  test "names the stalled agent holding a pull request instead of blaming the PR", %{conn: conn} do
+    job = approved_job("Repair the conflicted pull request") |> set_job_state("pr_open")
+    publication = publication_fixture(job, "failure", "conflicting")
+    blocked_agent_run(job, "impl_j#{job.id}_f1")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#lane-stuck #board-job-#{job.id}"
+
+    assert has_element?(view, card, "Waiting for a person")
+    assert has_element?(view, "#agent-attention-board-job-#{job.id}", "impl_j#{job.id}_f1")
+    assert has_element?(view, card, "answer it in Herdr or cancel the agent")
+    assert has_element?(view, card, "fail until it can run again")
+    refute has_element?(view, card, "Merge conflicts must be resolved")
+
+    assert has_element?(view, "#repair-and-merge-pr-#{publication.id}", "Fix and merge")
+  end
+
+  test "cancels a running implementation agent in two deliberate steps", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :herdr_client)
+    Application.put_env(:ptc_manager, :board_cancel_test_pid, self())
+    Application.put_env(:ptc_manager, :herdr_client, ClosingHerdrClient)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :herdr_client, previous)
+      Application.delete_env(:ptc_manager, :board_cancel_test_pid)
+    end)
+
+    job = approved_job("Stop this agent") |> set_job_state("working")
+    run = blocked_agent_run(job, "impl_j#{job.id}_f1")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#cancel-agent-#{job.id}")
+    refute has_element?(view, "#confirm-cancel-agent-#{job.id}")
+
+    view |> element("#cancel-agent-#{job.id}") |> render_click()
+
+    assert has_element?(view, "#confirm-cancel-agent-#{job.id}", "Confirm cancel")
+    assert Repo.get!(Job, job.id).state == "working"
+
+    view |> element("#confirm-cancel-agent-#{job.id}") |> render_click()
+
+    assert_receive {:closed, "w1:p1"}
+    assert Repo.get!(Job, job.id).state == "cancelled"
+    assert Repo.get!(AgentRun, run.id).state == "lost"
+    refute has_element?(view, "#board-job-#{job.id}")
+  end
+
+  test "offers no cancel once PtcManager owns the remaining delivery steps", %{conn: conn} do
+    job = approved_job("Verify this change") |> set_job_state("verifying_result")
+    blocked_agent_run(job, "impl_j#{job.id}_f1")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{job.id}")
+    refute has_element?(view, "#cancel-agent-#{job.id}")
+  end
+
+  test "marks a pull request whose retrospective asked for follow-up work", %{conn: conn} do
+    job = approved_job("Shipped with loose ends") |> set_job_state("working")
+    publication = publication_fixture(job, "success", "mergeable")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    refute has_element?(view, "#follow-ups-suggested-board-job-#{job.id}")
+
+    publication
+    |> PrPublication.changeset(%{labels: %{"names" => ["ptc:follow-up"]}})
+    |> Repo.update!()
+
+    Operations.notify_changed(:test)
+
+    assert has_element?(
+             view,
+             "#follow-ups-suggested-board-job-#{job.id}",
+             "Follow-ups suggested"
+           )
+  end
+
+  test "a stopped agent explains itself and offers the right recovery first", %{conn: conn} do
+    stopped =
+      stop_job("Record a live session", %{
+        "reason_code" => "missing_prerequisite",
+        "summary" => "OPENROUTER_API_KEY is not set in this workspace.",
+        "detail" => "The recording step needs a live key and no env file was found.",
+        "prerequisite" => "OPENROUTER_API_KEY",
+        "progress" => "none"
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#lane-stuck #board-job-#{stopped.id}"
+    assert has_element?(view, card, "Agent stopped · Missing prerequisite")
+    assert has_element?(view, card, "OPENROUTER_API_KEY is not set")
+    assert has_element?(view, card, "committed nothing")
+    # The technical branch error must not replace the agent's own explanation.
+    refute has_element?(view, card, "The agent stopped before completing the task.")
+
+    # A missing prerequisite is a retry, so Try again is the filled button.
+    assert has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
+    refute has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
+
+    view |> element("#retry-stopped-#{stopped.id}") |> render_click()
+
+    assert render(view) =~ "Queued a fresh attempt"
+    retry = Repo.get_by!(Job, state: "queued", issue_id: stopped.issue_id)
+    assert retry.approval_id == stopped.approval_id
+    refute has_element?(view, "#board-job-#{stopped.id}")
+  end
+
+  test "an ambiguity is offered to the issue first, not retried", %{conn: conn} do
+    stopped =
+      stop_job("Decide the export shape", %{
+        "reason_code" => "ambiguous_requirement",
+        "summary" => "The issue does not say which export shape to use.",
+        "detail" => "Two incompatible readings, and no test distinguishes them.",
+        "progress" => "partial"
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Needs a decision")
+    assert has_element?(view, "#board-job-#{stopped.id}", "worktree is kept")
+    assert has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
+    refute has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
+
+    view |> element("#ask-on-issue-#{stopped.id}") |> render_click()
+
+    assert render(view) =~ "put the blocker on the GitHub issue"
+
+    # A dedicated action, not issue preparation: its own prompt permits only a
+    # comment and a blocked or needs-decision label, so the restriction binds
+    # before the agent touches GitHub rather than after.
+    queued = Repo.get_by!(AgentAction, action_key: "report_issue_blocker", state: "queued")
+    assert queued.target_id == stopped.issue_id
+    assert queued.prompt =~ "blocked_implementation"
+    assert queued.prompt =~ "The issue does not say which export shape to use."
+    assert queued.prompt =~ ~s(allowed_outcomes="blocked,needs-decision")
+    refute queued.prompt =~ "reject"
+    assert queued.target_snapshot == %{"allowed_outcomes" => ["blocked", "needs-decision"]}
+    refute Repo.get_by(AgentAction, action_key: "prepare_issue")
+    refute has_element?(view, "#board-job-#{stopped.id}")
+  end
+
+  test "an unsafe stop offers no filled recovery at all", %{conn: conn} do
+    stopped =
+      stop_job("Delete the archive", %{
+        "reason_code" => "unsafe_to_proceed",
+        "summary" => "The change would delete data with no backup path.",
+        "detail" => "The issue asks for a destructive migration with no rollback.",
+        "progress" => "none"
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Judged unsafe")
+    assert has_element?(view, "#board-job-#{stopped.id}", "Read the evidence before restarting")
+
+    # Not merely unfilled: neither recovery exists to be clicked at all.
+    refute has_element?(view, "#retry-stopped-#{stopped.id}")
+    refute has_element?(view, "#ask-on-issue-#{stopped.id}")
+
+    view |> element("#acknowledge-stop-#{stopped.id}") |> render_click()
+
+    assert render(view) =~ "Set aside"
+    refute has_element?(view, "#board-job-#{stopped.id}")
+  end
+
+  test "a job stuck in checking shows why and can be abandoned", %{conn: conn} do
+    job = approved_job("Record a live session") |> set_job_state("working")
+
+    stuck =
+      job
+      |> Job.changeset(%{state: "awaiting_reconciliation", last_error: ":no_commits"})
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#board-job-#{stuck.id}"
+
+    # A reconciliation that could not take the branch is not progress. Leaving
+    # the card in "In progress" is how a Codex session parked at an unanswered
+    # prompt stayed invisible for half an hour while its work sat uncommitted.
+    assert has_element?(view, "#lane-stuck #{card}")
+    refute has_element?(view, "#lane-working #{card}")
+
+    # The reason has to be on the card, not only in the database.
+    assert has_element?(view, "#phase-error-board-job-#{stuck.id}", ":no_commits")
+    assert render(view) =~ "Read the agent&#39;s Herdr session before discarding the worktree"
+
+    # There is no agent left to cancel, but there is a way out.
+    refute has_element?(view, "#cancel-agent-#{stuck.id}")
+    assert has_element?(view, "#abandon-job-#{stuck.id}", "Abandon")
+
+    view |> element("#abandon-job-#{stuck.id}") |> render_click()
+    assert has_element?(view, "#confirm-abandon-#{stuck.id}", "Confirm abandon")
+    assert Repo.get!(Job, stuck.id).state == "awaiting_reconciliation"
+
+    view |> element("#dismiss-abandon-#{stuck.id}") |> render_click()
+    assert has_element?(view, "#abandon-job-#{stuck.id}")
+
+    view |> element("#abandon-job-#{stuck.id}") |> render_click()
+    view |> element("#confirm-abandon-#{stuck.id}") |> render_click()
+
+    assert render(view) =~ "Abandoned."
+    assert Repo.get!(Job, stuck.id).state == "cancelled"
+    refute has_element?(view, card)
+  end
+
+  test "a job still reconciling without an error stays in progress", %{conn: conn} do
+    job = approved_job("Reconciling cleanly") |> set_job_state("working")
+
+    checking =
+      job
+      |> Job.changeset(%{state: "awaiting_reconciliation", last_error: nil})
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#board-job-#{checking.id}"
+
+    assert has_element?(view, "#lane-working #{card}")
+    refute has_element?(view, "#lane-stuck #{card}")
+  end
+
+  test "a blocked publication with no pull request can still be abandoned", %{conn: conn} do
+    job = approved_job("Blocked before publishing") |> set_job_state("working")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    head_sha = String.duplicate("b", 40)
+
+    blocked =
+      job
+      |> Job.changeset(%{
+        state: "publish_blocked",
+        last_error: ":github_app_not_configured",
+        result_base_sha: String.duplicate("a", 40),
+        result_head_sha: head_sha,
+        result_diff_digest: String.duplicate("c", 64),
+        result_commit_count: 1,
+        result_verified_at: now
+      })
+      |> Repo.update!()
+
+    # The ordinary shape of this state: a publication row exists, but nothing
+    # was ever published, so there is no pull request to orphan.
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      job_id: blocked.id,
+      state: "blocked",
+      idempotency_key: String.duplicate("8", 64),
+      fencing_token: blocked.fencing_token,
+      branch_name: "ptc-manager/issue-job-#{blocked.id}",
+      base_sha: String.duplicate("a", 40),
+      head_sha: head_sha,
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      last_error: ":github_app_not_configured"
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#abandon-job-#{blocked.id}", "Abandon")
+
+    view |> element("#abandon-job-#{blocked.id}") |> render_click()
+    view |> element("#confirm-abandon-#{blocked.id}") |> render_click()
+
+    assert render(view) =~ "Abandoned."
+    assert Repo.get!(Job, blocked.id).state == "cancelled"
+  end
+
+  test "a job whose verifier is still working offers no abandon", %{conn: conn} do
+    job = approved_job("Still being checked") |> set_job_state("working")
+
+    claimed =
+      job
+      |> Job.changeset(%{
+        state: "verifying_result",
+        result_attempt_token: "live-attempt",
+        result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 300, :second)
+      })
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    assert has_element?(view, "#board-job-#{claimed.id}")
+    refute has_element?(view, "#abandon-job-#{claimed.id}")
+  end
+
+  defp stop_job(title, report) do
+    job = approved_job(title) |> set_job_state("working")
+    {:ok, job} = Operations.issue_stop_report_token(job)
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: "verifying_result",
+        result_attempt_token: "attempt-#{System.unique_integer([:positive])}",
+        result_attempt_expires_at: DateTime.add(DateTime.utc_now(), 600, :second)
+      })
+      |> Repo.update!()
+
+    {:ok, stopped} =
+      Operations.record_job_stop_report(
+        job.id,
+        job.fencing_token,
+        job.result_attempt_token,
+        report
+      )
+
+    stopped
+  end
+
   defp approved_job(title) do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{title: title})
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
     job
+  end
+
+  defp blocked_agent_run(job, agent_name) do
+    worker = worker_fixture()
+    stalled = DateTime.add(DateTime.utc_now(), -3 * 3600, :second)
+
+    %AgentRun{}
+    |> AgentRun.changeset(%{
+      worker_id: worker.id,
+      job_id: job.id,
+      role: "implementer",
+      state: "blocked",
+      agent_name: agent_name,
+      herdr_pane: "w1:p1",
+      fencing_token: 1,
+      started_at: stalled,
+      last_heartbeat_at: DateTime.utc_now(),
+      state_changed_at: stalled
+    })
+    |> Repo.insert!()
   end
 
   defp set_job_state(job, state) do

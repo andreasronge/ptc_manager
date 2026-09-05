@@ -237,42 +237,62 @@ defmodule PtcManager.DailyDigests.Evidence do
     end
   end
 
+  defp normalize_pull_request(%{"merged_at" => nil}, _branch, _digest), do: {:ok, nil}
+
+  # The window decides first. The scan reads pages ordered by a mutable
+  # updated_at, so it sees pull requests merged long before this digest covers,
+  # and holding one of those to the evidence this digest needs failed the whole
+  # day over a row it was never going to report on.
   defp normalize_pull_request(
-         %{
-           "number" => number,
-           "merged_at" => merged_at,
-           "merge_commit_sha" => merge_commit_sha,
-           "base" => %{"ref" => branch}
-         } = pull,
+         %{"number" => number, "merged_at" => merged_at, "base" => %{"ref" => branch}} = pull,
          branch,
          digest
        )
        when is_integer(number) and number > 0 and is_binary(merged_at) do
-    with true <- valid_sha?(merge_commit_sha),
-         {:ok, merged_at_dt, _offset} <- DateTime.from_iso8601(merged_at) do
-      if in_window?(merged_at_dt, digest) do
-        {:ok,
-         %{
-           "number" => number,
-           "title" => bounded(pull["title"], 300),
-           "body" => bounded(pull["body"], 600),
-           "html_url" => pull["html_url"],
-           "merged_at" => merged_at,
-           "merge_commit_sha" => merge_commit_sha,
-           "base_ref" => branch
-         }}
-      else
-        {:ok, nil}
-      end
-    else
-      _invalid -> {:error, :unexpected_github_pull_request}
+    case DateTime.from_iso8601(merged_at) do
+      {:ok, merged_at_dt, _offset} ->
+        if in_window?(merged_at_dt, digest),
+          do: merged_pull_request(pull, number, merged_at, branch),
+          else: {:ok, nil}
+
+      _invalid ->
+        {:error, :unexpected_github_pull_request}
     end
   end
 
-  defp normalize_pull_request(%{"merged_at" => nil}, _branch, _digest), do: {:ok, nil}
-
   defp normalize_pull_request(_pull, _branch, _digest),
     do: {:error, :unexpected_github_pull_request}
+
+  # Inside the window the merge commit is evidence the digest cannot do without,
+  # so a pull request missing one still stops the scan. GitHub computes that sha
+  # after recording the merge, though, so a pull request merged as the scan
+  # started is briefly missing one and is worth asking about again; anything
+  # else in its place is malformed and asking again would not help.
+  defp merged_pull_request(pull, number, merged_at, branch) do
+    case Map.get(pull, "merge_commit_sha") do
+      sha when is_binary(sha) ->
+        if valid_sha?(sha) do
+          {:ok,
+           %{
+             "number" => number,
+             "title" => bounded(pull["title"], 300),
+             "body" => bounded(pull["body"], 600),
+             "html_url" => pull["html_url"],
+             "merged_at" => merged_at,
+             "merge_commit_sha" => sha,
+             "base_ref" => branch
+           }}
+        else
+          {:error, :unexpected_github_pull_request}
+        end
+
+      nil ->
+        {:error, :github_pull_request_merge_pending}
+
+      _invalid ->
+        {:error, :unexpected_github_pull_request}
+    end
+  end
 
   defp commits_in_window(items, digest) do
     Enum.reduce_while(items, {:ok, []}, fn item, {:ok, included} ->

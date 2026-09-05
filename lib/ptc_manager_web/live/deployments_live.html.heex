@@ -92,6 +92,12 @@
           <p class="mt-1 text-xs leading-5 text-amber-100/70">
             {status.active_deployment.status_text}
           </p>
+          <p class="mt-1 text-xs text-amber-100/50">
+            Requested {timestamp(status.active_deployment.requested_at)} · {since(
+              @now,
+              status.active_deployment.requested_at
+            )}
+          </p>
           <button
             :if={status.active_deployment.state in ~w(queued draining)}
             id={"cancel-deployment-#{status.active_deployment.id}"}
@@ -114,10 +120,95 @@
         >
           <.icon name="hero-rocket-launch-mini" class="size-4" /> Deploy when safe
         </button>
+        <div
+          :if={!status.active_deployment && status.last_deployment}
+          id={"last-deployment-#{status.repository.id}"}
+          class={[
+            "mt-4 rounded-xl border p-4",
+            outcome_classes(status.last_deployment.state)
+          ]}
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-sm font-semibold">
+              Last attempt · {state_label(status.last_deployment.state)}
+              <span class="font-mono text-xs opacity-70">
+                @ {short_sha(status.last_deployment.requested_sha)}
+              </span>
+            </p>
+            <p class="text-xs opacity-60">
+              {timestamp(
+                status.last_deployment.finished_at || status.last_deployment.requested_at
+              )} · {since(
+                @now,
+                status.last_deployment.finished_at || status.last_deployment.requested_at
+              )}
+            </p>
+          </div>
+          <p :if={status.last_deployment.status_text} class="mt-2 text-xs leading-5 opacity-80">
+            {status.last_deployment.status_text}
+          </p>
+          <p
+            :if={status.last_deployment.last_error}
+            class="mt-2 break-words font-mono text-xs opacity-90"
+          >
+            {status.last_deployment.last_error}
+          </p>
+        </div>
+
         <p :if={is_nil(status.deployed_sha)} class="mt-3 text-xs leading-5 text-amber-200/80">
           The current release predates revision markers. The first typed deployment will establish one.
         </p>
       </article>
+    </section>
+
+    <section id="machine-software">
+      <div class="mb-4">
+        <p class="text-xs font-semibold uppercase tracking-[0.2em] text-teal-300">Machine</p>
+        <h2 class="mt-1 text-2xl font-semibold">Machine software</h2>
+        <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+          Each program below is pinned in the deployed revision's <code class="text-slate-300">deploy/toolchain-versions</code>, and a deployment installs that version and links it onto the worker's <code class="text-slate-300">PATH</code>. Updating one is a change to that file and a deployment, never a command run on the host.
+        </p>
+        <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
+          {toolchain_note(Toolchain.summary(@toolchain))}
+        </p>
+      </div>
+      <div class="overflow-hidden rounded-2xl border border-white/10 bg-slate-900/70">
+        <div
+          :for={program <- @toolchain}
+          id={"program-#{program.key}"}
+          class="border-b border-white/5 px-5 py-3.5 last:border-0"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            <p class="font-semibold text-white">{program.name}</p>
+            <div class="flex flex-wrap items-center gap-5">
+              <div>
+                <p class="text-[0.65rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  Pinned
+                </p>
+                <p class="font-mono text-sm text-slate-200">{program.pinned}</p>
+              </div>
+              <div>
+                <p class="text-[0.65rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  Linked
+                </p>
+                <p class="font-mono text-sm text-slate-200">{program.linked || "—"}</p>
+              </div>
+              <span class={[
+                "rounded-full px-2.5 py-1 text-xs font-semibold",
+                program_classes(program.status)
+              ]}>
+                {program_label(program.status)}
+              </span>
+            </div>
+          </div>
+          <p
+            :if={program.status not in [:matched, :absent] and program.target}
+            class="mt-1.5 break-all font-mono text-xs text-slate-500"
+          >
+            Links {program.target}
+          </p>
+        </div>
+      </div>
     </section>
 
     <section id="deployment-history">
@@ -145,7 +236,21 @@
                   @ {short_sha(deployment.requested_sha)}
                 </span>
               </p>
-              <p class="mt-1 text-xs text-slate-500">Requested by {deployment.requested_by}</p>
+              <p class="mt-1 text-xs text-slate-500">
+                Requested by {deployment.requested_by} · {timestamp(deployment.requested_at)}
+                <span class="text-slate-600">({since(@now, deployment.requested_at)})</span>
+              </p>
+              <p class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-slate-600">
+                <span :if={deployment.started_at}>
+                  Started {timestamp(deployment.started_at)}
+                </span>
+                <span :if={deployment.finished_at}>
+                  {state_label(deployment.state)} {timestamp(deployment.finished_at)}
+                </span>
+                <span :if={duration = deployment_duration(@now, deployment)}>
+                  Took {duration}
+                </span>
+              </p>
             </div>
             <span class={[
               "rounded-full px-2.5 py-1 text-xs font-semibold",

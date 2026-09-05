@@ -3,6 +3,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
+  alias PtcManager.AgentProfiles
   alias PtcManager.Automations
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.InvestigationWorkspaces
@@ -16,6 +17,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Repository.WorkerGit
   alias PtcManager.Repository.WorkspaceSetup
   alias PtcManager.WorktreeSecurity
+  alias PtcManager.Repository.WorkerAgentLogin
+  alias PtcManager.Repository.WorkerCodexArming
 
   @command_grace_ms 5_000
   @prompt_stall_recovery_ms 30_000
@@ -25,7 +28,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   def run(%AgentAction{automation_definition_version: version} = action)
       when not is_nil(version) do
     try do
-      with {:ok, profile} <- select_profile(version.agent_selector),
+      with {:ok, profile} <- AgentProfiles.select(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
            {:ok, path, workspace, pane} <- prepare_workspace(action),
            :ok <- trust_workspace(path),
@@ -33,14 +36,14 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            {:ok, context} <-
              PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
            :ok <- remember_context(context),
-           {:ok, agent_key} <- start_agent(name, pane, profile, path),
+           {:ok, agent_key} <- start_agent(name, pane, profile, path, action),
            dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
            :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
            :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
-           {:ok, result} <- read_result(output_path, action.action_key) do
+           {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
         {:ok, result}
       end
     after
@@ -174,30 +177,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
   end
 
-  defp select_profile(selector) do
-    profiles = Application.get_env(:ptc_manager, :agent_profiles, %{})
-    preferred = selector["preferred_kind"]
-    mode = selector["mode"] || "any"
-    fallback = Application.get_env(:ptc_manager, :implementation_agent_kind, "codex")
-
-    candidates =
-      case {mode, preferred} do
-        {"require", value} when is_binary(value) ->
-          [value]
-
-        {"prefer", value} when is_binary(value) ->
-          Enum.uniq([value, fallback] ++ Map.keys(profiles))
-
-        _other ->
-          Enum.uniq([fallback] ++ Map.keys(profiles))
-      end
-
-    case Enum.find(candidates, &(get_in(profiles, [&1, "enabled"]) == true)) do
-      nil -> {:error, :no_healthy_agent_profile}
-      kind -> {:ok, %{kind: kind, args: get_in(profiles, [kind, "args"]) || []}}
-    end
-  end
-
   defp prepare_output(action) do
     directory =
       Application.get_env(:ptc_manager, :agent_action_output_dir) || System.tmp_dir!()
@@ -257,9 +236,11 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
   end
 
-  defp start_agent(name, pane, profile, workspace_path) do
-    with :ok <- trust_agent_workspace(profile.kind, workspace_path) do
-      run_agent_start(name, pane, profile, workspace_path)
+  defp start_agent(name, pane, profile, workspace_path, action) do
+    with :ok <- WorkerAgentLogin.verify(profile.kind),
+         :ok <- trust_agent_workspace(profile.kind, workspace_path),
+         :ok <- WorkerCodexArming.prepare(profile.kind) do
+      run_agent_start(name, pane, profile, workspace_path, action)
     end
   end
 
@@ -279,8 +260,18 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp trust_agent_workspace(_kind, _workspace_path), do: :ok
 
-  defp run_agent_start(name, pane, profile, workspace_path) do
+  defp run_agent_start(name, pane, profile, workspace_path, action) do
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
+
+    agent_args =
+      if action.automation_definition_version.execution_profile == "ephemeral_investigation" do
+        HerdrAdapter.agent_arguments(profile.kind, workspace_path, [
+          action.repository.local_path,
+          workspace_path
+        ])
+      else
+        AgentProfiles.expand_args(profile.args, workspace_path)
+      end
 
     args =
       [
@@ -294,24 +285,12 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         "--timeout",
         Integer.to_string(timeout),
         "--"
-      ] ++ expand_agent_args(profile.args, workspace_path)
+      ] ++ agent_args
 
     case command().run(args, timeout + @command_grace_ms) do
       {:ok, output} -> {:ok, decode_agent_key(output, pane)}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  @doc false
-  def expand_agent_args(args, workspace_path) when is_list(args) and is_binary(workspace_path) do
-    expanded_path = Path.expand(workspace_path)
-    toml_path = PtcManager.CodexTrust.toml_basic_string(expanded_path)
-
-    Enum.map(args, fn argument ->
-      argument
-      |> String.replace("{{workspace_path_toml}}", toml_path)
-      |> String.replace("{{workspace_path}}", expanded_path)
-    end)
   end
 
   defp prompt_and_wait(name, action, output_path, schema_path) do
@@ -492,11 +471,11 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     """
   end
 
-  defp read_result(path, action_key) do
+  defp read_result(path, action_key, snapshot) do
     with {:ok, body} <- File.read(path),
          :ok <- require_result(body),
          {:ok, result} when is_map(result) <- Jason.decode(body),
-         :ok <- ResultValidator.validate_result(result, action_key) do
+         :ok <- ResultValidator.validate_result(result, action_key, snapshot) do
       {:ok, result}
     else
       {:error, %Jason.DecodeError{}} -> {:error, :invalid_agent_result_json}

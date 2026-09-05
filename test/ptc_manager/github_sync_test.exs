@@ -7,8 +7,14 @@ defmodule PtcManager.GitHubSyncTest do
 
   defmodule FakeClient do
     @behaviour PtcManager.GitHub
+
+    @impl true
     def list_open_issues(_repository), do: Process.get(:github_result)
 
+    @impl true
+    def viewer_login, do: Process.get(:github_viewer_login, {:error, :not_configured})
+
+    @impl true
     def get_issue(_repository, number) do
       case Process.get(:github_issue_results) do
         results when is_map(results) -> Map.fetch!(results, number)
@@ -51,6 +57,155 @@ defmodule PtcManager.GitHubSyncTest do
              Sync.sync_repository(synced_repository, client: FakeClient)
 
     assert Repo.get!(Repository, repository.id).sync_status == "ok"
+  end
+
+  test "records when GitHub says the issue was opened without changing the digest" do
+    repository = repository_fixture()
+
+    remote =
+      45
+      |> remote_issue("Aged issue")
+      |> Map.put("created_at", "2026-07-01T09:15:00Z")
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 45)
+    assert issue.github_created_at == ~U[2026-07-01 09:15:00.000000Z]
+
+    # The creation time must stay outside the content digest, or every issue
+    # would look changed on the first sync after this release.
+    without_created_at = IssueSnapshot.normalize!(remote_issue(45, "Aged issue"), repository)
+    assert issue.content_digest == without_created_at.content_digest
+  end
+
+  test "records who PtcManager reads GitHub as, and who opened each issue" do
+    repository = repository_fixture()
+    Process.put(:github_viewer_login, {:ok, "andreasronge"})
+
+    remote =
+      50
+      |> remote_issue("Reported from outside")
+      |> Map.put("author_login", "a-stranger")
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    assert Repo.get!(Repository, repository.id).github_viewer_login == "andreasronge"
+
+    assert Repo.get_by!(Issue, repository_id: repository.id, number: 50).github_author_login ==
+             "a-stranger"
+
+    # An identity lookup that fails must not erase the last known one.
+    Process.put(:github_viewer_login, {:error, :github_graphql_token_required})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+    assert Repo.get!(Repository, repository.id).github_viewer_login == "andreasronge"
+  end
+
+  test "keeps every GitHub label name outside the content digest" do
+    repository = repository_fixture()
+
+    remote =
+      55
+      |> remote_issue("Labelled issue")
+      |> Map.put("labels", [%{"name" => "wait"}, %{"name" => "bug"}, %{"name" => "ptc:ready"}])
+
+    Process.put(:github_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 55)
+    assert issue.github_labels == %{"names" => ["bug", "ptc:ready", "wait"]}
+    assert issue.workflow_label == "ptc:ready"
+
+    only_managed =
+      remote_issue(55, "Labelled issue")
+      |> Map.put("labels", [%{"name" => "ptc:ready"}])
+      |> IssueSnapshot.normalize!(repository)
+
+    assert issue.content_digest == only_managed.content_digest
+  end
+
+  test "backfills projection fields onto an issue whose canonical content is unchanged" do
+    repository = repository_fixture()
+    remote = remote_issue(60, "Already synchronized")
+
+    Process.put(:github_result, {:ok, [remote]})
+    Process.put(:github_viewer_login, {:ok, "andreasronge"})
+    assert {:ok, %{changed_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    # Simulate a row written before this release: identical canonical content,
+    # but none of the new out-of-digest projection fields.
+    Repo.get_by!(Issue, repository_id: repository.id, number: 60)
+    |> Ecto.Changeset.change(%{
+      github_created_at: nil,
+      github_author_login: nil,
+      github_labels: %{"names" => []}
+    })
+    |> Repo.update!()
+
+    enriched =
+      remote
+      |> Map.put("created_at", "2026-07-04T10:00:00Z")
+      |> Map.put("author_login", "a-stranger")
+      |> Map.put("labels", [%{"name" => "wait"}])
+
+    Process.put(:github_result, {:ok, [enriched]})
+
+    # Nothing canonical changed, so this is not a content change...
+    assert {:ok, %{changed_count: 0}} = Sync.sync_repository(repository, client: FakeClient)
+
+    # ...but the projection GitHub reports must still land locally.
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 60)
+    assert issue.github_created_at == ~U[2026-07-04 10:00:00.000000Z]
+    assert issue.github_author_login == "a-stranger"
+    assert issue.github_labels == %{"names" => ["wait"]}
+  end
+
+  test "recognizes a workflow label whatever casing GitHub reports" do
+    repository = repository_fixture()
+
+    blocked =
+      65
+      |> remote_issue("Blocked in shouty case")
+      |> Map.put("labels", [%{"name" => "PTC:Blocked"}])
+
+    Process.put(:github_result, {:ok, [blocked]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    issue = Repo.get_by!(Issue, repository_id: repository.id, number: 65)
+
+    assert issue.workflow_label == "ptc:blocked"
+    refute issue.workflow_label_conflict
+
+    # A blocked issue must not be startable, and Fix directly reads the same
+    # projection the approve gate does.
+    assert {:error, :issue_workflow_not_ready} =
+             PtcManager.Operations.approve_issue_directly(issue.id, "andreas")
+
+    conflicting =
+      66
+      |> remote_issue("Two workflow labels")
+      |> Map.put("labels", [%{"name" => "PTC:ready"}, %{"name" => "ptc:blocked"}])
+
+    Process.put(:github_result, {:ok, [blocked, conflicting]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    conflicted = Repo.get_by!(Issue, repository_id: repository.id, number: 66)
+    assert conflicted.workflow_label_conflict
+    assert is_nil(conflicted.workflow_label)
+
+    # The same label twice in different casing is one label, not a conflict.
+    duplicated =
+      67
+      |> remote_issue("One label written twice")
+      |> Map.put("labels", [%{"name" => "PTC:ready"}, %{"name" => "ptc:ready"}])
+
+    Process.put(:github_result, {:ok, [blocked, conflicting, duplicated]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    single = Repo.get_by!(Issue, repository_id: repository.id, number: 67)
+    assert single.workflow_label == "ptc:ready"
+    refute single.workflow_label_conflict
   end
 
   test "synchronizes the canonical managed workflow label" do

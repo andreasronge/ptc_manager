@@ -3,7 +3,8 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
 
   import Plug.Conn
 
-  alias PtcManager.Operations.Repository
+  alias PtcManager.Operations.{AuditEvent, Repository}
+  alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.{CapacitySettings, Operations, Repo}
 
   test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
@@ -57,6 +58,42 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
            )
   end
 
+  test "adds, replaces, and deletes write-only implementation-agent variables", %{conn: conn} do
+    repository = repository_fixture()
+    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    refute html =~ "browser-secret"
+
+    view
+    |> form("#agent-environment-#{repository.id} form", %{
+      "repository-id" => repository.id,
+      "variable" => %{"name" => "OPENROUTER_API_KEY", "secret" => "browser-secret"}
+    })
+    |> render_submit()
+
+    [variable] = AgentEnvironmentVariables.list(repository.id)
+    assert variable.value == "browser-secret"
+    assert has_element?(view, "#agent-environment-variable-#{variable.id}", "OPENROUTER_API_KEY")
+    refute render(view) =~ "browser-secret"
+
+    view
+    |> form("#agent-environment-#{repository.id} form", %{
+      "repository-id" => repository.id,
+      "variable" => %{"name" => "OPENROUTER_API_KEY", "secret" => "rotated-secret"}
+    })
+    |> render_submit()
+
+    assert [%{id: id, value: "rotated-secret"}] = AgentEnvironmentVariables.list(repository.id)
+    assert id == variable.id
+    refute render(view) =~ "rotated-secret"
+
+    view
+    |> element("#agent-environment-variable-#{variable.id} button", "Delete")
+    |> render_click()
+
+    assert AgentEnvironmentVariables.list(repository.id) == []
+  end
+
   test "registers another repository disabled with its own automation defaults", %{conn: conn} do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
 
@@ -78,7 +115,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
 
     refute repository.enabled
     assert repository.local_path == "/srv/ptc_manager"
-    assert length(PtcManager.Automations.list_definitions(repository)) == 11
+    assert length(PtcManager.Automations.list_definitions(repository)) == 12
     assert has_element?(view, "#repository-health-#{repository.id}", "Disabled")
     assert has_element?(view, "#repository-health-#{repository.id}", "/srv/ptc_manager")
   end
@@ -119,6 +156,57 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     refute Repo.get_by(Repository, github_name: "offline")
   end
 
+  # Onboarding derives a checkout path it cannot create, so the page has to offer
+  # the host the work and say plainly when the host cannot take it.
+  test "preparing checkouts reports when the host has no provisioning unit", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :provision_systemctl_command)
+    Application.delete_env(:ptc_manager, :provision_systemctl_command)
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:ptc_manager, :provision_systemctl_command)
+        value -> Application.put_env(:ptc_manager, :provision_systemctl_command, value)
+      end
+    end)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    html = view |> element("#prepare-repositories") |> render_click()
+
+    assert html =~ "no repository provisioning unit installed"
+  end
+
+  # Onboarding registers a repository disabled so a maintainer can verify it
+  # first, and synchronization only covers enabled repositories. Without a way to
+  # enable one, a newly added repository could never be used and its GitHub check
+  # could never go green.
+  test "a maintainer can enable and disable a repository", %{conn: conn} do
+    repository = repository_fixture(%{github_name: "toggle-me", enabled: false})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(view, "#toggle-repository-#{repository.id}", "Enable")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{repository.id}",
+             "turns green once it is enabled"
+           )
+
+    html = view |> element("#toggle-repository-#{repository.id}") |> render_click()
+
+    assert html =~ "is enabled"
+    assert Repo.get!(Repository, repository.id).enabled
+    assert has_element?(view, "#toggle-repository-#{repository.id}", "Disable")
+
+    assert Repo.get_by!(AuditEvent, action: "repository.enabled", target_id: repository.id)
+
+    html = view |> element("#toggle-repository-#{repository.id}") |> render_click()
+
+    assert html =~ "is disabled"
+    refute Repo.get!(Repository, repository.id).enabled
+  end
+
   test "rejects names that cannot produce a safe checkout component without persistence" do
     before_count = Repo.aggregate(Repository, :count)
 
@@ -131,6 +219,23 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
              })
 
     assert Repo.aggregate(Repository, :count) == before_count
+  end
+
+  # A maintainer pastes an owner and a repository name, and a paste routinely
+  # carries a leading or trailing space. Rejecting that with a message about
+  # /srv path components says nothing about what is actually wrong.
+  test "accepts an owner and name pasted with surrounding whitespace" do
+    assert {:ok, repository} =
+             Operations.onboard_repository(%{
+               github_owner: " andreasronge ",
+               github_name: "ptc-fs-mcp\n",
+               default_branch: " main "
+             })
+
+    assert repository.github_owner == "andreasronge"
+    assert repository.github_name == "ptc-fs-mcp"
+    assert repository.default_branch == "main"
+    assert repository.local_path == "/srv/ptc-fs-mcp"
   end
 
   test "normalizes string-keyed onboarding attributes and keeps repositories disabled" do
@@ -521,11 +626,176 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "#repository-health-#{repository.id}", "Add .ptc-manager.yml")
   end
 
+  test "reports publication writes and read-only PR tracking independently", %{conn: conn} do
+    previous_publication = Application.get_env(:ptc_manager, :publication_enabled)
+    previous_reconciliation = Application.get_env(:ptc_manager, :pr_reconcile_enabled)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :publication_enabled, previous_publication)
+      Application.put_env(:ptc_manager, :pr_reconcile_enabled, previous_reconciliation)
+    end)
+
+    Application.put_env(:ptc_manager, :publication_enabled, true)
+    Application.put_env(:ptc_manager, :pr_reconcile_enabled, false)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert html =~ "Publication enabled · exact-SHA GitHub App broker"
+    assert html =~ "Read-only PR status tracking disabled"
+    refute html =~ "without GitHub writes"
+  end
+
+  test "reports agent-owned PR creation as an enabled GitHub write path", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert html =~ "New jobs use agent publication · authenticated worker creates the PR"
+    refute html =~ "without GitHub writes"
+  end
+
+  test "shows read-only GitHub synchronization state per repository", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "integrations"})
+
+    repository
+    |> Repository.changeset(%{sync_status: "ok", last_synced_at: DateTime.utc_now()})
+    |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(view, "#integrations", "andreas/integrations")
+    assert has_element?(view, "#integrations", "connected")
+    assert has_element?(view, "#integrations", "Last complete sync:")
+    assert has_element?(view, "#integrations", "GitHub identity unknown until the next sync")
+
+    repository
+    |> Repository.changeset(%{github_viewer_login: "andreasronge"})
+    |> Repo.update!()
+
+    {:ok, identified, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+    assert has_element?(identified, "#integrations", "Reads GitHub as @andreasronge")
+  end
+
+  test "configures the maintainer's own triage labels per repository", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "labelled"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> form("#add-maintainer-label-#{repository.id}", %{
+      "label" => %{
+        "repository_id" => Integer.to_string(repository.id),
+        "name" => "wait",
+        "role" => "park"
+      }
+    })
+    |> render_submit()
+
+    assert render(view) =~ "It must already exist on GitHub"
+    assert has_element?(view, "#maintainer-labels-#{repository.id}", "wait")
+
+    assert Repo.get!(Repository, repository.id).maintainer_labels == %{
+             "labels" => [%{"name" => "wait", "role" => "park"}]
+           }
+
+    for reserved <- ["ptc:ready", "PTC:ready", "Ptc:Blocked"] do
+      view
+      |> form("#add-maintainer-label-#{repository.id}", %{
+        "label" => %{
+          "repository_id" => Integer.to_string(repository.id),
+          "name" => reserved,
+          "role" => "badge"
+        }
+      })
+      |> render_submit()
+
+      assert render(view) =~ "belong to PtcManager"
+    end
+
+    # GitHub label names are case-insensitive, so neither is a second label.
+    view
+    |> form("#add-maintainer-label-#{repository.id}", %{
+      "label" => %{
+        "repository_id" => Integer.to_string(repository.id),
+        "name" => "WAIT",
+        "role" => "badge"
+      }
+    })
+    |> render_submit()
+
+    assert render(view) =~ "already configured"
+
+    assert Repo.get!(Repository, repository.id).maintainer_labels == %{
+             "labels" => [%{"name" => "wait", "role" => "park"}]
+           }
+
+    view
+    |> element("#maintainer-labels-#{repository.id} button[phx-value-name='wait']")
+    |> render_click()
+
+    assert Repo.get!(Repository, repository.id).maintainer_labels == %{"labels" => []}
+  end
+
+  test "names the GitHub labels a repository is still missing", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "unlabelled"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(
+             view,
+             "#repository-health-#{repository.id}",
+             "GitHub labels not checked"
+           )
+
+    repository
+    |> Repository.changeset(%{
+      github_label_names: %{"names" => ["PTC:Ready", "ptc:blocked", "bug"]},
+      github_labels_checked_at: DateTime.utc_now(),
+      maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+    })
+    |> Repo.update!()
+
+    {:ok, partial, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    detail = render(view_health(partial, repository))
+    assert detail =~ "GitHub labels missing"
+    assert detail =~ "ptc:needs-decision"
+    assert detail =~ "ptc:follow-up"
+    assert detail =~ "wait"
+    # Casing is GitHub's, not ours: PTC:Ready already covers ptc:ready.
+    refute detail =~ "ptc:ready,"
+
+    repository
+    |> Repository.changeset(%{
+      github_label_names: %{
+        "names" => ["ptc:ready", "ptc:blocked", "ptc:needs-decision", "ptc:follow-up", "wait"]
+      }
+    })
+    |> Repo.update!()
+
+    {:ok, complete, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert has_element?(
+             complete,
+             "#repository-health-#{repository.id}",
+             "GitHub labels present"
+           )
+  end
+
   defp authenticated_conn(conn) do
     conn
     |> init_test_session(%{})
     |> put_session(:authenticated, true)
     |> put_session(:actor, "maintainer")
+  end
+
+  defp view_health(view, repository) do
+    element(view, "#repository-health-#{repository.id}")
   end
 
   defp git!(path, args) do

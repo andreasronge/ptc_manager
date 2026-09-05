@@ -11,4 +11,15 @@ controllers=$(cat "$cgroup_root/cgroup.controllers")
 case " $controllers " in *" memory "*) printf '+memory\n' >"$cgroup_root/cgroup.subtree_control" ;; esac
 case " $controllers " in *" pids "*) printf '+pids\n' >"$cgroup_root/cgroup.subtree_control" ;; esac
 
+# Every pane this server starts inherits the environment set here. Claude Code
+# updates itself by default, and the deployment installs it into a root-owned
+# tree precisely so an agent cannot rewrite the CLI it runs, so the attempt can
+# only ever fail: it retried 2.1.260 -> 2.1.261 and recorded install_failed in
+# the same minute the worker's stored credentials were rewritten and the agent
+# reported an expired login. Whether it caused that is not established, but a
+# self-update that can never succeed has no business running in the process
+# that holds the agent's credentials. Versions come from the manifest.
+DISABLE_AUTOUPDATER=1
+export DISABLE_AUTOUPDATER
+
 exec /usr/local/bin/herdr "$@"

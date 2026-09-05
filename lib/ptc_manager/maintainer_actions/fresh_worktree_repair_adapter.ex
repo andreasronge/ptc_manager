@@ -1,5 +1,15 @@
-defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
-  @moduledoc "Runs imported-PR repair and merge work in a named, retained Herdr session."
+defmodule PtcManager.MaintainerActions.FreshWorktreeRepairAdapter do
+  @moduledoc """
+  Repairs a pull request in a fresh worktree at its exact observed head.
+
+  An imported pull request has no retained implementation session, and a managed
+  one loses its session whenever the agent ends or Herdr stops reporting it. Both
+  are repaired the same way: a named Herdr agent in a new isolated worktree
+  rooted at the head GitHub reports, with no local history to trust. PtcManager
+  records the head that agent pushed and confirms it against GitHub afterwards,
+  which is the only evidence available when the worktree that produced the
+  commit is not the one being inspected.
+  """
 
   @behaviour PtcManager.MaintainerActions.Adapter
 
@@ -14,7 +24,7 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
 
   @impl true
   def run(%AgentAction{} = action) do
-    herdr = Application.get_env(:ptc_manager, :external_pr_herdr_adapter, HerdrAdapter)
+    herdr = Application.get_env(:ptc_manager, :pull_request_herdr_adapter, HerdrAdapter)
     run(action, herdr)
   end
 
@@ -26,11 +36,10 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
     publication =
       PrPublication
       |> Repo.get!(publication_id)
-      |> Repo.preload(:repository)
+      |> Repo.preload([:repository, job: :repository])
 
-    with true <- PrPublication.external?(publication),
-         %{local_path: repository_path} = repository when is_binary(repository_path) <-
-           publication.repository,
+    with %{local_path: repository_path} = repository when is_binary(repository_path) <-
+           PrPublication.repository(publication),
          {:ok, dispatch} <-
            Gateway.call(herdr, :start_pull_request_action, [action, publication, repository]),
          {:ok, _run} <-
@@ -43,16 +52,15 @@ defmodule PtcManager.MaintainerActions.ExternalPrRepairAdapter do
            Gateway.call(herdr, :prompt_pull_request_action, [dispatch.agent_name, action.prompt]) do
       settle_action(herdr, action, dispatch, output)
     else
-      false -> {:error, :pull_request_is_managed}
       nil -> {:error, :repository_path_unavailable}
       %{} -> {:error, :repository_path_unavailable}
       {:error, reason} -> {:error, reason}
     end
   rescue
-    error -> {:error, {:external_pr_repair_failed, error.__struct__}}
+    error -> {:error, {:fresh_worktree_repair_failed, error.__struct__}}
   end
 
-  def run(%AgentAction{}, _herdr), do: {:error, :unsupported_external_pr_action}
+  def run(%AgentAction{}, _herdr), do: {:error, :unsupported_pull_request_repair_action}
 
   defp settle_action(herdr, action, dispatch, output) do
     if HerdrOutput.settled_state(output) == "blocked" do

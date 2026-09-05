@@ -22,6 +22,7 @@ defmodule PtcManager.GitHubClientTest do
 
     assert {:error, :github_graphql_token_required} = Client.list_open_issues(repository)
     assert {:error, :github_graphql_token_required} = Client.get_issue(repository, 42)
+    assert {:error, :github_graphql_token_required} = Client.viewer_login()
   end
 
   test "prefers Retry-After response timing" do
@@ -61,6 +62,8 @@ defmodule PtcManager.GitHubClientTest do
       "body" => "No dependency prose is required.",
       "state" => "OPEN",
       "stateReason" => "REOPENED",
+      "createdAt" => "2026-08-20T07:30:00Z",
+      "author" => %{"login" => "a-stranger"},
       "updatedAt" => "2026-09-01T08:00:00Z",
       "labels" => %{"nodes" => [%{"name" => "ptc:ready"}]},
       "assignees" => %{"nodes" => [%{"login" => "worker"}]},
@@ -84,6 +87,8 @@ defmodule PtcManager.GitHubClientTest do
     normalized = Client.normalize_graphql_issue(issue)
 
     assert normalized["state"] == "open"
+    assert normalized["created_at"] == "2026-08-20T07:30:00Z"
+    assert normalized["author_login"] == "a-stranger"
     assert normalized["blocked_by_overflow"]
     assert normalized["blocked_by_unknown_count"] == 0
     assert [blocker] = normalized["blocked_by"]

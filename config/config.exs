@@ -74,6 +74,9 @@ config :ptc_manager,
   external_pr_group: nil,
   external_pr_worktree_root: nil,
   external_pr_push_run_as_user: nil,
+  issue_label_writer: PtcManager.GitHub.WorkerIssueLabelWriter,
+  issue_label_wrapper: "/usr/local/bin/ptc-manager-worker-gh-label",
+  issue_label_timeout_ms: 30_000,
   external_pr_push_wrapper: "/usr/local/bin/ptc-manager-external-push",
   external_pr_cleanup_wrapper: "/usr/local/bin/ptc-manager-external-cleanup",
   external_pr_git_wrapper: "/usr/local/bin/ptc-manager-external-git",
@@ -83,6 +86,8 @@ config :ptc_manager,
   dispatch_interval_ms: 5_000,
   dispatch_lease_ms: 1_800_000,
   implementation_idle_timeout_ms: 300_000,
+  agent_blocked_attention_ms: 600_000,
+  agent_silent_attention_ms: 600_000,
   dispatch_reconcile_after_ms: 60_000,
   worktree_root: nil,
   worktree_permission_check: true,
@@ -124,7 +129,6 @@ config :ptc_manager,
   git_memory_limit_binary: nil,
   git_memory_limit_bytes: 268_435_456,
   implementation_agent_kind: "codex",
-  implementation_agent_args: ["--dangerously-bypass-approvals-and-sandbox"],
   agent_profiles: %{
     "codex" => %{
       "enabled" => true,
@@ -135,6 +139,8 @@ config :ptc_manager,
       ]
     }
   },
+  toolchain_link_dir: "/usr/local/bin",
+  toolchain_install_root: "/opt",
   implementation_agent_start_timeout_ms: 120_000,
   implementation_agent_publishes_pr: false,
   required_pre_pr_reviews_default: 2
@@ -177,7 +183,9 @@ config :logger, :default_formatter,
   metadata: [:request_id]
 
 # Use Jason for JSON parsing in Phoenix
-config :phoenix, :json_library, Jason
+config :phoenix,
+  json_library: Jason,
+  filter_parameters: ["password", "token", "secret"]
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

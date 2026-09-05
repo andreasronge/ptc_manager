@@ -66,33 +66,63 @@ maintenance_override_preexisting=false
 agent_result_dir=/var/lib/ptc_manager-worker/agent-results
 agent_result_env=/etc/ptc_manager/agent-results.env
 agent_result_override=/etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-agent-results.conf
-mise_binary=/home/agent/.local/bin/mise
 worker_mise=/usr/local/bin/mise
-node_version=22.23.2
-worker_node_dir="/opt/ptc-manager-node-${node_version}"
-cursor_agent_version=2026.08.25-3e8eec8
-cursor_agent_source="/home/agent/.local/share/cursor-agent/versions/${cursor_agent_version}"
-cursor_agent_root=/opt/ptc-manager-cursor-agent
+# Every third-party version this machine runs comes from the deployed
+# revision's toolchain manifest; read_pinned_versions fills these in.
+node_version=
+worker_node_dir=
+pnpm_version=
+worker_pnpm_dir=
+codex_version=
+worker_codex_dir=
+claude_code_version=
+worker_claude_code_dir=
+cursor_agent_version=
+cursor_agent_sha256=
+worker_cursor_agent_dir=
+herdr_version=
+herdr_sha256=
+worker_herdr_dir=
+mise_version=
+mise_sha256=
+worker_mise_dir=
+hex_version=
+rebar3_sha512=
+erlang_version=
+elixir_version=
 worker_node_staging=
+worker_pnpm_staging=
+worker_tool_staging=
+worker_opt_staging=
+herdr_link_backup=
+herdr_link_backup_retained=false
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
-erlang_version=29.0.3
-elixir_version=1.20.2-otp-29
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
 gate_mise_cache="$gate_mise_root/cache"
 gate_mise_state="$gate_mise_root/state"
 gate_mise_config="$gate_mise_root/config"
-gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
-gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
+gate_erlang_dir=
+gate_elixir_dir=
 gate_mix_home=/opt/ptc-manager-gate-mix
 gate_tool_home=
 manual_herdr=/home/agent/.local/bin/herdr
 worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
+active_runs_query="/tmp/ptc-manager-active-runs-${release_id}.sql"
+repositories_query="/tmp/ptc-manager-repositories-${release_id}.sql"
+manager_access_dropin="/tmp/ptc-manager-access-${release_id}.conf"
+access_dropin_check="/tmp/ptc-manager-check-access-dropin-${release_id}"
+provision_runner_candidate="/tmp/ptc-manager-provision-${release_id}"
+provision_service_candidate="/tmp/ptc-manager-provision-service-${release_id}"
+worker_access_dropin="/tmp/ptc-manager-worker-access-${release_id}.conf"
 environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 claude_trust_candidate="/tmp/ptc-manager-worker-claude-trust-${release_id}"
+codex_arm_candidate="/tmp/ptc-manager-worker-codex-arm-${release_id}"
+agent_login_candidate="/tmp/ptc-manager-worker-agent-login-${release_id}"
+gh_label_candidate="/tmp/ptc-manager-worker-gh-label-${release_id}"
 operation_wrapper_candidate="/tmp/ptc-operation-${release_id}"
 operation_recovery_candidate="/tmp/ptc-manager-operation-recover-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
@@ -101,6 +131,8 @@ sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 self_deploy_runner_candidate="/tmp/ptc-manager-self-deploy-runner-${release_id}"
 self_deploy_service_candidate="/tmp/ptc-manager-self-deploy-service-${release_id}"
 self_deploy_access_candidate="/tmp/ptc-manager-self-deploy-access-${release_id}"
+toolchain_manifest="/tmp/ptc-manager-toolchain-versions-${release_id}"
+toolchain_reader="/tmp/ptc-manager-toolchain-version-${release_id}"
 coordinator_environment_files=
 coordinator_session=
 worker_session=
@@ -110,13 +142,17 @@ remote_script=$0
 deployment_phase=pre_stop
 
 cleanup_remote() {
-  rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$environment_file_parser" \
+  rm -f -- "$source_archive" "$remote_script" "$failure_policy" "$agent_filter" "$active_runs_query" "$repositories_query" \
+  "$manager_access_dropin" "$worker_access_dropin" "$access_dropin_check" \
+  "$provision_runner_candidate" "$provision_service_candidate" \
+  "$environment_file_parser" \
     "$worker_git_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
+    "$codex_arm_candidate" "$agent_login_candidate" "$gh_label_candidate" \
     "$operation_wrapper_candidate" \
     "$operation_recovery_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
-    "$self_deploy_access_candidate"
+    "$self_deploy_access_candidate" "$toolchain_manifest" "$toolchain_reader"
   sudo rm -f -- "$maintenance_override_backup"
 
   case "$build_dir" in
@@ -125,6 +161,28 @@ cleanup_remote() {
 
   case "$worker_node_staging" in
     /opt/ptc-manager-node-*) sudo rm -rf -- "$worker_node_staging" ;;
+  esac
+
+  case "$worker_pnpm_staging" in
+    /opt/ptc-manager-pnpm-*) sudo rm -rf -- "$worker_pnpm_staging" ;;
+  esac
+
+  case "$worker_opt_staging" in
+    /opt/ptc-manager-*) sudo rm -rf -- "$worker_opt_staging" ;;
+  esac
+
+  case "$worker_tool_staging" in
+    /tmp/ptc-manager-*) rm -rf -- "$worker_tool_staging" ;;
+  esac
+
+  case "$herdr_link_backup" in
+    /opt/ptc-manager-herdr-previous-*)
+      # A restoration that failed leaves this as the only copy of the Herdr the
+      # running release expects, and the link it came from may already be gone.
+      if [ "$herdr_link_backup_retained" != true ]; then
+        sudo rm -rf -- "$herdr_link_backup"
+      fi
+      ;;
   esac
 
   case "$gate_tool_home" in
@@ -268,8 +326,7 @@ read_environment_setting() {
 }
 
 active_managed_runs() {
-  sudo sqlite3 -readonly "$database_path" \
-    "select count(*) from agent_runs where state in ('queued','starting','working','blocked','unknown');"
+  sudo sqlite3 -readonly "$database_path" <"$active_runs_query"
 }
 
 ensure_no_managed_runs() {
@@ -287,6 +344,28 @@ ensure_no_managed_runs() {
 # ReadWritePaths fails every implementation dispatch with "cannot lock ref".
 # Probe the running mount namespaces rather than the unit files so an edited
 # but not yet restarted unit is reported here instead of by the next job.
+# Every path under /srv belongs to the worker identity with a group the
+# deployment user is not in, so a bare test would report an existing checkout as
+# missing. Ask through sudo, as every other access to these paths does.
+checkout_prepared() { sudo test -d "$1/.git"; }
+checkout_occupied() { sudo test -e "$1"; }
+
+# The generated content is the same on most deployments. Installing it anyway
+# would move its modification time past every service start, which is the signal
+# repository health reads to tell a pending grant from one already in force.
+# Leave an unchanged file alone so that time keeps meaning "the grants changed".
+install_dropin_when_changed() {
+  candidate=$1
+  target=$2
+
+  if sudo cmp -s "$candidate" "$target"; then
+    echo "Repository access unchanged: $target"
+  else
+    sudo install -o root -g root -m 0644 "$candidate" "$target"
+    echo "Repository access updated: $target"
+  fi
+}
+
 ensure_repository_checkouts_writable() {
   probe_pid=$1
   probe_service=$2
@@ -305,11 +384,75 @@ ensure_repository_checkouts_writable() {
 
       probe_path="${checkout}${probe_suffix}"
 
+      # A repository configured but not yet prepared is this deployment's work:
+      # it creates the checkout and grants it before the services restart.
+      if ! checkout_prepared "$checkout"; then
+        echo "repository checkout will be prepared by this deployment: $checkout"
+        continue
+      fi
+
       if ! sudo nsenter -t "$probe_pid" -m -- /bin/sh -c '[ -d "$1" ] && [ -w "$1" ]' sh "$probe_path"; then
-        echo "repository checkout is not writable inside $probe_service: $probe_path; add it to that unit's ReadWritePaths and restart the service before deploying" >&2
+        case "$probe_service" in
+          ptc_manager-herdr.service)
+            echo "repository checkout is not writable inside $probe_service: $probe_path; the generated access drop-in grants it, but that service keeps retained agent sessions and is never restarted by a deployment, so restart it when no session is retained" >&2
+            ;;
+          *)
+            echo "repository checkout is not writable inside $probe_service: $probe_path; deploy again so the generated access drop-in takes effect when the service restarts" >&2
+            ;;
+        esac
         exit 1
       fi
     done
+}
+
+# Onboarding derives a checkout path for a repository but cannot create it: the
+# coordinator runs with ProtectSystem=strict, so /srv is read only inside its
+# mount namespace even for root. The deployment runs outside that namespace, so
+# it is the one place that can prepare a newly configured repository.
+ensure_repository_checkouts() {
+  sudo sqlite3 -readonly "$database_path" <"$repositories_query" |
+    while IFS='|' read -r owner name checkout; do
+      case "$owner$name" in
+        *[!A-Za-z0-9_.-]*|'') echo "configured repository name is unsafe: $owner/$name" >&2; exit 1 ;;
+      esac
+      case "$checkout" in
+        /srv/*) ;;
+        *) echo "configured checkout path is not under /srv: $checkout" >&2; exit 1 ;;
+      esac
+      case "$checkout" in
+        *..*) echo "configured checkout path is not normalized: $checkout" >&2; exit 1 ;;
+      esac
+
+      checkout_prepared "$checkout" && continue
+
+      if checkout_occupied "$checkout"; then
+        echo "configured checkout path exists but is not a Git repository: $checkout" >&2
+        exit 1
+      fi
+
+      echo "Preparing checkout for $owner/$name at $checkout"
+      sudo git clone --quiet "https://github.com/$owner/$name" "$checkout"
+      sudo chown -R ptc-manager-worker:ptc-manager-repo "$checkout"
+      sudo chmod -R g-w,g+rX,o-rwx "$checkout"
+      sudo find "$checkout" -type d -exec chmod g+s {} +
+    done
+}
+
+# ReadWritePaths is additive across drop-ins, so the generated file adds every
+# configured repository to what the unit already grants. A leading "-" keeps a
+# checkout that disappeared from refusing to start the service.
+write_repository_access_dropin() {
+  suffix=$1
+  target=$2
+
+  {
+    printf '# Generated by the PtcManager deployment. Do not edit.\n'
+    printf '[Service]\n'
+    sudo sqlite3 -readonly "$database_path" <"$repositories_query" |
+      while IFS='|' read -r _owner _name checkout; do
+        printf 'ReadWritePaths=-%s%s\n' "$checkout" "$suffix"
+      done
+  } >"$target"
 }
 
 busy_agent_count() {
@@ -345,6 +488,39 @@ ensure_no_busy_herdr_agents() {
   if [ "$busy_total" -ne 0 ]; then
     echo "refusing to deploy while $busy_total Herdr agent(s) are not idle" >&2
     return 1
+  fi
+}
+
+# A newly granted checkout stays unwritable for the worker until
+# ptc_manager-herdr starts again, because ReadWritePaths enters a mount
+# namespace only at start. That restart ends every retained agent session, which
+# is why a deployment never takes it blindly. When PtcManager records no live
+# run and Herdr reports no live agent there is nothing to end, so take it then
+# and leave the maintainer only the case where something would actually be lost.
+restart_worker_when_nothing_retained() {
+  live_runs=$(
+    sudo sqlite3 -readonly "$database_path" \
+      "select count(*) from agent_runs where state not in ('done', 'failed', 'lost');"
+  )
+
+  if [ -n "$worker_session" ]; then
+    live_agents=$(
+      sudo -u ptc-manager-worker -H "$worker_herdr" --session "$worker_session" agent list |
+        jq '[.result.agents[]? | select(.agent_status != "done")] | length'
+    )
+  else
+    live_agents=0
+  fi
+
+  if [ "$live_runs" -eq 0 ] && [ "$live_agents" -eq 0 ]; then
+    echo "No agent session is retained; linking Herdr $herdr_version and restarting ptc_manager-herdr so granted checkouts become writable"
+    herdr_link_backup="/opt/ptc-manager-herdr-previous-${release_id}"
+    sudo rm -rf -- "$herdr_link_backup"
+    sudo cp -a "$worker_herdr" "$herdr_link_backup"
+    sudo ln -sfn "$worker_herdr_dir/herdr" "$worker_herdr"
+    sudo systemctl restart ptc_manager-herdr
+  else
+    echo "Leaving ptc_manager-herdr running: $live_runs live run(s) and $live_agents live agent(s) would be lost. Deploy again when none is retained: a deployment is what moves the link, so restarting the service by hand starts the same Herdr again rather than the pinned $herdr_version, and newly granted checkouts stay unwritable until then."
   fi
 }
 
@@ -411,33 +587,220 @@ ensure_private_worktree_root() {
   done
 }
 
-# Herdr starts every agent kind by its canonical executable on the worker's
-# service PATH. Codex already lives in /usr/local/bin; Claude Code is the
-# native binary shipped inside the worker Node directory, and the Cursor CLI is
-# copied from the pinned per-user installation into a root-owned tree. Login
-# state stays per identity, so the worker still signs in once after this.
-install_worker_agents() {
-  if sudo test -x "$worker_node_dir/bin/claude"; then
-    sudo ln -sfn "$worker_node_dir/bin/claude" /usr/local/bin/claude
+# The manifest in the deployed revision is the only place a version of anything
+# third party is written, so a program running on this machine can always be
+# traced to a commit, and the release compiles the same values in to report what
+# the machine actually links.
+read_pinned_versions() {
+  node_version=$("$toolchain_reader" "$toolchain_manifest" node)
+  worker_node_dir="/opt/ptc-manager-node-${node_version}"
+  pnpm_version=$("$toolchain_reader" "$toolchain_manifest" pnpm)
+  worker_pnpm_dir="/opt/ptc-manager-pnpm-${pnpm_version}"
+  codex_version=$("$toolchain_reader" "$toolchain_manifest" codex)
+  worker_codex_dir="/opt/ptc-manager-codex-${codex_version}"
+  claude_code_version=$("$toolchain_reader" "$toolchain_manifest" claude_code)
+  worker_claude_code_dir="/opt/ptc-manager-claude-code-${claude_code_version}"
+  cursor_agent_version=$("$toolchain_reader" "$toolchain_manifest" cursor_agent)
+  cursor_agent_sha256=$("$toolchain_reader" "$toolchain_manifest" cursor_agent_sha256)
+  worker_cursor_agent_dir="/opt/ptc-manager-cursor-agent-${cursor_agent_version}"
+  herdr_version=$("$toolchain_reader" "$toolchain_manifest" herdr)
+  herdr_sha256=$("$toolchain_reader" "$toolchain_manifest" herdr_sha256)
+  worker_herdr_dir="/opt/ptc-manager-herdr-${herdr_version}"
+  mise_version=$("$toolchain_reader" "$toolchain_manifest" mise)
+  mise_sha256=$("$toolchain_reader" "$toolchain_manifest" mise_sha256)
+  worker_mise_dir="/opt/ptc-manager-mise-${mise_version}"
+  hex_version=$("$toolchain_reader" "$toolchain_manifest" hex)
+  rebar3_sha512=$("$toolchain_reader" "$toolchain_manifest" rebar3_sha512)
+  erlang_version=$("$toolchain_reader" "$toolchain_manifest" erlang)
+  elixir_version=$("$toolchain_reader" "$toolchain_manifest" elixir)
+  gate_erlang_dir="$gate_mise_data/installs/erlang/${erlang_version}"
+  gate_elixir_dir="$gate_mise_data/installs/elixir/${elixir_version}"
+}
+
+# Take ownership of a staged /opt tree and make it traversable before it is
+# moved into place. `sudo mktemp -d` creates the staging root 0700 and `cp -a`
+# preserves the modes of what it copies rather than the root it copies into, so
+# without this the pinned tree is reachable by root alone: the worker cannot run
+# the program linked inside it, and the deploying user's own version check globs
+# nothing and reports the package as malformed.
+root_own_pinned_tree() {
+  sudo chown -R root:root "$1"
+  sudo chmod 0755 "$1"
+}
+
+# Codex and Claude Code both ship as an npm package whose platform dependency
+# carries the native binary. Install the pinned version with the pinned Node as
+# the deploying user, then copy it into a root-owned directory, the same way the
+# worker gets Node and pnpm, so an agent cannot rewrite the CLI it runs.
+install_worker_npm_tool() {
+  package=$1
+  version=$2
+  target=$3
+  entry_point=$4
+
+  if sudo test -d "$target"; then
+    return 0
   fi
 
-  if [ -x "$cursor_agent_source/cursor-agent" ]; then
-    sudo install -d -o root -g root -m 0755 "$cursor_agent_root"
+  worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-npm-tool-${release_id}.XXXXXX")
 
-    if ! sudo test -d "$cursor_agent_root/$cursor_agent_version"; then
-      cursor_agent_staging=$(sudo mktemp -d "$cursor_agent_root/.staging.XXXXXX")
-      sudo cp -a "$cursor_agent_source/." "$cursor_agent_staging/"
-      sudo chown -R root:root "$cursor_agent_staging"
-      sudo mv "$cursor_agent_staging" "$cursor_agent_root/$cursor_agent_version"
+  PATH="$worker_node_dir/bin:$PATH" "$worker_node_dir/bin/node" \
+    "$worker_node_dir/lib/node_modules/npm/bin/npm-cli.js" install --global \
+    --no-fund --no-audit --prefix "$worker_tool_staging" "${package}@${version}" >/dev/null
+
+  if [ ! -x "$worker_tool_staging/$entry_point" ]; then
+    echo "installed $package does not provide $entry_point" >&2
+    return 1
+  fi
+
+  worker_opt_staging=$(sudo mktemp -d "${target}.XXXXXX")
+  sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
+  root_own_pinned_tree "$worker_opt_staging"
+  sudo mv "$worker_opt_staging" "$target"
+  worker_opt_staging=
+  rm -rf -- "$worker_tool_staging"
+  worker_tool_staging=
+}
+
+install_worker_codex() {
+  install_worker_npm_tool @openai/codex "$codex_version" "$worker_codex_dir" bin/codex
+
+  # The package's own entry point is a Node shim around the platform
+  # dependency's native binary. Link the binary itself, so a Codex agent does
+  # not depend on Node resolving from whatever environment Herdr starts it in,
+  # and link it where it stands so it still finds its sidecar alongside.
+  set -- "$worker_codex_dir"/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/*/bin/codex
+
+  if [ "$#" -ne 1 ] || ! sudo test -x "$1"; then
+    echo "pinned Codex package does not contain exactly one native binary" >&2
+    return 1
+  fi
+
+  if [ "$(sudo -u ptc-manager-worker -H "$1" --version)" != "codex-cli $codex_version" ]; then
+    echo "installed Codex has an unexpected version" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$1" /usr/local/bin/codex
+}
+
+install_worker_claude_code() {
+  install_worker_npm_tool @anthropic-ai/claude-code "$claude_code_version" \
+    "$worker_claude_code_dir" bin/claude
+
+  claude_binary="$worker_claude_code_dir/bin/claude"
+  claude_reported=$(sudo -u ptc-manager-worker -H "$claude_binary" --version)
+
+  if [ "$claude_reported" != "$claude_code_version (Claude Code)" ]; then
+    echo "installed Claude Code has an unexpected version: $claude_reported" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$claude_binary" /usr/local/bin/claude
+}
+
+# The Cursor CLI has no package manager: its installer downloads one versioned
+# archive and its own copy is whatever was current that day. Fetch the pinned
+# version directly, so the deployment no longer depends on a per-user
+# installation someone populated by hand.
+install_worker_cursor_agent() {
+  cursor_marker="$worker_cursor_agent_dir/.ptc-manager-archive-sha256"
+
+  # An unpacked tree cannot be hashed back into the archive it came from, so the
+  # digest that proved it is kept beside it. A tree left by an earlier
+  # deployment that did not check one is replaced rather than trusted.
+  if [ "$(sudo cat "$cursor_marker" 2>/dev/null)" != "$cursor_agent_sha256" ]; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-cursor-agent-${release_id}.XXXXXX")
+    cursor_archive="$worker_tool_staging/agent-cli-package.tar.gz"
+
+    curl -fsSL -o "$cursor_archive" \
+      "https://downloads.cursor.com/lab/${cursor_agent_version}/linux/x64/agent-cli-package.tar.gz"
+
+    # The version an unverified archive reports is the archive's own claim, so
+    # the digest has to be proven before anything is unpacked from it.
+    if [ "$(sha256sum "$cursor_archive" | cut -d ' ' -f 1)" != "$cursor_agent_sha256" ]; then
+      echo "downloaded Cursor CLI archive does not match the sha256 this revision pins" >&2
+      return 1
     fi
 
-    sudo ln -sfn "$cursor_agent_root/$cursor_agent_version/cursor-agent" \
-      /usr/local/bin/cursor-agent
+    tar --strip-components=1 -xzf "$cursor_archive" -C "$worker_tool_staging"
+    rm -f -- "$cursor_archive"
+
+    if [ ! -x "$worker_tool_staging/cursor-agent" ]; then
+      echo "pinned Cursor CLI archive does not contain cursor-agent" >&2
+      return 1
+    fi
+
+    printf '%s\n' "$cursor_agent_sha256" >"$worker_tool_staging/.ptc-manager-archive-sha256"
+
+    worker_opt_staging=$(sudo mktemp -d "${worker_cursor_agent_dir}.XXXXXX")
+    sudo cp -a "$worker_tool_staging/." "$worker_opt_staging/"
+    root_own_pinned_tree "$worker_opt_staging"
+    sudo rm -rf -- "$worker_cursor_agent_dir"
+    sudo mv "$worker_opt_staging" "$worker_cursor_agent_dir"
+    worker_opt_staging=
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  cursor_binary="$worker_cursor_agent_dir/cursor-agent"
+
+  if [ "$(sudo -u ptc-manager-worker -H "$cursor_binary" --version)" != "$cursor_agent_version" ]; then
+    echo "installed Cursor CLI has an unexpected version" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$cursor_binary" /usr/local/bin/cursor-agent
+}
+
+# Herdr is the one program a deployment cannot swap while it runs: a client
+# whose protocol does not match the server breaks the coordinator's view of
+# every agent. Install the pinned build and leave the link where it is;
+# restart_worker_when_nothing_retained moves it at the one moment the server
+# restarts anyway, and until then the console reports the staged version.
+install_worker_herdr() {
+  if ! sudo test -x "$worker_herdr_dir/herdr"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-herdr-${release_id}.XXXXXX")
+
+    curl -fsSL -o "$worker_tool_staging/herdr" \
+      "https://github.com/herdrdev/herdr/releases/download/v${herdr_version}/herdr-linux-x86_64"
+
+    if [ "$(sha256sum "$worker_tool_staging/herdr" | cut -d ' ' -f 1)" != "$herdr_sha256" ]; then
+      echo "downloaded Herdr does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
+    sudo install -d -o root -g root -m 0755 "$worker_herdr_dir"
+    sudo install -o root -g root -m 0755 "$worker_tool_staging/herdr" "$worker_herdr_dir/herdr"
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  # Whatever stands at the pinned path is what a later restart links onto the
+  # PATH, including a file an interrupted deployment left there, so prove it on
+  # every run rather than only on the run that downloaded it.
+  if [ "$(sudo sha256sum "$worker_herdr_dir/herdr" | cut -d ' ' -f 1)" != "$herdr_sha256" ]; then
+    echo "installed Herdr does not match the sha256 this revision pins" >&2
+    return 1
+  fi
+
+  if [ "$(sudo -u ptc-manager-worker -H "$worker_herdr_dir/herdr" --version)" != "herdr $herdr_version" ]; then
+    echo "installed Herdr has an unexpected version" >&2
+    return 1
+  fi
+
+  # The interactive client belongs to the person, not to this deployment, so
+  # say when it has drifted rather than change it.
+  manual_herdr_version=$("$manual_herdr" --version 2>/dev/null || true)
+
+  if [ "$manual_herdr_version" != "herdr $herdr_version" ]; then
+    echo "Note: the interactive Herdr client at $manual_herdr reports \"$manual_herdr_version\" while this revision pins $herdr_version. Run \`herdr update\` as the agent user when convenient."
   fi
 }
 
 install_worker_node() {
-  node_source=$("$mise_binary" where "node@${node_version}")
+  "$worker_mise" install "node@${node_version}"
+  node_source=$("$worker_mise" where "node@${node_version}")
 
   case "$node_source" in
     /home/agent/.local/share/mise/installs/node/*) ;;
@@ -455,7 +818,7 @@ install_worker_node() {
   if ! sudo test -e "$worker_node_dir"; then
     worker_node_staging=$(sudo mktemp -d "/opt/ptc-manager-node-${node_version}.XXXXXX")
     sudo cp -a "$node_source/." "$worker_node_staging/"
-    sudo chown -R root:root "$worker_node_staging"
+    root_own_pinned_tree "$worker_node_staging"
 
     if [ "$(sudo "$worker_node_staging/bin/node" --version)" != "v${node_version}" ]; then
       echo "staged worker Node runtime has an unexpected version" >&2
@@ -493,9 +856,118 @@ install_worker_node() {
   sudo -u ptc-manager-worker -H /usr/local/bin/corepack --version >/dev/null
 }
 
+# pnpm links a worktree's node_modules into a shared content-addressed store
+# rather than copying a tree into each one, which is the only way a package cache
+# can be shared while no agent writes into another's workspace. The worker gets
+# it the way it gets Node: installed by mise as the deploying user, copied to a
+# root-owned directory, version-checked, and linked, so an agent cannot rewrite
+# its own toolchain.
+install_worker_pnpm() {
+  "$worker_mise" install "pnpm@${pnpm_version}"
+  pnpm_source=$("$worker_mise" where "pnpm@${pnpm_version}")
+
+  case "$pnpm_source" in
+    /home/agent/.local/share/mise/installs/pnpm/*) ;;
+    *)
+      echo "mise returned an unexpected pnpm installation path: $pnpm_source" >&2
+      return 1
+      ;;
+  esac
+
+  if [ ! -x "$pnpm_source/pnpm" ]; then
+    echo "mise-managed pnpm executable is missing: $pnpm_source/pnpm" >&2
+    return 1
+  fi
+
+  if ! sudo test -e "$worker_pnpm_dir"; then
+    worker_pnpm_staging=$(sudo mktemp -d "/opt/ptc-manager-pnpm-${pnpm_version}.XXXXXX")
+    sudo cp -a "$pnpm_source/." "$worker_pnpm_staging/"
+    root_own_pinned_tree "$worker_pnpm_staging"
+
+    if [ "$(sudo "$worker_pnpm_staging/pnpm" --version)" != "$pnpm_version" ]; then
+      echo "staged worker pnpm has an unexpected version" >&2
+      return 1
+    fi
+
+    sudo mv "$worker_pnpm_staging" "$worker_pnpm_dir"
+    worker_pnpm_staging=
+  fi
+
+  if [ "$(sudo "$worker_pnpm_dir/pnpm" --version)" != "$pnpm_version" ]; then
+    echo "installed worker pnpm has an unexpected version" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$worker_pnpm_dir/pnpm" /usr/local/bin/pnpm
+
+  # pnpm walks upward from the working directory looking for workspace and
+  # config files. The deployment runs from the deploying user's home, which the
+  # worker cannot read, so prove the command from a directory it can: an agent
+  # only ever runs pnpm inside its own worktree.
+  sudo -u ptc-manager-worker -H sh -c 'cd / && /usr/local/bin/pnpm --version' >/dev/null
+}
+
+# A repository's own bootstrap script runs the worker's mise to install its
+# toolchain, so it is a program on the machine like any other rather than a copy
+# of whatever the deploying user happens to have installed that week.
 install_worker_mise() {
-  sudo install -o root -g root -m 0755 "$mise_binary" "$worker_mise"
-  sudo -u ptc-manager-worker -H "$worker_mise" --version >/dev/null
+  if ! sudo test -f "$worker_mise_dir/mise"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-mise-${release_id}.XXXXXX")
+
+    curl -fsSL -o "$worker_tool_staging/mise" \
+      "https://github.com/jdx/mise/releases/download/v${mise_version}/mise-v${mise_version}-linux-x64"
+
+    if [ "$(sha256sum "$worker_tool_staging/mise" | cut -d ' ' -f 1)" != "$mise_sha256" ]; then
+      echo "downloaded mise does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
+    sudo install -d -o root -g root -m 0755 "$worker_mise_dir"
+    sudo install -o root -g root -m 0755 "$worker_tool_staging/mise" "$worker_mise_dir/mise"
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  if [ "$(sudo sha256sum "$worker_mise_dir/mise" | cut -d ' ' -f 1)" != "$mise_sha256" ]; then
+    echo "installed mise does not match the sha256 this revision pins" >&2
+    return 1
+  fi
+
+  sudo ln -sfn "$worker_mise_dir/mise" "$worker_mise"
+
+  installed_mise=$(sudo -u ptc-manager-worker -H "$worker_mise" --version | cut -d ' ' -f 1)
+
+  if [ "$installed_mise" != "$mise_version" ]; then
+    echo "installed mise has an unexpected version: $installed_mise" >&2
+    return 1
+  fi
+}
+
+gate_mix() {
+  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
+    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
+    "$gate_elixir_dir/bin/mix" "$@"
+}
+
+# Mix keeps one Rebar per Elixir series under a directory it names after the
+# series, so the digest has to come from the series this revision pins. A copy
+# left by an older series would otherwise answer for one that has none.
+gate_rebar_series() {
+  series=$(printf '%s' "$elixir_version" |
+    sed 's/^\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.[0-9][0-9]*-otp-\([0-9][0-9]*\)$/\1-\2-otp-\3/')
+
+  case "$series" in
+    *[!0-9a-z-]*|*.*|'')
+      echo "pinned Elixir version does not name a Mix series: $elixir_version" >&2
+      return 1
+      ;;
+  esac
+
+  printf '%s' "$series"
+}
+
+gate_rebar_digest() {
+  sudo sha512sum "$gate_mix_home/elixir/$1/rebar3" 2>/dev/null | cut -d ' ' -f 1
 }
 
 install_gate_beam_toolchain() {
@@ -505,16 +977,16 @@ install_gate_beam_toolchain() {
   sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
     MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
-    "$mise_binary" install "erlang@${erlang_version}" "elixir@${elixir_version}"
+    "$worker_mise" install "erlang@${erlang_version}" "elixir@${elixir_version}"
 
   installed_erlang=$(sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
     MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
-    "$mise_binary" where "erlang@${erlang_version}")
+    "$worker_mise" where "erlang@${erlang_version}")
   installed_elixir=$(sudo env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     MISE_DATA_DIR="$gate_mise_data" MISE_CACHE_DIR="$gate_mise_cache" \
     MISE_STATE_DIR="$gate_mise_state" MISE_CONFIG_DIR="$gate_mise_config" \
-    "$mise_binary" where "elixir@${elixir_version}")
+    "$worker_mise" where "elixir@${elixir_version}")
 
   if [ "$installed_erlang" != "$gate_erlang_dir" ] ||
     [ "$installed_elixir" != "$gate_elixir_dir" ]; then
@@ -548,12 +1020,41 @@ install_gate_beam_toolchain() {
   sudo install -d -o root -g root -m 0755 "$gate_mix_home"
 
   gate_tool_home=$(sudo mktemp -d /tmp/ptc-manager-gate-toolchain.XXXXXX)
-  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
-    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
-    "$gate_elixir_dir/bin/mix" local.hex --force --if-missing
-  sudo env -i HOME="$gate_tool_home" MIX_HOME="$gate_mix_home" \
-    PATH="$gate_elixir_dir/bin:$gate_erlang_dir/bin:/usr/bin:/bin" LC_ALL=C \
-    "$gate_elixir_dir/bin/mix" local.rebar --force --if-missing
+
+  if ! sudo test -d "$gate_mix_home/archives/hex-${hex_version}"; then
+    gate_mix local.hex "$hex_version" --force
+  fi
+
+  # Mix runs the newest archive it finds, so the pinned one is the only one that
+  # stays.
+  if sudo test -d "$gate_mix_home/archives"; then
+    sudo find "$gate_mix_home/archives" -mindepth 1 -maxdepth 1 -name 'hex-*' \
+      ! -name "hex-${hex_version}" -exec rm -rf -- {} +
+  fi
+
+  if ! sudo test -d "$gate_mix_home/archives/hex-${hex_version}"; then
+    echo "the gate does not have the Hex version this revision pins" >&2
+    return 1
+  fi
+
+  # Rebar has no version to ask for, and mix installs a mismatched --sha512
+  # anyway once --force is given, so the digest of what landed is the check.
+  rebar_series=$(gate_rebar_series)
+
+  if sudo test -d "$gate_mix_home/elixir"; then
+    sudo find "$gate_mix_home/elixir" -mindepth 1 -maxdepth 1 ! -name "$rebar_series" \
+      -exec rm -rf -- {} +
+  fi
+
+  if [ "$(gate_rebar_digest "$rebar_series")" != "$rebar3_sha512" ]; then
+    gate_mix local.rebar --force
+  fi
+
+  if [ "$(gate_rebar_digest "$rebar_series")" != "$rebar3_sha512" ]; then
+    echo "the Rebar the gate installed for Elixir $rebar_series does not match the sha512 this revision pins" >&2
+    return 1
+  fi
+
   sudo rm -rf -- "$gate_tool_home"
   gate_tool_home=
 
@@ -604,6 +1105,37 @@ prune_successful_backups() {
     done
 }
 
+# A deployment that goes back to the previous release has to go back to the
+# Herdr that release was built against. The coordinator reaches the server
+# through this link, so leaving a newer one behind pairs an old coordinator with
+# a protocol it does not expect, which is the mismatch the deferred link exists
+# to prevent.
+restore_worker_herdr() {
+  [ -n "$herdr_link_backup" ] || return 0
+
+  if ! sudo test -L "$herdr_link_backup" && ! sudo test -e "$herdr_link_backup"; then
+    return 0
+  fi
+
+  echo "Restoring the Herdr this release was deployed against." >&2
+
+  # This function is always called where its result is tested, which switches
+  # `set -e` off for its body, so every step has to report for itself. Ending on
+  # a command that cannot fail would let a rollback call itself healthy while
+  # the link is missing and cleanup removes the only copy of what it replaced.
+  restore_status=0
+  sudo rm -f -- "$worker_herdr" || restore_status=1
+  sudo cp -a "$herdr_link_backup" "$worker_herdr" || restore_status=1
+  sudo systemctl restart ptc_manager-herdr || restore_status=1
+
+  if [ "$restore_status" -ne 0 ]; then
+    herdr_link_backup_retained=true
+    echo "The Herdr this release was deployed against is kept at $herdr_link_backup; put it back at $worker_herdr by hand." >&2
+  fi
+
+  return "$restore_status"
+}
+
 rollback() {
   deployment_phase=handling_failure
   rollback_status=0
@@ -634,6 +1166,7 @@ rollback() {
 
   sudo install -o ptc-manager -g ptc-manager -m 0600 "$database_backup" "$database_path" ||
     rollback_status=1
+  restore_worker_herdr || rollback_status=1
   restore_preexisting_maintenance_override || rollback_status=1
   sudo systemctl start "$service_name" || rollback_status=1
 
@@ -666,6 +1199,8 @@ finish() {
     restart_existing)
       deployment_phase=handling_failure
       echo "Deployment stopped before the release swap; restarting the existing release." >&2
+      restore_worker_herdr ||
+        echo "Restoring the previous Herdr failed; check $worker_herdr and ptc_manager-herdr before deploying again." >&2
       restore_preexisting_maintenance_override || true
       sudo systemctl start "$service_name" || true
       ;;
@@ -687,7 +1222,6 @@ command -v jq >/dev/null
 command -v python3 >/dev/null
 command -v nsenter >/dev/null
 [ -x "$failure_policy" ]
-[ -x "$mise_binary" ]
 [ -x "$manual_herdr" ]
 [ -x "$worker_herdr" ]
 [ -f "$source_archive" ]
@@ -696,10 +1230,18 @@ command -v nsenter >/dev/null
 [ ! -e "$release_backup" ]
 sudo -n true
 tar -xOf "$source_archive" deploy/herdr-busy-agent-count.jq >"$agent_filter"
+tar -xOf "$source_archive" deploy/ptc-manager-active-managed-runs.sql >"$active_runs_query"
+tar -xOf "$source_archive" deploy/ptc-manager-configured-repositories.sql >"$repositories_query"
+tar -xOf "$source_archive" deploy/ptc-manager-check-access-dropin >"$access_dropin_check"
+tar -xOf "$source_archive" deploy/ptc-manager-provision-repository >"$provision_runner_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-provision-repository.service >"$provision_service_candidate"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-claude-trust >"$claude_trust_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-codex-arm >"$codex_arm_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-agent-login >"$agent_login_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-gh-label >"$gh_label_candidate"
 tar -xOf "$source_archive" deploy/ptc-operation >"$operation_wrapper_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-operation-recover >"$operation_recovery_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
@@ -708,9 +1250,17 @@ tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-self-deploy-runner >"$self_deploy_runner_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy.service >"$self_deploy_service_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_deploy_access_candidate"
+tar -xOf "$source_archive" deploy/toolchain-versions >"$toolchain_manifest"
+tar -xOf "$source_archive" deploy/ptc-manager-toolchain-version >"$toolchain_reader"
 chmod 0755 "$worker_git_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$claude_trust_candidate"
+chmod 0755 "$codex_arm_candidate"
+chmod 0755 "$agent_login_candidate"
+chmod 0755 "$gh_label_candidate"
+chmod 0755 "$access_dropin_check"
+chmod 0755 "$provision_runner_candidate"
+chmod 0644 "$provision_service_candidate"
 chmod 0755 "$operation_wrapper_candidate"
 chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
@@ -718,7 +1268,10 @@ chmod 0755 "$herdr_launch_candidate"
 chmod 0440 "$sudoers_candidate"
 chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
+chmod 0755 "$toolchain_reader"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
+
+read_pinned_versions
 
 coordinator_environment_files=$(
   sudo systemctl show -p EnvironmentFiles --value "$service_name" |
@@ -883,7 +1436,21 @@ sudo rm -f -- \
 sudo systemctl daemon-reload
 install_worker_mise
 install_worker_node
-install_worker_agents
+install_worker_pnpm
+install_worker_codex
+install_worker_claude_code
+install_worker_cursor_agent
+install_worker_herdr
+
+# One-time removal of what the pinned installations replaced: the Codex tree
+# extracted into /opt by hand, the agent CLIs installed into the pinned Node
+# directory after a deployment staged it, and the Cursor tree copied from a
+# per-user installation. Unlinking an executable an idle agent still holds open
+# is safe; the process keeps the inode until it exits.
+sudo rm -rf -- /opt/codex /opt/ptc-manager-cursor-agent \
+  "$worker_node_dir/lib/node_modules/@openai" \
+  "$worker_node_dir/lib/node_modules/@anthropic-ai" \
+  "$worker_node_dir/bin/codex" "$worker_node_dir/bin/claude"
 
 # Keep the worker Git bridge and its exact sudo authorization versioned with
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.
@@ -893,6 +1460,12 @@ sudo install -o root -g root -m 0755 "$worker_bootstrap_candidate" \
   /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 "$claude_trust_candidate" \
   /usr/local/bin/ptc-manager-worker-claude-trust
+sudo install -o root -g root -m 0755 "$codex_arm_candidate" \
+  /usr/local/bin/ptc-manager-worker-codex-arm
+sudo install -o root -g root -m 0755 "$agent_login_candidate" \
+  /usr/local/bin/ptc-manager-worker-agent-login
+sudo install -o root -g root -m 0755 "$gh_label_candidate" \
+  /usr/local/bin/ptc-manager-worker-gh-label
 sudo install -o root -g root -m 0755 "$operation_wrapper_candidate" \
   /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 "$operation_recovery_candidate" \
@@ -902,6 +1475,14 @@ sudo install -o root -g root -m 0644 "$agent_context_candidate" \
   /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 "$herdr_launch_candidate" \
   /usr/local/bin/ptc-manager-herdr-launch
+sudo install -o root -g root -m 0755 "$access_dropin_check" \
+  /usr/local/bin/ptc-manager-check-access-dropin
+sudo install -o root -g root -m 0755 "$provision_runner_candidate" \
+  /usr/local/bin/ptc-manager-provision-repository
+sudo install -o root -g root -m 0644 "$provision_service_candidate" \
+  /etc/systemd/system/ptc_manager-provision-repository.service
+sudo install -o root -g root -m 0644 "$repositories_query" \
+  /usr/local/libexec/ptc-manager-configured-repositories.sql
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
   /etc/sudoers.d/ptc_manager
 if ! getent group ptc-manager-deploy >/dev/null; then
@@ -917,6 +1498,18 @@ sudo install -o root -g root -m 0644 "$self_deploy_service_candidate" \
 sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager.service.d
 sudo install -o root -g root -m 0644 "$self_deploy_access_candidate" \
   /etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-self-deploy-access.conf
+
+ensure_repository_checkouts
+write_repository_access_dropin /.git "$manager_access_dropin"
+write_repository_access_dropin "" "$worker_access_dropin"
+"$access_dropin_check" "$manager_access_dropin"
+"$access_dropin_check" "$worker_access_dropin"
+chmod 0644 "$manager_access_dropin" "$worker_access_dropin"
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager-herdr.service.d
+install_dropin_when_changed "$manager_access_dropin" \
+  /etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-repositories.conf
+install_dropin_when_changed "$worker_access_dropin" \
+  /etc/systemd/system/ptc_manager-herdr.service.d/zz-ptc-manager-repositories.conf
 sudo systemctl daemon-reload
 sudo rm -f -- /etc/sudoers.d/ptc_manager-codex
 mkdir -p "$build_dir"
@@ -924,14 +1517,14 @@ tar -xf "$source_archive" -C "$build_dir"
 cd "$build_dir"
 
 echo "Building production release..."
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod PTC_WORKSPACE_CACHE_ROOT="$production_workspace_cache" \
   ./scripts/ptc/bootstrap
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix compile
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix assets.deploy
-"$mise_binary" x erlang@29.0.3 elixir@1.20.2-otp-29 "node@${node_version}" -- \
+"$worker_mise" x "erlang@${erlang_version}" "elixir@${elixir_version}" "node@${node_version}" -- \
   env MIX_ENV=prod mix release
 install_gate_beam_toolchain
 
@@ -944,6 +1537,7 @@ echo "Stopping service and backing up SQLite..."
 deployment_phase=service_stopped
 sudo systemctl stop "$service_name"
 ensure_no_managed_runs
+restart_worker_when_nothing_retained
 sudo sqlite3 "$database_path" ".backup '$database_backup'"
 sudo chown ptc-manager:ptc-manager "$database_backup"
 sudo chmod 0600 "$database_backup"

@@ -2,6 +2,7 @@ defmodule PtcManager.ResultReconciler do
   @moduledoc "Verifies committed implementation branches before GitHub write eligibility."
 
   alias PtcManager.Operations
+  alias PtcManager.Operations.StopReport
   alias PtcManager.Repository.Contract
 
   def run_once(opts \\ []) do
@@ -20,6 +21,16 @@ defmodule PtcManager.ResultReconciler do
   end
 
   defp verify_job(job, opts) do
+    # An agent that said it could not finish outranks whatever its branch looks
+    # like. A partial commit that happens to verify is not a delivery, and
+    # publishing it would ship work the agent itself declared incomplete.
+    case StopReport.read(job) do
+      {:ok, report} -> record_stop(job, report)
+      _no_usable_report -> verify_branch(job, opts)
+    end
+  end
+
+  defp verify_branch(job, opts) do
     probe = Keyword.get(opts, :probe, Application.fetch_env!(:ptc_manager, :result_probe))
     contract_provider = Keyword.get(opts, :contract_provider, PtcManager.Repository.Contract)
 
@@ -53,6 +64,22 @@ defmodule PtcManager.ResultReconciler do
         reason = {:unexpected_probe_result, other}
 
         record_failure(job, reason)
+    end
+  end
+
+  defp record_stop(job, report) do
+    case Operations.record_job_stop_report(
+           job.id,
+           job.fencing_token,
+           job.result_attempt_token,
+           report
+         ) do
+      {:ok, _job} ->
+        StopReport.discard(job)
+        {:error, {:agent_stopped, report["reason_code"]}}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

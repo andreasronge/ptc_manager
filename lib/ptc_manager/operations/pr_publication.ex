@@ -41,6 +41,8 @@ defmodule PtcManager.Operations.PrPublication do
     field :checks_failed, :integer, default: 0
     field :checks_pending, :integer, default: 0
     field :linked_issue_numbers, :map, default: %{"numbers" => []}
+    field :labels, :map, default: %{"names" => []}
+    field :follow_up_dismissed_at, :utc_datetime_usec
 
     belongs_to :job, PtcManager.Operations.Job
     belongs_to :repository, PtcManager.Operations.Repository
@@ -86,7 +88,9 @@ defmodule PtcManager.Operations.PrPublication do
       :checks_total,
       :checks_failed,
       :checks_pending,
-      :linked_issue_numbers
+      :linked_issue_numbers,
+      :labels,
+      :follow_up_dismissed_at
     ])
     |> validate_required([
       :state,
@@ -108,6 +112,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_number(:checks_failed, greater_than_or_equal_to: 0)
     |> validate_number(:checks_pending, greater_than_or_equal_to: 0)
     |> validate_linked_issue_numbers()
+    |> validate_labels()
     |> validate_number(:pr_number, greater_than: 0)
     |> validate_length(:idempotency_key, is: 64)
     |> validate_length(:branch_name, max: 240)
@@ -143,6 +148,17 @@ defmodule PtcManager.Operations.PrPublication do
   def external?(%__MODULE__{source: "external", job_id: nil}), do: true
   def external?(%__MODULE__{}), do: false
 
+  @doc """
+  The repository this pull request belongs to, from whichever side carries it.
+
+  An imported pull request is linked to its repository directly. One PtcManager
+  published for an agent may reach it only through the job that produced it, so
+  a caller must have preloaded whichever association it has.
+  """
+  def repository(%__MODULE__{repository: %{} = repository}), do: repository
+  def repository(%__MODULE__{job: %{repository: %{} = repository}}), do: repository
+  def repository(%__MODULE__{}), do: nil
+
   defp validate_publication_identity(changeset) do
     if get_field(changeset, :source) == "external" do
       validate_required(changeset, [
@@ -159,6 +175,32 @@ defmodule PtcManager.Operations.PrPublication do
     else
       validate_required(changeset, [:job_id])
     end
+  end
+
+  @doc "The label names GitHub last reported on this pull request."
+  def label_names(%__MODULE__{labels: %{"names" => names}}) when is_list(names), do: names
+  def label_names(%__MODULE__{}), do: []
+
+  @doc """
+  True when the implementation agent marked its retrospective as unfinished business.
+
+  GitHub matches label names case-insensitively, so this comparison does too.
+  """
+  def follow_up_suggested?(%__MODULE__{} = publication),
+    do: Enum.any?(label_names(publication), &(String.downcase(&1) == "ptc:follow-up"))
+
+  defp validate_labels(changeset) do
+    validate_change(changeset, :labels, fn :labels, value ->
+      case value do
+        %{"names" => names} ->
+          if is_list(names) and Enum.all?(names, &is_binary/1),
+            do: [],
+            else: [labels: "must contain label names"]
+
+        _other ->
+          [labels: "must contain a names list"]
+      end
+    end)
   end
 
   defp validate_linked_issue_numbers(changeset) do

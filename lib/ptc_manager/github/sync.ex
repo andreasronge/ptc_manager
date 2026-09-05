@@ -49,13 +49,32 @@ defmodule PtcManager.GitHub.Sync do
 
     with {:ok, remote_issues} <- Gateway.call(client, :list_open_issues, [syncing_repository]),
          {:ok, missing_issues} <- fetch_missing_issues(syncing_repository, remote_issues, client) do
-      persist_snapshot(syncing_repository, remote_issues, missing_issues)
+      persist_snapshot(
+        syncing_repository,
+        remote_issues,
+        missing_issues,
+        viewer_login(client),
+        Operations.read_repository_labels(client, syncing_repository)
+      )
     else
       {:error, reason} -> mark_failed(syncing_repository, reason)
     end
   end
 
-  defp persist_snapshot(repository, remote_issues, missing_issues) do
+  # Who PtcManager reads GitHub as. A failure here must not fail the sync: the
+  # console simply shows no author badges until the identity is known again.
+  defp viewer_login(client) do
+    {module, arity} = if is_atom(client), do: {client, 0}, else: {client.__struct__, 1}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :viewer_login, arity) do
+      case Gateway.call(client, :viewer_login, []) do
+        {:ok, login} when is_binary(login) and login != "" -> login
+        _unavailable -> nil
+      end
+    end
+  end
+
+  defp persist_snapshot(repository, remote_issues, missing_issues, viewer_login, label_names) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
@@ -95,11 +114,15 @@ defmodule PtcManager.GitHub.Sync do
 
         synced_repository =
           repository
-          |> Repository.changeset(%{
-            sync_status: "ok",
-            last_synced_at: now,
-            last_sync_error: nil
-          })
+          |> Repository.changeset(
+            %{
+              sync_status: "ok",
+              last_synced_at: now,
+              last_sync_error: nil,
+              github_viewer_login: viewer_login || repository.github_viewer_login
+            }
+            |> put_label_names(label_names, now)
+          )
           |> Repo.update!()
 
         %{
@@ -120,6 +143,12 @@ defmodule PtcManager.GitHub.Sync do
     end
   rescue
     error -> mark_failed(repository, error)
+  end
+
+  defp put_label_names(attrs, nil, _now), do: attrs
+
+  defp put_label_names(attrs, names, now) do
+    Map.merge(attrs, %{github_label_names: %{"names" => names}, github_labels_checked_at: now})
   end
 
   defp persist_issue(repository, remote_issue) do
@@ -157,12 +186,29 @@ defmodule PtcManager.GitHub.Sync do
     error -> {:error, error}
   end
 
+  # Fields GitHub reports that are deliberately outside the content digest, so
+  # they can never make a stored proposal stale.
+  @projection_fields [:github_created_at, :github_author_login, :github_labels]
+
   defp upsert_issue(nil, attrs) do
     %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
     :changed
   end
 
-  defp upsert_issue(
+  defp upsert_issue(%Issue{} = issue, attrs) do
+    if canonical_unchanged?(issue, attrs) do
+      # No content change, so this is not a change a maintainer has to look at.
+      # The projection still has to land, or a row written before those columns
+      # existed would keep its defaults until GitHub happened to touch it.
+      persist_projection(issue, attrs)
+      :unchanged
+    else
+      issue |> Issue.changeset(attrs) |> Repo.update!()
+      :changed
+    end
+  end
+
+  defp canonical_unchanged?(
          %Issue{
            content_digest: digest,
            dependency_overflow: overflow,
@@ -178,11 +224,18 @@ defmodule PtcManager.GitHub.Sync do
            github_assignment_projected: true
          }
        ),
-       do: :unchanged
+       do: true
 
-  defp upsert_issue(%Issue{} = issue, attrs) do
-    issue |> Issue.changeset(attrs) |> Repo.update!()
-    :changed
+  defp canonical_unchanged?(_issue, _attrs), do: false
+
+  defp persist_projection(issue, attrs) do
+    projection = Map.take(attrs, @projection_fields)
+
+    if Enum.any?(projection, fn {field, value} -> Map.fetch!(issue, field) != value end) do
+      issue |> Issue.changeset(projection) |> Repo.update!()
+    end
+
+    :ok
   end
 
   defp replace_dependencies(issue, blockers, context) do
