@@ -30,7 +30,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       with {:ok, profile} <- AgentProfiles.select(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
            {:ok, path, workspace, pane} <- prepare_workspace(action),
-           :ok <- trust_workspace(path),
            name = agent_name(action),
            {:ok, context} <-
              PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
@@ -70,6 +69,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp prepare_workspace(action) do
     with {:ok, path} <- action_path(action),
+         :ok <- trust_workspace(path),
          {:ok, workspace, pane} <- open_workspace(action, path) do
       {:ok, path, workspace, pane}
     end

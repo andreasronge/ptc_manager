@@ -9,7 +9,17 @@ defmodule PtcManager.AutomationsTest do
   alias PtcManager.Repo
 
   defmodule GitTrustCommand do
-    def git_command(_args), do: {"", 0}
+    def git_command(args) do
+      send(self(), {:workspace_event, {:git, args}})
+      {"", 0}
+    end
+  end
+
+  defmodule RejectedOpenCommand do
+    def run(["worktree", "open" | _args]) do
+      send(self(), {:workspace_event, :rejected_open})
+      {:error, :open_failed}
+    end
   end
 
   # Every managed pane now asks whether the kind it is about to start is still
@@ -33,6 +43,7 @@ defmodule PtcManager.AutomationsTest do
     def run(args, _timeout \\ nil) do
       cond do
         Enum.take(args, 2) == ["worktree", "open"] ->
+          send(self(), {:workspace_event, :open})
           workspace_path = Enum.at(args, Enum.find_index(args, &(&1 == "--cwd")) + 1)
           Process.put({__MODULE__, :workspace_path}, workspace_path)
 
@@ -1203,13 +1214,14 @@ defmodule PtcManager.AutomationsTest do
     assert run.herdr_workspace == "generic-workspace"
   end
 
-  test "a Claude profile trusts the snapshot for the worker before starting and revokes it after" do
+  test "a snapshot is Git-trusted before Herdr opens it and trust is revoked after" do
     keys = [
       :dispatch_enabled,
       :generic_herdr_command,
       :agent_profiles,
       :herdr_run_as_user,
       :worktree_root,
+      :planning_snapshot_root,
       :worker_repository_trust_command,
       :worker_claude_trust_command,
       :worker_claude_trust_test_pid,
@@ -1227,6 +1239,12 @@ defmodule PtcManager.AutomationsTest do
     Application.put_env(
       :ptc_manager,
       :worktree_root,
+      System.tmp_dir!() |> Path.expand() |> Path.dirname()
+    )
+
+    Application.put_env(
+      :ptc_manager,
+      :planning_snapshot_root,
       System.tmp_dir!() |> Path.expand() |> Path.dirname()
     )
 
@@ -1303,9 +1321,48 @@ defmodule PtcManager.AutomationsTest do
 
     workspace_path = Process.get({GenericHerdrCommand, :workspace_path})
     assert is_binary(workspace_path)
+    assert_receive {:workspace_event, first_event}
+
+    assert first_event ==
+             {:git, ["config", "--global", "--add", "safe.directory", workspace_path]}
+
+    assert_receive {:workspace_event, :open}
+
+    assert_receive {:workspace_event,
+                    {:git,
+                     [
+                       "config",
+                       "--global",
+                       "--fixed-value",
+                       "--unset-all",
+                       "safe.directory",
+                       ^workspace_path
+                     ]}}
+
     assert_receive {:claude_trust, ["allow", ^workspace_path]}
     assert_receive {:claude_trust, ["revoke", ^workspace_path]}
     assert Repo.get!(Invocation, invocation.id).selected_agent_kind == "claude"
+
+    Application.put_env(:ptc_manager, :generic_herdr_command, RejectedOpenCommand)
+
+    assert {:error, :open_failed} =
+             PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
+
+    assert_receive {:workspace_event,
+                    {:git, ["config", "--global", "--add", "safe.directory", ^workspace_path]}}
+
+    assert_receive {:workspace_event, :rejected_open}
+
+    assert_receive {:workspace_event,
+                    {:git,
+                     [
+                       "config",
+                       "--global",
+                       "--fixed-value",
+                       "--unset-all",
+                       "safe.directory",
+                       ^workspace_path
+                     ]}}
   end
 
   test "agent profile workspace placeholders preserve one argument and quote TOML paths" do

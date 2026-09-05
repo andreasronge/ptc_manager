@@ -1279,8 +1279,10 @@ exchange a bounded Git bundle; the worker cannot access publication staging.
 The coordinator and generic Herdr agents exchange task, schema, and result files
 only through the setgid directory at `PTC_AGENT_ACTION_OUTPUT_DIR`. The default
 `/var/lib/ptc_manager-worker/agent-results` path is writable inside the Herdr
-service sandbox; planning snapshots remain read-only to agents. The coordinator
-database directory is `0700`.
+service sandbox; planning snapshots remain read-only to agents. Before Herdr
+opens a coordinator-owned snapshot, the adapter grants the worker Git trust for
+that exact path and revokes it during cleanup, including when opening fails.
+The coordinator database directory is `0700`.
 
 The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed
