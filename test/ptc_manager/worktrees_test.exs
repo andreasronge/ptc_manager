@@ -129,6 +129,24 @@ defmodule PtcManager.WorktreesTest do
       refute File.exists?(path)
     end
 
+    test "a forgotten workspace cannot traverse a symlink below the managed root" do
+      outside = existing_path()
+      victim = Path.join(outside, "keep")
+      File.mkdir_p!(victim)
+      File.write!(Path.join(victim, "valuable"), "keep")
+      link = missing_path()
+      File.ln_s!(outside, link)
+      on_exit(fn -> File.rm(link) end)
+      allocation = attention_allocation!(Path.join(link, "keep"))
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})
+
+      assert {:error, {:worktree_cleanup_failed, :worktree_path_outside_managed_root}} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert File.read!(Path.join(victim, "valuable")) == "keep"
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
     test "a forgotten workspace outside the managed root keeps the worktree for attention" do
       allocation = attention_allocation!(unmanaged_path())
       Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})

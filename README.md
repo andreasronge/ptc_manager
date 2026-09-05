@@ -1054,15 +1054,20 @@ sudo systemctl status ptc_manager
 ```
 
 `ptc-manager-health-snapshot` runs as root, on demand or from a timer, and
-writes `/var/lib/ptc_manager-output/ptc-health.json`: capacity settings, live
-agent runs, agent actions, resource operations, jobs, and the service journal
-filtered down to its error lines. That file is group-readable by
-`ptc-manager-output`, so a managed agent inspects the console's own runtime
-without holding any privilege itself, which is what lets a repository
-automation look for disagreements between what a record claims and what it is
-doing. The script refuses to run when it cannot read the database or the
-journal, because a snapshot whose sections are all empty reads exactly like a
-healthy console.
+writes `/var/lib/ptc_manager-output/ptc-health.json`. It exports capacity settings,
+record IDs, states and timings, plus counts from at most 10,000 service journal
+lines. Live record lists are limited to 500 rows; a list at that limit may be
+incomplete. The log counts include a limit indicator. Raw journal messages,
+agent status text, labels and names stay private because they can contain secrets
+or agent-controlled instructions.
+
+The final file is readable by `ptc-manager-output`; staging files are private
+and exclusively created. Atomic replacement never follows an output symlink.
+Keep the output directory owned by the coordinator with its documented sticky
+bit, and its ancestors unwritable by agents. Environment overrides are for the trusted root
+invoker only. Database or journal read failures preserve the previous snapshot;
+consumers must check `captured_at` and treat a stale snapshot as unavailable,
+never as healthy. Snapshot data cannot authorize an action.
 
 The coordinator, implementation worker, external-PR repairer, and Git verifier
 run as separate OS identities. Herdr, implementation agents, and the initial
@@ -1403,6 +1408,26 @@ worktree has no local history worth trusting, so the only evidence is the head
 that agent pushed matching what GitHub reports — the same guarantee imported
 pull requests have always had, including for an authorized merge, which still
 waits for GitHub itself to report the pull request merged.
+
+Publication writes acquire SQLite's write lock before reading their transition
+state. They can wait for the connection's busy timeout (currently the adapter's
+2-second default), including button-triggered retries. Busy repair postflight and
+gate-recording writes remain retryable; contention is not evidence of a failed
+repair or gate. No GitHub or process calls run inside publication transactions.
+
+Forgotten managed worktrees can be deleted locally only at normalized, absolute,
+direct-child paths of the validated managed root, with no symlink at the child.
+Deletion uses Python's descriptor-based `shutil.rmtree` and refuses platforms
+without symlink-attack protection.
+
+A merged repair must still match its frozen preflight head, verified retained
+commit range, or recorded intended head for a fresh repair, even when status
+reconciliation recorded the merge first. This confirms the authorized outcome;
+it does not attribute which GitHub actor performed the merge.
+
+Implementation dispatch refreshes the repository source before its final GitHub
+issue read, so a slow fetch cannot hide an issue change from approval validation.
+The lease clock starts after those reads.
 
 The Phoenix endpoint listens only on `127.0.0.1:4000`. Expose it privately over
 your tailnet with Tailscale Serve:

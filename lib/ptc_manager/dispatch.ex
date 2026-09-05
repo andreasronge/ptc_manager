@@ -45,12 +45,11 @@ defmodule PtcManager.Dispatch do
   end
 
   defp dispatch_job(job, github, source_updater, adapter, worker_key, lease_ms, capacity, clock) do
-    lease_now = Clock.utc_now(clock)
-    lifecycle_now = Clock.utc_now(PtcManager.Clock.System)
-
-    with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
+    with {:ok, source} <- Gateway.call(source_updater, :refresh, [job.repository]),
+         {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
          {:ok, canonical} <- normalize_remote(remote, job.repository),
-         {:ok, source} <- Gateway.call(source_updater, :refresh, [job.repository]),
+         lease_now = Clock.utc_now(clock),
+         lifecycle_now = Clock.utc_now(PtcManager.Clock.System),
          {:ok, leased} <-
            Operations.lease_job(job.id, worker_key, canonical, lease_ms,
              capacity: capacity,

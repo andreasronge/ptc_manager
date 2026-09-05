@@ -80,7 +80,10 @@ defmodule PtcManager.MaintainerActions.Sync do
 
     case client.status(publication) do
       {:ok, result} ->
-        reconcile_repair_status(action, publication, result, phase)
+        case reconcile_repair_status(action, publication, result, phase) do
+          {:terminal_error, :database_busy} -> {:error, :database_busy}
+          outcome -> outcome
+        end
 
       {:retry, reason} ->
         {:error, reason}
@@ -123,7 +126,7 @@ defmodule PtcManager.MaintainerActions.Sync do
         {:ok, %{pull_request: result, publication: updated}}
       else
         {:ok, _unexpected} -> {:terminal_error, :merged_repair_not_recorded}
-        {:error, :publication_not_open} -> settled_merged_repair(publication.id, result)
+        {:error, :publication_not_open} -> settled_merged_repair(publication, result)
         {:error, reason} -> {:terminal_error, reason}
       end
     else
@@ -278,6 +281,12 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   defp record_verified_repair(action, publication, result) do
+    with {:ok, verified} <- verify_retained_repair(action, publication, result) do
+      Publications.record_repaired_status(publication.id, result, verified)
+    end
+  end
+
+  defp verify_retained_repair(action, publication, result) do
     job = publication.job
 
     with {:ok, path} <- repair_path(job),
@@ -285,7 +294,7 @@ defmodule PtcManager.MaintainerActions.Sync do
          true <- verified.head_sha == result.head_sha,
          :ok <- GitProbe.descendant?(path, preflight_head(action), verified.head_sha),
          :ok <- GitProbe.reclaimable(path, job.branch_name, verified.head_sha) do
-      Publications.record_repaired_status(publication.id, result, verified)
+      {:ok, verified}
     else
       false -> {:error, :repair_head_not_verified}
       {:error, reason} -> {:error, reason}
@@ -354,6 +363,8 @@ defmodule PtcManager.MaintainerActions.Sync do
 
   defp repair_path(_job), do: {:error, :repair_worktree_unavailable}
 
+  defp mark_repair_attention(_publication, :database_busy), do: :ok
+
   defp mark_repair_attention(%{job: %{worktree_allocation: %{id: id}}}, reason) do
     _ = Operations.mark_worktree_attention(id, reason, "repair-agent")
     :ok
@@ -377,34 +388,55 @@ defmodule PtcManager.MaintainerActions.Sync do
 
   defp repair_intended_head(_action), do: nil
 
-  # The publication status reconciler polls on its own schedule and can observe
-  # the merge first, which moves the job to `done` and closes the window
-  # record_remote_status/2 is willing to write in. The merge this action was
-  # approved to perform still happened, so the end state it was waiting for is
-  # the success, not a failure to record it a second time.
-  defp settled_merged_repair(publication_id, result) do
-    case Repo.get(PrPublication, publication_id) do
+  # Reconciliation may finish first, but its mutable remote head is not repair
+  # evidence. Validate the action's head independently before accepting its state.
+  defp settled_merged_repair(publication, result) do
+    repository = PrPublication.repository(publication)
+
+    case Repo.get(PrPublication, publication.id) do
       %PrPublication{state: "published", pr_state: "merged"} = settled ->
-        {:ok, %{pull_request: result, publication: settled}}
+        if settled.remote_head_sha == result.head_sha and settled.pr_url == result.pr_url and
+             result.base_ref == repository.default_branch and
+             String.downcase(result.base_repository) ==
+               String.downcase("#{repository.github_owner}/#{repository.github_name}") do
+          {:ok, %{pull_request: result, publication: settled}}
+        else
+          {:terminal_error, :merged_repair_not_recorded}
+        end
 
       _publication ->
         {:terminal_error, :publication_not_open}
     end
   end
 
-  defp merged_repair_matches?(action, %PrPublication{source: "external"}, result),
-    do: repair_intended_head(action) == result.head_sha
-
-  defp merged_repair_matches?(_action, _publication, _result), do: true
-
-  defp prepare_merged_repair(_action, %PrPublication{source: "external"} = publication, _result),
-    do: {:ok, publication}
+  defp merged_repair_matches?(action, publication, result) do
+    if fresh_repair?(action, publication),
+      do:
+        is_binary(repair_intended_head(action)) and
+          repair_intended_head(action) == result.head_sha,
+      else: true
+  end
 
   defp prepare_merged_repair(action, publication, result) do
-    if result.head_sha == publication.remote_head_sha do
-      {:ok, publication}
-    else
-      record_verified_repair(action, publication, Map.put(result, :state, "open"))
+    cond do
+      fresh_repair?(action, publication) ->
+        {:ok, publication}
+
+      is_binary(preflight_head(action)) and result.head_sha == preflight_head(action) ->
+        {:ok, publication}
+
+      true ->
+        with {:ok, verified} <- verify_retained_repair(action, publication, result) do
+          if publication.pr_state == "merged" do
+            {:ok, publication}
+          else
+            Publications.record_repaired_status(
+              publication.id,
+              Map.put(result, :state, "open"),
+              verified
+            )
+          end
+        end
     end
   end
 

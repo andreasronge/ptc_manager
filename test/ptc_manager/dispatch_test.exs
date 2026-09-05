@@ -54,6 +54,19 @@ defmodule PtcManager.DispatchTest do
     def refresh(_repository), do: {:error, :repository_source_refresh_failed}
   end
 
+  defmodule IssueChangingSourceUpdater do
+    def refresh(repository) do
+      {:ok, remote} = Process.get(:dispatch_github_result)
+
+      Process.put(
+        :dispatch_github_result,
+        {:ok, Map.put(remote, "title", "Changed during fetch")}
+      )
+
+      PtcManager.TestSourceUpdater.refresh(repository)
+    end
+  end
+
   setup do
     Process.put(:dispatch_test_pid, self())
 
@@ -319,6 +332,21 @@ defmodule PtcManager.DispatchTest do
     assert rejected.state == "cancelled"
     assert rejected.fencing_token == 0
     assert rejected.last_error == "stale_approval"
+  end
+
+  test "rechecks approval after a source fetch that overlaps an issue edit" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, :stale_approval} =
+             Dispatch.run_once(
+               github: FakeGitHub,
+               adapter: FakeAdapter,
+               source_updater: IssueChangingSourceUpdater
+             )
+
+    refute_receive {:dispatch_context, _}
+    assert Repo.get!(Job, job.id).state == "cancelled"
   end
 
   test "an unresolved dependency cancels a queued job before agent dispatch" do

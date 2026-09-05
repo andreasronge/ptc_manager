@@ -1701,6 +1701,8 @@ defmodule PtcManager.Publications do
     min(base * Integer.pow(2, max(attempt_count - 1, 0)), max_delay)
   end
 
+  defp requested_retry_delay_ms(:database_busy), do: 1_000
+
   defp requested_retry_delay_ms({:after, delay_ms, {:github_http_error, _, _, delay_ms}})
        when is_integer(delay_ms) and delay_ms > 0,
        do: delay_ms

@@ -60,6 +60,18 @@ defmodule PtcManager.Repository.WorkerCodexArmingTest do
     assert_receive {:arming, ["arm"]}
   end
 
+  test "explicit model arguments also select the resume model" do
+    previous = Application.get_env(:ptc_manager, :agent_profiles)
+    on_exit(fn -> Application.put_env(:ptc_manager, :agent_profiles, previous) end)
+
+    for args <- [["--model", "chosen-model"], ["--model=chosen-model"], ["-m", "chosen-model"]] do
+      Application.put_env(:ptc_manager, :agent_profiles, %{"codex" => %{"args" => args}})
+      assert :ok = WorkerCodexArming.prepare("codex")
+      assert_receive {:arming, ["arm", "chosen-model"]}
+      assert PtcManager.AgentProfiles.args("codex") == args
+    end
+  end
+
   test "other agent kinds need nothing" do
     assert :ok = WorkerCodexArming.prepare("claude")
     assert :ok = WorkerCodexArming.prepare("cursor")

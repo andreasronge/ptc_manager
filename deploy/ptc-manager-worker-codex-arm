@@ -85,6 +85,19 @@ BLOCK = (
 )
 
 
+def simple_key(text):
+    # TOML permits bare, single-quoted and double-quoted spellings of a key.
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
+    return text
+
+
+def notice_header(line):
+    text = line.split("#", 1)[0].strip()
+    return text.startswith("[") and text.endswith("]") and simple_key(text[1:-1]) == "notice"
+
+
 def ensure_notice(lines, enable):
     """Own one key inside the config's [notice] table, wherever that table is.
 
@@ -95,7 +108,7 @@ def ensure_notice(lines, enable):
     """
     header = None
     for index, line in enumerate(lines):
-        if line.split("#", 1)[0].strip() == NOTICE_TABLE:
+        if notice_header(line):
             header = index
             break
 
@@ -111,7 +124,7 @@ def ensure_notice(lines, enable):
     section = [
         line
         for line in lines[header + 1 : end]
-        if line.split("=", 1)[0].strip() != NOTICE_KEY
+        if simple_key(line.split("=", 1)[0]) != NOTICE_KEY
     ]
 
     if enable:
@@ -159,12 +172,24 @@ with open(os.path.join(codex_home, "config.toml.ptc-lock"), "w") as lock:
         stripped = line.strip()
         if stripped.startswith("["):
             break
-        if "=" in stripped and stripped.split("=", 1)[0].strip() in MANAGED_KEYS:
+        if "=" in stripped and simple_key(stripped.split("=", 1)[0]) in MANAGED_KEYS:
             fail(
                 "config.toml already sets "
                 + stripped.split("=", 1)[0].strip()
                 + " outside the managed block"
             )
+
+    # An inline/dotted notice definition cannot safely be extended as a table.
+    # Refuse ambiguous input before replacing the configuration.
+    if sum(notice_header(line) for line in kept) > 1:
+        fail("config.toml defines the notice table more than once")
+    for line in kept:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        key = simple_key(stripped.split("=", 1)[0])
+        if "=" in stripped and (key == "notice" or key.startswith("notice.")):
+            fail("config.toml must express notices using a [notice] table")
 
     kept = ensure_notice(kept, mode == "arm")
 

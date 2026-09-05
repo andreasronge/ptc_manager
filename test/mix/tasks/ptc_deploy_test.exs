@@ -339,6 +339,21 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert output =~ "already sets approval_policy"
     assert File.read!(config) == ~s(approval_policy = "on-request"\n)
 
+    # These are equivalent TOML spellings, including quoted keys.
+    for header <- ["[ notice ]", "[\"notice\"]", "['notice']"] do
+      File.write!(config, header <> "\n\"hide_rate_limit_model_nudge\" = false\n")
+      assert {_output, 0} = arming(home, ["arm", "gpt-5.6-sol"])
+      content = File.read!(config)
+      assert length(Regex.scan(~r/hide_rate_limit_model_nudge/, content)) == 1
+      assert {_output, 0} = arming(home, ["arm", "gpt-5.6-sol"])
+      assert File.read!(config) == content
+      assert {_output, 0} = arming(home, ["disarm"])
+    end
+
+    File.write!(config, "\"model\" = \"custom\"\n")
+    assert {_, 2} = arming(home, ["arm", "gpt-5.6-sol"])
+    assert File.read!(config) == "\"model\" = \"custom\"\n"
+
     # Codex writes [notice] itself the first time anyone dismisses a notice, and
     # TOML allows only one, so the key is managed inside the table that is
     # already there. Every other notice in it belongs to whoever set it.

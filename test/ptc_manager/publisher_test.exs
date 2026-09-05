@@ -793,6 +793,20 @@ defmodule PtcManager.PublisherTest do
     assert failed.pre_publication_output == "dialyzer failed"
   end
 
+  test "database contention at the gate is retryable" do
+    {_job, publication, result} = verified_publication_fixture()
+    Process.put(:publisher_probe_result, {:ok, result})
+    Application.put_env(:ptc_manager, :publisher_gate_result, {:error, :database_busy})
+
+    assert {:error, :database_busy} =
+             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: FakeGate)
+
+    retry = Repo.get!(PrPublication, publication.id)
+    assert retry.state == "queued"
+    assert retry.attempt_count == 0
+    refute_receive {:broker_called, _}
+  end
+
   test "renews the fenced publication claim while a slow gate is running" do
     {_job, publication, result} = verified_publication_fixture()
     Process.put(:publisher_probe_result, {:ok, result})

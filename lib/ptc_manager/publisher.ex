@@ -65,6 +65,9 @@ defmodule PtcManager.Publisher do
       {:error, {:revalidation, reason}} ->
         record_failure(publication, :retry, {:revalidation_failed, reason})
 
+      {:error, {:gate, :database_busy}} ->
+        record_failure(publication, :retry, :database_busy)
+
       {:error, {:gate, reason}} ->
         record_failure(publication, :blocked, {:pre_publication_gate_failed, reason})
 

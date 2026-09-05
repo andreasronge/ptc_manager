@@ -1307,6 +1307,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:ok, queued} =
              MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
 
+    queued = %{queued | target_snapshot: %{"head_sha" => publication.remote_head_sha}}
     merged = %{merge_status(publication, repository) | state: "merged"}
 
     # The status reconciler polls on its own schedule and wins the race: it
@@ -1331,6 +1332,73 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert settled.state == "published"
     assert settled.pr_state == "merged"
+  end
+
+  test "a reconciler-recorded unrelated head does not prove a repair succeeded" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    queued = %{queued | target_snapshot: %{"head_sha" => publication.remote_head_sha}}
+
+    merged = %{
+      merge_status(publication, repository)
+      | state: "merged",
+        head_sha: String.duplicate("f", 40)
+    }
+
+    assert {:ok, _} = PtcManager.Publications.record_remote_status(publication.id, merged)
+    previous = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, SettledMergeClient)
+    Process.put(:settled_merge_status, merged)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous) end)
+
+    assert {:terminal_error, _} = Sync.sync_action(queued, {:ok, %{"outcome" => "repaired"}})
+  end
+
+  @tag :nightly
+  @tag sandbox: false
+  test "a busy publication write retries merged postflight without losing its transition" do
+    target = PtcManager.DisposableDeploymentTarget.start!()
+    previous = Application.get_env(:ptc_manager, :pull_request_client)
+
+    try do
+      repository = repository_fixture()
+      issue = issue_fixture(repository)
+      publication = open_publication_fixture(issue)
+      retain_repair_worktree(publication)
+
+      assert {:ok, queued} =
+               MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+      queued = %{queued | target_snapshot: %{"head_sha" => publication.remote_head_sha}}
+      merged = %{merge_status(publication, repository) | state: "merged"}
+      Application.put_env(:ptc_manager, :pull_request_client, SettledMergeClient)
+      Process.put(:settled_merge_status, merged)
+      {:ok, writer} = Exqlite.Sqlite3.open(target.database)
+
+      try do
+        :ok = Exqlite.Sqlite3.execute(writer, "BEGIN IMMEDIATE")
+
+        assert {:error, :database_busy} =
+                 Sync.sync_action(queued, {:ok, %{"outcome" => "repaired"}})
+
+        assert Repo.get!(PrPublication, publication.id).pr_state == "open"
+        :ok = Exqlite.Sqlite3.execute(writer, "ROLLBACK")
+
+        assert {:ok, %{publication: %{pr_state: "merged"}}} =
+                 Sync.sync_action(queued, {:ok, %{"outcome" => "repaired"}})
+      after
+        Exqlite.Sqlite3.close(writer)
+      end
+    after
+      Application.put_env(:ptc_manager, :pull_request_client, previous)
+      PtcManager.DisposableDeploymentTarget.close!(target)
+    end
   end
 
   test "queues approve-and-merge for an already clean pull request" do

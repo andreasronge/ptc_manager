@@ -19,7 +19,7 @@ db="${PTC_HEALTH_DB:-/var/lib/ptc_manager/ptc_manager.db}"
 out="${PTC_HEALTH_OUT:-/var/lib/ptc_manager-output/ptc-health.json}"
 unit="${PTC_HEALTH_UNIT:-ptc_manager.service}"
 since="${PTC_HEALTH_SINCE:--6 hours}"
-max_log_lines="${PTC_HEALTH_LOG_LINES:-150}"
+max_log_lines=10000
 
 fail() {
   echo "ptc-manager-health-snapshot: $1" >&2
@@ -30,14 +30,19 @@ fail() {
 journalctl -u "$unit" -n 1 --no-pager >/dev/null 2>&1 ||
   fail "cannot read the journal for $unit; run this as root"
 
-tmp="${out}.tmp.$$"
+# Exclusive creation prevents a guessed temporary-file symlink from turning
+# this root write into an overwrite. Raw journal data stays private throughout.
+umask 0077
+tmp_dir="$(mktemp -d "${out}.tmp.XXXXXX")" || fail "cannot create private staging directory"
+tmp="$tmp_dir/snapshot.json"
+log="$tmp_dir/journal"
 
 cleanup() {
-  rm -f "$tmp"
+  rm -rf "$tmp_dir"
 }
 
 trap cleanup EXIT HUP INT TERM
-umask 0027
+
 
 # sqlite3 prints nothing at all for an empty result set, which would leave a
 # bare "key": in the object, so an empty answer becomes an empty JSON array. A
@@ -54,11 +59,10 @@ query() {
   fi
 }
 
-# Reachability is settled by the preflight above; a failure here would land in
-# a pipeline subshell and could not stop the script anyway.
-journal() {
-  journalctl -u "$unit" --since "$since" --no-pager 2>/dev/null || true
-}
+# Read once, check the actual read, and bound the privileged input. A successful
+# preflight cannot prove this later read succeeded.
+journalctl -u "$unit" --since "$since" -n "$max_log_lines" --no-pager >"$log" 2>/dev/null ||
+  fail "cannot read the journal; leaving the previous snapshot in place"
 
 live_run_states="'queued','starting','working','idle','blocked','waiting','unknown'"
 
@@ -70,52 +74,48 @@ live_run_states="'queued','starting','working','idle','blocked','waiting','unkno
          from capacity_settings;"
 
   printf ',"live_agent_runs":'
-  query "select id, job_id, agent_action_id, role, state, status_text, agent_name,
-                herdr_pane, worker_id, started_at, last_heartbeat_at
+  query "select id, job_id, agent_action_id, role, state, worker_id, started_at, last_heartbeat_at
          from agent_runs
          where state in ($live_run_states)
-         order by id;"
+         order by id limit 500;"
 
   printf ',"live_agent_actions":'
-  query "select id, repository_id, action_key, state, target_type, target_id,
-                target_label, attempt_count, requested_at, started_at
+  query "select id, repository_id, state, target_type, target_id,
+                attempt_count, requested_at, started_at
          from agent_actions
          where state in ('queued','running','sync_pending')
-         order by id;"
+         order by id limit 500;"
 
   printf ',"live_resource_operations":'
-  query "select id, state, label, slot_number, job_id, agent_action_id, agent_run_id,
+  query "select id, state, slot_number, job_id, agent_action_id, agent_run_id,
                 queued_at, started_at
          from resource_operations
          where state in ('queued','starting','running','cancelling','recovery_pending')
-         order by id;"
+         order by id limit 500;"
 
   printf ',"recent_resource_operations":'
-  query "select id, state, label, agent_run_id, agent_action_id, job_id, queued_at,
+  query "select id, state, agent_run_id, agent_action_id, job_id, queued_at,
                 started_at, finished_at, wait_duration_ms, run_duration_ms
          from resource_operations
          order by id desc
          limit 40;"
 
   printf ',"live_jobs":'
-  query "select id, state, fencing_token, lease_owner, lease_expires_at, updated_at
+  query "select id, state, fencing_token, lease_expires_at, updated_at
          from jobs
          where state not in ('done','failed','cancelled')
-         order by id;"
+         order by id limit 500;"
 
-  printf ',"recent_service_errors":'
-  journal |
-    grep -v 'sudo\[' |
-    grep -v 'pam_unix' |
-    grep -E '\[(error|warning)\]|\*\* \(|terminating|Function: ' |
-    tail -n "$max_log_lines" |
-    jq -R -s 'split("\n") | map(select(length > 0))'
-
+  # Never export exception text: it may contain SQL parameters, credentials,
+  # private summaries, or instructions planted in an agent-controlled value.
   printf ',"service_log_volume":'
-  total="$(journal | wc -l)"
-  noise="$(journal | grep -c 'sudo\[\|pam_unix' || true)"
-  printf '{"window":"%s","total_lines":%s,"session_noise_lines":%s}' \
-    "$since" "$total" "${noise:-0}"
+  jq -R -s --arg window "$since" --argjson limit "$max_log_lines" '
+    split("\n") | map(select(length > 0)) |
+    {window: $window, line_limit: $limit, at_limit: (length >= $limit),
+     total_lines: length,
+     session_noise_lines: (map(select(test("sudo\\[|pam_unix"))) | length),
+     error_lines: (map(select(test("\\[(error|warning)\\]|\\*\\* \\(|terminating|Function: "))) | length)}
+  ' "$log"
 
   printf '}\n'
 } >"$tmp"
@@ -125,6 +125,10 @@ jq -e 'type == "object"' <"$tmp" >/dev/null ||
 
 chmod 0640 "$tmp"
 chgrp ptc-manager-output "$tmp"
-mv -f "$tmp" "$out"
+# Unlike mv, replace never interprets an existing symlink as a destination
+# directory. The output directory is shared (sticky), so an agent can precreate
+# this name before the first root-owned snapshot exists.
+/usr/bin/python3 -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$tmp" "$out"
+cleanup
 
 trap - EXIT HUP INT TERM

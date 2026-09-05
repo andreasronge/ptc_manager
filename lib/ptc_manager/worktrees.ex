@@ -132,13 +132,17 @@ defmodule PtcManager.Worktrees do
   end
 
   # A missing directory only proves abandonment when the managed root itself
-  # is present and intact; an unmounted or replaced root must not look empty.
+  # is present and intact. Managed allocations are direct children: accepting
+  # deeper paths would let a worker-owned symlink redirect deletion elsewhere.
+  # Reject unnormalised paths too, since symlink/.. has filesystem semantics
+  # that differ from Path.expand/1.
   defp managed_path?(path) when is_binary(path) do
     root = Application.get_env(:ptc_manager, :worktree_root)
 
     is_binary(root) and Path.type(path) == :absolute and File.dir?(root) and
       WorktreeSecurity.validate_configured_root(root) == :ok and
-      String.starts_with?(Path.expand(path), Path.expand(root) <> "/")
+      path == Path.expand(path) and Path.dirname(path) == Path.expand(root) and
+      not match?({:ok, %{type: :symlink}}, File.lstat(path))
   end
 
   defp managed_path?(_path), do: false
@@ -272,16 +276,40 @@ defmodule PtcManager.Worktrees do
   # the abandonment probe already applies before it trusts a path.
   defp discard_forgotten_directory(%{path: path}) when is_binary(path) do
     if managed_path?(path) do
-      case File.rm_rf(path) do
-        {:ok, _removed} -> :ok
-        {:error, reason, _file} -> {:error, {:worktree_directory_removal_failed, reason}}
-      end
+      remove_directory(path)
     else
       {:error, :worktree_path_outside_managed_root}
     end
   end
 
   defp discard_forgotten_directory(_allocation), do: {:error, :worktree_path_missing}
+
+  # A preflight lstat alone cannot prevent a worker replacing a directory
+  # during recursion. Python's fd-based rmtree checks inode identity and never
+  # traverses a substituted symlink. Refuse platforms without that protection.
+  @remove_directory_script """
+  import shutil, sys
+  if not shutil.rmtree.avoids_symlink_attacks:
+      sys.exit(2)
+  try:
+      shutil.rmtree(sys.argv[1])
+  except FileNotFoundError as error:
+      if error.filename != sys.argv[1]:
+          sys.exit(1)
+  except OSError:
+      sys.exit(1)
+  """
+
+  defp remove_directory(path) do
+    case System.cmd("/usr/bin/python3", ["-I", "-c", @remove_directory_script, path],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> :ok
+      {_output, status} -> {:error, {:worktree_directory_removal_failed, status}}
+    end
+  rescue
+    _error -> {:error, :worktree_directory_removal_unavailable}
+  end
 
   # Adapters may omit the forced removal; fall back to the ordinary one.
   defp removal_function(adapter, :discard_worktree) do

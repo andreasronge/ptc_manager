@@ -75,6 +75,11 @@ defmodule PtcManager.AgentProfiles do
   """
   @spec model(binary()) :: binary() | nil
   def model(kind) when is_binary(kind) do
+    args = get_in(configured(), [kind, "args"]) || []
+    argument_model(args) || configured_model(kind)
+  end
+
+  defp configured_model(kind) do
     case get_in(configured(), [kind, "model"]) do
       model when is_binary(model) and model != "" -> model
       _unset -> Map.get(@default_models, kind)
@@ -85,11 +90,16 @@ defmodule PtcManager.AgentProfiles do
   # wants; appending a second --model would let the CLI pick between them.
   defp model_args(kind, configured_args) do
     cond do
-      Enum.any?(configured_args, &(&1 in ["--model", "-m"])) -> []
+      argument_model(configured_args) != nil -> []
       model = model(kind) -> ["--model", model]
       true -> []
     end
   end
+
+  defp argument_model([flag, value | _rest]) when flag in ["--model", "-m"], do: value
+  defp argument_model(["--model=" <> value | _rest]), do: value
+  defp argument_model([_arg | rest]), do: argument_model(rest)
+  defp argument_model([]), do: nil
 
   @doc "Expands the workspace placeholders in profile arguments, keeping each argument whole."
   @spec expand_args([binary()], binary()) :: [binary()]
