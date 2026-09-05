@@ -123,6 +123,7 @@ defmodule PtcManager.MaintainerActions.Sync do
         {:ok, %{pull_request: result, publication: updated}}
       else
         {:ok, _unexpected} -> {:terminal_error, :merged_repair_not_recorded}
+        {:error, :publication_not_open} -> settled_merged_repair(publication.id, result)
         {:error, reason} -> {:terminal_error, reason}
       end
     else
@@ -375,6 +376,21 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   defp repair_intended_head(_action), do: nil
+
+  # The publication status reconciler polls on its own schedule and can observe
+  # the merge first, which moves the job to `done` and closes the window
+  # record_remote_status/2 is willing to write in. The merge this action was
+  # approved to perform still happened, so the end state it was waiting for is
+  # the success, not a failure to record it a second time.
+  defp settled_merged_repair(publication_id, result) do
+    case Repo.get(PrPublication, publication_id) do
+      %PrPublication{state: "published", pr_state: "merged"} = settled ->
+        {:ok, %{pull_request: result, publication: settled}}
+
+      _publication ->
+        {:terminal_error, :publication_not_open}
+    end
+  end
 
   defp merged_repair_matches?(action, %PrPublication{source: "external"}, result),
     do: repair_intended_head(action) == result.head_sha
