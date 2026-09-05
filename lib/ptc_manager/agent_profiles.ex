@@ -9,9 +9,25 @@ defmodule PtcManager.AgentProfiles do
   implementation job, a fresh pull-request repair, or a generic ephemeral
   action, selects through here, so the kind a maintainer picked on the
   Automations page is the kind that starts.
+
+  A profile also carries the model that kind runs. Left unset, every kind
+  reaches for the strongest model its account offers, which is more than a
+  routine maintenance job needs, so each kind has a default here and a profile
+  may override it with its own `model`. The model joins the arguments the agent
+  starts with; a profile that already passes `--model` itself is left alone.
   """
 
   @type profile :: %{kind: binary(), args: [binary()]}
+
+  # Identifiers taken from each CLI's own catalogue: `codex debug models` lists
+  # gpt-5.6-sol as GPT-5.6-Sol, `cursor-agent models` lists cursor-grok-4.6-high
+  # as Cursor Grok 4.6, and `claude --help` documents opus as the alias tracking
+  # the latest Opus. Every kind accepts `--model`.
+  @default_models %{
+    "codex" => "gpt-5.6-sol",
+    "claude" => "opus",
+    "cursor" => "cursor-grok-4.6-high"
+  }
 
   @doc """
   Selects the enabled profile an agent selector allows.
@@ -40,9 +56,40 @@ defmodule PtcManager.AgentProfiles do
     end
   end
 
-  @doc "Returns the configured start arguments of one kind; an unconfigured kind has none."
+  @doc """
+  Returns the start arguments of one kind, including the model it runs.
+
+  An unconfigured kind has no arguments of its own but still receives its
+  default model, so a kind enabled through `PTC_AGENT_PROFILES_JSON` with no
+  arguments does not silently fall back to the account's strongest model.
+  """
   @spec args(binary()) :: [binary()]
-  def args(kind) when is_binary(kind), do: get_in(configured(), [kind, "args"]) || []
+  def args(kind) when is_binary(kind) do
+    configured_args = get_in(configured(), [kind, "args"]) || []
+    configured_args ++ model_args(kind, configured_args)
+  end
+
+  @doc """
+  Returns the model one kind runs, or `nil` when neither profile nor default
+  names one.
+  """
+  @spec model(binary()) :: binary() | nil
+  def model(kind) when is_binary(kind) do
+    case get_in(configured(), [kind, "model"]) do
+      model when is_binary(model) and model != "" -> model
+      _unset -> Map.get(@default_models, kind)
+    end
+  end
+
+  # A profile that names its own model on the command line has said what it
+  # wants; appending a second --model would let the CLI pick between them.
+  defp model_args(kind, configured_args) do
+    cond do
+      Enum.any?(configured_args, &(&1 in ["--model", "-m"])) -> []
+      model = model(kind) -> ["--model", model]
+      true -> []
+    end
+  end
 
   @doc "Expands the workspace placeholders in profile arguments, keeping each argument whole."
   @spec expand_args([binary()], binary()) :: [binary()]

@@ -751,6 +751,15 @@ defmodule PtcManager.DispatchTest do
              PtcManager.AgentProfiles.args("codex")
   end
 
+  test "every agent kind starts on a named model rather than the account default" do
+    assert PtcManager.AgentProfiles.model("codex") == "gpt-5.6-sol"
+    assert PtcManager.AgentProfiles.model("claude") == "opus"
+    assert PtcManager.AgentProfiles.model("cursor") == "cursor-grok-4.6-high"
+
+    assert List.last(PtcManager.AgentProfiles.args("codex")) == "gpt-5.6-sol"
+    assert "--model" in PtcManager.AgentProfiles.args("codex")
+  end
+
   test "builds repository-owned validation, provider-neutral review, and broker contract" do
     repository =
       repository_fixture(%{required_pre_pr_reviews: 2})

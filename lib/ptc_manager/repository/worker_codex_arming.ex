@@ -20,18 +20,26 @@ defmodule PtcManager.Repository.WorkerCodexArming do
   unattended agent stops there mid-task. Herdr reports that parked pane as
   `done`, so the branch is reconciled while it still holds no commits and the
   job stalls on `:no_commits` with the work uncommitted in its worktree.
+
+  The model the Codex profile names is recorded for the same reason. It is
+  passed at `herdr agent start` as well, but a restore that drops the arguments
+  would otherwise bring the pane back on the account's default model rather
+  than the one the maintainer chose.
   """
 
+  alias PtcManager.AgentProfiles
   alias PtcManager.Repository.WorkerHelper
 
   @doc "Arms the worker's Codex configuration; other agent kinds need nothing."
-  def prepare("codex"), do: arm()
+  def prepare("codex"), do: arm(AgentProfiles.model("codex"))
   def prepare(_kind), do: :ok
 
-  @doc "Records the managed approval and sandbox policy for the worker account."
-  def arm do
+  @doc """
+  Records the managed policy, and the model when the Codex profile names one.
+  """
+  def arm(model \\ nil) do
     if WorkerHelper.worker_boundary?() do
-      case run(["arm"]) do
+      case run(["arm" | List.wrap(model)]) do
         {_output, 0} -> :ok
         {output, status} -> {:error, {:worker_codex_arming_failed, status, bounded(output)}}
       end
