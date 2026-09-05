@@ -14,6 +14,12 @@ defmodule PtcManager.Repository.WorkerCodexArming do
   keeps a resumed agent exactly as capable as a started one. The account runs
   managed agents only and already receives the arguments on every start, so the
   recorded policy widens nothing that was previously narrower.
+
+  The same file silences the one interactive prompt no argument covers. As it
+  approaches a rate limit Codex raises a menu offering a cheaper model, and an
+  unattended agent stops there mid-task. Herdr reports that parked pane as
+  `done`, so the branch is reconciled while it still holds no commits and the
+  job stalls on `:no_commits` with the work uncommitted in its worktree.
   """
 
   alias PtcManager.Repository.WorkerHelper

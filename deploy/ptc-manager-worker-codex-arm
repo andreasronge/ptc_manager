@@ -13,6 +13,11 @@ set -eu
 # the same policy from config.toml, so recording it there survives the restore.
 # Only this worker account runs managed agents and it already receives the flags
 # on every start, so the recorded policy widens nothing that was narrower.
+#
+# notice.hide_rate_limit_model_nudge silences the interactive "switch model"
+# menu Codex raises when it approaches a rate limit. No argument suppresses it,
+# and an unattended agent that meets it stops mid-task at a menu nobody answers,
+# leaving its branch uncommitted while Herdr still reports the pane as done.
 
 fail() {
   echo "ptc-manager-worker-codex-arm: $1" >&2
@@ -48,11 +53,16 @@ config = os.path.join(codex_home, "config.toml")
 
 BEGIN = "# BEGIN ptc-manager managed agent policy"
 END = "# END ptc-manager managed agent policy"
-MANAGED_KEYS = ("approval_policy", "sandbox_mode")
+MANAGED_KEYS = (
+    "approval_policy",
+    "sandbox_mode",
+    "notice.hide_rate_limit_model_nudge",
+)
 BLOCK = [
     BEGIN,
     'approval_policy = "never"',
     'sandbox_mode = "danger-full-access"',
+    "notice.hide_rate_limit_model_nudge = true",
     END,
 ]
 
@@ -81,9 +91,9 @@ with open(os.path.join(codex_home, "config.toml.ptc-lock"), "w") as lock:
     if inside:
         fail("config.toml has an unterminated managed block")
 
-    # Codex applies approval_policy and sandbox_mode only at the top level, so a
-    # maintainer's own value there would collide with the managed block instead
-    # of layering under it. Stop rather than silently take it over.
+    # Codex applies these keys only at the top level, so a maintainer's own value
+    # there would collide with the managed block instead of layering under it.
+    # Stop rather than silently take it over.
     for line in kept:
         stripped = line.strip()
         if stripped.startswith("["):
@@ -94,6 +104,15 @@ with open(os.path.join(codex_home, "config.toml.ptc-lock"), "w") as lock:
                 + stripped.split("=", 1)[0].strip()
                 + " outside the managed block"
             )
+
+    # The nudge suppression is written as a dotted key so the block stays flat
+    # and every key after it still belongs to the top level. Codex then rejects
+    # a config that also opens [notice] as a table, so a maintainer who owns
+    # that table is told rather than handed a config Codex refuses to load.
+    for line in kept:
+        header = line.split("#", 1)[0].strip()
+        if header == "[notice]" or header.startswith("[notice."):
+            fail("config.toml declares " + header + ", which the managed block would break")
 
     if mode == "arm":
         kept = BLOCK + kept

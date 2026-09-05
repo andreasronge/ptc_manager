@@ -40,6 +40,7 @@ defmodule PtcManager.Operations.DeliveryLane do
   def stuck?(item) do
     stopped?(item) or
       job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
+      unreconciled?(item) or
       match?(%{checks_state: "failure"}, item.publication) or
       match?(%{mergeability: "conflicting"}, item.publication) or
       match?(
@@ -48,6 +49,22 @@ defmodule PtcManager.Operations.DeliveryLane do
         item.publication
       )
   end
+
+  @doc """
+  True when reconciliation ran against the agent's branch and could not take it.
+
+  A job passes through `awaiting_reconciliation` in seconds on its way to
+  verification, so the state alone says nothing. A recorded error means a probe
+  ran and failed, most often on `:no_commits` — which is what a Codex or Claude
+  session parked at an unanswered prompt looks like from outside the pane, since
+  Herdr reports that pane as finished. PtcManager keeps probing, so a transient
+  failure returns the card to its own lane without anyone touching it.
+  """
+  def unreconciled?(%{active_job: %{state: "awaiting_reconciliation", last_error: error}})
+      when is_binary(error) and error != "",
+      do: true
+
+  def unreconciled?(_item), do: false
 
   def ready?(item) do
     open_pull_request?(item) and

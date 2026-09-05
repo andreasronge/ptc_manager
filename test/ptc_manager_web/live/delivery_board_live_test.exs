@@ -499,8 +499,15 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     card = "#board-job-#{stuck.id}"
 
+    # A reconciliation that could not take the branch is not progress. Leaving
+    # the card in "In progress" is how a Codex session parked at an unanswered
+    # prompt stayed invisible for half an hour while its work sat uncommitted.
+    assert has_element?(view, "#lane-stuck #{card}")
+    refute has_element?(view, "#lane-working #{card}")
+
     # The reason has to be on the card, not only in the database.
     assert has_element?(view, "#phase-error-board-job-#{stuck.id}", ":no_commits")
+    assert render(view) =~ "Read the agent&#39;s Herdr session before discarding the worktree"
 
     # There is no agent left to cancel, but there is a way out.
     refute has_element?(view, "#cancel-agent-#{stuck.id}")
@@ -519,6 +526,22 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert render(view) =~ "Abandoned."
     assert Repo.get!(Job, stuck.id).state == "cancelled"
     refute has_element?(view, card)
+  end
+
+  test "a job still reconciling without an error stays in progress", %{conn: conn} do
+    job = approved_job("Reconciling cleanly") |> set_job_state("working")
+
+    checking =
+      job
+      |> Job.changeset(%{state: "awaiting_reconciliation", last_error: nil})
+      |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+    card = "#board-job-#{checking.id}"
+
+    assert has_element?(view, "#lane-working #{card}")
+    refute has_element?(view, "#lane-stuck #{card}")
   end
 
   test "a blocked publication with no pull request can still be abandoned", %{conn: conn} do
