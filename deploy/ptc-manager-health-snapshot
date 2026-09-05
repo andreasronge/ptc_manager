@@ -1,0 +1,130 @@
+#!/bin/sh
+# Publishes a bounded, read-only view of the console's own runtime so the
+# health-watch automation can inspect it.
+#
+# Root reads the private database and the service journal; the result lands in
+# the ptc-manager-output group, which the managed agent user already belongs
+# to, so the agent itself needs no privilege. Mirrors
+# ptc_manager-herdr-snapshot-write: build a temporary file, fix its mode, then
+# move it into place atomically.
+#
+# Every privileged read is checked before anything is written. A run that
+# cannot reach the database or the journal fails loudly and leaves the previous
+# snapshot alone, because a snapshot with empty sections is indistinguishable
+# from a console that is simply healthy.
+
+set -eu
+
+db="${PTC_HEALTH_DB:-/var/lib/ptc_manager/ptc_manager.db}"
+out="${PTC_HEALTH_OUT:-/var/lib/ptc_manager-output/ptc-health.json}"
+unit="${PTC_HEALTH_UNIT:-ptc_manager.service}"
+since="${PTC_HEALTH_SINCE:--6 hours}"
+max_log_lines="${PTC_HEALTH_LOG_LINES:-150}"
+
+fail() {
+  echo "ptc-manager-health-snapshot: $1" >&2
+  exit 1
+}
+
+[ -r "$db" ] || fail "cannot read the database at $db; run this as root"
+journalctl -u "$unit" -n 1 --no-pager >/dev/null 2>&1 ||
+  fail "cannot read the journal for $unit; run this as root"
+
+tmp="${out}.tmp.$$"
+
+cleanup() {
+  rm -f "$tmp"
+}
+
+trap cleanup EXIT HUP INT TERM
+umask 0027
+
+# sqlite3 prints nothing at all for an empty result set, which would leave a
+# bare "key": in the object, so an empty answer becomes an empty JSON array. A
+# genuine read failure is fatal rather than a third indistinguishable empty
+# array.
+query() {
+  rows="$(sqlite3 -readonly -json "$db" "$1" 2>&1)" ||
+    fail "database query failed: $rows"
+
+  if [ -z "$rows" ]; then
+    printf '[]'
+  else
+    printf '%s' "$rows"
+  fi
+}
+
+# Reachability is settled by the preflight above; a failure here would land in
+# a pipeline subshell and could not stop the script anyway.
+journal() {
+  journalctl -u "$unit" --since "$since" --no-pager 2>/dev/null || true
+}
+
+live_run_states="'queued','starting','working','idle','blocked','waiting','unknown'"
+
+{
+  printf '{"captured_at":"%s"' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  printf ',"capacity_settings":'
+  query "select light_agent_capacity, heavy_agent_capacity, operation_capacity
+         from capacity_settings;"
+
+  printf ',"live_agent_runs":'
+  query "select id, job_id, agent_action_id, role, state, status_text, agent_name,
+                herdr_pane, worker_id, started_at, last_heartbeat_at
+         from agent_runs
+         where state in ($live_run_states)
+         order by id;"
+
+  printf ',"live_agent_actions":'
+  query "select id, repository_id, action_key, state, target_type, target_id,
+                target_label, attempt_count, requested_at, started_at
+         from agent_actions
+         where state in ('queued','running','sync_pending')
+         order by id;"
+
+  printf ',"live_resource_operations":'
+  query "select id, state, label, slot_number, job_id, agent_action_id, agent_run_id,
+                queued_at, started_at
+         from resource_operations
+         where state in ('queued','starting','running','cancelling','recovery_pending')
+         order by id;"
+
+  printf ',"recent_resource_operations":'
+  query "select id, state, label, agent_run_id, agent_action_id, job_id, queued_at,
+                started_at, finished_at, wait_duration_ms, run_duration_ms
+         from resource_operations
+         order by id desc
+         limit 40;"
+
+  printf ',"live_jobs":'
+  query "select id, state, fencing_token, lease_owner, lease_expires_at, updated_at
+         from jobs
+         where state not in ('done','failed','cancelled')
+         order by id;"
+
+  printf ',"recent_service_errors":'
+  journal |
+    grep -v 'sudo\[' |
+    grep -v 'pam_unix' |
+    grep -E '\[(error|warning)\]|\*\* \(|terminating|Function: ' |
+    tail -n "$max_log_lines" |
+    jq -R -s 'split("\n") | map(select(length > 0))'
+
+  printf ',"service_log_volume":'
+  total="$(journal | wc -l)"
+  noise="$(journal | grep -c 'sudo\[\|pam_unix' || true)"
+  printf '{"window":"%s","total_lines":%s,"session_noise_lines":%s}' \
+    "$since" "$total" "${noise:-0}"
+
+  printf '}\n'
+} >"$tmp"
+
+jq -e 'type == "object"' <"$tmp" >/dev/null ||
+  fail "produced invalid JSON; leaving the previous snapshot in place"
+
+chmod 0640 "$tmp"
+chgrp ptc-manager-output "$tmp"
+mv -f "$tmp" "$out"
+
+trap - EXIT HUP INT TERM

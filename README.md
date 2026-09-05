@@ -1016,6 +1016,7 @@ sudo install -o root -g root -m 0755 deploy/ptc-manager-worker-gh-label /usr/loc
 sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-operation
 sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
+sudo install -o root -g root -m 0755 deploy/ptc-manager-health-snapshot /usr/local/bin/ptc-manager-health-snapshot
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0644 deploy/ptc-manager-agent-context /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-git /usr/local/bin/ptc-manager-external-git
@@ -1033,6 +1034,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ptc_manager-herdr ptc_manager
 sudo systemctl status ptc_manager
 ```
+
+`ptc-manager-health-snapshot` runs as root, on demand or from a timer, and
+writes `/var/lib/ptc_manager-output/ptc-health.json`: capacity settings, live
+agent runs, agent actions, resource operations, jobs, and the service journal
+filtered down to its error lines. That file is group-readable by
+`ptc-manager-output`, so a managed agent inspects the console's own runtime
+without holding any privilege itself, which is what lets a repository
+automation look for disagreements between what a record claims and what it is
+doing. The script refuses to run when it cannot read the database or the
+journal, because a snapshot whose sections are all empty reads exactly like a
+healthy console.
 
 The coordinator, implementation worker, external-PR repairer, and Git verifier
 run as separate OS identities. Herdr, implementation agents, and the initial
