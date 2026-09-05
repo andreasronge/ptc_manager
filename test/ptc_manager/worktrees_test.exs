@@ -130,7 +130,7 @@ defmodule PtcManager.WorktreesTest do
     end
 
     test "a forgotten workspace outside the managed root keeps the worktree for attention" do
-      allocation = attention_allocation!("/tmp/ptc-manager-unmanaged-worktree")
+      allocation = attention_allocation!(unmanaged_path())
       Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})
 
       assert {:error, {:worktree_cleanup_failed, :worktree_path_outside_managed_root}} =
@@ -468,6 +468,18 @@ defmodule PtcManager.WorktreesTest do
       Application.fetch_env!(:ptc_manager, :worktree_root),
       "ptc-manager-missing-#{System.unique_integer([:positive])}"
     )
+  end
+
+  # A sibling of the managed root, sharing its prefix without being inside it,
+  # which is exactly the boundary managed_path?/1 draws. It has to be derived
+  # from the configured root rather than written down: the root is
+  # System.tmp_dir!(), so a hard-coded /tmp path sits outside it on macOS and
+  # inside it on Linux.
+  defp unmanaged_path do
+    :ptc_manager
+    |> Application.fetch_env!(:worktree_root)
+    |> Path.expand()
+    |> Kernel.<>("-outside-#{System.unique_integer([:positive])}")
   end
 
   defp existing_path do
