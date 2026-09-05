@@ -3,6 +3,8 @@ defmodule PtcManager.ResourceOperationBroker do
 
   use GenServer
 
+  require Logger
+
   import Ecto.Query
 
   alias PtcManager.ManagedOperationContext
@@ -57,8 +59,19 @@ defmodule PtcManager.ResourceOperationBroker do
 
   @impl true
   def handle_info(:sweep, state) do
-    sweep()
-    ManagedOperationContext.cleanup_inactive(&owner_active?/1)
+    # Every managed agent asks this process for permission to run an expensive
+    # command, and a restart loses the leases it was tracking. A sweep that
+    # raises must therefore cost one interval rather than the whole broker: a
+    # transient database error here used to terminate it, and agents then failed
+    # their verification because their coordinator had gone.
+    try do
+      sweep()
+      ManagedOperationContext.cleanup_inactive(&owner_active?/1)
+    rescue
+      error ->
+        Logger.error("Resource operation sweep failed: #{Exception.message(error)}")
+    end
+
     schedule_sweep()
     {:noreply, state}
   end

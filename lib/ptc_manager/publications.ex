@@ -31,7 +31,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if Enum.all?(pulls, &valid_external_status?/1) do
-        Repo.transaction(fn ->
+        RepoTransaction.immediate(fn ->
           managed_numbers = managed_pr_numbers(repository.id)
           managed_heads = managed_pr_heads(repository)
 
@@ -136,7 +136,7 @@ defmodule PtcManager.Publications do
     now = now()
 
     outcome =
-      Repo.transaction(fn ->
+      RepoTransaction.immediate(fn ->
         publication =
           Enum.find(follow_up_candidates(), &(&1.id == publication_id)) ||
             Repo.rollback(:not_a_follow_up_candidate)
@@ -266,7 +266,7 @@ defmodule PtcManager.Publications do
     expires_at = DateTime.add(now, timeout_ms, :millisecond)
 
     outcome =
-      Repo.transaction(fn ->
+      RepoTransaction.immediate(fn ->
         publication =
           PrPublication
           |> preload(job: :repository)
@@ -369,7 +369,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_gate_evidence?(evidence) do
-        Repo.transaction(fn ->
+        RepoTransaction.immediate(fn ->
           publication = load(publication_id)
 
           with :ok <- active_publication_claim(publication, fencing_token, attempt_token, now),
@@ -422,7 +422,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_result?(result) do
-        Repo.transaction(fn ->
+        RepoTransaction.immediate(fn ->
           publication = Repo.get!(PrPublication, publication_id)
 
           cond do
@@ -716,7 +716,7 @@ defmodule PtcManager.Publications do
     message = bounded_error(reason)
 
     outcome =
-      Repo.transaction(fn ->
+      RepoTransaction.immediate(fn ->
         publication = Repo.get!(PrPublication, publication_id)
         job = Repo.get!(Job, publication.job_id)
 
@@ -756,7 +756,7 @@ defmodule PtcManager.Publications do
     message = bounded_error(reason)
 
     outcome =
-      Repo.transaction(fn ->
+      RepoTransaction.immediate(fn ->
         publication = Repo.get!(PrPublication, publication_id)
         max_attempts = Application.get_env(:ptc_manager, :publication_max_attempts, 5)
         requested_delay_ms = requested_retry_delay_ms(reason)
@@ -841,7 +841,7 @@ defmodule PtcManager.Publications do
     now = now()
 
     outcome =
-      Repo.transaction(fn ->
+      RepoTransaction.immediate(fn ->
         # The id arrives from a browser event, so a card the maintainer is
         # looking at may already be gone.
         publication =
@@ -895,7 +895,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_remote_status?(result) do
-        Repo.transaction(fn ->
+        RepoTransaction.immediate(fn ->
           publication = Repo.get!(PrPublication, publication_id)
           job = publication.job_id && Repo.get!(Job, publication.job_id)
           repository = publication_repository!(publication, job)
@@ -1052,7 +1052,7 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_agent_result?(result) and valid_verified_result?(verified) do
-        Repo.transaction(fn ->
+        RepoTransaction.immediate(fn ->
           publication = Repo.get!(PrPublication, publication_id)
           job = Repo.get!(Job, publication.job_id)
           repository = Repo.get!(Repository, job.repository_id)
