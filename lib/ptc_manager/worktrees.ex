@@ -122,6 +122,7 @@ defmodule PtcManager.Worktrees do
 
   defp abandoned_reason(allocation, probe) do
     cond do
+      PtcManager.Reviews.held?(allocation.job) -> :keep
       Operations.worktree_consumes_execution_slot?(allocation) -> :keep
       not managed_path?(allocation.path) -> :keep
       not File.exists?(allocation.path) -> {:ok, @missing_worktree_reason}

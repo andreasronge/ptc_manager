@@ -79,6 +79,38 @@ defmodule PtcManager.AgentProfiles do
     argument_model(args) || configured_model(kind)
   end
 
+  def execution_args(kind, nil), do: args(kind)
+
+  def execution_args(kind, %{"model" => model} = settings) do
+    clean = strip_model(args(kind))
+    effort = settings["effort"]
+
+    effort_args =
+      cond do
+        is_nil(effort) or effort == "" -> []
+        kind == "codex" -> ["-c", "model_reasoning_effort=\"#{effort}\""]
+        kind == "claude" -> ["--effort", effort]
+        true -> []
+      end
+
+    clean ++ ["--model", model] ++ effort_args
+  end
+
+  defp strip_model([flag, _value | rest]) when flag in ["--model", "-m", "--effort"],
+    do: strip_model(rest)
+
+  defp strip_model(["--effort=" <> _ | rest]), do: strip_model(rest)
+  defp strip_model(["--model=" <> _ | rest]), do: strip_model(rest)
+
+  defp strip_model([flag, "model_reasoning_effort=" <> _ | rest]) when flag in ["-c", "--config"],
+    do: strip_model(rest)
+
+  defp strip_model([flag, "model=" <> _ | rest]) when flag in ["-c", "--config"],
+    do: strip_model(rest)
+
+  defp strip_model([arg | rest]), do: [arg | strip_model(rest)]
+  defp strip_model([]), do: []
+
   defp configured_model(kind) do
     case get_in(configured(), [kind, "model"]) do
       model when is_binary(model) and model != "" -> model

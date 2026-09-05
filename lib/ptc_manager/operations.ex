@@ -12,7 +12,6 @@ defmodule PtcManager.Operations do
   alias PtcManager.Gateway
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
-  alias PtcManager.ReviewPolicy
   alias PtcManager.RuntimeIncarnation
   alias PtcManager.Repository.Checkout
   alias PtcManager.WorktreeSecurity
@@ -53,6 +52,7 @@ defmodule PtcManager.Operations do
     daily_digest
     prepare_issue
     report_issue_blocker
+    post_cancellation_note
     review_issue
     resolve_issue_decision
   )
@@ -917,7 +917,12 @@ defmodule PtcManager.Operations do
             kind: stopped.kind,
             state: "queued",
             fencing_token: 0,
-            required_review_count: stopped.required_review_count
+            required_review_count: stopped.required_review_count,
+            execution_settings: stopped.execution_settings,
+            review_state:
+              if(stopped.execution_settings,
+                do: if(stopped.required_review_count == 0, do: "skipped", else: "pending")
+              )
           })
           |> Repo.insert!()
 
@@ -2291,6 +2296,11 @@ defmodule PtcManager.Operations do
     outcome =
       if valid_result_fields?(result) do
         Repo.transaction(fn ->
+          review_job = Repo.get!(Job, job_id)
+
+          unless PtcManager.Reviews.publication_allowed?(review_job, result),
+            do: Repo.rollback(:independent_review_required)
+
           {updated, _rows} =
             Job
             |> where(
@@ -3183,10 +3193,10 @@ defmodule PtcManager.Operations do
     broadcast_change(outcome)
   end
 
-  def approve_issue(issue_id, actor, requested_review_count \\ nil)
+  def approve_issue(issue_id, actor, requested_review_count \\ nil, profile \\ nil)
       when is_integer(issue_id) and is_binary(actor) do
     with :ok <- valid_requested_review_count(requested_review_count) do
-      do_approve_issue(issue_id, actor, requested_review_count)
+      do_approve_issue(issue_id, actor, requested_review_count, :prepared, profile)
     end
   end
 
@@ -3199,19 +3209,25 @@ defmodule PtcManager.Operations do
   because a small issue does not need a preparation round. The click is the
   approval.
   """
-  def approve_issue_directly(issue_id, actor, requested_review_count \\ nil)
+  def approve_issue_directly(issue_id, actor, requested_review_count \\ nil, profile \\ nil)
       when is_integer(issue_id) and is_binary(actor) do
     with :ok <- valid_requested_review_count(requested_review_count) do
-      do_approve_issue(issue_id, actor, requested_review_count, :direct)
+      do_approve_issue(issue_id, actor, requested_review_count, :direct, profile)
     end
   end
 
-  defp do_approve_issue(issue_id, actor, requested_review_count, mode \\ :prepared) do
+  defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     Multi.new()
     |> Multi.run(:snapshot, fn repo, _changes ->
       current_approvable_snapshot(repo, issue_id, mode)
+    end)
+    |> Multi.run(:execution, fn _repo, %{snapshot: {_issue, proposal, _repository}} ->
+      case PtcManager.ExecutionProfiles.freeze(proposal, profile, requested_review_count) do
+        {:ok, settings, budget} -> {:ok, %{settings: settings, budget: budget}}
+        error -> error
+      end
     end)
     |> Multi.run(:automation, fn _repo, %{snapshot: {_issue, _proposal, repository}} ->
       with :ok <- PtcManager.Automations.ensure_defaults(repository),
@@ -3236,9 +3252,10 @@ defmodule PtcManager.Operations do
       })
     end)
     |> Multi.insert(:job, fn %{
-                               snapshot: {issue, _proposal, repository},
+                               snapshot: {issue, _proposal, _repository},
                                approval: approval,
-                               automation: {version, prompt_instructions}
+                               automation: {version, prompt_instructions},
+                               execution: execution
                              } ->
       Job.changeset(%Job{}, %{
         repository_id: issue.repository_id,
@@ -3249,7 +3266,13 @@ defmodule PtcManager.Operations do
         kind: "implementation",
         state: "queued",
         fencing_token: 0,
-        required_review_count: requested_review_count || ReviewPolicy.default_count(repository)
+        required_review_count: execution.budget,
+        execution_settings:
+          Map.merge(execution.settings, %{
+            "issue_title" => issue.title,
+            "issue_body" => String.slice(issue.body || "", 0, 20_000)
+          }),
+        review_state: if(execution.budget == 0, do: "skipped", else: "pending")
       })
     end)
     |> Multi.insert(:audit_event, fn %{
@@ -3266,6 +3289,7 @@ defmodule PtcManager.Operations do
           "issue_number" => issue.number,
           "proposal_id" => proposal && proposal.id,
           "required_review_count" => job.required_review_count,
+          "execution_settings" => job.execution_settings,
           "proposal_digest" => proposal && proposal.proposal_digest,
           "source_digest" => issue.content_digest
         }
@@ -3314,7 +3338,7 @@ defmodule PtcManager.Operations do
   end
 
   defp valid_requested_review_count(nil), do: :ok
-  defp valid_requested_review_count(count) when count in 0..3, do: :ok
+  defp valid_requested_review_count(count) when count in 0..5, do: :ok
   defp valid_requested_review_count(_count), do: {:error, :invalid_review_count}
 
   defp job_is_queued(%Job{state: "queued"}), do: :ok
@@ -3650,6 +3674,14 @@ defmodule PtcManager.Operations do
   end
 
   defp eligible_result_jobs(query, now) do
+    query =
+      where(
+        query,
+        [job],
+        is_nil(job.review_state) or
+          job.review_state not in ["paused", "manual", "cancelled", "resume_pending", "running"]
+      )
+
     where(
       query,
       [job],
@@ -4438,6 +4470,9 @@ defmodule PtcManager.Operations do
     end
   end
 
+  defp expire_job_lease(%Job{review_state: state}, _lease_now, _lifecycle_now)
+       when state in ~w(paused manual cancelled resume_pending running), do: false
+
   defp expire_job_lease(%Job{state: "idle"} = job, lease_now, lifecycle_now) do
     message =
       "The implementation agent remained idle past its deadline; its partial worktree was preserved."
@@ -4605,6 +4640,9 @@ defmodule PtcManager.Operations do
 
   # The automation version captured at approval chooses the agent kind, so
   # editing the selector later cannot change work that is already queued.
+  defp implementation_profile(%Job{execution_settings: %{"kind" => kind}}),
+    do: PtcManager.AgentProfiles.select(%{"mode" => "require", "preferred_kind" => kind})
+
   defp implementation_profile(%Job{automation_definition_version: %{agent_selector: selector}}),
     do: PtcManager.AgentProfiles.select(selector)
 

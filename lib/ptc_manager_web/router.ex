@@ -44,6 +44,8 @@ defmodule PtcManagerWeb.Router do
       live "/automations/:id", AutomationsLive, :show
       live "/deployments", DeploymentsLive, :index
       live "/configuration", ConfigurationLive, :index
+      live "/execution-profiles", ExecutionProfilesLive, :index
+      live "/jobs/:id/reviews", JobReviewsLive, :show
     end
 
     delete "/logout", AuthController, :delete

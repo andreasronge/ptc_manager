@@ -101,6 +101,23 @@ defmodule PtcManager.Repository.GitProbe do
     end
   end
 
+  @doc "Captures a complete bounded patch using the publication verifier's Git safeguards."
+  def review_patch(repository, job, path) do
+    with {:ok, result} <- verify_at(repository, job, path),
+         {:ok, status} <- git(path, ["status", "--porcelain"]),
+         true <- status == "",
+         {:ok, head} <- revision(path, "HEAD^{commit}"),
+         true <- head == result.head_sha,
+         {:ok, diff} <-
+           run_git(path, diff_args(result.base_sha, result.head_sha), {:collect, 500_000}),
+         true <- String.valid?(diff) do
+      {:ok, Map.put(result, :diff, diff)}
+    else
+      false -> {:error, :review_requires_clean_text_commit}
+      error -> error
+    end
+  end
+
   @doc "Verifies a repair against the immutable base commit reported by GitHub."
   def verify_repair_at(%Repository{}, %Job{} = job, path, github_base_sha)
       when is_binary(path) and is_binary(github_base_sha) do
@@ -476,7 +493,15 @@ defmodule PtcManager.Repository.GitProbe do
   end
 
   defp diff_digest(path, base_sha, head_sha) do
-    args = [
+    case run_git(path, diff_args(base_sha, head_sha), {:digest, diff_limit()}) do
+      {:ok, %{bytes: 0}} -> {:error, :no_tree_changes}
+      {:ok, %{digest: digest}} -> {:ok, Base.encode16(digest, case: :lower)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp diff_args(base_sha, head_sha),
+    do: [
       "diff",
       "--binary",
       "--no-renames",
@@ -484,13 +509,6 @@ defmodule PtcManager.Repository.GitProbe do
       "--no-textconv",
       "#{base_sha}..#{head_sha}"
     ]
-
-    case run_git(path, args, {:digest, diff_limit()}) do
-      {:ok, %{bytes: 0}} -> {:error, :no_tree_changes}
-      {:ok, %{digest: digest}} -> {:ok, Base.encode16(digest, case: :lower)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
 
   defp git(path, args) do
     case run_git(path, args, {:collect, @small_output_limit}) do

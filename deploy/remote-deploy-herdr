@@ -118,6 +118,7 @@ provision_service_candidate="/tmp/ptc-manager-provision-service-${release_id}"
 worker_access_dropin="/tmp/ptc-manager-worker-access-${release_id}.conf"
 environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
+worker_review_candidate="/tmp/ptc-manager-worker-review-${release_id}"
 worktree_cleanup_candidate="/tmp/ptc-manager-worktree-cleanup-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 claude_trust_candidate="/tmp/ptc-manager-worker-claude-trust-${release_id}"
@@ -147,7 +148,7 @@ cleanup_remote() {
   "$manager_access_dropin" "$worker_access_dropin" "$access_dropin_check" \
   "$provision_runner_candidate" "$provision_service_candidate" \
   "$environment_file_parser" \
-    "$worker_git_candidate" "$worktree_cleanup_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
+    "$worker_git_candidate" "$worker_review_candidate" "$worktree_cleanup_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
     "$codex_arm_candidate" "$agent_login_candidate" "$gh_label_candidate" \
     "$operation_wrapper_candidate" \
     "$operation_recovery_candidate" \
@@ -1238,6 +1239,7 @@ tar -xOf "$source_archive" deploy/ptc-manager-provision-repository >"$provision_
 tar -xOf "$source_archive" deploy/ptc_manager-provision-repository.service >"$provision_service_candidate"
 tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environment_file_parser"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-worker-review >"$worker_review_candidate"
 tar -xOf "$source_archive" priv/worktree_cleanup.py >"$worktree_cleanup_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-claude-trust >"$claude_trust_candidate"
@@ -1458,6 +1460,8 @@ sudo rm -rf -- /opt/codex /opt/ptc-manager-cursor-agent \
 # the release so a fresh deploy cannot leave runtime code ahead of host setup.
 sudo install -o root -g root -m 0755 "$worker_git_candidate" \
   /usr/local/bin/ptc-manager-worker-git
+sudo install -o root -g root -m 0755 "$worker_review_candidate" \
+  /usr/local/bin/ptc-manager-worker-review
 sudo install -o root -g root -m 0755 "$worktree_cleanup_candidate" \
   /usr/local/bin/ptc-manager-worker-worktree-cleanup
 sudo install -o root -g root -m 0755 "$worker_bootstrap_candidate" \

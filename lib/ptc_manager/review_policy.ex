@@ -1,7 +1,7 @@
 defmodule PtcManager.ReviewPolicy do
   @moduledoc "Resolves the bounded independent-review count for implementation jobs."
 
-  @maximum 3
+  @maximum 100
 
   def default_count(repository) do
     (repository.required_pre_pr_reviews ||

@@ -66,6 +66,7 @@ defmodule PtcManager.ResourceOperationBroker do
     # their verification because their coordinator had gone.
     try do
       sweep()
+      PtcManager.Reviews.sweep()
       ManagedOperationContext.cleanup_inactive(&owner_active?/1)
     rescue
       error ->
@@ -112,6 +113,35 @@ defmodule PtcManager.ResourceOperationBroker do
 
     :gen_tcp.send(socket, Jason.encode!(response) <> "\n")
     :gen_tcp.close(socket)
+  end
+
+  defp handle_request(
+         %{"operation" => "review", "request_id" => request_id},
+         %{"owner_type" => "job"} = payload
+       ) do
+    with {:ok, _run} <- active_run(payload, false),
+         {:ok, result} <-
+           PtcManager.Reviews.request(
+             integer(payload, "owner_id"),
+             integer(payload, "fencing_token"),
+             request_id
+           ) do
+      review_response(result)
+    else
+      {:error, reason} -> error_response(reason)
+    end
+  end
+
+  defp handle_request(
+         %{"operation" => "review_status", "round_id" => id},
+         %{"owner_type" => "job"} = payload
+       ) do
+    with {:ok, _run} <- active_run(payload, false),
+         {:ok, round} <- PtcManager.Reviews.status(integer(payload, "owner_id"), id) do
+      review_response(round)
+    else
+      {:error, reason} -> error_response(reason)
+    end
   end
 
   defp handle_request(%{"operation" => "request"} = request, payload) do
@@ -194,7 +224,27 @@ defmodule PtcManager.ResourceOperationBroker do
 
   defp handle_request(_request, _payload), do: error_response(:unsupported_operation)
 
-  defp active_run(payload) do
+  defp review_response(result) when result in [:paused, :skipped],
+    do: %{"status" => "ok", "state" => to_string(result)}
+
+  defp review_response(round) do
+    state =
+      if round.state == "completed",
+        do: if(round.result["findings"] == [], do: "passed", else: "changes_requested"),
+        else: round.state
+
+    %{
+      "status" => "ok",
+      "state" => state,
+      "round_id" => round.id,
+      "round" => round.number,
+      "head_sha" => round.head_sha,
+      "result" => round.result,
+      "error" => round.error
+    }
+  end
+
+  defp active_run(payload, allow_create \\ true) do
     owner_type = payload["owner_type"]
     owner_id = integer(payload, "owner_id")
     pane = payload["pane_id"]
@@ -222,7 +272,7 @@ defmodule PtcManager.ResourceOperationBroker do
       %AgentRun{} = run ->
         {:ok, run}
 
-      nil when owner_type == "job" ->
+      nil when owner_type == "job" and allow_create ->
         %AgentRun{}
         |> AgentRun.changeset(%{
           worker_id: integer(payload, "worker_id"),

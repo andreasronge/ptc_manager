@@ -275,7 +275,7 @@ defmodule PtcManager.ResultReconcilerTest do
     assert claimed.result_attempt_token
     assert claimed.result_attempt_expires_at
     assert {:error, :result_already_claimed} = Operations.claim_result_job(job.id)
-    assert {:error, :already_active} = Operations.approve_issue(issue.id, "andreas")
+    assert {:error, :already_active} = Operations.approve_issue(issue.id, "andreas", 0)
   end
 
   test "an expired verifier cannot publish after a newer claim" do
@@ -383,7 +383,7 @@ defmodule PtcManager.ResultReconcilerTest do
     repository = repository_fixture(%{local_path: "/tmp/repository"})
     issue = issue_fixture(repository)
     proposal_fixture(issue)
-    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas", 0)
 
     job =
       job

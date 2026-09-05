@@ -38,7 +38,7 @@ defmodule PtcManager.Operations.DeliveryLane do
   def stopped?(_item), do: false
 
   def stuck?(item) do
-    stopped?(item) or
+    PtcManager.Reviews.held?(item.active_job) or stopped?(item) or
       job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
       unreconciled?(item) or
       match?(%{checks_state: "failure"}, item.publication) or

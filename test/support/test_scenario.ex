@@ -63,7 +63,13 @@ defmodule PtcManager.TestScenario do
       )
 
     proposal = OperationsFixtures.proposal_fixture(issue)
-    {:ok, job} = Operations.approve_issue(issue.id, "scenario-maintainer")
+
+    {:ok, job} =
+      Operations.approve_issue(
+        issue.id,
+        "scenario-maintainer",
+        Keyword.get(opts, :review_count, 0)
+      )
 
     worker =
       Repo.get_by(Worker, worker_key: "herdr:scenario") ||

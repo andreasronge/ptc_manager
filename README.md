@@ -55,6 +55,62 @@ last day, 1 hour for the last week) and leaves a visible gap wherever no sample
 exists, for example across a deploy restart. The chart is server-rendered SVG:
 no JavaScript chart library is bundled.
 
+## Execution profiles and review limits
+
+Configuration → **Execution profiles and models** sets the implementation and
+reviewer agent, model, reasoning effort, and maximum reviews for three presets:
+
+| Suggestion | Initial implementation model | Maximum reviews |
+| --- | --- | --- |
+| Small scope and low risk | Codex `gpt-5.4-mini` | 1 |
+| Other or unknown scope/risk | Codex `gpt-5.6-sol` | 2 |
+| Large scope or high risk | Codex `gpt-6-astra` | 5 |
+
+All three initially use Codex `gpt-6-astra` as reviewer. **Approve and start**
+and **Fix directly** offer a profile override and a 0–5 review limit; leaving
+the limit blank uses that preset's maximum. Approval freezes the selected
+models and issue context. Editing presets affects future approvals only.
+The implementation profile takes precedence over the implementation automation's
+agent selector; other maintainer actions keep their existing selection policy.
+Pre-upgrade jobs retain their original prompt/count policy.
+
+**Refresh available models** asks the worker's logged-in Codex and Cursor CLI
+accounts. Claude currently has no account model-list command; enter a model ID
+or alias. Catalogs are hints, not entitlement guarantees. Unsupported models
+fail visibly without substituting another model. Cursor encodes effort in its
+model ID; leave its separate effort field at Model default.
+
+The implementer commits a clean checkpoint and calls
+`$PTC_OPERATION_WRAPPER review`. PtcManager captures the exact patch using the
+publication verifier's Git safeguards, launches a separate reviewer, and stores
+structured findings. Each assessment consumes a round, including assessments
+after fixes; fixing findings does not itself consume one. A clean review ends
+the loop early. Repeating the same request or reviewing unchanged evidence does
+not spend another round. Code changes require another review.
+
+When reviews are exhausted or fail, **Delivery → Reviews** shows the preserved
+branch and findings. Add +1, +2, or +5 rounds (up to 100 in total), optionally
+switch profiles, or take over manually. Continuation starts an agent in the
+existing worktree with the frozen issue and latest findings; it does not reset
+files or start a replacement job. An unavailable or busy retained agent leaves
+a visible pause for recovery. Paused work reserves its existing implementation
+capacity. Manual takeover requests the retained pane to stop; confirm it has
+stopped before editing. Cancellation requires a private reason and preserves
+all work. Posting an explanation on GitHub is a separate, editable approval.
+
+The first reviewer bridge supplies a complete patch up to 500 KB and bounded
+issue context, rather than a full interactive repository review. Larger or
+invalid inputs fail closed. Reviews are serialized in a dedicated Oban queue,
+expire after 30 minutes including queue time, and give the CLI 10 minutes.
+A failed assessment consumes its admitted round. The deployed root-owned
+`ptc-manager-worker-review` helper runs as the worker; the normal deployment
+script installs it and its exact sudo rule. Browser demo mode never starts
+these reviewers or continuations. Repository test commands and coding
+conventions stay in `AGENTS.md`; managed review orchestration comes from the
+PtcManager task prompt, so managed jobs do not need repository-specific review
+counts, tools, or session instructions. This does not isolate hostile agents
+that share the same worker account or direct GitHub credentials.
+
 ## Run locally
 
 Requirements: Elixir, Erlang/OTP, SQLite, `lsof`, and a C compiler toolchain.
@@ -335,9 +391,10 @@ gate policy needs explicit human review, and protected-branch CI remains the
 merge boundary.
 
 In broker mode, the task prompt tells the implementation agent to validate the
-change, run the number of independent reviews frozen on the job, fix findings,
-and commit without using GitHub credentials. The review loop is agent-owned
-prompt policy: PtcManager does not launch reviewers or store review evidence.
+change, request independent reviews within the maximum frozen on the job, fix
+findings, and commit without using GitHub credentials. PtcManager launches the
+reviewer, stores its validated result, and checks that the reviewed head, base,
+and patch digest match before allowing publication.
 The agent places its retrospective in the final commit message between
 `PTC-AGENT-RETROSPECTIVE-BEGIN` and `PTC-AGENT-RETROSPECTIVE-END` lines, and
 the broker copies that section into the draft PR description.

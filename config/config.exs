@@ -12,7 +12,7 @@ config :elixir, :time_zone_database, Tz.TimeZoneDatabase
 config :ptc_manager, Oban,
   engine: Oban.Engines.Lite,
   repo: PtcManager.Repo,
-  queues: [automations: 4],
+  queues: [automations: 4, reviews: 1],
   plugins: [
     {Oban.Plugins.Cron, crontab: [{"* * * * *", PtcManager.Automations.ScheduleTickWorker}]}
   ]

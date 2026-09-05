@@ -19,6 +19,41 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     end
   end
 
+  test "a review request from an old pane cannot recreate its agent run" do
+    context = managed_run_fixture()
+
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-review-context-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, issued} =
+      ManagedOperationContext.issue(
+        %{
+          owner_type: "job",
+          owner_id: context.job.id,
+          repository_id: context.repository.id,
+          worker_id: context.worker.id,
+          pane_id: "old-review-pane",
+          fencing_token: 4
+        },
+        directory: directory
+      )
+
+    before = Repo.aggregate(PtcManager.Operations.AgentRun, :count)
+
+    response =
+      ResourceOperationBroker.dispatch(%{
+        "token" => issued.token,
+        "context_id" => issued.payload["context_id"],
+        "operation" => "review",
+        "request_id" => "stale-pane"
+      })
+
+    assert response["status"] == "error"
+    assert Repo.aggregate(PtcManager.Operations.AgentRun, :count) == before
+  end
+
   test "signed context drives the generic broker protocol without parsing agent output" do
     context = managed_run_fixture()
 

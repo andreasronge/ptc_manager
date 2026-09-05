@@ -1393,7 +1393,7 @@ defmodule PtcManager.PublisherTest do
 
     issue = issue_fixture(repository)
     proposal_fixture(issue)
-    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas", 0)
 
     job =
       job

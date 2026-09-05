@@ -28,6 +28,10 @@ truth, and model output is validated data, never authority.
   repository's `AGENTS.md`. A changed default prompt reaches only new
   repositories unless a migration updates the existing `system:built-in`
   versions, as `priv/repo/migrations/*_simplify_automation_prompts.exs` did.
+- Managed implementation review budgets and model selection belong to execution
+  profiles and generated runtime instructions, not repository-specific prompts.
+  A clean review is evidence for its exact commit; exhausting reviews must retain
+  work for an explicit maintainer decision.
 
 ## Managed agents (PtcManager)
 

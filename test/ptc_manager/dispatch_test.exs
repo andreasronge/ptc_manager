@@ -521,14 +521,21 @@ defmodule PtcManager.DispatchTest do
     assert Repo.get!(Job, job.id).state == "queued"
   end
 
-  test "a lease records the agent kind the implement-issue automation requires" do
+  test "a lease records the agent kind frozen by the execution profile" do
     put_agent_profiles(%{
       "codex" => %{"enabled" => true, "args" => []},
       "cursor" => %{"enabled" => true, "args" => ["--force", "--trust"]}
     })
 
     repository = repository_fixture(%{local_path: "/tmp/repository"})
-    require_agent_kind!(repository, "implement_issue", "cursor")
+
+    {:ok, _} =
+      PtcManager.ExecutionProfiles.save(
+        "small",
+        %{"kind" => "cursor", "model" => "cursor-grok-4.6-high"},
+        "maintainer"
+      )
+
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture(repository)
     canonical = IssueSnapshot.normalize!(remote, repository.id)
 
@@ -540,11 +547,22 @@ defmodule PtcManager.DispatchTest do
   end
 
   test "a lease cancels a job whose required agent kind has no enabled profile" do
-    put_agent_profiles(%{"codex" => %{"enabled" => true, "args" => []}})
+    put_agent_profiles(%{
+      "codex" => %{"enabled" => true, "args" => []},
+      "cursor" => %{"enabled" => true, "args" => []}
+    })
 
     repository = repository_fixture(%{local_path: "/tmp/repository"})
-    require_agent_kind!(repository, "implement_issue", "cursor")
+
+    {:ok, _} =
+      PtcManager.ExecutionProfiles.save(
+        "small",
+        %{"kind" => "cursor", "model" => "cursor-grok-4.6-high"},
+        "maintainer"
+      )
+
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture(repository)
+    put_agent_profiles(%{"codex" => %{"enabled" => true, "args" => []}})
     canonical = IssueSnapshot.normalize!(remote, repository.id)
 
     assert {:error, :no_healthy_agent_profile} =
@@ -828,7 +846,7 @@ defmodule PtcManager.DispatchTest do
 
     assert prompt =~ "Fix the issue completely"
     assert prompt =~ "Follow the repository instructions"
-    assert prompt =~ "Independent reviews: 2"
+    assert prompt =~ "Maximum independent review rounds: 1"
     refute prompt =~ "Run this configured test command exactly"
     refute prompt =~ "codex-review"
     assert prompt =~ "PtcManager will publish it"
@@ -851,8 +869,8 @@ defmodule PtcManager.DispatchTest do
     tricky_prompt =
       PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, tricky_issue, tricky_job)
 
-    assert easy_prompt =~ "Independent reviews: 0"
-    assert tricky_prompt =~ "Independent reviews: 3"
+    assert easy_prompt =~ "Maximum independent review rounds: 0"
+    assert tricky_prompt =~ "Maximum independent review rounds: 3"
     refute tricky_prompt =~ "codex-review"
   end
 
@@ -885,7 +903,7 @@ defmodule PtcManager.DispatchTest do
 
     assert prompt =~ "publish a pull request that closes the issue"
     assert prompt =~ "Branch: #{job.branch_name} → main"
-    assert prompt =~ "Independent reviews: 2"
+    assert prompt =~ "Maximum independent review rounds: 1"
     assert prompt =~ "Read the issue, its comments, linked issues"
     assert prompt =~ "Push this branch and create a pull request. Do not merge."
     refute prompt =~ "fencing_token"

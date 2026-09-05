@@ -24,9 +24,13 @@ defmodule PtcManager.ResultReconciler do
     # An agent that said it could not finish outranks whatever its branch looks
     # like. A partial commit that happens to verify is not a delivery, and
     # publishing it would ship work the agent itself declared incomplete.
-    case StopReport.read(job) do
-      {:ok, report} -> record_stop(job, report)
-      _no_usable_report -> verify_branch(job, opts)
+    if PtcManager.Reviews.held?(job) do
+      record_failure(job, :review_decision_required)
+    else
+      case StopReport.read(job) do
+        {:ok, report} -> record_stop(job, report)
+        _no_usable_report -> verify_branch(job, opts)
+      end
     end
   end
 
@@ -49,6 +53,14 @@ defmodule PtcManager.ResultReconciler do
 
           if match?({:ok, _job}, outcome) do
             PtcManager.PublisherPoller.wake()
+          else
+            if outcome == {:error, :independent_review_required},
+              do:
+                PtcManager.Reviews.pause(
+                  job.id,
+                  "Independent review required before publication.",
+                  job
+                )
           end
 
           outcome

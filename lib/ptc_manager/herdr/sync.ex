@@ -867,10 +867,19 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp update_job_from_agent(job, agent_state, agent_now, lease_now) do
-    state = job_state(agent_state, job.state)
+    state =
+      if PtcManager.Reviews.held?(job), do: "blocked", else: job_state(agent_state, job.state)
 
     attrs =
       cond do
+        PtcManager.Reviews.held?(job) ->
+          %{
+            state: "blocked",
+            lease_expires_at: nil,
+            reconciling_at: nil,
+            absence_observed_at: nil
+          }
+
         state in ~w(failed lost) ->
           %{
             state: state,
@@ -939,7 +948,7 @@ defmodule PtcManager.Herdr.Sync do
   defp maybe_attach_managed_attempt(%{agent_name: name} = attrs, worker_key)
        when is_binary(name) do
     with [job_id, fencing_token] <-
-           Regex.run(~r/^impl_j(\d+)_f(\d+)$/, name, capture: :all_but_first),
+           Regex.run(~r/^impl_j(\d+)_f(\d+)(?:_r\d+)?$/, name, capture: :all_but_first),
          {job_id, ""} <- Integer.parse(job_id),
          {fencing_token, ""} <- Integer.parse(fencing_token),
          %Job{fencing_token: ^fencing_token, state: state, lease_owner: ^worker_key} = job <-
@@ -948,26 +957,30 @@ defmodule PtcManager.Herdr.Sync do
            state in ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr pr_open) do
       managed_run = Repo.get_by(AgentRun, job_id: job.id, fencing_token: fencing_token)
 
-      attrs =
+      if managed_run && managed_run.agent_name not in [nil, name] do
         attrs
-        |> Map.put(:job_id, job.id)
-        |> Map.put(:fencing_token, fencing_token)
-        |> Map.put(:managed_run, managed_run)
-        |> Map.put(
-          :recover_retained,
-          state == "pr_open" and match?(%AgentRun{state: "lost"}, managed_run)
-        )
-
-      if state == "pr_open" and attrs.state in ["done", "idle"] do
-        attrs
-        |> Map.put(:state, "waiting")
-        |> Map.put(:ended_at, nil)
-        |> Map.put(
-          :status_text,
-          "Retained with its PR context; waiting for CI or maintainer action."
-        )
       else
-        attrs
+        attrs =
+          attrs
+          |> Map.put(:job_id, job.id)
+          |> Map.put(:fencing_token, fencing_token)
+          |> Map.put(:managed_run, managed_run)
+          |> Map.put(
+            :recover_retained,
+            state == "pr_open" and match?(%AgentRun{state: "lost"}, managed_run)
+          )
+
+        if state == "pr_open" and attrs.state in ["done", "idle"] do
+          attrs
+          |> Map.put(:state, "waiting")
+          |> Map.put(:ended_at, nil)
+          |> Map.put(
+            :status_text,
+            "Retained with its PR context; waiting for CI or maintainer action."
+          )
+        else
+          attrs
+        end
       end
     else
       _ -> attrs
@@ -1104,13 +1117,17 @@ defmodule PtcManager.Herdr.Sync do
     )
     |> Repo.all()
     |> Enum.count(fn job ->
-      attempt_name = "impl_j#{job.id}_f#{job.fencing_token}"
+      run = Repo.get_by(AgentRun, job_id: job.id, fencing_token: job.fencing_token)
+      attempt_name = (run && run.agent_name) || "impl_j#{job.id}_f#{job.fencing_token}"
 
       old_enough =
         job.reconciling_at &&
           DateTime.diff(lease_now, job.reconciling_at, :millisecond) >= reconcile_after_ms
 
       cond do
+        PtcManager.Reviews.held?(job) ->
+          false
+
         !old_enough || MapSet.member?(observed_names, attempt_name) ->
           false
 

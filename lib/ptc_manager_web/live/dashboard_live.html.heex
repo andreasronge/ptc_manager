@@ -193,17 +193,43 @@
                     >
                       <input type="hidden" name="issue-id" value={item.issue.id} />
                       <label class="text-xs font-medium text-slate-400">
-                        Reviews
+                        Execution profile
+                        <select
+                          name="execution-profile"
+                          class="mt-1 block rounded-xl bg-slate-950 px-3 py-2.5 text-white"
+                          disabled={!startable?(item)}
+                        >
+                          <option
+                            :for={profile <- @execution_profiles}
+                            value={profile.name}
+                            selected={
+                              profile.name ==
+                                PtcManager.ExecutionProfiles.suggested(item.proposal)
+                            }
+                          >
+                            {String.capitalize(profile.name)} · {profile.model} · max {profile.max_reviews}{if profile.name ==
+                                                                                                                 PtcManager.ExecutionProfiles.suggested(
+                                                                                                                   item.proposal
+                                                                                                                 ),
+                                                                                                               do:
+                                                                                                                 " · suggested",
+                                                                                                               else:
+                                                                                                                 ""}
+                          </option>
+                        </select>
+                      </label>
+                      <label class="text-xs font-medium text-slate-400">
+                        Maximum reviews
                         <select
                           id={"review-count-issue-#{item.issue.id}"}
                           name="review-count"
                           disabled={!startable?(item)}
                           class="mt-1 block rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5 text-sm font-semibold text-white outline-none focus:border-teal-400/60"
                         >
+                          <option value="" selected>Profile default</option>
                           <option
-                            :for={count <- 0..3}
+                            :for={count <- 0..5}
                             value={count}
-                            selected={count == required_reviews(item.issue.repository)}
                           >
                             {count}{if(count == 0, do: " · none", else: "")}
                           </option>

@@ -9,6 +9,22 @@ defmodule PtcManager.Automations.Defaults do
 
   @definitions [
     %{
+      key: "post_cancellation_note",
+      name: "Post cancellation explanation",
+      description:
+        "Post one explicitly approved explanation after an implementation is cancelled.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 300,
+      result_type: "issue_maintenance",
+      prompt:
+        "Post only the exact approved explanation to the named issue. Check for an existing identical comment before writing. Do not make any other GitHub or repository changes. Return completed once the comment exists."
+    },
+    %{
       key: "private_issue_analysis",
       name: "Private issue analysis",
       description: "Create the simple private planning summary shown in the backlog.",

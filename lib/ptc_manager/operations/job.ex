@@ -16,6 +16,13 @@ defmodule PtcManager.Operations.Job do
     field :branch_name, :string
     field :publication_source, :string
     field :required_review_count, :integer
+    field :review_resume_expires_at, :utc_datetime_usec
+    field :cancellation_reason, :string
+    field :cancellation_action_id, :integer
+    field :execution_settings, :map
+    field :review_state, :string
+    field :reviewed_head_sha, :string
+    field :review_generation, :integer, default: 0
     field :last_error, :string
     field :reconciling_at, :utc_datetime_usec
     field :absence_observed_at, :utc_datetime_usec
@@ -72,6 +79,13 @@ defmodule PtcManager.Operations.Job do
       :branch_name,
       :publication_source,
       :required_review_count,
+      :review_resume_expires_at,
+      :cancellation_reason,
+      :cancellation_action_id,
+      :execution_settings,
+      :review_state,
+      :reviewed_head_sha,
+      :review_generation,
       :last_error,
       :reconciling_at,
       :absence_observed_at,
@@ -114,7 +128,7 @@ defmodule PtcManager.Operations.Job do
     |> validate_number(:fencing_token, greater_than_or_equal_to: 0)
     |> validate_number(:required_review_count,
       greater_than_or_equal_to: 0,
-      less_than_or_equal_to: 3
+      less_than_or_equal_to: 100
     )
     |> validate_length(:lease_owner, max: 120)
     |> validate_length(:branch_name, max: 240)

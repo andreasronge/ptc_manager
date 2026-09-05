@@ -54,6 +54,24 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
+  def cancellation_comment_present?(repository, number, body) do
+    query =
+      "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { comments(last: 100) { nodes { body } } } } }"
+
+    with {:ok, %{"repository" => %{"issue" => %{"comments" => %{"nodes" => comments}}}}} <-
+           graphql(query, %{
+             "owner" => repository.github_owner,
+             "name" => repository.github_name,
+             "number" => number
+           }) do
+      if Enum.any?(comments, &(&1["body"] == body)),
+        do: {:ok, %{}},
+        else: {:error, :approved_comment_not_observed}
+    else
+      _ -> {:error, :comment_verification_unavailable}
+    end
+  end
+
   @impl true
   def viewer_login do
     case graphql(viewer_query(), %{}) do

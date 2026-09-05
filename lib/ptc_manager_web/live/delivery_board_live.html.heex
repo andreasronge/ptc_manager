@@ -70,6 +70,13 @@
             </p>
             <span class="shrink-0 text-[11px] text-slate-600">{card_age(@now, item)}</span>
           </div>
+          <.link
+            :if={item.active_job && item.active_job.execution_settings}
+            navigate={"/jobs/#{item.active_job.id}/reviews"}
+            class="mt-2 inline-block text-sm text-teal-300"
+          >
+            Reviews · {item.active_job.review_state}
+          </.link>
           <h3 class="mt-1.5 text-sm font-semibold leading-5 text-slate-100">
             {item.title}
           </h3>

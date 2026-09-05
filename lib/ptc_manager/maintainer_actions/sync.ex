@@ -68,6 +68,20 @@ defmodule PtcManager.MaintainerActions.Sync do
       when action_key in ["repair_pr", "repair_and_merge_pr"],
       do: sync_repair(action, {:postflight, result})
 
+  def sync_action(%{action_key: "post_cancellation_note"} = action, _result) do
+    issue = Repo.get!(Issue, action.target_id) |> Repo.preload(:repository)
+    client = Application.fetch_env!(:ptc_manager, :github_client)
+
+    if function_exported?(client, :cancellation_comment_present?, 3),
+      do:
+        client.cancellation_comment_present?(
+          issue.repository,
+          issue.number,
+          action.target_snapshot["approved_comment"]
+        ),
+      else: {:error, :comment_verification_unavailable}
+  end
+
   def sync_action(action, _result), do: sync_action(action)
 
   defp sync_repair(%{target_id: publication_id} = action, phase) do

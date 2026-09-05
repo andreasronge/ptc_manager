@@ -136,8 +136,14 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
         "cursor" => %{"enabled" => true, "args" => ["--force", "--trust"]}
       })
 
-      repository = repository_fixture(%{local_path: workspace.repository})
-      require_agent_kind!(repository, "implement_issue", "cursor")
+      repository_fixture(%{local_path: workspace.repository})
+
+      {:ok, _} =
+        PtcManager.ExecutionProfiles.save(
+          "small",
+          %{"kind" => "cursor", "model" => "cursor-grok-4.6-high"},
+          "maintainer"
+        )
 
       leased =
         TestScenario.leased_implementation!(scenario,
