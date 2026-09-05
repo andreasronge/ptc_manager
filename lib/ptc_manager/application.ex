@@ -46,9 +46,12 @@ defmodule PtcManager.Application do
 
   defp maintainer_action_supervisor do
     children =
-      for lane <- [:planning, :writing], index <- 1..8 do
-        {PtcManager.MaintainerActions.Poller, lane: lane, index: index}
-      end
+      for index <- 1..16 do
+        {PtcManager.MaintainerActions.Poller, lane: :planning, index: index}
+      end ++
+        for index <- 1..16 do
+          {PtcManager.MaintainerActions.Poller, lane: :writing, index: index}
+        end
 
     %{
       id: PtcManager.MaintainerActions.Supervisor,

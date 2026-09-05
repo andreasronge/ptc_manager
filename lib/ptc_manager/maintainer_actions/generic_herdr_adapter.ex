@@ -6,12 +6,17 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.AgentProfiles
   alias PtcManager.Automations
   alias PtcManager.Dispatch.HerdrAdapter
+  alias PtcManager.InvestigationWorkspaces
   alias PtcManager.MaintainerActions.ActionAdapter, as: ResultValidator
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentAction
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.InvestigationWorkspace
   alias PtcManager.Repository.WorkerRepositoryTrust
   alias PtcManager.Repository.WorkerClaudeTrust
+  alias PtcManager.Repository.WorkerGit
+  alias PtcManager.Repository.WorkspaceSetup
+  alias PtcManager.WorktreeSecurity
   alias PtcManager.Repository.WorkerAgentLogin
   alias PtcManager.Repository.WorkerCodexArming
 
@@ -23,16 +28,15 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   def run(%AgentAction{automation_definition_version: version} = action)
       when not is_nil(version) do
     try do
-      with {:ok, path} <- action_path(action),
-           {:ok, profile} <- AgentProfiles.select(version.agent_selector),
+      with {:ok, profile} <- AgentProfiles.select(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
+           {:ok, path, workspace, pane} <- prepare_workspace(action),
            :ok <- trust_workspace(path),
-           {:ok, workspace, pane} <- open_workspace(action, path),
            name = agent_name(action),
            {:ok, context} <-
              PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
            :ok <- remember_context(context),
-           {:ok, agent_key} <- start_agent(name, pane, profile, path),
+           {:ok, agent_key} <- start_agent(name, pane, profile, path, action),
            dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
@@ -43,7 +47,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         {:ok, result}
       end
     after
-      cleanup()
+      cleanup(action)
     end
   rescue
     error -> {:error, {:generic_herdr_failed, error.__struct__}}
@@ -56,6 +60,122 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
        do: {:ok, Path.expand(path)}
 
   defp action_path(%AgentAction{repository: repository}), do: Checkout.available_path(repository)
+
+  defp prepare_workspace(
+         %AgentAction{
+           automation_definition_version: %{execution_profile: "ephemeral_investigation"}
+         } = action
+       ) do
+    prepare_investigation_workspace(action)
+  end
+
+  defp prepare_workspace(action) do
+    with {:ok, path} <- action_path(action),
+         {:ok, workspace, pane} <- open_workspace(action, path) do
+      {:ok, path, workspace, pane}
+    end
+  end
+
+  defp prepare_investigation_workspace(action) do
+    root = Application.get_env(:ptc_manager, :worktree_root)
+
+    with {:ok, repository_path} <- Checkout.available_path(action.repository),
+         true <- is_binary(root) and root != "",
+         :ok <- WorktreeSecurity.validate_configured_root(root),
+         {:ok, identity} <- InvestigationWorkspace.identity(action),
+         path = InvestigationWorkspace.path(root, action.repository, action),
+         {:ok, _run} <-
+           Operations.prepare_agent_action_disposable_workspace(
+             action.id,
+             action.attempt_count,
+             path,
+             identity.branch
+           ),
+         {:ok, output} <-
+           command().run([
+             "worktree",
+             "create",
+             "--cwd",
+             repository_path,
+             "--branch",
+             identity.branch,
+             "--base",
+             identity.source_sha,
+             "--path",
+             path,
+             "--label",
+             "review-issue-#{action.target_id}",
+             "--no-focus"
+           ]),
+         {:ok, workspace, pane} <- remember_disposable_workspace(output, action),
+         :ok <- remember_investigation_branch(repository_path, identity.branch),
+         {:ok, report} <- setup_investigation(path, action) do
+      Process.put({__MODULE__, :setup_report}, report)
+      {:ok, path, workspace, pane}
+    else
+      false -> {:error, :worktree_root_unavailable}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp remember_investigation_branch(repository_path, branch) do
+    Process.put({__MODULE__, :investigation_branch}, {repository_path, branch})
+    :ok
+  end
+
+  defp remember_disposable_workspace(output, action) do
+    case HerdrAdapter.decode_worktree(output) do
+      {:ok, workspace, pane} = opened ->
+        Process.put({__MODULE__, :workspace}, workspace)
+        Process.put({__MODULE__, :disposable_workspace}, true)
+
+        with {:ok, _run} <-
+               Operations.attach_agent_action_disposable_workspace(
+                 action.id,
+                 action.attempt_count,
+                 workspace,
+                 pane,
+                 Application.get_env(:ptc_manager, :herdr_session, "default")
+               ) do
+          opened
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp setup_investigation(path, action) do
+    setup = Application.get_env(:ptc_manager, :workspace_setup, WorkspaceSetup)
+
+    case PtcManager.Gateway.call(setup, :run, [path, action]) do
+      {:ok, report} when is_map(report) ->
+        with {:ok, _run} <-
+               Operations.record_agent_action_workspace_setup(
+                 action.id,
+                 action.attempt_count,
+                 report
+               ) do
+          {:ok, report}
+        end
+
+      {:error, report} when is_map(report) ->
+        with {:ok, _run} <-
+               Operations.record_agent_action_workspace_setup(
+                 action.id,
+                 action.attempt_count,
+                 report
+               ) do
+          {:error, {:investigation_workspace_setup_failed, Map.get(report, :error)}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:unexpected_workspace_setup_result, other}}
+    end
+  end
 
   defp prepare_output(action) do
     directory =
@@ -116,11 +236,11 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
   end
 
-  defp start_agent(name, pane, profile, workspace_path) do
+  defp start_agent(name, pane, profile, workspace_path, action) do
     with :ok <- WorkerAgentLogin.verify(profile.kind),
          :ok <- trust_agent_workspace(profile.kind, workspace_path),
          :ok <- WorkerCodexArming.prepare(profile.kind) do
-      run_agent_start(name, pane, profile, workspace_path)
+      run_agent_start(name, pane, profile, workspace_path, action)
     end
   end
 
@@ -140,8 +260,18 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp trust_agent_workspace(_kind, _workspace_path), do: :ok
 
-  defp run_agent_start(name, pane, profile, workspace_path) do
+  defp run_agent_start(name, pane, profile, workspace_path, action) do
     timeout = Application.get_env(:ptc_manager, :implementation_agent_start_timeout_ms, 120_000)
+
+    agent_args =
+      if action.automation_definition_version.execution_profile == "ephemeral_investigation" do
+        HerdrAdapter.agent_arguments(profile.kind, workspace_path, [
+          action.repository.local_path,
+          workspace_path
+        ])
+      else
+        AgentProfiles.expand_args(profile.args, workspace_path)
+      end
 
     args =
       [
@@ -155,7 +285,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         "--timeout",
         Integer.to_string(timeout),
         "--"
-      ] ++ AgentProfiles.expand_args(profile.args, workspace_path)
+      ] ++ agent_args
 
     case command().run(args, timeout + @command_grace_ms) do
       {:ok, output} -> {:ok, decode_agent_key(output, pane)}
@@ -371,9 +501,24 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       worktree_path: path,
       worker_key: "herdr:#{session}",
       role: "manager",
-      status_text: "Running #{String.replace(action.action_key, "_", " ")} through Herdr."
+      status_text: action_status(action)
     }
   end
+
+  defp action_status(%AgentAction{
+         automation_definition_version: %{execution_profile: "ephemeral_investigation"}
+       }) do
+    case Process.get({__MODULE__, :setup_report}) do
+      %{cache_state: "hit"} ->
+        "Reviewing the issue in a prepared disposable workspace (warm cache)."
+
+      _report ->
+        "Reviewing the issue in a prepared disposable workspace."
+    end
+  end
+
+  defp action_status(action),
+    do: "Running #{String.replace(action.action_key, "_", " ")} through Herdr."
 
   defp decode_agent_key(output, fallback) do
     with {:ok, decoded} <- Jason.decode(output),
@@ -387,10 +532,44 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp agent_name(action), do: "automation_a#{action.id}_f#{action.attempt_count}"
 
-  defp cleanup do
+  defp cleanup(action) do
     if workspace = Process.delete({__MODULE__, :workspace}) do
-      _ = command().run(["workspace", "close", workspace])
+      if Process.delete({__MODULE__, :disposable_workspace}) do
+        remover = fn workspace_id ->
+          ["worktree", "remove", "--workspace", workspace_id, "--force"]
+          |> command().run()
+          |> HerdrAdapter.action_workspace_removal_result()
+        end
+
+        recoverer = fn repository_path, path, label ->
+          with {:ok, output} <-
+                 command().run([
+                   "worktree",
+                   "open",
+                   "--cwd",
+                   repository_path,
+                   "--path",
+                   path,
+                   "--label",
+                   label,
+                   "--no-focus"
+                 ]),
+               {:ok, workspace_id, _pane} <- HerdrAdapter.decode_worktree(output) do
+            {:ok, workspace_id}
+          end
+        end
+
+        case InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer) do
+          {:ok, :empty} -> fallback_investigation_cleanup(workspace, remover)
+          _durable_result -> :ok
+        end
+      else
+        _ = command().run(["workspace", "close", workspace])
+      end
     end
+
+    Process.delete({__MODULE__, :investigation_branch})
+    Process.delete({__MODULE__, :setup_report})
 
     if path = Process.delete({__MODULE__, :trusted_path}) do
       _ = WorkerRepositoryTrust.revoke(path)
@@ -411,6 +590,32 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
 
     :ok
+  end
+
+  defp fallback_investigation_cleanup(workspace, remover) do
+    case remover.(workspace) do
+      :ok -> delete_investigation_branch()
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp delete_investigation_branch do
+    case Process.get({__MODULE__, :investigation_branch}) do
+      {repository_path, branch} ->
+        _ =
+          WorkerGit.run([
+            "-C",
+            repository_path,
+            "update-ref",
+            "-d",
+            "refs/heads/#{branch}"
+          ])
+
+        :ok
+
+      nil ->
+        :ok
+    end
   end
 
   defp remember_context(%{path: path}) do

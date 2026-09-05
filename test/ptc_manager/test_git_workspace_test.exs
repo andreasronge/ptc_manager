@@ -173,7 +173,12 @@ defmodule PtcManager.TestGitWorkspaceTest do
 
     result =
       HerdrAdapter.dispatch(
-        %{job: leased, issue: leased.issue, repository: leased.repository},
+        %{
+          job: leased,
+          issue: leased.issue,
+          repository: leased.repository,
+          source: %{sha: workspace.source_sha, ref: "refs/remotes/origin/main"}
+        },
         command: command
       )
 
@@ -209,7 +214,12 @@ defmodule PtcManager.TestGitWorkspaceTest do
             {:uncertain,
              {:worktree_create_unconfirmed, _create_error, :worktree_create_identity_mismatch}}} =
              HerdrAdapter.dispatch(
-               %{job: leased, issue: leased.issue, repository: leased.repository},
+               %{
+                 job: leased,
+                 issue: leased.issue,
+                 repository: leased.repository,
+                 source: %{sha: workspace.source_sha, ref: "refs/remotes/origin/main"}
+               },
                command: command
              )
 

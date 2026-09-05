@@ -45,6 +45,7 @@ defmodule PtcManager.Automations.DefinitionForm do
 
   @execution_profiles %{
     "generic_ephemeral" => "Read-only snapshot of the default branch",
+    "ephemeral_investigation" => "Disposable test-capable investigation worktree",
     "retained_pr_repair" => "Retained pull-request worktree",
     "implementation_job" => "Writable implementation worktree",
     "private_daily_update" => "Private daily update"

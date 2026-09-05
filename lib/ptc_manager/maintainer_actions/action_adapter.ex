@@ -21,9 +21,12 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   def run(
         %AgentAction{
-          automation_definition_version: %{execution_profile: "generic_ephemeral"}
+          automation_definition_version: %{
+            execution_profile: profile
+          }
         } = action
-      ) do
+      )
+      when profile in ["generic_ephemeral", "ephemeral_investigation"] do
     GenericHerdrAdapter.run(action)
   end
 

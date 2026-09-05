@@ -15,11 +15,12 @@ defmodule PtcManager.Repository.SourceSnapshot do
   def prepare(%Repository{} = repository, action_id, existing_snapshot)
       when is_integer(action_id) and is_map(existing_snapshot) do
     with {:ok, repository_path} <- repository_path(repository),
-         {:ok, source} <- source(repository_path, existing_snapshot),
+         {:ok, source} <- source(repository, repository_path, existing_snapshot),
          snapshot_path <- snapshot_path(action_id, source.sha),
          :ok <- ensure_snapshot_root(),
          :ok <- remove_existing_snapshot(snapshot_path, repository_path, action_id, source.sha),
-         :ok <- clone_snapshot(repository_path, snapshot_path, action_id, source.sha),
+         :ok <-
+           clone_snapshot(repository_path, snapshot_path, action_id, source.ref, source.sha),
          :ok <- verify(repository, snapshot_path, source.sha) do
       {:ok, Map.put(source, :path, snapshot_path)}
     end
@@ -27,7 +28,7 @@ defmodule PtcManager.Repository.SourceSnapshot do
 
   def capture(%Repository{} = repository) do
     with {:ok, path} <- repository_path(repository) do
-      capture_at(path)
+      refresh(repository, path)
     end
   end
 
@@ -62,27 +63,34 @@ defmodule PtcManager.Repository.SourceSnapshot do
     end
   end
 
-  defp source(_path, %{"source_sha" => sha, "source_ref" => ref})
+  defp source(_repository, _path, %{"source_sha" => sha, "source_ref" => ref})
        when is_binary(sha) and is_binary(ref) do
     if Regex.match?(@sha, sha) and ref != "" and byte_size(ref) <= 240,
       do: {:ok, %{sha: sha, ref: ref}},
       else: {:error, :repository_snapshot_unavailable}
   end
 
-  defp source(path, _snapshot), do: capture_at(path)
+  defp source(repository, path, _snapshot), do: refresh(repository, path)
 
-  defp capture_at(path) do
-    with {:ok, source_sha} <- git(path, ["rev-parse", "--verify", "HEAD^{commit}"]),
-         true <- Regex.match?(@sha, source_sha),
-         {:ok, source_ref} <- git(path, ["rev-parse", "--abbrev-ref", "HEAD"]),
-         true <- source_ref != "" and byte_size(source_ref) <= 240 do
-      {:ok, %{sha: source_sha, ref: source_ref}}
-    else
-      _failure -> {:error, :repository_snapshot_unavailable}
+  defp refresh(repository, path) do
+    updater = Application.fetch_env!(:ptc_manager, :source_updater)
+
+    updater.refresh(repository)
+    |> case do
+      {:ok, %{path: ^path} = source} ->
+        {:ok, source}
+
+      {:ok, %{path: other_path} = source} when is_binary(other_path) ->
+        if Path.expand(other_path) == Path.expand(path),
+          do: {:ok, %{source | path: Path.expand(path)}},
+          else: {:error, :repository_source_path_mismatch}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
-  defp clone_snapshot(repository_path, path, action_id, source_sha) do
+  defp clone_snapshot(repository_path, path, action_id, source_ref, source_sha) do
     bundle_path = Path.join([path, ".git", "ptc-manager-source.bundle"])
 
     # A local clone starts upload-pack in a child Git process that re-checks the
@@ -92,7 +100,7 @@ defmodule PtcManager.Repository.SourceSnapshot do
     # repository without hardlinks back to the mutable source.
     with {_output, 0} <- git_command(["init", "--quiet", "--", path]),
          {_output, 0} <-
-           git_command(git_args(repository_path, ["bundle", "create", bundle_path, "HEAD"])),
+           git_command(git_args(repository_path, ["bundle", "create", bundle_path, source_ref])),
          {_output, 0} <-
            git_command(["-C", path, "fetch", "--no-tags", "--", bundle_path, source_sha]),
          :ok <- File.rm(bundle_path),

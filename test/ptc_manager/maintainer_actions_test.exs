@@ -840,11 +840,14 @@ defmodule PtcManager.MaintainerActionsTest do
     issue = issue_fixture(repository, %{number: 43})
 
     assert {:ok, action} = MaintainerActions.enqueue("review_issue", issue.id, "andreas")
+    action = Repo.preload(action, :automation_definition_version)
     assert action.action_key == "review_issue"
     assert action.prompt =~ ~s(<runtime_context action="review_issue")
     refute action.prompt =~ "review_limit"
     refute action.prompt =~ "codex-review"
     assert action.prompt =~ "Review whether the issue is genuinely ready"
+    assert action.automation_definition_version.execution_profile == "ephemeral_investigation"
+    assert action.automation_definition_version.resource_class == "heavy"
   end
 
   test "queues an authenticated issue decision as a narrowly scoped GitHub action" do
@@ -2384,6 +2387,93 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert claimed.id == planning.id
     assert Repo.get!(AgentAction, merge.id).state == "queued"
+  end
+
+  test "light planning selection skips an older heavy review" do
+    repository = repository_fixture()
+    review_issue = issue_fixture(repository, %{number: 9_301})
+    light_issue = issue_fixture(repository, %{number: 9_302})
+
+    assert {:ok, review} = MaintainerActions.enqueue("review_issue", review_issue.id, "andreas")
+
+    assert {:ok, light} =
+             MaintainerActions.enqueue("prepare_issue", light_issue.id, "andreas")
+
+    review
+    |> AgentAction.changeset(%{
+      requested_at: DateTime.add(review.requested_at, -60, :second)
+    })
+    |> Repo.update!()
+
+    assert Operations.next_agent_action_candidate_for_lane(:planning, DateTime.utc_now(), "heavy").id ==
+             review.id
+
+    assert Operations.next_agent_action_candidate_for_lane(:planning, DateTime.utc_now(), "light").id ==
+             light.id
+  end
+
+  test "writing pollers schedule editable light writing automations" do
+    previous_light = Application.get_env(:ptc_manager, :light_agent_capacity)
+    previous_heavy = Application.get_env(:ptc_manager, :heavy_agent_capacity)
+    Application.put_env(:ptc_manager, :light_agent_capacity, 2)
+    Application.put_env(:ptc_manager, :heavy_agent_capacity, 1)
+
+    on_exit(fn ->
+      restore_test_env(:light_agent_capacity, previous_light)
+      restore_test_env(:heavy_agent_capacity, previous_heavy)
+    end)
+
+    assert PtcManager.MaintainerActions.Poller.resource_class(:writing, 1) == "light"
+    assert PtcManager.MaintainerActions.Poller.resource_class(:writing, 3) == "heavy"
+  end
+
+  test "resource-class pollers retain deterministic scheduling for versionless actions" do
+    repository = repository_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    legacy_heavy =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "review_issue",
+        target_type: "issue",
+        target_id: 9_401,
+        target_label: "legacy review",
+        prompt_version: 1,
+        prompt: "Review the issue",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: now
+      })
+      |> Repo.insert!()
+
+    legacy_light =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "prepare_issue",
+        target_type: "issue",
+        target_id: 9_402,
+        target_label: "legacy preparation",
+        prompt_version: 1,
+        prompt: "Prepare the issue",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: now
+      })
+      |> Repo.insert!()
+
+    assert Operations.next_agent_action_candidate_for_lane(:planning, now, "heavy").id ==
+             legacy_heavy.id
+
+    assert Operations.next_agent_action_candidate_for_lane(:planning, now, "light").id ==
+             legacy_light.id
   end
 
   test "reports local planning snapshot failures separately from GitHub synchronization" do

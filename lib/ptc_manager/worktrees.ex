@@ -1,6 +1,8 @@
 defmodule PtcManager.Worktrees do
   @moduledoc "Enforces worker-advertised worktree capacity and safe reclamation."
 
+  require Logger
+
   alias PtcManager.Operations
   alias PtcManager.Operations.WorktreeAllocation
   alias PtcManager.ExternalPrSessions
@@ -37,9 +39,28 @@ defmodule PtcManager.Worktrees do
         probe \\ GitProbe,
         external_adapter \\ configured_external_adapter()
       ) do
+    reap_investigation_worktree()
+
     case cleanup_terminal_once(adapter, probe, external_adapter) do
       {:ok, :empty} -> cleanup_abandoned_once(adapter, probe)
       other -> other
+    end
+  end
+
+  defp reap_investigation_worktree do
+    adapter =
+      Application.get_env(
+        :ptc_manager,
+        :investigation_workspace_adapter,
+        HerdrAdapter
+      )
+
+    case PtcManager.InvestigationWorkspaces.cleanup_terminal_once(adapter) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Investigation workspace cleanup deferred: #{inspect(reason)}")
     end
   end
 

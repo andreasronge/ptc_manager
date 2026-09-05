@@ -154,8 +154,18 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
   end
 
   defp dispatch(leased, command) do
+    {source_sha, 0} =
+      System.cmd("git", ["-C", leased.repository.local_path, "rev-parse", "HEAD"],
+        stderr_to_stdout: true
+      )
+
     HerdrAdapter.dispatch(
-      %{job: leased, issue: leased.issue, repository: leased.repository},
+      %{
+        job: leased,
+        issue: leased.issue,
+        repository: leased.repository,
+        source: %{sha: String.trim(source_sha), ref: "refs/remotes/origin/main"}
+      },
       command: command
     )
   end

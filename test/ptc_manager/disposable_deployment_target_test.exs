@@ -315,6 +315,112 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
            )
   end
 
+  @tag migration_opts: [to: 20_260_902_200_000]
+  test "testable review migration preserves maintainer-authored execution boundaries", %{
+    target: target
+  } do
+    timestamp = "2026-09-02T20:30:00.000000Z"
+
+    Repo.query!(
+      """
+      INSERT INTO repositories
+        (id, github_owner, github_name, default_branch, enabled, inserted_at, updated_at)
+      VALUES
+        (1, 'owner', 'built-in', 'main', 1, ?, ?),
+        (2, 'owner', 'customized', 'main', 1, ?, ?)
+      """,
+      [timestamp, timestamp, timestamp, timestamp]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO automation_definitions
+        (id, repository_id, key, name, description, enabled, inserted_at, updated_at)
+      VALUES
+        (1, 1, 'review_issue', 'Review issue', 'Built-in review', 1, ?, ?),
+        (2, 2, 'review_issue', 'Review issue', 'Customized review', 1, ?, ?)
+      """,
+      [timestamp, timestamp, timestamp, timestamp]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO automation_definition_versions
+        (id, automation_definition_id, version, target_type, execution_profile,
+         agent_selector, github_access, queue_lane, resource_class, lock_policy,
+         timeout_seconds, result_type, result_protocol_version, prompt,
+         configuration_snapshot, created_by, inserted_at)
+      VALUES
+        (1, 1, 1, 'issue', 'generic_ephemeral', '{}', 'trusted_direct', 'planning',
+         'light', '{}', 1800, 'issue_maintenance', 1, 'Built-in prompt', '{}',
+         'system:built-in', ?),
+        (2, 2, 1, 'issue', 'generic_ephemeral', '{}', 'trusted_direct', 'planning',
+         'light', '{}', 1800, 'issue_maintenance', 1, 'Keep this custom prompt', '{}',
+         'maintainer', ?)
+      """,
+      [timestamp, timestamp]
+    )
+
+    Repo.query!("UPDATE automation_definitions SET current_version_id = id")
+    _target = DisposableDeploymentTarget.migrate_remaining!(target)
+
+    assert Repo.query!("""
+           SELECT definition.repository_id, version.execution_profile, version.resource_class,
+                  version.prompt, version.created_by
+           FROM automation_definitions AS definition
+           JOIN automation_definition_versions AS version
+             ON version.id = definition.current_version_id
+           ORDER BY definition.repository_id
+           """).rows == [
+             [
+               1,
+               "ephemeral_investigation",
+               "heavy",
+               "Built-in prompt",
+               "system:testable-issue-review"
+             ],
+             [2, "generic_ephemeral", "light", "Keep this custom prompt", "maintainer"]
+           ]
+
+    _target = DisposableDeploymentTarget.rollback!(target, step: 2)
+
+    Repo.query!("""
+    INSERT INTO automation_definition_versions
+      (automation_definition_id, version, target_type, execution_profile,
+       agent_selector, github_access, queue_lane, resource_class, lock_policy,
+       timeout_seconds, result_type, result_protocol_version, prompt,
+       configuration_snapshot, created_by, inserted_at)
+    SELECT automation_definition_id, max(version) + 1, target_type, 'generic_ephemeral',
+           agent_selector, github_access, queue_lane, 'light', lock_policy,
+           timeout_seconds, result_type, result_protocol_version, 'Edited after rollback',
+           configuration_snapshot, 'maintainer', '#{timestamp}'
+    FROM automation_definition_versions
+    WHERE automation_definition_id = 1
+    """)
+
+    Repo.query!("""
+    UPDATE automation_definitions
+    SET current_version_id = (
+      SELECT id FROM automation_definition_versions
+      WHERE automation_definition_id = 1 AND created_by = 'maintainer'
+      ORDER BY version DESC LIMIT 1
+    )
+    WHERE id = 1
+    """)
+
+    _target = DisposableDeploymentTarget.migrate_remaining!(target)
+
+    assert [["generic_ephemeral", "light", "Edited after rollback", "maintainer"]] =
+             Repo.query!("""
+             SELECT version.execution_profile, version.resource_class, version.prompt,
+                    version.created_by
+             FROM automation_definitions AS definition
+             JOIN automation_definition_versions AS version
+               ON version.id = definition.current_version_id
+             WHERE definition.id = 1
+             """).rows
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
   defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
 

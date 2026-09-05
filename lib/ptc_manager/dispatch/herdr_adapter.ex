@@ -8,9 +8,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.Automations
   alias PtcManager.Gateway
   alias PtcManager.Operations.StopReport
-  alias PtcManager.CommandEnvironment
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerAgentLogin
+  alias PtcManager.Repository.WorkerGit
   alias PtcManager.Repository.WorkerClaudeTrust
   alias PtcManager.Repository.WorkerCodexArming
   alias PtcManager.Repository.WorkspaceSetup
@@ -24,12 +24,13 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   def dispatch(context), do: dispatch(context, [])
 
   @doc false
-  def dispatch(%{job: job, issue: issue, repository: repository}, opts) when is_list(opts) do
+  def dispatch(%{job: job, issue: issue, repository: repository, source: source}, opts)
+      when is_list(opts) do
     command = Keyword.get(opts, :command, Command)
 
     with :ok <- enabled?(),
          {:ok, path} <- repository_path(repository) do
-      dispatch_external(path, repository, job, issue, command)
+      dispatch_external(path, source, job, issue, command)
     else
       {:error, reason} -> {:error, {:safe, reason}}
     end
@@ -212,9 +213,41 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   @doc "Removes a retained PR-action workspace after its PR is terminal."
   def remove_action_workspace(workspace) when is_binary(workspace) and workspace != "" do
-    case run(["worktree", "remove", "--workspace", workspace, "--force"]) do
-      {:ok, _output} -> :ok
-      {:error, reason} -> {:error, reason}
+    ["worktree", "remove", "--workspace", workspace, "--force"]
+    |> run()
+    |> action_workspace_removal_result()
+  end
+
+  @doc false
+  def action_workspace_removal_result({:ok, _output}), do: :ok
+
+  def action_workspace_removal_result({:error, {:herdr_exit, _status, output}} = error)
+      when is_binary(output) do
+    case Jason.decode(output) do
+      {:ok, %{"error" => %{"code" => "workspace_not_found"}}} -> :ok
+      _other -> error
+    end
+  end
+
+  def action_workspace_removal_result({:error, _reason} = error), do: error
+
+  @doc "Reopens an existing action worktree so an interrupted creation can be cleaned up."
+  def open_action_workspace(repository_path, path, label)
+      when is_binary(repository_path) and is_binary(path) and is_binary(label) do
+    with {:ok, output} <-
+           run([
+             "worktree",
+             "open",
+             "--cwd",
+             repository_path,
+             "--path",
+             path,
+             "--label",
+             label,
+             "--no-focus"
+           ]),
+         {:ok, workspace, _pane} <- decode_worktree(output) do
+      {:ok, workspace}
     end
   end
 
@@ -224,10 +257,10 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       if(terminal_pull_request?(allocation), do: ["--force"], else: [])
   end
 
-  defp dispatch_external(path, repository, job, issue, command) do
+  defp dispatch_external(path, source, job, issue, command) do
     started = System.monotonic_time(:millisecond)
 
-    with {:ok, created} <- create_worktree(command, path, repository, job),
+    with {:ok, created} <- create_worktree(command, path, source.sha, job),
          {:ok, workspace_id, pane_id} <- decode_worktree(created) do
       worktree_duration_ms = max(System.monotonic_time(:millisecond) - started, 0)
       setup = Application.get_env(:ptc_manager, :workspace_setup, WorkspaceSetup)
@@ -349,7 +382,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     Checkout.available_path(repository)
   end
 
-  defp create_worktree(command, path, repository, job) do
+  defp create_worktree(command, path, base_sha, job) do
     args = [
       "worktree",
       "create",
@@ -358,7 +391,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       "--branch",
       job.branch_name,
       "--base",
-      repository.default_branch,
+      base_sha,
       "--path",
       job.worktree_allocation.path,
       "--label",
@@ -371,9 +404,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         created
 
       {:error, create_error} ->
-        with {:ok, base_sha} <- capture_git(["-C", path, "rev-parse", repository.default_branch]) do
-          adopt_created_worktree(command, path, job, base_sha, create_error)
-        end
+        adopt_created_worktree(command, path, job, base_sha, create_error)
     end
   end
 
@@ -567,30 +598,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   @doc false
   def git_command(args) do
-    {command, command_args} = git_command_spec(args)
-
-    System.cmd(command, command_args,
-      env: CommandEnvironment.scrub(),
-      stderr_to_stdout: true
-    )
-  rescue
-    error -> {inspect(error.__struct__), 127}
+    WorkerGit.run(args)
   end
 
   @doc false
   def git_command_spec(args) do
-    binary =
-      Application.get_env(
-        :ptc_manager,
-        :herdr_git_binary,
-        Application.get_env(:ptc_manager, :git_binary, "git")
-      )
-
-    CommandEnvironment.command(
-      binary,
-      args,
-      Application.get_env(:ptc_manager, :herdr_run_as_user)
-    )
+    WorkerGit.command_spec(args)
   end
 
   @doc """
