@@ -817,7 +817,9 @@ mix precommit
 ```
 
 This formats the project, compiles with warnings treated as errors, and runs
-the deployment-critical suite across three isolated SQLite partitions. The
+the deployment-critical suite across three isolated SQLite partitions. Each
+partition gets its own temporary directory, removed with the suite's staging
+files, so fixture names cannot collide across partitions or repeated runs. The
 test phase has a hard wall-clock budget of less than 60 seconds; a failed,
 hung, or slower run fails the gate. Real filesystem, Git-worktree, cache,
 process-timeout, and disposable-migration lifecycle tests carry the `nightly`
@@ -1260,7 +1262,11 @@ retained for attention. A merged or closed PR is the explicit exception: its
 abandoned checkout is removed with Herdr's force option because GitHub has
 already made the work terminal. Disposable investigation worktrees are also
 force-removed when their action ends; any temporary reproduction tests or
-other review changes are intentionally discarded. A retained worktree
+other review changes are intentionally discarded. Cleanup is bound to the run's
+fencing token: a late attempt can remove only its own workspace, even if the
+action has already retried. The database record is the single cleanup authority;
+there is no fallback deletion outside its cleanup claim. An old run can still be
+cleaned after the action's source snapshot changes or is cleared. A retained worktree
 that no longer exists inside a healthy worktree root, or that a credential-free
 Git check proves clean with no commit beyond the default branch, is removed
 automatically because nothing can be lost. Every other retained worktree waits

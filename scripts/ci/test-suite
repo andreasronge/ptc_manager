@@ -18,6 +18,7 @@ if [ -z "$timeout_binary" ]; then
 fi
 
 temporary_parent=${TMPDIR:-/tmp}
+temporary_parent=$(cd "$temporary_parent" && pwd -P)
 output_root=$(mktemp -d "$temporary_parent/ptc-manager-test-suite.XXXXXX")
 
 cleanup() {
@@ -36,8 +37,10 @@ partition=1
 
 while [ "$partition" -le "$partitions" ]; do
   log_path="$output_root/partition-$partition.log"
+  partition_tmp="$output_root/partition-$partition"
+  mkdir "$partition_tmp"
   "$timeout_binary" --signal=TERM --kill-after=2s "${partition_budget}s" \
-    env MIX_TEST_PARTITION="$partition" mix test --partitions "$partitions" --exclude nightly \
+    env TMPDIR="$partition_tmp" MIX_TEST_PARTITION="$partition" mix test --partitions "$partitions" --exclude nightly \
     >"$log_path" 2>&1 &
   pids="$pids $!"
   partition=$((partition + 1))

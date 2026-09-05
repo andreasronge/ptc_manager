@@ -6,28 +6,30 @@ defmodule PtcManager.Repository.InvestigationWorkspace do
 
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
-  def identity(%AgentAction{
-        id: id,
-        action_key: "review_issue",
-        target_type: "issue",
-        target_id: issue_id,
-        attempt_count: attempt,
-        target_snapshot: %{"source_sha" => source_sha}
-      })
-      when is_integer(id) and is_integer(issue_id) and is_integer(attempt) and
-             is_binary(source_sha) do
-    if Regex.match?(@sha, source_sha) do
-      {:ok,
-       %{
-         branch: "ptc-manager/review-issue-#{issue_id}-action-#{id}-f#{attempt}",
-         source_sha: source_sha
-       }}
-    else
-      {:error, :investigation_source_invalid}
+  def identity(%AgentAction{target_snapshot: %{"source_sha" => source_sha}} = action)
+      when is_binary(source_sha) do
+    with {:ok, branch} <- branch(action) do
+      if Regex.match?(@sha, source_sha),
+        do: {:ok, %{branch: branch, source_sha: source_sha}},
+        else: {:error, :investigation_source_invalid}
     end
   end
 
   def identity(%AgentAction{}), do: {:error, :invalid_investigation_action}
+
+  @doc "Derives cleanup identity without depending on a later source snapshot."
+  def branch(%AgentAction{
+        id: id,
+        action_key: "review_issue",
+        target_type: "issue",
+        target_id: issue_id,
+        attempt_count: attempt
+      })
+      when is_integer(id) and id > 0 and is_integer(issue_id) and issue_id > 0 and
+             is_integer(attempt) and attempt > 0,
+      do: {:ok, "ptc-manager/review-issue-#{issue_id}-action-#{id}-f#{attempt}"}
+
+  def branch(%AgentAction{}), do: {:error, :invalid_investigation_action}
 
   def path(root, %Repository{} = repository, %AgentAction{id: id, attempt_count: attempt})
       when is_binary(root) and is_integer(id) and is_integer(attempt) do

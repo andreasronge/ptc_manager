@@ -74,25 +74,41 @@ defmodule PtcManager.PublisherTest do
     end
   end
 
-  defmodule SlowGate do
+  defmodule WaitingForRenewalsGate do
     def verify(publication) do
-      send(Application.fetch_env!(:ptc_manager, :publisher_test_pid), {
-        :slow_gate_started,
-        publication.id
-      })
+      gate = self()
+      handler = {__MODULE__, gate}
 
-      Process.sleep(Application.fetch_env!(:ptc_manager, :publisher_slow_gate_ms))
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:ptc_manager, :repo, :query],
+          fn _, _, metadata, pid ->
+            query = metadata[:query] || ""
 
-      {:ok,
-       %{
-         status: "passed",
-         verified_sha: publication.head_sha,
-         config_digest: publication.job.pre_publication_config_digest,
-         exit_status: 0,
-         output: "slow gate passed",
-         output_truncated: false,
-         duration_ms: Application.fetch_env!(:ptc_manager, :publisher_slow_gate_ms)
-       }}
+            if String.starts_with?(query, "UPDATE \"pr_publications\"") and
+                 String.contains?(query, "SET \"attempt_expires_at\"") and
+                 match?({:ok, %{num_rows: 1}}, metadata[:result]) do
+              send(pid, :claim_renewed)
+            end
+          end,
+          gate
+        )
+
+      try do
+        for _ <- 1..2 do
+          receive do
+            :claim_renewed -> :ok
+          after
+            5_000 -> raise "publication claim was not renewed while the gate waited"
+          end
+        end
+
+        send(Application.fetch_env!(:ptc_manager, :publisher_test_pid), :renewed_while_waiting)
+        FakeGate.verify(publication)
+      after
+        :telemetry.detach(handler)
+      end
     end
   end
 
@@ -101,14 +117,12 @@ defmodule PtcManager.PublisherTest do
 
     previous_test_pid = Application.get_env(:ptc_manager, :publisher_test_pid)
     previous_gate_result = Application.get_env(:ptc_manager, :publisher_gate_result)
-    previous_slow_gate_ms = Application.get_env(:ptc_manager, :publisher_slow_gate_ms)
 
     Application.put_env(:ptc_manager, :publisher_test_pid, self())
 
     on_exit(fn ->
       restore_env(:publisher_test_pid, previous_test_pid)
       restore_env(:publisher_gate_result, previous_gate_result)
-      restore_env(:publisher_slow_gate_ms, previous_slow_gate_ms)
     end)
 
     :ok
@@ -825,9 +839,8 @@ defmodule PtcManager.PublisherTest do
     previous_renewal_interval =
       Application.get_env(:ptc_manager, :publication_gate_renewal_interval_ms)
 
-    Application.put_env(:ptc_manager, :publication_claim_timeout_ms, 40)
+    Application.put_env(:ptc_manager, :publication_claim_timeout_ms, 5_000)
     Application.put_env(:ptc_manager, :publication_gate_renewal_interval_ms, 5)
-    Application.put_env(:ptc_manager, :publisher_slow_gate_ms, 120)
 
     on_exit(fn ->
       restore_env(:publication_claim_timeout_ms, previous_claim_timeout)
@@ -835,13 +848,17 @@ defmodule PtcManager.PublisherTest do
     end)
 
     assert {:ok, published} =
-             Publisher.run_once(probe: FakeProbe, broker: FakeBroker, gate: SlowGate)
+             Publisher.run_once(
+               probe: FakeProbe,
+               broker: FakeBroker,
+               gate: WaitingForRenewalsGate
+             )
 
-    assert_receive {:slow_gate_started, publication_id}
+    assert_receive :renewed_while_waiting
+    assert_receive {:broker_called, publication_id}
     assert publication_id == publication.id
-    assert_receive {:broker_called, ^publication_id}
     assert published.state == "published"
-    assert Repo.get!(Job, published.job_id).pre_publication_output == "slow gate passed"
+    assert Repo.get!(Job, published.job_id).pre_publication_output == "gate passed"
   end
 
   test "an expired publication attempt is reclaimed and fences the old result" do

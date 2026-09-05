@@ -14,7 +14,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Repository.InvestigationWorkspace
   alias PtcManager.Repository.WorkerRepositoryTrust
   alias PtcManager.Repository.WorkerClaudeTrust
-  alias PtcManager.Repository.WorkerGit
   alias PtcManager.Repository.WorkspaceSetup
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Repository.WorkerAgentLogin
@@ -108,7 +107,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
              "--no-focus"
            ]),
          {:ok, workspace, pane} <- remember_disposable_workspace(output, action),
-         :ok <- remember_investigation_branch(repository_path, identity.branch),
          {:ok, report} <- setup_investigation(path, action) do
       Process.put({__MODULE__, :setup_report}, report)
       {:ok, path, workspace, pane}
@@ -116,11 +114,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       false -> {:error, :worktree_root_unavailable}
       {:error, _reason} = error -> error
     end
-  end
-
-  defp remember_investigation_branch(repository_path, branch) do
-    Process.put({__MODULE__, :investigation_branch}, {repository_path, branch})
-    :ok
   end
 
   defp remember_disposable_workspace(output, action) do
@@ -559,16 +552,12 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
           end
         end
 
-        case InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer) do
-          {:ok, :empty} -> fallback_investigation_cleanup(workspace, remover)
-          _durable_result -> :ok
-        end
+        _ = InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer)
       else
         _ = command().run(["workspace", "close", workspace])
       end
     end
 
-    Process.delete({__MODULE__, :investigation_branch})
     Process.delete({__MODULE__, :setup_report})
 
     if path = Process.delete({__MODULE__, :trusted_path}) do
@@ -590,32 +579,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
 
     :ok
-  end
-
-  defp fallback_investigation_cleanup(workspace, remover) do
-    case remover.(workspace) do
-      :ok -> delete_investigation_branch()
-      {:error, _reason} -> :ok
-    end
-  end
-
-  defp delete_investigation_branch do
-    case Process.get({__MODULE__, :investigation_branch}) do
-      {repository_path, branch} ->
-        _ =
-          WorkerGit.run([
-            "-C",
-            repository_path,
-            "update-ref",
-            "-d",
-            "refs/heads/#{branch}"
-          ])
-
-        :ok
-
-      nil ->
-        :ok
-    end
   end
 
   defp remember_context(%{path: path}) do

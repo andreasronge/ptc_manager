@@ -440,6 +440,49 @@ defmodule PtcManager.AutomationsTest do
     assert run.disposable_cleanup_state == nil
   end
 
+  test "late cleanup belongs to its own attempt, not the newest run" do
+    %{action: action, old_run: old_run, new_run: new_run} = retried_investigation_fixture!()
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup(
+               action,
+               &InvestigationCleanupAdapter.remove_action_workspace/1,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.id == old_run.id
+    assert_receive {:investigation_cleanup, "old-workspace"}
+
+    assert {:ok, :empty} =
+             PtcManager.InvestigationWorkspaces.cleanup(
+               action,
+               &InvestigationCleanupAdapter.remove_action_workspace/1,
+               InvestigationCleanupGit
+             )
+
+    refute_receive {:investigation_cleanup, "new-workspace"}
+
+    assert Repo.get!(PtcManager.Operations.AgentRun, new_run.id).disposable_cleanup_state ==
+             "workspace_open"
+  end
+
+  test "terminal cleanup derives old workspace identity from the run's fencing token" do
+    %{action: action, old_run: old_run} = retried_investigation_fixture!()
+
+    action
+    |> PtcManager.Operations.AgentAction.changeset(%{state: "done", target_snapshot: %{}})
+    |> Repo.update!()
+
+    assert {:ok, cleaned} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    assert cleaned.id == old_run.id
+    assert_receive {:investigation_cleanup, "old-workspace"}
+  end
+
   test "failed investigation setup retains its bounded diagnostics" do
     %{action: action} = claimed_investigation_fixture!()
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -1337,6 +1380,52 @@ defmodule PtcManager.AutomationsTest do
     assert {:ok, {action, token}} = PtcManager.Operations.claim_agent_action(action.id)
 
     %{action: action, issue: issue, root: root, source_sha: source_sha, token: token}
+  end
+
+  defp retried_investigation_fixture! do
+    %{action: action, root: root} = claimed_investigation_fixture!()
+    run = Repo.get_by!(PtcManager.Operations.AgentRun, agent_action_id: action.id)
+    {:ok, identity} = PtcManager.Repository.InvestigationWorkspace.identity(action)
+    path = PtcManager.Repository.InvestigationWorkspace.path(root, action.repository, action)
+
+    old_run =
+      run
+      |> PtcManager.Operations.AgentRun.changeset(%{
+        state: "lost",
+        ended_at: DateTime.utc_now(),
+        disposable_cleanup_state: "workspace_open",
+        disposable_worktree_path: path,
+        disposable_worktree_branch: identity.branch,
+        herdr_workspace: "old-workspace"
+      })
+      |> Repo.update!()
+
+    next =
+      action
+      |> PtcManager.Operations.AgentAction.changeset(%{attempt_count: action.attempt_count + 1})
+      |> Repo.update!()
+
+    {:ok, next_identity} = PtcManager.Repository.InvestigationWorkspace.identity(next)
+    next_path = PtcManager.Repository.InvestigationWorkspace.path(root, action.repository, next)
+
+    new_run =
+      %PtcManager.Operations.AgentRun{}
+      |> PtcManager.Operations.AgentRun.changeset(%{
+        worker_id: run.worker_id,
+        agent_action_id: action.id,
+        role: "manager",
+        state: "working",
+        fencing_token: next.attempt_count,
+        started_at: run.started_at,
+        last_heartbeat_at: run.last_heartbeat_at,
+        disposable_cleanup_state: "workspace_open",
+        disposable_worktree_path: next_path,
+        disposable_worktree_branch: next_identity.branch,
+        herdr_workspace: "new-workspace"
+      })
+      |> Repo.insert!()
+
+    %{action: action, old_run: old_run, new_run: new_run}
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

@@ -14,7 +14,7 @@ defmodule PtcManager.InvestigationWorkspaces do
   @terminal_action_states ~w(sync_pending done failed cancelled)
 
   def cleanup(
-        %AgentAction{id: action_id},
+        %AgentAction{id: action_id, attempt_count: attempt},
         remove_workspace,
         git \\ nil,
         workspace_hint \\ nil,
@@ -25,7 +25,7 @@ defmodule PtcManager.InvestigationWorkspaces do
     git = git || configured_git()
 
     action_id
-    |> cleanup_run_for_action()
+    |> cleanup_run_for_action(attempt)
     |> case do
       nil -> {:ok, :empty}
       run -> cleanup_run(run, remove_workspace, git, workspace_hint, recover_workspace)
@@ -68,10 +68,14 @@ defmodule PtcManager.InvestigationWorkspaces do
     end
   end
 
-  defp cleanup_run_for_action(action_id) do
+  defp cleanup_run_for_action(action_id, attempt) do
     AgentRun
     |> join(:inner, [run], action in AgentAction, on: action.id == run.agent_action_id)
-    |> where([run, action], action.id == ^action_id and not is_nil(run.disposable_cleanup_state))
+    |> where(
+      [run, action],
+      action.id == ^action_id and run.fencing_token == ^attempt and
+        not is_nil(run.disposable_cleanup_state)
+    )
     |> order_by([run], desc: run.id)
     |> preload([run, action],
       agent_action: {action, [:repository, :automation_definition_version]}
@@ -135,17 +139,19 @@ defmodule PtcManager.InvestigationWorkspaces do
   defp cleanup_identity(%AgentRun{
          disposable_worktree_path: path,
          disposable_worktree_branch: branch,
+         fencing_token: attempt,
          agent_action: %AgentAction{repository: repository} = action
        })
        when is_binary(path) and is_binary(branch) do
     root = Application.get_env(:ptc_manager, :worktree_root)
+    action = %{action | attempt_count: attempt}
 
     with true <- is_binary(root) and root != "" and File.dir?(root),
          :ok <- WorktreeSecurity.validate_configured_root(root),
-         {:ok, expected} <- InvestigationWorkspace.identity(action),
+         {:ok, expected_branch} <- InvestigationWorkspace.branch(action),
          expected_path <- InvestigationWorkspace.path(root, repository, action),
          true <- Path.expand(path) == Path.expand(expected_path),
-         true <- branch == expected.branch,
+         true <- branch == expected_branch,
          {:ok, repository_path} <- Checkout.available_path(repository) do
       {:ok,
        %{
@@ -281,11 +287,6 @@ defmodule PtcManager.InvestigationWorkspaces do
         {:error, reason}
     end
   end
-
-  defp remove_unconfirmed_worktree(nil, nil), do: :ok
-
-  defp remove_unconfirmed_worktree(%{path: path}, _git) when not is_binary(path),
-    do: {:error, :invalid_investigation_cleanup_identity}
 
   defp remove_unconfirmed_worktree(%{path: path, repository_path: repository_path}, git) do
     if File.exists?(path) do
