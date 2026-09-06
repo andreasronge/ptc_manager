@@ -42,10 +42,23 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert_redirect(view, "/jobs/#{job.id}/reviews")
   end
 
+  test "a stale running-review flag does not hide reconciliation", %{conn: conn} do
+    job = approved_job("Review outcome unknown") |> set_job_state("reconciling")
+    job |> Job.changeset(%{review_state: "running"}) |> Repo.update!()
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#lane-stuck #board-job-#{job.id}", "cannot yet confirm")
+    refute has_element?(view, "#board-job-#{job.id}", "Under review")
+    refute has_element?(view, "#board-job-#{job.id}", "No decision is needed yet")
+  end
+
   test "a running review links to progress without requesting a decision", %{conn: conn} do
     job = approved_job("Review underway") |> set_job_state("blocked")
     job |> Job.changeset(%{review_state: "running"}) |> Repo.update!()
+    blocked_agent_run(job, "waiting-for-review")
     {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#lane-working #board-job-#{job.id}", "Under review")
+    refute has_element?(view, "#lane-stuck #board-job-#{job.id}")
+    refute has_element?(view, "#agent-attention-board-job-#{job.id}")
     assert has_element?(view, "#job-reviews-#{job.id}", "View review progress")
     assert has_element?(view, "#board-job-#{job.id}", "No decision is needed yet")
     refute has_element?(view, "#board-job-#{job.id}", "Review findings and decide")

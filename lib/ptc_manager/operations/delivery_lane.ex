@@ -26,6 +26,7 @@ defmodule PtcManager.Operations.DeliveryLane do
       stopped?(item) -> :stuck
       job_state(item) == "queued" -> :queued
       stuck?(item) -> :stuck
+      review_in_progress?(item) -> :working
       ready?(item) -> :ready
       true -> :working
     end
@@ -37,9 +38,17 @@ defmodule PtcManager.Operations.DeliveryLane do
 
   def stopped?(_item), do: false
 
+  @doc "A review hold is automatic progress, unless the job has stopped or entered recovery."
+  def review_in_progress?(%{active_job: %{state: state, review_state: "running"}} = item)
+      when state in ~w(starting working idle blocked), do: not stopped?(item)
+
+  def review_in_progress?(_item), do: false
+
   def stuck?(item) do
-    PtcManager.Reviews.held?(item.active_job) or stopped?(item) or
-      job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"] or
+    stopped?(item) or
+      (not review_in_progress?(item) and
+         (PtcManager.Reviews.held?(item.active_job) or
+            job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"])) or
       unreconciled?(item) or
       match?(%{checks_state: "failure"}, item.publication) or
       match?(%{mergeability: "conflicting"}, item.publication) or

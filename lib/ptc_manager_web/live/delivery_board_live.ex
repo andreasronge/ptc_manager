@@ -378,10 +378,14 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   """
   def agent_attention(%{agent_run: nil}, _now), do: nil
 
-  def agent_attention(%{agent_run: run}, now) do
-    case AgentHealth.assess(run, now) do
-      %{status: :attention} = health -> health
-      _healthy -> nil
+  def agent_attention(%{agent_run: run} = item, now) do
+    if DeliveryLane.review_in_progress?(item) and run.state in ~w(blocked idle) do
+      nil
+    else
+      case AgentHealth.assess(run, now) do
+        %{status: :attention} = health -> health
+        _healthy -> nil
+      end
     end
   end
 
@@ -530,12 +534,16 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     do:
       "Review needs your decision. Open the findings to continue existing work, take over, or cancel."
 
-  def next_step(%{active_job: %{review_state: "running"}}, _lane),
-    do: "The review is running. No decision is needed yet; open review progress for details."
+  def next_step(item, lane) do
+    if DeliveryLane.review_in_progress?(item),
+      do: "The review is running. No decision is needed yet; open review progress for details.",
+      else: phase_next_step(item, lane)
+  end
 
-  def next_step(_item, :queued), do: "PtcManager will assign this when a worker slot is free."
+  defp phase_next_step(_item, :queued),
+    do: "PtcManager will assign this when a worker slot is free."
 
-  def next_step(item, :working) do
+  defp phase_next_step(item, :working) do
     cond do
       match?(%{publication: %{draft: true}}, item) ->
         "The pull request is still a draft."
@@ -561,7 +569,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  def next_step(item, :stuck) do
+  defp phase_next_step(item, :stuck) do
     cond do
       work_state(item) == "queued" ->
         if item.pr_agent_action.action_key == "repair_and_merge_pr",
@@ -602,7 +610,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     end
   end
 
-  def next_step(_item, :ready),
+  defp phase_next_step(_item, :ready),
     do: "All observed gates are clean. Approve an agent to merge this pull request."
 
   defp load_board(socket) do
@@ -692,11 +700,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def card_id(%{active_job: %{id: id}}), do: "board-job-#{id}"
   def card_id(%{publication: %{id: id}}), do: "board-pr-#{id}"
 
-  def delivery_state(%{active_job: %{state: state}}), do: state
+  def delivery_state(%{active_job: %{state: state}} = item),
+    do: if(DeliveryLane.review_in_progress?(item), do: "working", else: state)
+
   def delivery_state(_item), do: "pr_open"
 
   def delivery_label(%{managed?: false}), do: "External PR"
-  def delivery_label(%{active_job: %{state: state}}), do: status_label(state)
+
+  def delivery_label(%{active_job: %{state: state}} = item),
+    do: if(DeliveryLane.review_in_progress?(item), do: "Under review", else: status_label(state))
 
   def repository_label(item), do: item.repository.github_name
 
