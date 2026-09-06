@@ -919,7 +919,7 @@ defmodule PtcManager.MaintainerActionsTest do
     refute_receive {:ran_agent_action, _action}
   end
 
-  test "the adapter revalidates the immutable health evidence at handoff" do
+  test "the adapter revalidates immutable health evidence at handoff and result acceptance" do
     action = %AgentAction{
       action_key: "check_health",
       automation_definition_version: %{},
@@ -930,6 +930,13 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert {:error, {:health_snapshot_unavailable, :health_snapshot_expired}} =
              GenericHerdrAdapter.run(action)
+
+    adapter_source =
+      File.read!(
+        Path.expand("../../lib/ptc_manager/maintainer_actions/generic_herdr_adapter.ex", __DIR__)
+      )
+
+    assert length(String.split(adapter_source, ":ok <- validate_health_snapshot(action)")) == 3
   end
 
   test "concurrent planning pollers prepare and claim an action only once" do

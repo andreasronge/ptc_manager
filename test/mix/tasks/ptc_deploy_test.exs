@@ -791,7 +791,11 @@ defmodule Mix.Tasks.PtcDeployTest do
     refute service =~ "ExecCondition="
 
     assert byte_index(script, "health_check maintenance") <
-             byte_index(script, "systemctl start ptc_manager-health-snapshot.service")
+             byte_index(
+               script,
+               "systemctl is-active --quiet ptc_manager.service\n" <>
+                 "sudo systemctl start ptc_manager-health-snapshot.service"
+             )
 
     assert byte_index(script, "verify_health_snapshot") <
              byte_index(script, "deployment_phase=post_effect")
@@ -804,7 +808,12 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "restore_health_snapshot_installation"
     assert script =~ "health_snapshot_timer_was_enabled="
     assert script =~ "health_snapshot_timer_was_active="
+    assert script =~ "health_snapshot_service_was_active="
     assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.timer"
+    assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.service"
+
+    assert byte_index(script, "backup_health_snapshot_file /etc/ptc_manager/health-snapshot.env") <
+             byte_index(script, "health_snapshot_installation_prepared=true")
 
     assert byte_index(script, "backup_health_snapshot_installation") <
              byte_index(

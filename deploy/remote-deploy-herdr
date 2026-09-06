@@ -102,6 +102,7 @@ health_snapshot_installation_prepared=false
 health_snapshot_backup_retained=false
 health_snapshot_timer_was_enabled=false
 health_snapshot_timer_was_active=false
+health_snapshot_service_was_active=false
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
@@ -1190,7 +1191,6 @@ backup_health_snapshot_file() {
 
 backup_health_snapshot_installation() {
   sudo install -d -o root -g root -m 0700 "$health_snapshot_backup"
-  health_snapshot_installation_prepared=true
 
   if sudo systemctl is-enabled --quiet ptc_manager-health-snapshot.timer; then
     health_snapshot_timer_was_enabled=true
@@ -1198,13 +1198,28 @@ backup_health_snapshot_installation() {
 
   if sudo systemctl is-active --quiet ptc_manager-health-snapshot.timer; then
     health_snapshot_timer_was_active=true
-    sudo systemctl stop ptc_manager-health-snapshot.timer
+  fi
+
+  if sudo systemctl is-active --quiet ptc_manager-health-snapshot.service; then
+    health_snapshot_service_was_active=true
   fi
 
   backup_health_snapshot_file /usr/local/bin/ptc-manager-health-snapshot writer
   backup_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.service service
   backup_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.timer timer
   backup_health_snapshot_file /etc/ptc_manager/health-snapshot.env environment
+  health_snapshot_installation_prepared=true
+
+  if [ "$health_snapshot_timer_was_active" = true ]; then
+    sudo systemctl stop ptc_manager-health-snapshot.timer
+  fi
+
+  # A timer-triggered oneshot must finish before its executable and unit are
+  # replaced. Otherwise deployment verification could observe its output and
+  # never exercise the collector from the revision being deployed.
+  if [ "$health_snapshot_service_was_active" = true ]; then
+    sudo systemctl stop ptc_manager-health-snapshot.service
+  fi
 }
 
 restore_health_snapshot_file() {
@@ -1244,6 +1259,10 @@ restore_health_snapshot_installation() {
 
   if [ "$health_snapshot_timer_was_active" = true ]; then
     sudo systemctl start ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if [ "$health_snapshot_service_was_active" = true ]; then
+    sudo systemctl start ptc_manager-health-snapshot.service || restore_status=1
   fi
 
   if [ "$restore_status" -ne 0 ]; then
