@@ -17,6 +17,40 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     end
   end
 
+  test "a paused review has a clear decision link even during reconciliation", %{conn: conn} do
+    job = approved_job("Decide on remaining findings") |> set_job_state("reconciling")
+
+    job
+    |> Job.changeset(%{
+      review_state: "paused",
+      last_error: "A terminal managed agent identity became active again."
+    })
+    |> Repo.update!()
+
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#board-job-#{job.id}", "Review needs your decision")
+
+    assert has_element?(
+             view,
+             "#job-reviews-#{job.id}[href='/jobs/#{job.id}/reviews']",
+             "Review findings and decide"
+           )
+
+    assert has_element?(view, "#phase-error-board-job-#{job.id}", "terminal managed agent")
+    refute has_element?(view, "#board-job-#{job.id}", "cannot yet confirm")
+    view |> element("#job-reviews-#{job.id}") |> render_click()
+    assert_redirect(view, "/jobs/#{job.id}/reviews")
+  end
+
+  test "a running review links to progress without requesting a decision", %{conn: conn} do
+    job = approved_job("Review underway") |> set_job_state("blocked")
+    job |> Job.changeset(%{review_state: "running"}) |> Repo.update!()
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#job-reviews-#{job.id}", "View review progress")
+    assert has_element?(view, "#board-job-#{job.id}", "No decision is needed yet")
+    refute has_element?(view, "#board-job-#{job.id}", "Review findings and decide")
+  end
+
   test "separates queued, working, and blocked deliveries", %{conn: conn} do
     queued = approved_job("Queue this change")
     working = approved_job("Implement this change") |> set_job_state("working")

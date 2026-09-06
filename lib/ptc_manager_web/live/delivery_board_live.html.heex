@@ -70,13 +70,6 @@
             </p>
             <span class="shrink-0 text-[11px] text-slate-600">{card_age(@now, item)}</span>
           </div>
-          <.link
-            :if={item.active_job && item.active_job.execution_settings}
-            navigate={"/jobs/#{item.active_job.id}/reviews"}
-            class="mt-2 inline-block text-sm text-teal-300"
-          >
-            Reviews · {item.active_job.review_state}
-          </.link>
           <h3 class="mt-1.5 text-sm font-semibold leading-5 text-slate-100">
             {item.title}
           </h3>
@@ -228,6 +221,21 @@
           </p>
 
           <div class="mt-3 flex flex-wrap gap-3 text-xs">
+            <.link
+              :if={item.active_job && item.active_job.execution_settings}
+              id={"job-reviews-#{item.active_job.id}"}
+              navigate={"/jobs/#{item.active_job.id}/reviews"}
+              class={[
+                "inline-flex items-center gap-1.5 rounded-lg px-3 py-2 font-semibold",
+                if(item.active_job.review_state in ~w(paused manual),
+                  do: "bg-amber-300 text-slate-950 hover:bg-amber-200",
+                  else: "bg-white/10 text-teal-200 hover:bg-white/15"
+                )
+              ]}
+            >
+              <.icon name="hero-clipboard-document-check-mini" class="size-3.5" />
+              {review_action_label(item)}
+            </.link>
             <button
               :if={lane.key == :stuck && repair_action(item)}
               id={"repair-pr-#{item.publication.id}"}
