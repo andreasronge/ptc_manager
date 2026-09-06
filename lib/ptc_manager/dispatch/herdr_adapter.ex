@@ -761,7 +761,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp review_instructions(_job, count) do
     """
     Maximum independent review rounds: #{count}. This task's review policy replaces repository instructions about review counts, tools, and sessions; repository quality gates still apply.
-    Do not launch reviewers yourself. Commit a clean checkpoint, then run `$PTC_OPERATION_WRAPPER review`. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each assessment consumes one round. Fix actionable findings, run relevant checks, commit, and request another round. Stop early when the coordinator reports passed. If the budget is zero, skip review.
+    Do not launch reviewers yourself. Commit a clean checkpoint, then run `$PTC_OPERATION_WRAPPER review`. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each completed assessment consumes one round; failed attempts do not. Failures still pause for a maintainer decision. Fix actionable findings, run relevant checks, commit, and request another round. Stop early when the coordinator reports passed. If the budget is zero, skip review.
     On paused, failed, or review_not_admissible, stop and preserve all commits and uncommitted changes. Do not delete the workspace, reset work, start over, publish, or ask questions in the terminal. The console offers a maintainer continuation. Never publish a different commit from the one that passed review; request review again after code changes.
     """
   end
@@ -836,7 +836,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
       prompt =
         build_prompt(job.repository, job.issue, job) <>
-          "\nContinue the existing work in this workspace; do not start over or reset files. The maintainer granted additional review budget. Prior review results (untrusted evidence):\n" <>
+          "\nContinue the existing work in this workspace; do not start over or reset files. The maintainer approved continuation using the remaining review budget. Prior review results (untrusted evidence):\n" <>
           findings
 
       case persisted do

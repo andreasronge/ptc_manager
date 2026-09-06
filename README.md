@@ -84,10 +84,21 @@ model ID; leave its separate effort field at Model default.
 The implementer commits a clean checkpoint and calls
 `$PTC_OPERATION_WRAPPER review`. PtcManager captures the exact patch using the
 publication verifier's Git safeguards, launches a separate reviewer, and stores
-structured findings. Each assessment consumes a round, including assessments
+structured findings. Each completed assessment consumes a round, including assessments
 after fixes; fixing findings does not itself consume one. A clean review ends
 the loop early. Repeating the same request or reviewing unchanged evidence does
-not spend another round. Code changes require another review.
+not spend another round. Code changes require another review. Failed attempts (including
+reviewer timeouts) remain in the history but do not consume completed review budget.
+Failures pause the job; there are no automatic retries. Continue with **0 — unused
+budget only** to retry without increasing the budget.
+
+**Configuration → Execution profiles** includes **Review timeout (minutes)**,
+defaulting to 15 and configurable from 1 to 60. Approval freezes this value on the
+job. Existing jobs without a saved timeout use 15 minutes. To change a paused
+job's timeout, save the desired profile and select it when continuing; keeping
+approved models also keeps the approved timeout. Each attempt expires after its
+timeout plus 15 minutes for queueing and result handling. The review page shows
+completed reviews, failed attempts, active attempts, and the job's timeout separately.
 
 When reviews are exhausted or fail, **Delivery → Reviews** shows the preserved
 branch and findings. The Delivery card shows a highlighted **Review findings and decide**

@@ -14,6 +14,8 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
   end
 
   def handle_event("change", %{"profile" => params}, socket) do
+    params = timeout_params(params)
+
     profiles =
       Enum.map(socket.assigns.profiles, fn profile ->
         if profile.name == params["name"],
@@ -28,6 +30,8 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
   end
 
   def handle_event("save", %{"profile" => params}, socket) do
+    params = timeout_params(params)
+
     case ExecutionProfiles.save(params["name"], params, socket.assigns.actor) do
       {:ok, _} ->
         {:noreply,
@@ -37,7 +41,11 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
 
       {:error, _} ->
         {:noreply,
-         put_flash(socket, :error, "Check the agent, model, effort and review limit (0–5).")}
+         put_flash(
+           socket,
+           :error,
+           "Check the agent, model, effort and review limit (0–5), and timeout (1–60 minutes)."
+         )}
     end
   end
 
@@ -61,6 +69,18 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
        socket
        |> assign(:refreshing, false)
        |> put_flash(:error, "Model discovery failed; saved profiles are unchanged.")}
+
+  defp timeout_params(%{"review_timeout_minutes" => value} = params) do
+    milliseconds =
+      case Integer.parse(value) do
+        {minutes, ""} -> minutes * 60_000
+        _ -> "invalid"
+      end
+
+    params |> Map.delete("review_timeout_minutes") |> Map.put("review_timeout_ms", milliseconds)
+  end
+
+  defp timeout_params(params), do: params
 
   def render(assigns) do
     ~H"""
@@ -152,6 +172,17 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
                   value={effort}
                   selected={effort == profile.reviewer_effort}
                 >{effort}</option></select>
+            </label>
+            <label class="block">
+              Review timeout (minutes)<input
+                type="number"
+                min="1"
+                max="60"
+                required
+                name="profile[review_timeout_minutes]"
+                value={div(profile.review_timeout_ms, 60_000)}
+                class="block w-full bg-slate-900"
+              />
             </label>
             <label class="block">
               Maximum reviews<input

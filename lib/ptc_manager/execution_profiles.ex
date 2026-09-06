@@ -47,7 +47,8 @@ defmodule PtcManager.ExecutionProfiles do
           :effort,
           :reviewer_kind,
           :reviewer_model,
-          :reviewer_effort
+          :reviewer_effort,
+          :review_timeout_ms
         ])
         |> Map.new(fn {k, v} -> {to_string(k), v} end)
 

@@ -8,6 +8,12 @@ defmodule PtcManager.Reviews do
   @active ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result)
   def rounds(id), do: Repo.all(from r in Round, where: r.job_id == ^id, order_by: r.number)
 
+  def timeout_ms(job), do: (job.execution_settings || %{})["review_timeout_ms"] || 900_000
+
+  defp completed_count(id),
+    do:
+      Repo.aggregate(from(r in Round, where: r.job_id == ^id and r.state == "completed"), :count)
+
   def held?(%{review_state: state}),
     do: state in ~w(paused manual cancelled resume_pending running)
 
@@ -60,7 +66,8 @@ defmodule PtcManager.Reviews do
             from r in Round, where: r.job_id == ^job_id and r.state in ["queued", "running"]
           )
 
-        count = Repo.aggregate(from(r in Round, where: r.job_id == ^job_id), :count)
+        attempts = Repo.aggregate(from(r in Round, where: r.job_id == ^job_id), :count)
+        count = completed_count(job_id)
 
         cached =
           Repo.one(
@@ -98,14 +105,15 @@ defmodule PtcManager.Reviews do
               job_id: job_id,
               fencing_token: fence,
               generation: current.review_generation,
-              number: count + 1,
+              number: attempts + 1,
               request_id: request_id,
               state: "queued",
               head_sha: input["head_sha"],
               base_sha: input["base_sha"],
               diff_digest: input["diff_digest"],
               input: Map.put(input, "settings", current.execution_settings),
-              expires_at: DateTime.add(DateTime.utc_now(), 1800, :second)
+              expires_at:
+                DateTime.add(DateTime.utc_now(), timeout_ms(current) + 900_000, :millisecond)
             }
 
             round = %Round{} |> Round.changeset(attrs) |> Repo.insert!()
@@ -206,7 +214,7 @@ defmodule PtcManager.Reviews do
       state =
         cond do
           result["findings"] == [] -> "passed"
-          round.number >= job.required_review_count -> "paused"
+          completed_count(job.id) + 1 >= job.required_review_count -> "paused"
           true -> "changes_requested"
         end
 
@@ -291,7 +299,7 @@ defmodule PtcManager.Reviews do
               job.execution_settings
           end
 
-        count = Repo.aggregate(from(r in Round, where: r.job_id == ^id), :count)
+        count = completed_count(id)
 
         unless job.required_review_count + extra > count,
           do: Repo.rollback(:review_budget_exhausted)

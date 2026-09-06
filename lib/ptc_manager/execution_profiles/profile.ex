@@ -10,6 +10,7 @@ defmodule PtcManager.ExecutionProfiles.Profile do
     field :reviewer_kind, :string
     field :reviewer_model, :string
     field :reviewer_effort, :string
+    field :review_timeout_ms, :integer, default: 900_000
     field :max_reviews, :integer
     timestamps(type: :utc_datetime_usec)
   end
@@ -24,9 +25,18 @@ defmodule PtcManager.ExecutionProfiles.Profile do
       :reviewer_kind,
       :reviewer_model,
       :reviewer_effort,
-      :max_reviews
+      :max_reviews,
+      :review_timeout_ms
     ])
-    |> validate_required([:name, :kind, :model, :reviewer_kind, :reviewer_model, :max_reviews])
+    |> validate_required([
+      :name,
+      :kind,
+      :model,
+      :reviewer_kind,
+      :reviewer_model,
+      :max_reviews,
+      :review_timeout_ms
+    ])
     |> validate_inclusion(:name, ~w(small standard strong))
     |> validate_inclusion(:kind, ~w(codex claude cursor))
     |> validate_inclusion(:reviewer_kind, ~w(codex claude cursor))
@@ -35,6 +45,10 @@ defmodule PtcManager.ExecutionProfiles.Profile do
     |> validate_inclusion(:effort, ~w(low medium high xhigh max))
     |> validate_inclusion(:reviewer_effort, ~w(low medium high xhigh max))
     |> validate_number(:max_reviews, greater_than_or_equal_to: 0, less_than_or_equal_to: 5)
+    |> validate_number(:review_timeout_ms,
+      greater_than_or_equal_to: 60_000,
+      less_than_or_equal_to: 3_600_000
+    )
     |> validate_effort(:kind, :effort)
     |> validate_effort(:reviewer_kind, :reviewer_effort)
     |> unique_constraint(:name)

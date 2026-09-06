@@ -75,6 +75,41 @@ defmodule PtcManager.ReviewsTest do
     assert frozen["reviewer_effort"] == "xhigh"
   end
 
+  test "failed attempts do not prematurely exhaust a later completed review" do
+    job = job!(2)
+    {:ok, first} = request(job, "failure")
+    Reviews.fail(first.id, :review_timeout)
+    {:ok, continued} = Reviews.decide(job.id, 0, "continue", %{"extra_rounds" => 0}, "maintainer")
+    continued |> Job.changeset(%{review_state: "changes_requested"}) |> Repo.update!()
+    {:ok, second} = request(continued, "second")
+    assert {:ok, _} = Reviews.complete(second.id, findings())
+    assert Repo.get!(Job, job.id).review_state == "changes_requested"
+    Process.put(:review_test_head, String.duplicate("d", 40))
+    {:ok, third} = request(continued, "third")
+    assert third.number == 3
+    assert {:ok, _} = Reviews.complete(third.id, findings())
+    assert Repo.get!(Job, job.id).review_state == "paused"
+  end
+
+  test "review timeouts are validated, frozen, and covered by the attempt expiry" do
+    job = job!(2)
+    assert job.execution_settings["review_timeout_ms"] == 900_000
+
+    for value <- [0, 3_600_001, "invalid"] do
+      assert {:error, _} =
+               ExecutionProfiles.save("standard", %{"review_timeout_ms" => value}, "maintainer")
+    end
+
+    assert {:ok, _} =
+             ExecutionProfiles.save("standard", %{"review_timeout_ms" => 3_600_000}, "maintainer")
+
+    assert Repo.get!(Job, job.id).execution_settings["review_timeout_ms"] == 900_000
+    long_job = job!(2)
+    {:ok, round} = request(long_job, "long")
+    assert round.input["settings"]["review_timeout_ms"] == 3_600_000
+    assert DateTime.diff(round.expires_at, DateTime.utc_now()) >= 3600
+  end
+
   test "a duplicate request counts once and a clean review approves only its exact head" do
     job = job!(2)
     assert {:ok, first} = request(job, "one")
@@ -272,12 +307,25 @@ defmodule PtcManager.ReviewsTest do
     refute Reviews.publication_allowed?(cancelled, round.head_sha)
   end
 
-  test "reviewer failure preserves evidence and consumes the admitted round" do
+  test "reviewer failures preserve evidence without spending completed review budget" do
     job = job!(1)
     {:ok, round} = request(job, "one")
     assert {:ok, :ok} = Reviews.fail(round.id, :model_unavailable)
     assert Repo.get!(Job, job.id).review_state == "paused"
     assert [%{state: "failed", input: %{"diff" => "a bounded patch"}}] = Reviews.rounds(job.id)
     assert {:ok, :paused} = request(job, "another")
+
+    assert {:ok, continued} =
+             Reviews.decide(job.id, 0, "continue", %{"extra_rounds" => 0}, "maintainer")
+
+    assert continued.required_review_count == 1
+    continued |> Job.changeset(%{review_state: "changes_requested"}) |> Repo.update!()
+    assert {:ok, retry} = request(continued, "retry")
+    assert retry.number == 2
+    assert {:ok, _} = Reviews.complete(retry.id, findings())
+    assert Repo.get!(Job, job.id).review_state == "paused"
+
+    assert {:error, :review_budget_exhausted} =
+             Reviews.decide(job.id, 1, "continue", %{"extra_rounds" => 0}, "maintainer")
   end
 end
