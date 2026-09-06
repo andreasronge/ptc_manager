@@ -1714,6 +1714,7 @@ defmodule PtcManager.Operations do
           |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             :ok <- PtcManager.AutoImplementation.dispatch_allowed(job, remote_issue),
              {:ok, %{kind: agent_kind}} <- implementation_profile(job),
              :ok <- heavy_delivery_priority_unlocked(),
              :ok <- repository_dispatch_unlocked(job.repository_id),
@@ -3216,6 +3217,11 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc "Queues one ready issue under the repository's explicit automatic implementation policy."
+  def auto_approve_issue(issue_id) when is_integer(issue_id) do
+    do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil)
+  end
+
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -3295,7 +3301,7 @@ defmodule PtcManager.Operations do
         }
       })
     end)
-    |> Repo.transaction()
+    |> RepoTransaction.immediate()
     |> normalize_approval_result()
     |> tap(fn
       {:ok, job} -> PtcManager.Automations.link_job_invocation(job, actor)
@@ -3304,14 +3310,17 @@ defmodule PtcManager.Operations do
     |> broadcast_change()
   end
 
+  defp approval_decision(:automatic), do: "start_implementation_automatic"
   defp approval_decision(:direct), do: "start_implementation_direct"
   defp approval_decision(_mode), do: "start_implementation"
 
+  defp audit_action(:automatic), do: "issue.automatically_approved_for_implementation"
   defp audit_action(:direct), do: "issue.approved_for_direct_implementation"
   defp audit_action(_mode), do: "issue.approved_for_implementation"
 
   defp current_approvable_snapshot(repo, issue_id, mode) do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
+         :ok <- automatic_approval_allowed(repo, issue, mode),
          :ok <- issue_is_open(issue),
          :ok <- issue_unclaimed(issue),
          :ok <- issue_workflow_allows_implementation(issue),
@@ -3321,6 +3330,23 @@ defmodule PtcManager.Operations do
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp automatic_approval_allowed(repo, issue, :automatic),
+    do: PtcManager.AutoImplementation.eligible(repo, issue)
+
+  defp automatic_approval_allowed(_repo, _issue, _mode), do: :ok
+
+  defp approvable_proposal(repo, issue, :automatic) do
+    case latest_proposal(repo, issue.id) do
+      nil ->
+        {:ok, nil}
+
+      proposal ->
+        if proposal_matches_issue(proposal, issue) == :ok,
+          do: {:ok, proposal},
+          else: {:ok, nil}
     end
   end
 
@@ -4849,6 +4875,8 @@ defmodule PtcManager.Operations do
     |> Repo.all()
     |> Enum.reduce(%{}, fn job, jobs -> Map.put_new(jobs, job.issue_id, job) end)
   end
+
+  defp normalize_approval_result({:error, reason}), do: {:error, reason}
 
   defp normalize_approval_result({:ok, %{job: job}}), do: {:ok, job}
   defp normalize_approval_result({:error, :snapshot, reason, _changes}), do: {:error, reason}

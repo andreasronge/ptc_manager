@@ -1,6 +1,9 @@
 defmodule PtcManager.Operations.Approval do
   @moduledoc """
-  One maintainer decision to start implementing one issue.
+  One authorization to start implementing one issue.
+
+  Automatic approvals record admission under an explicitly enabled repository
+  policy, with a current proposal when available.
 
   A prepared approval freezes the proposal it was made from. A direct one has no
   proposal at all: the maintainer looked at the issue and decided it is small
@@ -11,7 +14,7 @@ defmodule PtcManager.Operations.Approval do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @decisions ~w(start_implementation start_implementation_direct)
+  @decisions ~w(start_implementation start_implementation_direct start_implementation_automatic)
 
   schema "approvals" do
     field :decision, :string
@@ -44,8 +47,11 @@ defmodule PtcManager.Operations.Approval do
   end
 
   defp require_proposal(changeset) do
-    if get_field(changeset, :decision) == "start_implementation_direct",
-      do: changeset,
-      else: validate_required(changeset, [:proposal_id, :proposal_digest])
+    if get_field(changeset, :decision) in [
+         "start_implementation_direct",
+         "start_implementation_automatic"
+       ],
+       do: changeset,
+       else: validate_required(changeset, [:proposal_id, :proposal_digest])
   end
 end

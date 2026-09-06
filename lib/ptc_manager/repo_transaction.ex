@@ -14,8 +14,8 @@ defmodule PtcManager.RepoTransaction do
 
   alias PtcManager.Repo
 
-  def immediate(fun) when is_function(fun, 0) do
-    Repo.transaction(fun, mode: :immediate)
+  def immediate(operation) when is_function(operation, 0) or is_struct(operation, Ecto.Multi) do
+    Repo.transaction(operation, mode: :immediate)
   rescue
     error in Exqlite.Error ->
       if busy?(error) do

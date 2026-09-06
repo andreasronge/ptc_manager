@@ -7,6 +7,35 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
   alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.{CapacitySettings, Operations, Repo}
 
+  test "toggles automatic implementation for only the selected repository", %{conn: conn} do
+    repository = repository_fixture()
+    other = repository_fixture()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+    assert has_element?(view, "#auto-fix-#{repository.id}", "Enable automatic implementation")
+    view |> element("#auto-fix-#{repository.id}") |> render_click()
+    assert Repo.get!(Repository, repository.id).auto_fix_issues
+    refute Repo.get!(Repository, other.id).auto_fix_issues
+    assert has_element?(view, "#auto-fix-#{repository.id}", "Disable automatic implementation")
+    view |> element("#auto-fix-#{repository.id}") |> render_click()
+    refute Repo.get!(Repository, repository.id).auto_fix_issues
+  end
+
+  test "malformed auto-fix events leave the configuration view running", %{conn: conn} do
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    for params <- [
+          %{"id" => "invalid", "enabled" => "true"},
+          %{"id" => "1", "enabled" => "invalid"},
+          %{},
+          %{"id" => 1, "enabled" => "true"}
+        ] do
+      assert render_click(view, "set-auto-fix", params) =~
+               "Could not save automatic implementation setting."
+    end
+
+    assert Process.alive?(view.pid)
+  end
+
   test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
     original = CapacitySettings.current()
 
