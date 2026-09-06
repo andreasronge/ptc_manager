@@ -885,12 +885,14 @@ defmodule PtcManager.MaintainerActionsTest do
     File.write!(path, Jason.encode!(health_snapshot(DateTime.utc_now() |> DateTime.to_iso8601())))
 
     previous_path = Application.get_env(:ptc_manager, :health_snapshot_path)
+    previous_source_snapshot = Application.get_env(:ptc_manager, :planning_source_snapshot)
     Application.put_env(:ptc_manager, :health_snapshot_path, path)
     Application.put_env(:ptc_manager, :planning_source_snapshot, UnavailableSourceSnapshot)
 
     on_exit(fn ->
       File.rm(path)
       restore_test_env(:health_snapshot_path, previous_path)
+      restore_test_env(:planning_source_snapshot, previous_source_snapshot)
     end)
 
     assert {:ok, queued} =
