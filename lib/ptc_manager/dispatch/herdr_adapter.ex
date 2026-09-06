@@ -870,7 +870,16 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
         owned ->
           with {:ok, output} <-
-                 Command.run(["pane", "split", old_pane, "--cwd", path, "--no-focus"]),
+                 Command.run([
+                   "pane",
+                   "split",
+                   old_pane,
+                   "--direction",
+                   "right",
+                   "--cwd",
+                   path,
+                   "--no-focus"
+                 ]),
                {:ok, data} <- Jason.decode(output),
                pane when is_binary(pane) <- get_in(data, ["result", "pane", "pane_id"]),
                {:ok, _} <- Command.run(["pane", "close", old_pane]) do
