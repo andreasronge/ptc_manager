@@ -7,6 +7,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.Sync, as: ActionSync
   alias PtcManager.Gateway
+  alias PtcManager.HealthSnapshotEvidence
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.DailyDigests
   alias PtcManager.DailyDigests.Evidence, as: DailyDigestEvidence
@@ -423,6 +424,49 @@ defmodule PtcManager.MaintainerActions do
 
       _mismatch ->
         fail_preflight(action.id, :daily_digest_action_mismatch)
+    end
+  end
+
+  defp prepare_for_execution(
+         %{
+           action_key: "check_health",
+           target_type: "repository",
+           automation_definition_version: %{execution_profile: "generic_ephemeral"}
+         } = action,
+         _adapter,
+         sync
+       ) do
+    with {:ok, snapshot} <- HealthSnapshotEvidence.read(),
+         {:ok, _summary} <- call_sync(sync, action),
+         encoded_snapshot = Jason.encode!(snapshot),
+         {:ok, prepared} <-
+           Operations.record_agent_action_target_snapshot(
+             action.id,
+             Map.put(action.target_snapshot || %{}, "health_snapshot_evidence", snapshot),
+             action.prompt <>
+               """
+
+               Use only this immutable, deterministically validated runtime evidence. Do not read the mutable live snapshot file.
+               <health_snapshot>#{encoded_snapshot}</health_snapshot>
+               """
+           ) do
+      prepare_repository_source_snapshot(prepared)
+    else
+      {:error, reason}
+      when reason in [
+             :health_snapshot_missing,
+             :health_snapshot_unreadable,
+             :health_snapshot_malformed,
+             :health_snapshot_future_dated,
+             :health_snapshot_expired
+           ] ->
+        fail_preflight(action.id, {:health_snapshot_unavailable, reason})
+
+      {:terminal_error, reason} ->
+        fail_preflight(action.id, reason)
+
+      {:error, reason} ->
+        defer_preflight(action.id, reason, action.sync_attempt_count)
     end
   end
 

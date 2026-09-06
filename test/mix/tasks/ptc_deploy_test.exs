@@ -754,6 +754,37 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "-m 2750"
   end
 
+  test "remote deployment installs, activates, and verifies health snapshot collection" do
+    script = File.read!(@remote_script)
+
+    for source <- [
+          "deploy/ptc-manager-health-snapshot",
+          "deploy/ptc_manager-health-snapshot.service",
+          "deploy/ptc_manager-health-snapshot.timer"
+        ] do
+      assert script =~ ~s(tar -xOf "$source_archive" #{source})
+    end
+
+    assert script =~ "/usr/local/bin/ptc-manager-health-snapshot"
+    assert script =~ "/etc/systemd/system/ptc_manager-health-snapshot.service"
+    assert script =~ "/etc/systemd/system/ptc_manager-health-snapshot.timer"
+    assert script =~ "systemctl enable --now ptc_manager-health-snapshot.timer"
+    assert script =~ "systemctl start ptc_manager-health-snapshot.service"
+    assert script =~ "verify_health_snapshot"
+    assert script =~ ~s(' "$health_snapshot_path" "$previous_capture")
+    assert script =~ "configured_health_snapshot_path"
+    assert script =~ "running_health_snapshot_path"
+    assert script =~ "/var/lib/ptc_manager-output/*"
+    assert script =~ "previous_health_capture="
+    assert script =~ "did not replace the previous evidence"
+
+    assert byte_index(script, "health_check maintenance") <
+             byte_index(script, "systemctl start ptc_manager-health-snapshot.service")
+
+    assert byte_index(script, "verify_health_snapshot") <
+             byte_index(script, "deployment_phase=post_effect")
+  end
+
   test "remote deployment gives agents a narrow writable result exchange" do
     script = File.read!(@remote_script)
 

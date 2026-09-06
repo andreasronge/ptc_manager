@@ -6,6 +6,7 @@ defmodule PtcManager.MaintainerActionsTest do
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.ActionAdapter
   alias PtcManager.MaintainerActions.RetainedHerdrAdapter
+  alias PtcManager.MaintainerActions.GenericHerdrAdapter
   alias PtcManager.MaintainerActions.Sync
   alias PtcManager.DailyDigests
   alias PtcManager.MergeDecisions
@@ -835,6 +836,60 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(Issue, issue.id).workflow_label == nil
   end
 
+  test "stale health evidence blocks analysis and issue filing before the adapter runs" do
+    repository = repository_fixture(%{github_name: "ptc_manager"})
+    version = Automations.get_definition(repository, "nightly_ci_investigation").current_version
+    path = Path.join(System.tmp_dir!(), "stale-health-#{System.unique_integer([:positive])}.json")
+
+    File.write!(
+      path,
+      Jason.encode!(health_snapshot("2020-01-01T00:00:00Z"))
+    )
+
+    previous_path = Application.get_env(:ptc_manager, :health_snapshot_path)
+    Application.put_env(:ptc_manager, :health_snapshot_path, path)
+
+    on_exit(fn ->
+      File.rm(path)
+      restore_test_env(:health_snapshot_path, previous_path)
+    end)
+
+    assert {:ok, queued} =
+             Operations.enqueue_agent_action(%{
+               repository_id: repository.id,
+               automation_definition_version_id: version.id,
+               action_key: "check_health",
+               target_type: "repository",
+               target_id: repository.id,
+               target_label: "health watch",
+               prompt_version: 1,
+               prompt: "Inspect runtime health and file an issue when needed.",
+               actor: "schedule"
+             })
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(adapter: FakeAdapter, sync: NoopSync, lane: :planning)
+
+    assert failed.id == queued.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "health_snapshot_unavailable"
+    assert failed.last_error =~ "health_snapshot_expired"
+    refute_receive {:ran_agent_action, _action}
+  end
+
+  test "the adapter revalidates the immutable health evidence at handoff" do
+    action = %AgentAction{
+      action_key: "check_health",
+      automation_definition_version: %{},
+      target_snapshot: %{
+        "health_snapshot_evidence" => health_snapshot("2020-01-01T00:00:00Z")
+      }
+    }
+
+    assert {:error, {:health_snapshot_unavailable, :health_snapshot_expired}} =
+             GenericHerdrAdapter.run(action)
+  end
+
   test "concurrent planning pollers prepare and claim an action only once" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 4_602, workflow_label: nil})
@@ -867,6 +922,27 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Agent.get(counter, & &1) == 1
     assert Enum.count(results, &match?({:ok, %AgentAction{id: id}} when id == queued.id, &1)) == 1
     assert Enum.count(results, &(&1 == {:ok, :empty})) == 1
+  end
+
+  defp health_snapshot(captured_at) do
+    %{
+      "captured_at" => captured_at,
+      "freshness_budget_seconds" => 3600,
+      "capacity_settings" => [],
+      "live_agent_runs" => [],
+      "live_agent_actions" => [],
+      "live_resource_operations" => [],
+      "recent_resource_operations" => [],
+      "live_jobs" => [],
+      "service_log_volume" => %{
+        "window" => "-6 hours",
+        "line_limit" => 10_000,
+        "at_limit" => false,
+        "total_lines" => 0,
+        "session_noise_lines" => 0,
+        "error_lines" => 0
+      }
+    }
   end
 
   test "private analysis result contract rejects GitHub writes" do
