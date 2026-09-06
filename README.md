@@ -91,7 +91,10 @@ not spend another round. Code changes require another review.
 
 When reviews are exhausted or fail, **Delivery → Reviews** shows the preserved
 branch and findings. The Delivery card shows a highlighted **Review findings and decide**
-button when a decision is needed, and **View review progress** while review runs. Add +1, +2, or +5 rounds (up to 100 in total), optionally
+button when a decision is needed, and **View review progress** while review runs.
+An active review appears under **In progress** with an **Under review** badge;
+the internal review hold does not by itself mean the maintainer needs to act.
+Paused decisions, stop reports, and real failures still appear under **Needs attention**. Add +1, +2, or +5 rounds (up to 100 in total), optionally
 switch profiles, or take over manually. Continuation starts an agent in the
 existing worktree with the frozen issue and latest findings. An idle retained
 pane is replaced using an explicitly directed Herdr split; it does not reset
