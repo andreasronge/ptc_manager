@@ -15,12 +15,17 @@ without replacing the user interface or GitHub integration.
 
 1. A person approves consequential actions. Pressing a named maintainer-action
    button authorizes that one prompt to update GitHub; starting implementation
-   and merging a pull request remain separate human decisions.
+   normally requires an individual approval. A maintainer may instead enable
+   automatic implementation of ready issues for one repository. That recorded
+   policy authorizes bounded job admission; merging and deployment remain
+   separate human decisions.
 2. GitHub is the source of truth for issues, pull requests, checks, and commits.
    PtcManager stores private summaries, approvals, execution state, and an audit
    log; it does not turn GitHub labels into an internal job queue. An optional
    mutually exclusive `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` label
-   is a display-only projection and never grants authority. PtcManager's own
+   is a projection and never grants authority by itself. The opt-in repository
+   auto-fix policy uses `ptc:ready` as eligibility, with one automatic admission
+   per issue, a daily limit, and the existing dispatch capacity limits. PtcManager's own
    GitHub client stays read-only, except the label wrapper, which adds or
    removes one configured maintainer label on a button press; such a label
    changes where an issue is shown, never whether it may be approved.

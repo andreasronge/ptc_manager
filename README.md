@@ -748,6 +748,41 @@ trying approvals:
 mix ecto.reset
 ```
 
+### Automatically implementing ready issues
+
+Under **Configuration**, each repository has **Automatically implement ready
+issues**, off by default. Enable it for `andreasronge/ptc_manager` to authorize
+implementation without a separate approval click for every issue. Other
+repositories remain off unless explicitly enabled. Anyone or any preparation
+agent with permission to apply `ptc:ready` can make an issue eligible under this
+policy. Merge and deployment approval rules are unchanged.
+
+After a successful GitHub synchronization, deterministic code admits open,
+unassigned `ptc:ready` issues with resolved dependencies and no conflicting
+workflow labels. Existing backlog issues are included; a single-issue refresh
+only considers that issue. No selector model or new coding workflow is involved.
+The existing execution profile selection uses a current assessment's scope and
+risk; an absent or stale assessment uses the existing `standard` fallback.
+Models, review budgets, publication, and worker capacity follow the existing
+implementation pipeline.
+
+Any previous implementation job (including a manual, failed, or cancelled job)
+or a known linked pull request prevents automatic admission. Open pull requests
+are refreshed before admission; unavailable PR discovery defers automatic work. Retrying requires
+an explicit manual action; removing/reapplying the label, editing the issue, or
+disabling/re-enabling the setting does not reset its history. Admission and job
+creation share one write transaction. At most five automatic jobs per repository
+are admitted per UTC day, including failed and cancelled jobs; subsequent syncs
+pick up the remaining backlog after the budget resets. Existing capacity limits
+bound how many run concurrently.
+
+Dispatch re-reads GitHub and checks the frozen issue version, readiness,
+assignment, dependencies, and repository setting. Disabling automatic
+implementation prevents queued automatic jobs from starting and leaves running
+jobs alone. Policy changes and automatic approvals are recorded in the audit
+log. This setting grants no sudo access: machine changes still go through an
+approved deployment.
+
 ### Generic automations and additional repositories
 
 PtcManager stores every automation as a repository identity plus immutable

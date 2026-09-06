@@ -137,6 +137,24 @@ defmodule PtcManagerWeb.ConfigurationLive do
   def handle_event("remove-repository", _params, socket),
     do: {:noreply, put_flash(socket, :error, "Confirm the repository before removing it.")}
 
+  def handle_event("set-auto-fix", %{"id" => id, "enabled" => enabled}, socket)
+      when enabled in ["true", "false"] do
+    case PtcManager.AutoImplementation.configure(
+           String.to_integer(id),
+           enabled == "true",
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Automatic implementation setting saved.")
+         |> load_configuration()}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Could not save automatic implementation setting.")}
+    end
+  end
+
   def handle_event("add-maintainer-label", %{"label" => params}, socket) do
     with {repository_id, ""} <- Integer.parse(params["repository_id"] || ""),
          %Repository{} = repository <- Operations.get_repository(repository_id),

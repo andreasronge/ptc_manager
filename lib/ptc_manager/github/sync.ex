@@ -135,6 +135,11 @@ defmodule PtcManager.GitHub.Sync do
 
     case result do
       {:ok, summary} ->
+        PtcManager.AutoImplementation.reconcile(
+          summary.repository.id,
+          Map.get(summary, :issue_number)
+        )
+
         Operations.notify_changed(__MODULE__)
         {:ok, summary}
 
@@ -176,6 +181,11 @@ defmodule PtcManager.GitHub.Sync do
 
     case result do
       {:ok, summary} ->
+        PtcManager.AutoImplementation.reconcile(
+          summary.repository.id,
+          Map.get(summary, :issue_number)
+        )
+
         Operations.notify_changed(__MODULE__)
         {:ok, summary}
 

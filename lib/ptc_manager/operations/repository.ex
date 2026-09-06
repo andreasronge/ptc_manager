@@ -9,6 +9,7 @@ defmodule PtcManager.Operations.Repository do
     field :github_name, :string
     field :default_branch, :string, default: "main"
     field :enabled, :boolean, default: true
+    field :auto_fix_issues, :boolean, default: false
     field :local_path, :string
     field :sync_status, :string, default: "never"
     field :last_synced_at, :utc_datetime_usec
@@ -38,6 +39,7 @@ defmodule PtcManager.Operations.Repository do
       :github_name,
       :default_branch,
       :enabled,
+      :auto_fix_issues,
       :local_path,
       :sync_status,
       :last_synced_at,
