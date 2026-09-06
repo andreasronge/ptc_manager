@@ -797,6 +797,28 @@ defmodule Mix.Tasks.PtcDeployTest do
              byte_index(script, "deployment_phase=post_effect")
   end
 
+  test "remote deployment restores snapshot collection when a pre-effect deployment fails" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "backup_health_snapshot_installation"
+    assert script =~ "restore_health_snapshot_installation"
+    assert script =~ "health_snapshot_timer_was_enabled="
+    assert script =~ "health_snapshot_timer_was_active="
+    assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.timer"
+
+    assert byte_index(script, "backup_health_snapshot_installation") <
+             byte_index(
+               script,
+               ~s(sudo install -o root -g root -m 0755 "$health_snapshot_candidate")
+             )
+
+    assert byte_index(script, "restore_health_snapshot_installation || rollback_status=1") <
+             byte_index(script, ~s(sudo systemctl start "$service_name" || rollback_status=1))
+
+    assert length(String.split(script, "restore_health_snapshot_installation")) == 4
+    assert script =~ "health_snapshot_backup_retained=true"
+  end
+
   test "remote deployment gives agents a narrow writable result exchange" do
     script = File.read!(@remote_script)
 

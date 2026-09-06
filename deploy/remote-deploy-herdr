@@ -97,6 +97,11 @@ worker_tool_staging=
 worker_opt_staging=
 herdr_link_backup=
 herdr_link_backup_retained=false
+health_snapshot_backup="/tmp/ptc-manager-health-snapshot-backup-${release_id}"
+health_snapshot_installation_prepared=false
+health_snapshot_backup_retained=false
+health_snapshot_timer_was_enabled=false
+health_snapshot_timer_was_active=false
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
@@ -191,6 +196,14 @@ cleanup_remote() {
       # running release expects, and the link it came from may already be gone.
       if [ "$herdr_link_backup_retained" != true ]; then
         sudo rm -rf -- "$herdr_link_backup"
+      fi
+      ;;
+  esac
+
+  case "$health_snapshot_backup" in
+    /tmp/ptc-manager-health-snapshot-backup-*)
+      if [ "$health_snapshot_backup_retained" != true ]; then
+        sudo rm -rf -- "$health_snapshot_backup"
       fi
       ;;
   esac
@@ -1166,6 +1179,81 @@ restore_worker_herdr() {
   return "$restore_status"
 }
 
+backup_health_snapshot_file() {
+  snapshot_file=$1
+  snapshot_backup_name=$2
+
+  if sudo test -e "$snapshot_file" || sudo test -L "$snapshot_file"; then
+    sudo cp -a "$snapshot_file" "$health_snapshot_backup/$snapshot_backup_name"
+  fi
+}
+
+backup_health_snapshot_installation() {
+  sudo install -d -o root -g root -m 0700 "$health_snapshot_backup"
+  health_snapshot_installation_prepared=true
+
+  if sudo systemctl is-enabled --quiet ptc_manager-health-snapshot.timer; then
+    health_snapshot_timer_was_enabled=true
+  fi
+
+  if sudo systemctl is-active --quiet ptc_manager-health-snapshot.timer; then
+    health_snapshot_timer_was_active=true
+    sudo systemctl stop ptc_manager-health-snapshot.timer
+  fi
+
+  backup_health_snapshot_file /usr/local/bin/ptc-manager-health-snapshot writer
+  backup_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.service service
+  backup_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.timer timer
+  backup_health_snapshot_file /etc/ptc_manager/health-snapshot.env environment
+}
+
+restore_health_snapshot_file() {
+  snapshot_file=$1
+  snapshot_backup_name=$2
+
+  sudo rm -f -- "$snapshot_file" || return 1
+
+  if sudo test -e "$health_snapshot_backup/$snapshot_backup_name" ||
+    sudo test -L "$health_snapshot_backup/$snapshot_backup_name"; then
+    sudo cp -a "$health_snapshot_backup/$snapshot_backup_name" "$snapshot_file" || return 1
+  fi
+}
+
+restore_health_snapshot_installation() {
+  [ "$health_snapshot_installation_prepared" = true ] || return 0
+
+  echo "Restoring the previous health snapshot collector." >&2
+  restore_status=0
+  if sudo systemctl is-active --quiet ptc_manager-health-snapshot.timer; then
+    sudo systemctl stop ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if sudo systemctl is-enabled --quiet ptc_manager-health-snapshot.timer; then
+    sudo systemctl disable ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  restore_health_snapshot_file /usr/local/bin/ptc-manager-health-snapshot writer || restore_status=1
+  restore_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.service service || restore_status=1
+  restore_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.timer timer || restore_status=1
+  restore_health_snapshot_file /etc/ptc_manager/health-snapshot.env environment || restore_status=1
+  sudo systemctl daemon-reload || restore_status=1
+
+  if [ "$health_snapshot_timer_was_enabled" = true ]; then
+    sudo systemctl enable ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if [ "$health_snapshot_timer_was_active" = true ]; then
+    sudo systemctl start ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if [ "$restore_status" -ne 0 ]; then
+    health_snapshot_backup_retained=true
+    echo "The previous health snapshot collector is kept at $health_snapshot_backup; restore it before deploying again." >&2
+  fi
+
+  return "$restore_status"
+}
+
 rollback() {
   deployment_phase=handling_failure
   rollback_status=0
@@ -1198,6 +1286,7 @@ rollback() {
     rollback_status=1
   restore_worker_herdr || rollback_status=1
   restore_preexisting_maintenance_override || rollback_status=1
+  restore_health_snapshot_installation || rollback_status=1
   sudo systemctl start "$service_name" || rollback_status=1
 
   if [ "$rollback_status" -eq 0 ] && legacy_health_check; then
@@ -1232,6 +1321,7 @@ finish() {
       restore_worker_herdr ||
         echo "Restoring the previous Herdr failed; check $worker_herdr and ptc_manager-herdr before deploying again." >&2
       restore_preexisting_maintenance_override || true
+      restore_health_snapshot_installation || true
       sudo systemctl start "$service_name" || true
       ;;
     no_action) ;;
@@ -1568,6 +1658,7 @@ sudo install -o root -g root -m 0644 "$self_deploy_service_candidate" \
 sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager.service.d
 sudo install -o root -g root -m 0644 "$self_deploy_access_candidate" \
   /etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-self-deploy-access.conf
+backup_health_snapshot_installation
 sudo install -o root -g root -m 0755 "$health_snapshot_candidate" \
   /usr/local/bin/ptc-manager-health-snapshot
 sudo install -o root -g root -m 0644 "$health_snapshot_service_candidate" \
