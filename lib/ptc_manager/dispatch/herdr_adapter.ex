@@ -775,6 +775,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          %{path: path} when is_binary(path) <- job.worktree_allocation,
          true <- File.dir?(path),
          {:ok, pane, workspace} <- continuation_pane(name, old_pane, path),
+         {:ok, _report_path, _schema_path} <- StopReport.prepare(job),
          {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
          kind = job.execution_settings["kind"],
          new_name = "impl_j#{job.id}_f#{job.fencing_token}_r#{job.review_generation}",

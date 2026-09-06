@@ -150,6 +150,33 @@ defmodule PtcManager.ReviewsTest do
     def resume_review_job(_), do: {:error, :retained_agent_busy}
   end
 
+  test "continuation cannot consume a previous agent's stop report" do
+    alias PtcManager.Operations.StopReport
+    job = job!(1)
+    {:ok, job} = Operations.issue_stop_report_token(job)
+    old_path = StopReport.path_for(job)
+    File.mkdir_p!(Path.dirname(old_path))
+
+    report = %{
+      "reason_code" => "environment_broken",
+      "summary" => "Old review failed",
+      "detail" => "No assessment was returned",
+      "progress" => "partial"
+    }
+
+    File.write!(old_path, Jason.encode!(report))
+    on_exit(fn -> File.rm(old_path) end)
+    assert {:ok, _} = StopReport.read(job)
+
+    {:ok, round} = request(job, "one")
+    {:ok, :ok} = Reviews.fail(round.id, :reviewer_unavailable)
+    {:ok, continued} = Reviews.decide(job.id, 0, "continue", %{"extra_rounds" => 1}, "maintainer")
+
+    refute StopReport.path_for(continued) == old_path
+    assert :none = StopReport.read(continued)
+    assert {:ok, _} = StopReport.read(job)
+  end
+
   test "a failed continuation remains visible and cannot consume more budget automatically" do
     job = job!(1)
     {:ok, round} = request(job, "one")

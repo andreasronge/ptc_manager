@@ -300,6 +300,7 @@ defmodule PtcManager.Reviews do
           update_job(job, %{
             required_review_count: job.required_review_count + extra,
             execution_settings: settings,
+            stop_report_token: PtcManager.Operations.StopReport.new_token(),
             review_state: "resume_pending",
             reviewed_head_sha: nil,
             review_generation: generation + 1,

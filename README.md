@@ -94,7 +94,8 @@ branch and findings. Add +1, +2, or +5 rounds (up to 100 in total), optionally
 switch profiles, or take over manually. Continuation starts an agent in the
 existing worktree with the frozen issue and latest findings. An idle retained
 pane is replaced using an explicitly directed Herdr split; it does not reset
-files or start a replacement job. An unavailable or busy retained agent leaves
+files or start a replacement job. Each continuation receives a fresh stop-report
+identity, so an earlier agent’s failure cannot overwrite its successful result. An unavailable or busy retained agent leaves
 a visible pause for recovery. Paused work reserves its existing implementation
 capacity. Manual takeover requests the retained pane to stop; confirm it has
 stopped before editing. Cancellation requires a private reason and preserves
