@@ -22,6 +22,7 @@ defmodule PtcManager.Operations.Job do
     field :execution_settings, :map
     field :review_state, :string
     field :reviewed_head_sha, :string
+    field :review_continuation_instructions, :string
     field :review_generation, :integer, default: 0
     field :last_error, :string
     field :reconciling_at, :utc_datetime_usec
@@ -86,6 +87,7 @@ defmodule PtcManager.Operations.Job do
       :review_state,
       :reviewed_head_sha,
       :review_generation,
+      :review_continuation_instructions,
       :last_error,
       :reconciling_at,
       :absence_observed_at,
@@ -138,6 +140,7 @@ defmodule PtcManager.Operations.Job do
     |> validate_length(:pre_publication_command, max: 2_000)
     |> validate_length(:pre_publication_output, max: 65_536)
     |> validate_length(:prompt_instructions, max: 20_000)
+    |> validate_length(:review_continuation_instructions, max: 4_000)
     |> validate_inclusion(:pre_publication_status, ["pending", "running", "passed", "failed"])
     |> validate_number(:pre_publication_timeout_ms,
       greater_than: 0,

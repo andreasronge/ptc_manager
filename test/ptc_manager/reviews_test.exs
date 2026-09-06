@@ -110,6 +110,61 @@ defmodule PtcManager.ReviewsTest do
     assert DateTime.diff(round.expires_at, DateTime.utc_now()) >= 3600
   end
 
+  test "continuation instructions are saved, audited, and included in the resumed prompt" do
+    job = job!(1)
+    job |> Job.changeset(%{review_state: "manual"}) |> Repo.update!()
+    instructions = "Read all prior findings and check rollback before editing."
+
+    assert {:ok, continued} =
+             Reviews.decide(
+               job.id,
+               0,
+               "continue",
+               %{"extra_rounds" => 0, "instructions" => "  " <> instructions <> "  "},
+               "maintainer"
+             )
+
+    assert continued.review_continuation_instructions == instructions
+    loaded = Repo.preload(continued, [:repository, :issue])
+
+    prompt =
+      PtcManager.Dispatch.HerdrAdapter.build_prompt(loaded.repository, loaded.issue, loaded)
+
+    assert prompt =~ instructions
+    assert prompt =~ "Do not push, create a pull request, or merge"
+
+    audit =
+      Repo.get_by!(PtcManager.Operations.AuditEvent,
+        target_id: job.id,
+        action: "review.continued"
+      )
+
+    assert audit.details["instructions"] == instructions
+
+    continued |> Job.changeset(%{review_state: "paused"}) |> Repo.update!()
+
+    assert {:ok, next} =
+             Reviews.decide(job.id, 1, "continue", %{"instructions" => "  "}, "maintainer")
+
+    assert is_nil(next.review_continuation_instructions)
+
+    refute PtcManager.Dispatch.HerdrAdapter.build_prompt(loaded.repository, loaded.issue, next) =~
+             instructions
+  end
+
+  test "invalid continuation instructions do not queue a continuation" do
+    job = job!(1)
+    job |> Job.changeset(%{review_state: "paused"}) |> Repo.update!()
+
+    for value <- [String.duplicate("x", 4001), %{}] do
+      assert {:error, :invalid_continuation_instructions} =
+               Reviews.decide(job.id, 0, "continue", %{"instructions" => value}, "maintainer")
+
+      assert Repo.get!(Job, job.id).review_state == "paused"
+      assert Repo.get!(Job, job.id).review_generation == 0
+    end
+  end
+
   test "a duplicate request counts once and a clean review approves only its exact head" do
     job = job!(2)
     assert {:ok, first} = request(job, "one")
