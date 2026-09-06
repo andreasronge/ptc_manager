@@ -518,6 +518,21 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def badge_classes(:waiting), do: "bg-violet-400/15 text-violet-300 ring-violet-400/20"
   def badge_classes(:muted), do: "bg-white/5 text-slate-400 ring-white/10"
 
+  def review_action_label(%{active_job: %{review_state: state}}) when state in ~w(paused manual),
+    do: "Review findings and decide"
+
+  def review_action_label(%{active_job: %{review_state: "running"}}),
+    do: "View review progress"
+
+  def review_action_label(_item), do: "View reviews"
+
+  def next_step(%{active_job: %{review_state: state}}, _lane) when state in ~w(paused manual),
+    do:
+      "Review needs your decision. Open the findings to continue existing work, take over, or cancel."
+
+  def next_step(%{active_job: %{review_state: "running"}}, _lane),
+    do: "The review is running. No decision is needed yet; open review progress for details."
+
   def next_step(_item, :queued), do: "PtcManager will assign this when a worker slot is free."
 
   def next_step(item, :working) do
