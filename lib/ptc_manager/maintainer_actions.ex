@@ -438,19 +438,21 @@ defmodule PtcManager.MaintainerActions do
        ) do
     with {:ok, snapshot} <- HealthSnapshotEvidence.read(),
          {:ok, _summary} <- call_sync(sync, action),
+         {:ok, {source_snapshot, source_prompt}} <-
+           prepare_repository_source_snapshot_attrs(action),
          encoded_snapshot = Jason.encode!(snapshot),
          {:ok, prepared} <-
            Operations.record_agent_action_target_snapshot(
              action.id,
-             Map.put(action.target_snapshot || %{}, "health_snapshot_evidence", snapshot),
-             action.prompt <>
+             Map.put(source_snapshot, "health_snapshot_evidence", snapshot),
+             source_prompt <>
                """
 
                Use only this immutable, deterministically validated runtime evidence. Do not read the mutable live snapshot file.
                <health_snapshot>#{encoded_snapshot}</health_snapshot>
                """
            ) do
-      prepare_repository_source_snapshot(prepared)
+      {:ok, prepared}
     else
       {:error, reason}
       when reason in [
@@ -599,6 +601,16 @@ defmodule PtcManager.MaintainerActions do
   defp ready_check_supported?(_adapter), do: false
 
   defp prepare_repository_source_snapshot(action) do
+    case prepare_repository_source_snapshot_attrs(action) do
+      {:ok, {snapshot, prompt}} ->
+        Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt)
+
+      {:error, reason} ->
+        defer_preflight(action.id, reason, action.sync_attempt_count)
+    end
+  end
+
+  defp prepare_repository_source_snapshot_attrs(action) do
     source_snapshot =
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
@@ -619,10 +631,7 @@ defmodule PtcManager.MaintainerActions do
 
              <source_snapshot ref="#{source.ref}" sha="#{source.sha}" default_branch="#{action.repository.default_branch}" workspace="read_only" />
              """ do
-      Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt)
-    else
-      {:error, reason} ->
-        defer_preflight(action.id, reason, action.sync_attempt_count)
+      {:ok, {snapshot, prompt}}
     end
   end
 

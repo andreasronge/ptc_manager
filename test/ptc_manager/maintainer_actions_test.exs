@@ -877,6 +877,46 @@ defmodule PtcManager.MaintainerActionsTest do
     refute_receive {:ran_agent_action, _action}
   end
 
+  test "failed health source preparation does not persist evidence in the prompt" do
+    repository = repository_fixture(%{github_name: "ptc_manager"})
+    version = Automations.get_definition(repository, "nightly_ci_investigation").current_version
+    path = Path.join(System.tmp_dir!(), "fresh-health-#{System.unique_integer([:positive])}.json")
+
+    File.write!(path, Jason.encode!(health_snapshot(DateTime.utc_now() |> DateTime.to_iso8601())))
+
+    previous_path = Application.get_env(:ptc_manager, :health_snapshot_path)
+    Application.put_env(:ptc_manager, :health_snapshot_path, path)
+    Application.put_env(:ptc_manager, :planning_source_snapshot, UnavailableSourceSnapshot)
+
+    on_exit(fn ->
+      File.rm(path)
+      restore_test_env(:health_snapshot_path, previous_path)
+    end)
+
+    assert {:ok, queued} =
+             Operations.enqueue_agent_action(%{
+               repository_id: repository.id,
+               automation_definition_version_id: version.id,
+               action_key: "check_health",
+               target_type: "repository",
+               target_id: repository.id,
+               target_label: "health watch",
+               prompt_version: 1,
+               prompt: "Inspect runtime health.",
+               actor: "schedule"
+             })
+
+    assert {:ok, deferred} =
+             MaintainerActions.run_once(adapter: FakeAdapter, sync: NoopSync, lane: :planning)
+
+    assert deferred.id == queued.id
+    assert deferred.state == "queued"
+    assert deferred.prompt == queued.prompt
+    assert deferred.target_snapshot == queued.target_snapshot
+    refute deferred.prompt =~ "<health_snapshot>"
+    refute_receive {:ran_agent_action, _action}
+  end
+
   test "the adapter revalidates the immutable health evidence at handoff" do
     action = %AgentAction{
       action_key: "check_health",
