@@ -92,7 +92,8 @@ not spend another round. Code changes require another review.
 When reviews are exhausted or fail, **Delivery → Reviews** shows the preserved
 branch and findings. Add +1, +2, or +5 rounds (up to 100 in total), optionally
 switch profiles, or take over manually. Continuation starts an agent in the
-existing worktree with the frozen issue and latest findings; it does not reset
+existing worktree with the frozen issue and latest findings. An idle retained
+pane is replaced using an explicitly directed Herdr split; it does not reset
 files or start a replacement job. An unavailable or busy retained agent leaves
 a visible pause for recovery. Paused work reserves its existing implementation
 capacity. Manual takeover requests the retained pane to stop; confirm it has
