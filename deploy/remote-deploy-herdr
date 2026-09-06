@@ -137,6 +137,7 @@ self_deploy_access_candidate="/tmp/ptc-manager-self-deploy-access-${release_id}"
 health_snapshot_candidate="/tmp/ptc-manager-health-snapshot-${release_id}"
 health_snapshot_service_candidate="/tmp/ptc-manager-health-snapshot-service-${release_id}"
 health_snapshot_timer_candidate="/tmp/ptc-manager-health-snapshot-timer-${release_id}"
+health_snapshot_env_candidate="/tmp/ptc-manager-health-snapshot-env-${release_id}"
 toolchain_manifest="/tmp/ptc-manager-toolchain-versions-${release_id}"
 toolchain_reader="/tmp/ptc-manager-toolchain-version-${release_id}"
 coordinator_environment_files=
@@ -160,6 +161,7 @@ cleanup_remote() {
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
     "$self_deploy_access_candidate" "$health_snapshot_candidate" \
     "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate" \
+    "$health_snapshot_env_candidate" \
     "$toolchain_manifest" "$toolchain_reader"
   sudo rm -f -- "$maintenance_override_backup"
 
@@ -218,21 +220,30 @@ health_check() {
 
 verify_health_snapshot() {
   previous_capture=$1
+  previous_file_id=$2
   sudo /usr/bin/python3 -I -c '
 import datetime, json, pathlib, sys
-snapshot = json.loads(pathlib.Path(sys.argv[1]).read_text())
+path = pathlib.Path(sys.argv[1])
+snapshot = json.loads(path.read_text())
 captured = datetime.datetime.fromisoformat(snapshot["captured_at"].replace("Z", "+00:00"))
 budget = snapshot["freshness_budget_seconds"]
-age = (datetime.datetime.now(datetime.timezone.utc) - captured).total_seconds()
+now = datetime.datetime.now(datetime.timezone.utc)
+age = (now - captured).total_seconds()
+current_file_id = f"{path.stat().st_dev}:{path.stat().st_ino}"
+if sys.argv[3] and current_file_id == sys.argv[3]:
+    raise SystemExit("health snapshot collection did not replace the evidence file")
 if sys.argv[2]:
-    previous = datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
-    if captured <= previous:
-        raise SystemExit("health snapshot collection did not produce newer evidence")
+    try:
+        previous = datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+        if previous <= now and captured <= previous:
+            raise SystemExit("health snapshot collection did not produce newer evidence")
+    except (TypeError, ValueError):
+        pass
 if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0 or budget > 21600:
     raise SystemExit("invalid health snapshot freshness budget")
 if age < 0 or age > budget:
     raise SystemExit("health snapshot is not fresh")
-' "$health_snapshot_path" "$previous_capture"
+' "$health_snapshot_path" "$previous_capture" "$previous_file_id"
 }
 
 legacy_health_check() {
@@ -1420,6 +1431,17 @@ failed_database="${database_path}-failed-${release_id}"
 health_url="http://127.0.0.1:${health_port}/health"
 health_snapshot_path=$configured_health_snapshot_path
 
+/usr/bin/python3 -I -c '
+import sys
+def quote(value):
+    if "\n" in value or "\r" in value:
+        raise SystemExit("health snapshot environment paths must not contain newlines")
+    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+print("DATABASE_PATH=" + quote(sys.argv[1]))
+print("PTC_HEALTH_OUT=" + quote(sys.argv[2]))
+' "$database_path" "$health_snapshot_path" >"$health_snapshot_env_candidate"
+chmod 0600 "$health_snapshot_env_candidate"
+
 case "$health_snapshot_path" in
   /var/lib/ptc_manager-output/*..*|/var/lib/ptc_manager-output/)
     echo "configured health snapshot path is not a file below /var/lib/ptc_manager-output" >&2
@@ -1560,6 +1582,8 @@ sudo install -o root -g root -m 0644 "$health_snapshot_service_candidate" \
   /etc/systemd/system/ptc_manager-health-snapshot.service
 sudo install -o root -g root -m 0644 "$health_snapshot_timer_candidate" \
   /etc/systemd/system/ptc_manager-health-snapshot.timer
+sudo install -o root -g root -m 0600 "$health_snapshot_env_candidate" \
+  /etc/ptc_manager/health-snapshot.env
 
 ensure_repository_checkouts
 write_repository_access_dropin /.git "$manager_access_dropin"
@@ -1619,9 +1643,10 @@ health_check maintenance
 # collector synchronously as well: activation alone cannot prove that its
 # database and journal reads work or that consumers have current evidence.
 previous_health_capture=$(sudo jq -r '.captured_at // empty' "$health_snapshot_path" 2>/dev/null || true)
+previous_health_snapshot_id=$(sudo stat -c '%d:%i' "$health_snapshot_path" 2>/dev/null || true)
 sudo systemctl is-active --quiet ptc_manager.service
 sudo systemctl start ptc_manager-health-snapshot.service
-verify_health_snapshot "$previous_health_capture"
+verify_health_snapshot "$previous_health_capture" "$previous_health_snapshot_id"
 sudo systemctl enable --now ptc_manager-health-snapshot.timer
 
 migration_version=$(sudo sqlite3 -readonly "$database_path" \

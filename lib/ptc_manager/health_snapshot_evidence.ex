@@ -25,6 +25,22 @@ defmodule PtcManager.HealthSnapshotEvidence do
 
   def validate(_snapshot, %DateTime{}), do: {:error, :health_snapshot_malformed}
 
+  def validate_for(snapshot, minimum_lifetime_seconds, now \\ DateTime.utc_now())
+
+  def validate_for(snapshot, minimum_lifetime_seconds, %DateTime{} = now)
+      when is_map(snapshot) and is_integer(minimum_lifetime_seconds) and
+             minimum_lifetime_seconds >= 0 do
+    with :ok <- validate_shape(snapshot),
+         {:ok, captured_at} <- captured_at(snapshot),
+         {:ok, budget} <- freshness_budget(snapshot),
+         :ok <- fresh?(captured_at, budget - minimum_lifetime_seconds, now) do
+      {:ok, snapshot}
+    end
+  end
+
+  def validate_for(_snapshot, _minimum_lifetime_seconds, %DateTime{}),
+    do: {:error, :health_snapshot_malformed}
+
   def configured_path do
     Application.get_env(
       :ptc_manager,
@@ -102,6 +118,7 @@ defmodule PtcManager.HealthSnapshotEvidence do
 
     cond do
       age < 0 -> {:error, :health_snapshot_future_dated}
+      budget < 0 -> {:error, :health_snapshot_expired}
       age > budget -> {:error, :health_snapshot_expired}
       true -> :ok
     end

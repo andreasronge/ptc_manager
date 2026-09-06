@@ -779,8 +779,15 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "running_health_snapshot_path"
     assert script =~ "/var/lib/ptc_manager-output/*"
     assert script =~ "previous_health_capture="
+    assert script =~ "previous_health_snapshot_id="
+    assert script =~ "health snapshot collection did not replace the evidence file"
     assert script =~ "captured <= previous"
     assert script =~ "did not produce newer evidence"
+    assert script =~ "except (TypeError, ValueError)"
+    assert script =~ "/etc/ptc_manager/health-snapshot.env"
+    assert script =~ ~s|print("DATABASE_PATH=" + quote(sys.argv[1]))|
+    assert script =~ ~s|print("PTC_HEALTH_OUT=" + quote(sys.argv[2]))|
+    assert script =~ ~s(' "$database_path" "$health_snapshot_path")
     assert service =~ "ExecStartPre=/usr/bin/systemctl is-active --quiet ptc_manager.service"
     refute service =~ "ExecCondition="
 

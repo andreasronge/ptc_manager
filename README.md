@@ -1310,6 +1310,9 @@ sudo systemctl status ptc_manager
 `/var/lib/ptc_manager-output/ptc-health.json`. The normal deployment updates the
 writer and both systemd units from the deployed source archive, collects and
 verifies fresh evidence, then starts the timer before activating the release. It
+also writes `/etc/ptc_manager/health-snapshot.env` from the coordinator's
+resolved `DATABASE_PATH` and `PTC_HEALTH_OUT`, so collection reads the same
+database and publishes the same path that the running application expects. It
 exports capacity settings,
 record IDs, states and timings, plus counts from at most 10,000 service journal
 lines. Live record lists are limited to 500 rows; a list at that limit may be

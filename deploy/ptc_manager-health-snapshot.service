@@ -4,7 +4,7 @@ After=ptc_manager.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/etc/ptc_manager/ptc_manager.env
+EnvironmentFile=-/etc/ptc_manager/health-snapshot.env
 ExecStartPre=/usr/bin/systemctl is-active --quiet ptc_manager.service
 ExecStart=/usr/local/bin/ptc-manager-health-snapshot
 PrivateTmp=true

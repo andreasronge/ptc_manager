@@ -10,6 +10,15 @@ defmodule PtcManager.HealthSnapshotEvidenceTest do
     assert snapshot["freshness_budget_seconds"] == 3600
   end
 
+  test "rejects evidence that will expire before the authorized analysis can finish" do
+    snapshot = Map.put(valid_snapshot(), "captured_at", "2026-09-06T11:30:00Z")
+
+    assert {:ok, _snapshot} = HealthSnapshotEvidence.validate_for(snapshot, 1800, @now)
+
+    assert {:error, :health_snapshot_expired} =
+             HealthSnapshotEvidence.validate_for(snapshot, 1801, @now)
+  end
+
   test "rejects missing, malformed, future-dated, and expired evidence" do
     assert {:error, :health_snapshot_missing} = HealthSnapshotEvidence.read("/missing", @now)
     assert {:error, :health_snapshot_malformed} = validate("not json")
