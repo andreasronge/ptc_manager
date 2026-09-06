@@ -757,6 +757,9 @@ defmodule Mix.Tasks.PtcDeployTest do
   test "remote deployment installs, activates, and verifies health snapshot collection" do
     script = File.read!(@remote_script)
 
+    service =
+      File.read!(@project_root <> "/deploy/ptc_manager-health-snapshot.service")
+
     for source <- [
           "deploy/ptc-manager-health-snapshot",
           "deploy/ptc_manager-health-snapshot.service",
@@ -776,7 +779,10 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "running_health_snapshot_path"
     assert script =~ "/var/lib/ptc_manager-output/*"
     assert script =~ "previous_health_capture="
-    assert script =~ "did not replace the previous evidence"
+    assert script =~ "captured <= previous"
+    assert script =~ "did not produce newer evidence"
+    assert service =~ "ExecStartPre=/usr/bin/systemctl is-active --quiet ptc_manager.service"
+    refute service =~ "ExecCondition="
 
     assert byte_index(script, "health_check maintenance") <
              byte_index(script, "systemctl start ptc_manager-health-snapshot.service")

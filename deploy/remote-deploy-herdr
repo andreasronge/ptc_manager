@@ -224,8 +224,10 @@ snapshot = json.loads(pathlib.Path(sys.argv[1]).read_text())
 captured = datetime.datetime.fromisoformat(snapshot["captured_at"].replace("Z", "+00:00"))
 budget = snapshot["freshness_budget_seconds"]
 age = (datetime.datetime.now(datetime.timezone.utc) - captured).total_seconds()
-if sys.argv[2] and snapshot["captured_at"] == sys.argv[2]:
-    raise SystemExit("health snapshot collection did not replace the previous evidence")
+if sys.argv[2]:
+    previous = datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+    if captured <= previous:
+        raise SystemExit("health snapshot collection did not produce newer evidence")
 if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0 or budget > 21600:
     raise SystemExit("invalid health snapshot freshness budget")
 if age < 0 or age > budget:
