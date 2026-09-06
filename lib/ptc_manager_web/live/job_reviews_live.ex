@@ -84,6 +84,9 @@ defmodule PtcManagerWeb.JobReviewsLive do
 
   defp decision_error(:review_budget_exhausted), do: "Add at least one review round to continue."
 
+  defp decision_error(:invalid_continuation_instructions),
+    do: "Keep continuation instructions within 4,000 characters."
+
   defp decision_error(:invalid_review_budget),
     do: "Choose up to five additional rounds, within the total limit of 100."
 
@@ -129,6 +132,10 @@ defmodule PtcManagerWeb.JobReviewsLive do
             ]} / {@job.execution_settings["reviewer_model"]}
           </p>
         </div>
+        <div :if={@job.review_continuation_instructions} class="rounded-xl border border-white/10 p-5">
+          <h2 class="font-semibold">Last continuation instructions</h2>
+          <p class="whitespace-pre-wrap">{@job.review_continuation_instructions}</p>
+        </div>
         <p :if={@job.last_error} class="text-amber-200">{@job.last_error}</p>
         <p :if={@job.review_state == "manual"}>
           Confirm the retained agent has stopped in Operations before editing the workspace.
@@ -159,6 +166,19 @@ defmodule PtcManagerWeb.JobReviewsLive do
           </label>
           <p class="text-sm text-slate-400">
             Changing profile selects its implementation and reviewer models and review timeout. The same branch, files and review history are retained.
+          </p>
+          <label class="block">
+            Instructions for continuation (optional)<textarea
+              name="decision[instructions]"
+              maxlength="4000"
+              rows="4"
+              class="mt-2 block w-full bg-slate-900"
+            />
+          </label>
+          <p class="text-sm text-slate-400">
+            Sent to the agent only when you continue. Use this to request a broader review of the
+            existing work or explain a change of approach. Leave blank for normal continuation;
+            previous instructions are not automatically reused. Review and publication safeguards still apply.
           </p>
           <label class="block">
             Reason (required for cancellation)<textarea

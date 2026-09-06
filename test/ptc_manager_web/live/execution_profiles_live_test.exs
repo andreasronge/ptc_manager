@@ -69,12 +69,15 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
         generation: "0",
         extra_rounds: "2",
         profile: "strong",
+        instructions: "Inspect all failure paths before editing.",
         reason: ""
       }
     )
     |> render_submit(%{"decision" => %{"action" => "continue"}})
 
     updated = Repo.get!(Job, job.id)
+    assert updated.review_continuation_instructions == "Inspect all failure paths before editing."
+    assert render(view) =~ "Inspect all failure paths before editing."
     assert updated.required_review_count == 3
     assert updated.review_state == "resume_pending"
     assert updated.branch_name == "keep-my-work"

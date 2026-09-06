@@ -107,7 +107,14 @@ An active review appears under **In progress** with an **Under review** badge;
 the internal review hold does not by itself mean the maintainer needs to act.
 Paused decisions, stop reports, and real failures still appear under **Needs attention**. Add +1, +2, or +5 rounds (up to 100 in total), optionally
 switch profiles, or take over manually. Continuation starts an agent in the
-existing worktree with the frozen issue and latest findings. An idle retained
+existing worktree with the frozen issue and latest findings. **Instructions for
+continuation (optional)** accepts up to 4,000 characters of additional direction,
+such as checking the whole change and its failure paths before editing. It is
+available for both paused reviews and manual takeover. The instruction is saved
+with the continuation decision, shown on the review page, and sent to the resumed
+agent; it does not change review or publication permissions. Blank instructions
+mean normal continuation and do not reuse the previous continuation's note.
+Manual takeover and cancellation do not send the field to an agent. An idle retained
 pane is replaced using an explicitly directed Herdr split; it does not reset
 files or start a replacement job. Each continuation receives a fresh stop-report
 identity, so an earlier agent’s failure cannot overwrite its successful result. An unavailable or busy retained agent leaves

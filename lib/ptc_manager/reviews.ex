@@ -282,6 +282,23 @@ defmodule PtcManager.Reviews do
              do: Repo.rollback(:review_decision_stale)
 
       if action == "continue" do
+        instructions =
+          case attrs["instructions"] do
+            nil ->
+              nil
+
+            value when is_binary(value) ->
+              value = String.trim(value)
+
+              if String.length(value) > 4_000,
+                do: Repo.rollback(:invalid_continuation_instructions)
+
+              if value == "", do: nil, else: value
+
+            _ ->
+              Repo.rollback(:invalid_continuation_instructions)
+          end
+
         extra = attrs["extra_rounds"] || 0
 
         unless is_integer(extra) and extra in 0..5 and job.required_review_count + extra <= 100,
@@ -308,6 +325,7 @@ defmodule PtcManager.Reviews do
           update_job(job, %{
             required_review_count: job.required_review_count + extra,
             execution_settings: settings,
+            review_continuation_instructions: instructions,
             stop_report_token: PtcManager.Operations.StopReport.new_token(),
             review_state: "resume_pending",
             reviewed_head_sha: nil,
@@ -321,6 +339,7 @@ defmodule PtcManager.Reviews do
 
         ExecutionProfiles.audit(actor, "review.continued", id, %{
           extra_rounds: extra,
+          instructions: instructions,
           settings: settings
         })
 

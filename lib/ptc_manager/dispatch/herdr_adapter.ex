@@ -752,7 +752,18 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       </issue_data>
       """
 
-    Automations.compose_prompt(job.prompt_instructions, context)
+    Automations.compose_prompt(job.prompt_instructions, context) <> continuation_instructions(job)
+  end
+
+  defp continuation_instructions(job) do
+    case Map.get(job, :review_continuation_instructions) do
+      instructions when is_binary(instructions) and instructions != "" ->
+        "\nMaintainer instructions for this continuation (the managed review and publication rules above still apply):\n" <>
+          instructions <> "\n"
+
+      _ ->
+        ""
+    end
   end
 
   defp review_instructions(%{execution_settings: nil}, count),
