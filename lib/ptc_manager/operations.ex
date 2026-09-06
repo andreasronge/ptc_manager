@@ -3301,7 +3301,7 @@ defmodule PtcManager.Operations do
         }
       })
     end)
-    |> Repo.transaction(mode: :immediate)
+    |> RepoTransaction.immediate()
     |> normalize_approval_result()
     |> tap(fn
       {:ok, job} -> PtcManager.Automations.link_job_invocation(job, actor)
@@ -4875,6 +4875,8 @@ defmodule PtcManager.Operations do
     |> Repo.all()
     |> Enum.reduce(%{}, fn job, jobs -> Map.put_new(jobs, job.issue_id, job) end)
   end
+
+  defp normalize_approval_result({:error, reason}), do: {:error, reason}
 
   defp normalize_approval_result({:ok, %{job: job}}), do: {:ok, job}
   defp normalize_approval_result({:error, :snapshot, reason, _changes}), do: {:error, reason}

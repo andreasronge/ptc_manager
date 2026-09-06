@@ -759,7 +759,9 @@ policy. Merge and deployment approval rules are unchanged.
 
 After a successful GitHub synchronization, deterministic code admits open,
 unassigned `ptc:ready` issues with resolved dependencies and no conflicting
-workflow labels. Existing backlog issues are included; a single-issue refresh
+workflow labels. Queued, running, or synchronizing issue actions defer admission
+until their assessment has been stored and the action finishes; the next
+successful synchronization then selects the profile. Existing backlog issues are included; a single-issue refresh
 only considers that issue. No selector model or new coding workflow is involved.
 The existing execution profile selection uses a current assessment's scope and
 risk; an absent or stale assessment uses the existing `standard` fallback.

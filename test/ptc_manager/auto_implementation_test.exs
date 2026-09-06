@@ -20,6 +20,34 @@ defmodule PtcManager.AutoImplementationTest do
     :ok
   end
 
+  test "configuration handles a repository removed before the event arrives" do
+    repository = repository_fixture()
+    Repo.delete!(repository)
+
+    assert {:error, :repository_not_found} =
+             AutoImplementation.configure(repository.id, true, "andreas")
+
+    refute Repo.exists?(
+             from event in AuditEvent, where: event.action == "repository.auto_fix_updated"
+           )
+  end
+
+  test "queued, running and synchronizing issue actions defer automatic admission" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    {:ok, action} = PtcManager.MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+
+    for state <- ["queued", "running", "sync_pending"] do
+      Repo.update_all(from(a in PtcManager.Operations.AgentAction, where: a.id == ^action.id),
+        set: [state: state]
+      )
+
+      assert {:error, :issue_action_active} = Operations.auto_approve_issue(issue.id)
+    end
+
+    assert Repo.aggregate(Job, :count) == 0
+  end
+
   test "disabled by default, explicitly enabled per repository and audited" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})

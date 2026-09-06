@@ -138,6 +138,24 @@ defmodule PtcManager.MaintainerActionsTest do
     end
   end
 
+  defmodule AutoFixGitHubClient do
+    def get_issue(_repository, _number), do: {:ok, Process.get(:auto_fix_issue)}
+    def list_open(_repository), do: {:ok, []}
+  end
+
+  defmodule ComplexPreparationAdapter do
+    def run(action) do
+      {:ok, result} = FakeAdapter.run(action)
+
+      Process.put(
+        :auto_fix_issue,
+        Map.put(Process.get(:auto_fix_issue), "labels", [%{"name" => "ptc:ready"}])
+      )
+
+      {:ok, Map.merge(result, %{"scope" => "large", "risk" => "high"})}
+    end
+  end
+
   defmodule PrivateAnalysisAdapter do
     @behaviour PtcManager.MaintainerActions.Adapter
 
@@ -579,6 +597,42 @@ defmodule PtcManager.MaintainerActionsTest do
     end)
 
     :ok
+  end
+
+  test "automatic implementation waits for preparation to store its complexity assessment" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository)
+
+    Process.put(:auto_fix_issue, %{
+      "number" => issue.number,
+      "title" => issue.title,
+      "body" => issue.body,
+      "html_url" => issue.html_url,
+      "state" => "open",
+      "labels" => [],
+      "updated_at" => DateTime.to_iso8601(issue.github_updated_at)
+    })
+
+    previous_github = Application.fetch_env!(:ptc_manager, :github_client)
+    previous_pulls = Application.fetch_env!(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :github_client, AutoFixGitHubClient)
+    Application.put_env(:ptc_manager, :pull_request_client, AutoFixGitHubClient)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :github_client, previous_github)
+      Application.put_env(:ptc_manager, :pull_request_client, previous_pulls)
+    end)
+
+    {:ok, _queued} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+
+    assert {:ok, %{state: "done"}} =
+             MaintainerActions.run_once(adapter: ComplexPreparationAdapter, sync: Sync)
+
+    assert Repo.get_by!(Proposal, issue_id: issue.id).scope == "large"
+    assert Repo.aggregate(PtcManager.Operations.Job, :count) == 0
+    assert {:ok, _} = PtcManager.GitHub.Sync.sync_issue(repository, issue.number)
+    job = Repo.get_by!(PtcManager.Operations.Job, issue_id: issue.id)
+    assert job.execution_settings["name"] == "strong"
   end
 
   test "runs a daily update in the planning lane and stores its Markdown" do

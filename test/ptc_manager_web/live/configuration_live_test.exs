@@ -20,6 +20,22 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     refute Repo.get!(Repository, repository.id).auto_fix_issues
   end
 
+  test "malformed auto-fix events leave the configuration view running", %{conn: conn} do
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    for params <- [
+          %{"id" => "invalid", "enabled" => "true"},
+          %{"id" => "1", "enabled" => "invalid"},
+          %{},
+          %{"id" => 1, "enabled" => "true"}
+        ] do
+      assert render_click(view, "set-auto-fix", params) =~
+               "Could not save automatic implementation setting."
+    end
+
+    assert Process.alive?(view.pid)
+  end
+
   test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
     original = CapacitySettings.current()
 

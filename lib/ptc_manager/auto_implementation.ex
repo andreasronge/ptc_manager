@@ -4,14 +4,14 @@ defmodule PtcManager.AutoImplementation do
   require Logger
 
   alias PtcManager.{Operations, Repo, RepoTransaction}
-  alias PtcManager.Operations.{Approval, Issue, Job, PrPublication, Repository}
+  alias PtcManager.Operations.{AgentAction, Approval, Issue, Job, PrPublication, Repository}
 
   @daily_limit 5
 
   def configure(repository_id, enabled, actor) when is_boolean(enabled) do
     result =
       RepoTransaction.immediate(fn ->
-        repository = Repo.get!(Repository, repository_id)
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
 
         updated =
           repository |> Repository.changeset(%{auto_fix_issues: enabled}) |> Repo.update!()
@@ -66,7 +66,9 @@ defmodule PtcManager.AutoImplementation do
   end
 
   # Runs inside the approval's immediate transaction, serializing checks with
-  # job creation and policy updates. Any previous job consumes automatic eligibility,
+  # job creation and policy updates. Pending issue actions must finish storing
+  # their analysis before admission freezes a profile, including postflight recovery.
+  # Any previous job consumes automatic eligibility,
   # including failed/cancelled/manual jobs; label toggles never reset it.
   def eligible(repo, issue) do
     repository = repo.get!(Repository, issue.repository_id)
@@ -77,6 +79,15 @@ defmodule PtcManager.AutoImplementation do
 
       issue.workflow_label != "ptc:ready" ->
         {:error, :issue_workflow_not_ready}
+
+      repo.exists?(
+        from action in AgentAction,
+          where:
+            action.repository_id == ^issue.repository_id and action.target_type == "issue" and
+              action.target_id == ^issue.id and
+                action.state in ["queued", "running", "sync_pending"]
+      ) ->
+        {:error, :issue_action_active}
 
       repo.exists?(from job in Job, where: job.issue_id == ^issue.id) ->
         {:error, :already_attempted}
