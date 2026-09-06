@@ -343,7 +343,7 @@ config :ptc_manager,
     System.get_env("PTC_GIT_MAX_TOTAL_BLOB_BYTES", "50000000") |> String.to_integer(),
   git_memory_limit_binary: System.get_env("PTC_GIT_MEMORY_LIMIT_BINARY"),
   git_memory_limit_bytes:
-    System.get_env("PTC_GIT_MEMORY_LIMIT_BYTES", "268435456") |> String.to_integer(),
+    System.get_env("PTC_GIT_MEMORY_LIMIT_BYTES", "536870912") |> String.to_integer(),
   implementation_agent_kind: implementation_agent_kind,
   agent_profiles: agent_profiles,
   implementation_agent_start_timeout_ms:

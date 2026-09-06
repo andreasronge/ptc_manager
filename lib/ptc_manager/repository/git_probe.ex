@@ -20,9 +20,14 @@ defmodule PtcManager.Repository.GitProbe do
 
       true ->
         case run_git(path, ["show", "#{sha}:.ptc-manager.yml"], {:collect, @small_output_limit}) do
-          {:ok, content} -> {:ok, content}
-          {:error, {:git_failed, "show", _status}} -> {:error, :repository_contract_missing}
-          {:error, reason} -> {:error, reason}
+          {:ok, content} ->
+            {:ok, content}
+
+          {:error, {:git_failed, "show", _status, _detail}} ->
+            {:error, :repository_contract_missing}
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end
@@ -251,7 +256,7 @@ defmodule PtcManager.Repository.GitProbe do
       true ->
         case run_git(path, ["merge-base", "--is-ancestor", ancestor, head], {:collect, 1_024}) do
           {:ok, _output} -> :ok
-          {:error, {:git_failed, "merge-base", 1}} -> {:error, :repair_not_fast_forward}
+          {:error, {:git_failed, "merge-base", 1, _detail}} -> {:error, :repair_not_fast_forward}
           {:error, reason} -> {:error, reason}
         end
     end
@@ -528,26 +533,40 @@ defmodule PtcManager.Repository.GitProbe do
       )
 
     deadline = System.monotonic_time(:millisecond) + port_timeout_ms()
-    receive_port(port, List.first(args), mode_state(mode), deadline)
+    receive_port(port, List.first(args), mode_state(mode), deadline, "")
   rescue
     _error -> {:error, :git_unavailable}
   end
 
-  defp receive_port(port, operation, state, deadline) do
+  defp receive_port(port, operation, state, deadline, tail) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
         case consume(state, data) do
-          {:ok, next_state} -> receive_port(port, operation, next_state, deadline)
-          {:error, reason} -> close_port(port, reason)
+          {:ok, next_state} ->
+            combined = tail <> data
+
+            tail =
+              binary_part(
+                combined,
+                max(byte_size(combined) - 2_000, 0),
+                min(byte_size(combined), 2_000)
+              )
+
+            receive_port(port, operation, next_state, deadline, tail)
+
+          {:error, reason} ->
+            close_port(port, reason)
         end
 
       {^port, {:exit_status, 0}} ->
         {:ok, finish(state)}
 
       {^port, {:exit_status, status}} ->
-        {:error, {:git_failed, operation, status}}
+        {:error,
+         {:git_failed, operation, status,
+          String.replace(tail, ~r/[^\x20-\x7E\n\t]/, "?") |> String.trim()}}
     after
       remaining -> close_port(port, :git_timeout)
     end
@@ -599,7 +618,23 @@ defmodule PtcManager.Repository.GitProbe do
 
   @doc false
   def command(binary, git_args) do
-    git = ["/bin/sh", "-c", ~s(exec "$@" 2>/dev/null), "ptc-manager-git", binary | git_args]
+    # Keep successful stderr out of refs and patch hashes. A separate reader
+    # retains only the last 2 KiB, without limiting Git's own filesystem writes.
+    script = ~S"""
+    umask 077
+    diagnostics=$(mktemp -d) || exit 125
+    trap 'rm -rf "$diagnostics"' EXIT
+    mkfifo "$diagnostics/stderr" || exit 125
+    tail -c 2000 <"$diagnostics/stderr" >"$diagnostics/tail" &
+    reader=$!
+    "$@" 2>"$diagnostics/stderr"
+    status=$?
+    wait "$reader" || exit 125
+    if [ "$status" -ne 0 ]; then cat "$diagnostics/tail"; fi
+    exit "$status"
+    """
+
+    git = ["/bin/sh", "-c", script, "ptc-manager-git", binary | git_args]
 
     timed =
       case Application.get_env(:ptc_manager, :git_timeout_binary) do
@@ -664,5 +699,5 @@ defmodule PtcManager.Repository.GitProbe do
     do: Application.get_env(:ptc_manager, :git_max_total_blob_bytes, 50_000_000)
 
   defp memory_limit_bytes,
-    do: Application.get_env(:ptc_manager, :git_memory_limit_bytes, 268_435_456)
+    do: Application.get_env(:ptc_manager, :git_memory_limit_bytes, 536_870_912)
 end

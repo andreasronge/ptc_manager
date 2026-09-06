@@ -176,10 +176,47 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert "/usr/bin/timeout" in args
     assert "15.0s" in args
     assert "/usr/bin/prlimit" in args
-    assert "--as=268435456" in args
-    assert ~s(exec "$@" 2>/dev/null) in args
+    assert "--as=536870912" in args
+    refute ~s(exec "$@" 2>/dev/null) in args
     assert "/usr/bin/git" in args
     assert GitProbe.timeout_duration() == "15.0s"
+  end
+
+  test "failed Git commands retain bounded diagnostics without contaminating successful output" do
+    path = repository_with_base()
+    binary = Path.join(path, "fake-git")
+    File.write!(binary, "#!/bin/sh\nprintf 'Cannot allocate memory' >&2\nexit 128\n")
+    File.chmod!(binary, 0o755)
+    previous = Application.fetch_env(:ptc_manager, :git_binary)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:ptc_manager, :git_binary, value)
+        :error -> Application.delete_env(:ptc_manager, :git_binary)
+      end
+    end)
+
+    Application.put_env(:ptc_manager, :git_binary, binary)
+
+    assert {:error, {:git_failed, "symbolic-ref", 128, message}} =
+             GitProbe.reclaimable(path, "main", "head")
+
+    assert message =~ "Cannot allocate memory"
+
+    File.write!(
+      binary,
+      "#!/bin/sh\nprintf '" <> String.duplicate("x", 6000) <> "final diagnostic' >&2\nexit 128\n"
+    )
+
+    assert {:error, {:git_failed, "symbolic-ref", 128, bounded}} =
+             GitProbe.reclaimable(path, "main", "head")
+
+    assert byte_size(bounded) <= 2000
+    assert bounded =~ "final diagnostic"
+    File.write!(binary, "#!/bin/sh\nprintf 'diagnostic warning' >&2\nprintf 'main'\n")
+    # Successful stderr must never become part of parsed refs or patch hashes.
+    {command, args} = GitProbe.command(binary, [])
+    assert {"main", 0} = System.cmd(command, args)
   end
 
   test "accepts only repair heads that preserve the published history" do

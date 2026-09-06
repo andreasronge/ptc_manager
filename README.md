@@ -1578,3 +1578,18 @@ tailscale serve status
 
 Open the HTTPS `*.ts.net` address reported by Tailscale on the Mac or iPhone.
 Do not use Tailscale Funnel for this private console.
+
+### Recovering implementation startup failures
+
+A safe dispatch failure stays on Delivery under **Needs attention**, with the
+startup error and **Try again** / **Set aside** actions. No agent needs to start
+for this card to appear. Try again preserves the original approval, profile,
+prompt and review budget; closed issues and issues with newer attempts cannot
+be retried. Retries are explicit, never an automatic failure loop. Upgrading
+also restores missing cards for unresolved historical dispatch failures.
+
+Git verification defaults to a 512 MiB virtual-address-space limit, configurable
+with `PTC_GIT_MEMORY_LIMIT_BYTES`. Git maps packfiles into virtual memory, so a
+`Cannot allocate memory` error can mean this limit is too small even when the
+machine has free RAM. Failed commands retain bounded diagnostic text; successful
+stderr remains excluded from parsed Git output and patch hashes.

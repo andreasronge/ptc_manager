@@ -458,7 +458,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     card = "#lane-stuck #board-job-#{stopped.id}"
-    assert has_element?(view, card, "Agent stopped · Missing prerequisite")
+    assert has_element?(view, card, "Work stopped · Missing prerequisite")
     assert has_element?(view, card, "OPENROUTER_API_KEY is not set")
     assert has_element?(view, card, "committed nothing")
     # The technical branch error must not replace the agent's own explanation.
@@ -487,7 +487,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
-    assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Needs a decision")
+    assert has_element?(view, "#board-job-#{stopped.id}", "Work stopped · Needs a decision")
     assert has_element?(view, "#board-job-#{stopped.id}", "worktree is kept")
     assert has_element?(view, "#ask-on-issue-#{stopped.id}.bg-amber-300")
     refute has_element?(view, "#retry-stopped-#{stopped.id}.bg-teal-400")
@@ -521,7 +521,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
-    assert has_element?(view, "#board-job-#{stopped.id}", "Agent stopped · Judged unsafe")
+    assert has_element?(view, "#board-job-#{stopped.id}", "Work stopped · Judged unsafe")
     assert has_element?(view, "#board-job-#{stopped.id}", "Read the evidence before restarting")
 
     # Not merely unfilled: neither recovery exists to be clicked at all.
