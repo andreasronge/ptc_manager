@@ -25,7 +25,8 @@ class ReviewerContract(unittest.TestCase):
         expected = {'summary': 'clear', 'findings': []}
         for kind in ('codex', 'claude', 'cursor'):
             commands = []
-            def fake_run(args, prompt, cwd):
+            def fake_run(args, prompt, cwd, timeout=None):
+                self.assertEqual(timeout, 900)
                 commands.append(args)
                 self.assertIn('untrusted diff', prompt)
                 if kind == 'codex':
@@ -42,7 +43,7 @@ class ReviewerContract(unittest.TestCase):
         request['settings']['reviewer_model'] = 'gpt-5.6-sol'
         expected = {'summary': 'clear', 'findings': []}
 
-        def fake_run(args, prompt, cwd):
+        def fake_run(args, prompt, cwd, timeout=None):
             self.assertEqual(args[args.index('--model') + 1], 'gpt-5.6-sol')
             self.assertEqual(args[args.index('-c') + 1], 'model_reasoning_effort="xhigh"')
             self.assertIn('independent code reviewer', prompt)
@@ -51,6 +52,23 @@ class ReviewerContract(unittest.TestCase):
 
         with patch.dict(context, run=fake_run):
             self.assertEqual(review(request), expected)
+
+    def test_custom_timeout_and_invalid_values(self):
+        for kind in ('codex', 'claude', 'cursor'):
+            request = self.request(kind)
+            request['settings']['review_timeout_ms'] = 1_500_000
+            def fake_run(args, prompt, cwd, timeout=None):
+                self.assertEqual(timeout, 1500)
+                raise RuntimeError('observed timeout')
+            with patch.dict(context, run=fake_run):
+                with self.assertRaisesRegex(RuntimeError, 'observed timeout'):
+                    review(request)
+        for value in (0, 3_600_001, True, '900000', None):
+            request = self.request()
+            request['settings']['review_timeout_ms'] = value
+            with patch.dict(context, run=lambda *a, **kw: self.fail('agent launched')):
+                with self.assertRaisesRegex(RuntimeError, 'invalid_review_timeout'):
+                    review(request)
 
     def test_invalid_model_or_effort_never_launches_an_agent(self):
         with patch.dict(context, run=lambda *_: self.fail('agent launched')):

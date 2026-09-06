@@ -63,9 +63,15 @@ defmodule PtcManagerWeb.JobReviewsLive do
       Repo.get!(Job, socket.assigns.job_id)
       |> Repo.preload([:issue, :repository, :worktree_allocation])
 
+    rounds = Reviews.rounds(job.id)
+
     assign(socket,
       job: job,
-      rounds: Reviews.rounds(job.id),
+      rounds: rounds,
+      completed_count: Enum.count(rounds, &(&1.state == "completed")),
+      failed_count: Enum.count(rounds, &(&1.state == "failed")),
+      active_count: Enum.count(rounds, &(&1.state in ~w(queued running))),
+      latest_failed: match?(%{state: "failed"}, List.last(rounds)),
       profiles: PtcManager.ExecutionProfiles.list()
     )
   end
@@ -99,10 +105,20 @@ defmodule PtcManagerWeb.JobReviewsLive do
         <div class="rounded-xl border border-white/10 bg-white/5 p-5">
           <h2 class="text-xl">
             {if @job.review_state == "paused",
-              do: "Review budget reached or review needs attention",
+              do:
+                if(@latest_failed,
+                  do: "Review attempt failed",
+                  else: "Review budget reached or review needs attention"
+                ),
               else: "Review status: #{review_status(@job.review_state)}"}
           </h2>
-          <p>{length(@rounds)} of {@job.required_review_count} rounds used · Work preserved</p>
+          <p>{@completed_count} of {@job.required_review_count} completed reviews · Work preserved</p>
+          <p>{@failed_count} failed attempts · {@active_count} in progress</p>
+          <p>Review timeout: {div(Reviews.timeout_ms(@job), 60_000)} minutes</p>
+          <p :if={@latest_failed and @job.review_state == "paused"} class="mt-2 text-amber-200">
+            The reviewer did not return a valid assessment. This attempt did not use a review round.
+            Continue with unused budget after addressing the failure; retries require your decision.
+          </p>
           <p class="mt-2 break-all text-sm">Branch: {@job.branch_name}</p>
           <p :if={@job.worktree_allocation} class="break-all text-sm">
             Workspace: {@job.worktree_allocation.path}
@@ -127,9 +143,12 @@ defmodule PtcManagerWeb.JobReviewsLive do
         >
           <input type="hidden" name="decision[generation]" value={@job.review_generation} />
           <label class="block">
-            Additional rounds<select name="decision[extra_rounds]" class="ml-3 bg-slate-900"><option value="0">0 — unused budget only</option><option value="1">+1</option><option
+            Additional rounds<select name="decision[extra_rounds]" class="ml-3 bg-slate-900"><option
+                value="0"
+                selected={@completed_count < @job.required_review_count}
+              >0 — unused budget only</option><option value="1">+1</option><option
                 value="2"
-                selected
+                selected={@completed_count >= @job.required_review_count}
               >+2</option><option value="5">+5</option></select>
           </label>
           <label class="block">
@@ -139,7 +158,7 @@ defmodule PtcManagerWeb.JobReviewsLive do
               >{String.capitalize(profile.name)} · {profile.kind}/{profile.model} · reviewer {profile.reviewer_kind}/{profile.reviewer_model}</option></select>
           </label>
           <p class="text-sm text-slate-400">
-            Changing profile selects its implementation and reviewer models. The same branch, files and review history are retained.
+            Changing profile selects its implementation and reviewer models and review timeout. The same branch, files and review history are retained.
           </p>
           <label class="block">
             Reason (required for cancellation)<textarea
@@ -190,7 +209,7 @@ defmodule PtcManagerWeb.JobReviewsLive do
           id={"review-round-#{round.id}"}
           class="rounded-xl border border-white/10 p-5"
         >
-          <h2 class="font-semibold">Round {round.number} · {round.state}</h2>
+          <h2 class="font-semibold">Attempt {round.number} · {round.state}</h2>
           <p class="break-all text-xs text-slate-400">Commit {round.head_sha}</p>
           <p :if={round.error} class="mt-2 text-amber-200">{round.error}</p>
           <div :if={round.result} class="mt-3">

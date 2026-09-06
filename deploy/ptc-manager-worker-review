@@ -14,7 +14,7 @@ import time
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
 
 
-def run(command, prompt=None, cwd=None, timeout=600):
+def run(command, prompt=None, cwd=None, timeout=900):
     # Bound captured output, not the CLI's persistent databases and WAL files.
     with tempfile.TemporaryFile() as input_file, selectors.DefaultSelector() as streams:
         if prompt:
@@ -80,6 +80,10 @@ def catalog(kind):
 
 def review(request):
     settings = request["settings"]
+    timeout_ms = settings.get("review_timeout_ms", 900_000)
+    if type(timeout_ms) is not int or not 60_000 <= timeout_ms <= 3_600_000:
+        raise RuntimeError("invalid_review_timeout")
+    timeout = timeout_ms / 1000
     kind, model = settings["reviewer_kind"], settings["reviewer_model"]
     if kind not in BINARIES or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}", model):
         raise RuntimeError("invalid_review_profile")
@@ -103,17 +107,17 @@ def review(request):
                     "--model", model, "--output-schema", schema_path, "-o", result_path]
             if effort:
                 args += ["-c", 'model_reasoning_effort="' + effort + '"']
-            run(args + ["-"], prompt, directory)
+            run(args + ["-"], prompt, directory, timeout=timeout)
             return read_json_file(result_path, 150_000)
         if kind == "claude":
             args = [BINARIES[kind], "--print", "--no-session-persistence", "--tools", "",
                     "--model", model, "--output-format", "json", "--json-schema", json.dumps(request["schema"])]
             if effort:
                 args += ["--effort", effort]
-            envelope = json.loads(run(args, prompt, directory))
+            envelope = json.loads(run(args, prompt, directory, timeout=timeout))
             return envelope["structured_output"]
         envelope = json.loads(run([BINARIES[kind], "--print", "--mode", "ask", "--model", model,
-                                   "--output-format", "json"], prompt, directory))
+                                   "--output-format", "json"], prompt, directory, timeout=timeout))
         return json.loads(envelope["result"])
 
 
