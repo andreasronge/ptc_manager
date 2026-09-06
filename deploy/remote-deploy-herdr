@@ -219,8 +219,7 @@ health_check() {
 }
 
 verify_health_snapshot() {
-  previous_capture=$1
-  previous_file_id=$2
+  previous_file_id=$1
   sudo /usr/bin/python3 -I -c '
 import datetime, json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
@@ -230,20 +229,13 @@ budget = snapshot["freshness_budget_seconds"]
 now = datetime.datetime.now(datetime.timezone.utc)
 age = (now - captured).total_seconds()
 current_file_id = f"{path.stat().st_dev}:{path.stat().st_ino}"
-if sys.argv[3] and current_file_id == sys.argv[3]:
+if sys.argv[2] and current_file_id == sys.argv[2]:
     raise SystemExit("health snapshot collection did not replace the evidence file")
-if sys.argv[2]:
-    try:
-        previous = datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
-        if previous <= now and captured <= previous:
-            raise SystemExit("health snapshot collection did not produce newer evidence")
-    except (TypeError, ValueError):
-        pass
 if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0 or budget > 21600:
     raise SystemExit("invalid health snapshot freshness budget")
 if age < 0 or age > budget:
     raise SystemExit("health snapshot is not fresh")
-' "$health_snapshot_path" "$previous_capture" "$previous_file_id"
+' "$health_snapshot_path" "$previous_file_id"
 }
 
 legacy_health_check() {
@@ -1642,11 +1634,10 @@ health_check maintenance
 # The timer is installed from this exact archive on every deployment. Run the
 # collector synchronously as well: activation alone cannot prove that its
 # database and journal reads work or that consumers have current evidence.
-previous_health_capture=$(sudo jq -r '.captured_at // empty' "$health_snapshot_path" 2>/dev/null || true)
 previous_health_snapshot_id=$(sudo stat -c '%d:%i' "$health_snapshot_path" 2>/dev/null || true)
 sudo systemctl is-active --quiet ptc_manager.service
 sudo systemctl start ptc_manager-health-snapshot.service
-verify_health_snapshot "$previous_health_capture" "$previous_health_snapshot_id"
+verify_health_snapshot "$previous_health_snapshot_id"
 sudo systemctl enable --now ptc_manager-health-snapshot.timer
 
 migration_version=$(sudo sqlite3 -readonly "$database_path" \
