@@ -99,6 +99,33 @@ class ReviewerContract(unittest.TestCase):
         self.assertIn('preserve your work', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
 
+    def test_existing_cli_state_can_grow_past_four_megabytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory, 'state.sqlite-wal')
+            with state.open('wb') as output:
+                output.truncate(4_000_000)
+            command = [sys.executable, '-c',
+                       'import sys; f = open(sys.argv[1], "ab"); f.write(b"x"); f.flush(); print("ok")',
+                       str(state)]
+            self.assertEqual(helper['run'](command).strip(), 'ok')
+
+    def test_nonzero_exit_retains_bounded_stderr_and_status(self):
+        command = [sys.executable, '-c',
+                   'import sys; sys.stderr.write("review startup failed"); sys.exit(23)']
+        with self.assertRaisesRegex(RuntimeError, 'exit=23.*review startup failed'):
+            helper['run'](command)
+
+    def test_stdout_and_stderr_are_bounded(self):
+        for stream in ('stdout', 'stderr'):
+            with self.assertRaisesRegex(RuntimeError, 'agent_output_too_large'):
+                helper['run']([sys.executable, '-c',
+                               f'import sys; sys.{stream}.write("x" * 1_000_001)'])
+
+    def test_prompt_is_delivered_and_stderr_is_not_result_data(self):
+        command = [sys.executable, '-c',
+                   'import sys; sys.stderr.write("diagnostic"); print(sys.stdin.read())']
+        self.assertEqual(helper['run'](command, prompt='bounded input').strip(), 'bounded input')
+
     def test_process_timeout_is_bounded(self):
         with self.assertRaisesRegex(RuntimeError, 'review_timeout'):
             helper['run']([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.05)

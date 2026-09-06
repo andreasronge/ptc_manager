@@ -32,7 +32,14 @@ defmodule PtcManager.Reviews.Adapter do
            true <- PtcManager.Reviews.valid_result?(decoded) do
         {:ok, decoded}
       else
-        _ -> {:error, :independent_review_failed}
+        {output, status} when is_binary(output) and is_integer(status) ->
+          {:error, {:reviewer_command_failed, status, WorkerHelper.bounded(output)}}
+
+        {:error, reason} ->
+          {:error, {:reviewer_request_failed, reason}}
+
+        _ ->
+          {:error, :invalid_review_result}
       end
     after
       File.rm(request)
