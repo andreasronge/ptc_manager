@@ -103,6 +103,11 @@ The first reviewer bridge supplies a complete patch up to 500 KB and bounded
 issue context, rather than a full interactive repository review. Larger or
 invalid inputs fail closed. Reviews are serialized in a dedicated Oban queue,
 expire after 30 minutes including queue time, and give the CLI 10 minutes.
+The helper caps combined stdout/stderr at 1 MB and retains a bounded failure
+message and exit status for the review record. It does not impose a process-wide
+file-size limit: the worker CLI maintains SQLite databases and WAL files that
+can exceed the review output budget. Diagnostics are untrusted display text;
+only a validated structured result can complete a review.
 A failed assessment consumes its admitted round. The deployed root-owned
 `ptc-manager-worker-review` helper runs as the worker; the normal deployment
 script installs it and its exact sudo rule. Browser demo mode never starts

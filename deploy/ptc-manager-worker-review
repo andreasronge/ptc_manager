@@ -3,41 +3,62 @@
 import json
 import os
 import re
-import resource
+import selectors
 import signal
 import subprocess
 import stat
 import sys
 import tempfile
+import time
 
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
 
 
 def run(command, prompt=None, cwd=None, timeout=600):
-    with tempfile.TemporaryFile() as output:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=output,
-                                   stderr=subprocess.DEVNULL, cwd=cwd, start_new_session=True,
-                                   preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (4_000_000, 4_000_000)))
+    # Bound captured output, not the CLI's persistent databases and WAL files.
+    with tempfile.TemporaryFile() as input_file, selectors.DefaultSelector() as streams:
+        if prompt:
+            input_file.write(prompt.encode())
+        input_file.seek(0)
+        process = subprocess.Popen(command, stdin=input_file, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
+        stdout, stderr = bytearray(), bytearray()
+        captured = 0
+        deadline = time.monotonic() + timeout
+        streams.register(process.stdout, selectors.EVENT_READ, stdout)
+        streams.register(process.stderr, selectors.EVENT_READ, stderr)
         try:
-            process.communicate(input=prompt.encode() if prompt else None, timeout=timeout)
+            while streams.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                for key, _ in streams.select(remaining):
+                    data = os.read(key.fd, 16_384)
+                    if not data:
+                        streams.unregister(key.fileobj)
+                        continue
+                    captured += len(data)
+                    if captured > 1_000_000:
+                        raise RuntimeError("agent_output_too_large")
+                    key.data.extend(data)
+                    if key.data is stderr:
+                        del stderr[:-4_000]
+            process.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise RuntimeError("review_timeout")
+            raise RuntimeError("review_timeout") from None
         finally:
-            # Reviewers may have spawned tools. Their process tree must not
-            # outlive the bounded assessment, even after a successful exit.
+            # Descendants must not outlive the assessment, even after success.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
         if process.returncode:
-            raise RuntimeError("agent_command_failed")
-        output.seek(0)
-        data = output.read(1_000_001)
-        if len(data) > 1_000_000:
-            raise RuntimeError("agent_output_too_large")
-        return data.decode()
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"agent_command_failed exit={process.returncode}: {detail}")
+        return stdout.decode()
 
 
 def catalog(kind):
@@ -127,6 +148,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        print("Review/catalog command failed; check the configured model and worker login.", file=sys.stderr)
+    except Exception as error:
+        print(f"Review/catalog command failed: {type(error).__name__}: {str(error)[-4_000:]}",
+              file=sys.stderr)
         sys.exit(1)
