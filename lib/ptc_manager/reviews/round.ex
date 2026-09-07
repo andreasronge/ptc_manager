@@ -14,6 +14,7 @@ defmodule PtcManager.Reviews.Round do
     field :diff_digest, :string
     field :input, :map
     field :result, :map
+    field :usage, :map
     field :error, :string
     field :failure, :map
     field :expires_at, :utc_datetime_usec
@@ -34,6 +35,7 @@ defmodule PtcManager.Reviews.Round do
       :diff_digest,
       :input,
       :result,
+      :usage,
       :error,
       :failure,
       :expires_at

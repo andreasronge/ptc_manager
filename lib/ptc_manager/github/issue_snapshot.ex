@@ -66,9 +66,15 @@ defmodule PtcManager.GitHub.IssueSnapshot do
       github_author_login: author_login(remote["author_login"]),
       github_labels: %{"names" => label_names(remote["labels"] || [])},
       github_created_at: created_at,
+      github_comment_count: comment_count(remote["comments"]),
+      comments_checked_at:
+        if(is_integer(comment_count(remote["comments"])), do: DateTime.utc_now()),
       github_updated_at: updated_at
     }
   end
+
+  defp comment_count(n) when is_integer(n) and n >= 0, do: n
+  defp comment_count(_), do: nil
 
   def digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 

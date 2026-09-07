@@ -20,6 +20,8 @@ defmodule PtcManager.Operations.Issue do
     field :content_digest, :string
     field :github_author_login, :string
     field :github_labels, :map, default: %{"names" => []}
+    field :github_comment_count, :integer
+    field :comments_checked_at, :utc_datetime_usec
     field :github_created_at, :utc_datetime_usec
     field :github_updated_at, :utc_datetime_usec
 
@@ -52,6 +54,8 @@ defmodule PtcManager.Operations.Issue do
       :content_digest,
       :github_author_login,
       :github_labels,
+      :github_comment_count,
+      :comments_checked_at,
       :github_created_at,
       :github_updated_at
     ])
@@ -65,6 +69,7 @@ defmodule PtcManager.Operations.Issue do
       :content_digest,
       :github_updated_at
     ])
+    |> validate_number(:github_comment_count, greater_than_or_equal_to: 0)
     |> validate_number(:number, greater_than: 0)
     |> validate_number(:dependency_unknown_count, greater_than_or_equal_to: 0)
     |> validate_inclusion(:state, ["open", "closed"])

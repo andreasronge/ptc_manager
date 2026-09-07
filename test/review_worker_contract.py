@@ -93,7 +93,7 @@ class ReviewerContract(unittest.TestCase):
             Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
             return json.dumps({'type': 'thread.started', 'thread_id': session})
         with patch.dict(context, run=fake_run):
-            self.assertEqual(review(request), {'result': expected, 'session_id': session})
+            self.assertEqual(review(request), {'result': expected, 'session_id': session, 'usage': None})
 
     def test_reviewer_uses_exact_repository_and_can_read_linked_requirements(self):
         request = self.request()
@@ -260,6 +260,14 @@ pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_text(json.dumps({'summary
             events.feed(event + b'\n')
         with self.assertRaisesRegex(RuntimeError, 'missing_reviewer_session'):
             helper['CodexSessionEvents']().result()
+
+    def test_token_usage_is_per_invocation_and_cached_input_is_not_added_again(self):
+        for _ in range(2):
+            events = helper['CodexSessionEvents']()
+            events.feed(json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'}).encode() + b'\n')
+            for usage in [{'input_tokens': 100, 'cached_input_tokens': 60, 'output_tokens': 10}, {'input_tokens': 50, 'cached_input_tokens': 30, 'output_tokens': 5}]:
+                events.feed(json.dumps({'type': 'turn.completed', 'usage': usage}).encode()+b'\n')
+            self.assertEqual(json.loads(events.result())['usage'], {'input_tokens': 150, 'cached_input_tokens': 90, 'output_tokens': 15})
 
     def test_streamed_progress_still_enforces_exit_status_timeout_and_result_file_limit(self):
         with self.assertRaisesRegex(RuntimeError, 'exit=23.*useful failure'):

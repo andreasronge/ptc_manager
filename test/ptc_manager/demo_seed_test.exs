@@ -31,8 +31,9 @@ defmodule PtcManager.DemoSeedTest do
 
     assert Repo.aggregate(Repository, :count) == 1
     assert Repo.aggregate(Issue, :count) == 8
-    assert Repo.aggregate(AgentRun, :count) == 2
-    assert Repo.aggregate(ResourceOperation, :count) == 6
+    assert Repo.aggregate(AgentRun, :count) == 3
+    assert Enum.count(Repo.all(AgentRun), &(&1.state == "working")) == 2
+    assert Repo.aggregate(ResourceOperation, :count) == 10
     assert Repo.get_by!(ResourceOperation, state: "running").label == "test"
 
     # Every issue carries the ages, author, and labels Planning groups by.
@@ -41,6 +42,27 @@ defmodule PtcManager.DemoSeedTest do
     assert Repo.get_by!(Issue, number: 1331).github_labels == %{"names" => ["wait", "ux"]}
     assert Repo.one!(Repository).github_viewer_login == "andreasronge"
 
+    ready = Repo.get_by!(PrPublication, pr_number: 1319)
+    assert ready.checks_state == "success"
+
+    item =
+      Enum.find(
+        PtcManager.Operations.delivery_board_items(),
+        &(&1.publication && &1.publication.id == ready.id)
+      )
+
+    assert item
+    assert PtcManager.Operations.DeliveryLane.lane_for(item) == :ready
+    report = PtcManager.DeliveryReport.load(ready.job_id)
+    assert length(report.rounds) == 3
+    assert report.usage.measured == 2
+    assert report.ready_ms >= 4_680_000
+
+    for op <- report.operations do
+      event = Enum.find(report.events, &(&1.source == "Operation ##{op.id}"))
+      assert event.at == op.finished_at
+    end
+
     # One merged pull request the agent labelled as having unfinished business.
     follow_up = Repo.get_by!(PrPublication, pr_number: 1_311)
     assert follow_up.pr_state == "merged"
@@ -48,7 +70,7 @@ defmodule PtcManager.DemoSeedTest do
 
     job = Repo.get_by!(Job, state: "working")
     repository = Repo.one!(Repository)
-    allocation = Repo.one!(WorktreeAllocation)
+    allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
 
     assert is_nil(repository.local_path)
     assert repository.required_pre_pr_reviews == 2

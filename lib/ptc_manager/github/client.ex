@@ -263,6 +263,7 @@ defmodule PtcManager.GitHub.Client do
       "state_reason" => normalize_enum(issue["stateReason"]),
       "author_login" => get_in(issue, ["author", "login"]),
       "created_at" => issue["createdAt"],
+      "comments" => get_in(issue, ["comments", "totalCount"]),
       "updated_at" => issue["updatedAt"],
       "labels" => get_in(issue, ["labels", "nodes"]) || [],
       "assignees" => get_in(issue, ["assignees", "nodes"]) || [],
@@ -356,7 +357,7 @@ defmodule PtcManager.GitHub.Client do
 
   defp issue_fields do
     """
-    number title url body state stateReason createdAt updatedAt
+    number title url body state stateReason createdAt updatedAt comments { totalCount }
     author { login }
     labels(first: 100) { nodes { name } }
     assignees(first: 100) { nodes { login } }

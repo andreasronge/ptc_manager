@@ -1505,6 +1505,8 @@ defmodule PtcManager.Publications do
       :mergeability,
       :mergeable_state,
       :checks_state,
+      :comment_count,
+      :inline_comment_count,
       :checks_total,
       :checks_failed,
       :checks_pending

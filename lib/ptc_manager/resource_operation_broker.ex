@@ -214,6 +214,7 @@ defmodule PtcManager.ResourceOperationBroker do
            ResourceOperations.finish(operation.id, request["attempt_token"], %{
              exit_status: request["exit_status"],
              peak_memory_bytes: request["peak_memory_bytes"],
+             resource_metrics: request["resource_metrics"],
              last_error: request["last_error"]
            }) do
       operation_response(operation)

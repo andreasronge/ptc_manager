@@ -3398,7 +3398,10 @@ defmodule PtcManager.Operations do
         execution_settings:
           Map.merge(execution.settings, %{
             "issue_title" => issue.title,
-            "issue_body" => String.slice(issue.body || "", 0, 20_000)
+            "issue_body" => String.slice(issue.body || "", 0, 20_000),
+            "issue_comment_count_at_submission" => issue.github_comment_count,
+            "issue_comments_observed_at_submission" =>
+              if(issue.comments_checked_at, do: DateTime.to_iso8601(issue.comments_checked_at))
           }),
         review_state: if(execution.budget == 0, do: "skipped", else: "pending")
       })
