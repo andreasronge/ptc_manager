@@ -807,7 +807,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           current = PtcManager.Repo.get!(PtcManager.Operations.Job, job.id)
 
           unless current.review_state == "resume_pending" and
-                   current.review_generation == job.review_generation,
+                   current.review_generation == job.review_generation and
+                   not is_nil(current.review_resume_expires_at) and
+                   DateTime.compare(current.review_resume_expires_at, DateTime.utc_now()) == :gt,
                  do: PtcManager.Repo.rollback(:stale_continuation)
 
           run

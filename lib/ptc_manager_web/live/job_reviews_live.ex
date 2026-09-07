@@ -136,6 +136,12 @@ defmodule PtcManagerWeb.JobReviewsLive do
           <h2 class="font-semibold">Last continuation instructions</h2>
           <p class="whitespace-pre-wrap">{@job.review_continuation_instructions}</p>
         </div>
+        <p :if={@job.review_state == "resume_pending"}>
+          {if is_nil(@job.review_resume_expires_at),
+            do:
+              "Continuation queued. Your workspace is preserved while waiting for the previous agent to stop and a worker slot to become free.",
+            else: "A worker slot is reserved and the retained work is starting."}
+        </p>
         <p :if={@job.last_error} class="text-amber-200">{@job.last_error}</p>
         <p :if={@job.review_state == "manual"}>
           Confirm the retained agent has stopped in Operations before editing the workspace.

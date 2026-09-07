@@ -2965,11 +2965,76 @@ defmodule PtcManager.Operations do
         state: allocation_state,
         job: %Job{state: job_state} = job
       }) do
-    allocation_state in ["reserved", "active"] or job_state in @capacity_job_states or
-      execution_run_active?(job)
+    not review_capacity_released?(job) and
+      (allocation_state in ["reserved", "active"] or job_state in @capacity_job_states or
+         execution_run_active?(job))
   end
 
   def worktree_consumes_execution_slot?(_allocation), do: false
+
+  @doc "A retained review workspace is not a slot once its implementer is confirmed stopped."
+  def review_capacity_released?(%Job{state: state, agent_runs: runs} = job)
+      when state in ~w(blocked working idle) and is_list(runs) do
+    waiting =
+      job.review_state in ~w(paused manual) or
+        (job.review_state == "resume_pending" and is_nil(job.review_resume_expires_at))
+
+    waiting and
+      Enum.any?(
+        runs,
+        &(&1.role == "implementer" and &1.fencing_token == job.fencing_token and
+            &1.state in ~w(done failed lost))
+      ) and
+      Enum.all?(runs, &(&1.role != "implementer" or &1.state in ~w(done failed lost)))
+  end
+
+  def review_capacity_released?(_job), do: false
+
+  defp released_review_job_ids(repo \\ Repo) do
+    Job
+    |> where([job], job.review_state in ~w(paused manual resume_pending))
+    |> preload(:agent_runs)
+    |> repo.all()
+    |> Enum.filter(&review_capacity_released?/1)
+    |> Enum.map(& &1.id)
+  end
+
+  @doc "Atomically reserves shared worker capacity before resuming retained review work."
+  def claim_review_continuation(id, generation) do
+    RepoTransaction.immediate(fn ->
+      job =
+        Repo.get!(Job, id)
+        |> Repo.preload([:repository, :issue, :agent_runs, worktree_allocation: :worker])
+
+      unless job.review_state == "resume_pending" and job.review_generation == generation,
+        do: Repo.rollback(:stale_continuation)
+
+      unless is_nil(job.review_resume_expires_at),
+        do: Repo.rollback(:continuation_already_claimed)
+
+      unless job.worktree_allocation && job.worktree_allocation.state != "removed",
+        do: Repo.rollback(:retained_workspace_not_ready)
+
+      unless review_capacity_released?(job), do: Repo.rollback(:retained_agent_not_stopped)
+
+      worker = job.worktree_allocation.worker
+      now = utc_now()
+
+      with :ok <- repository_dispatch_unlocked(job.repository_id),
+           :ok <- heavy_delivery_priority_unlocked(),
+           {:ok, capacity} <- worker_execution_capacity(worker),
+           :ok <- dispatch_capacity_available(Repo, worker, capacity, now) do
+        job
+        |> Job.changeset(%{
+          review_resume_expires_at: DateTime.add(now, 600, :second),
+          last_error: nil
+        })
+        |> Repo.update!()
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
 
   defp execution_run_active?(%Job{agent_runs: runs}) when is_list(runs),
     do: Enum.any?(runs, &(&1.role == "implementer" and &1.state in @capacity_run_states))
@@ -3387,6 +3452,8 @@ defmodule PtcManager.Operations do
     |> where([candidate], candidate.id == ^worker.id)
     |> repo.update_all(set: [updated_at: now])
 
+    released_reviews = released_review_job_ids(repo)
+
     active_allocation_count =
       WorktreeAllocation
       |> join(:inner, [allocation], job in Job,
@@ -3395,7 +3462,7 @@ defmodule PtcManager.Operations do
       )
       |> where(
         [allocation, job],
-        allocation.worker_id == ^worker.id and
+        allocation.worker_id == ^worker.id and job.id not in ^released_reviews and
           (allocation.state in ["reserved", "active"] or
              job.state in ^@capacity_job_states or
              exists(
@@ -3413,6 +3480,7 @@ defmodule PtcManager.Operations do
       |> where(
         [job],
         job.lease_owner == ^worker.worker_key and job.state in ^@capacity_job_states and
+          job.id not in ^released_reviews and
           not exists(
             from allocation in WorktreeAllocation,
               where: allocation.job_id == parent_as(:legacy_job).id
@@ -4259,8 +4327,10 @@ defmodule PtcManager.Operations do
   end
 
   defp active_writing_repository_ids do
+    released_reviews = released_review_job_ids()
+
     Job
-    |> where([job], job.state in ^@capacity_job_states)
+    |> where([job], job.state in ^@capacity_job_states and job.id not in ^released_reviews)
     |> select([job], job.repository_id)
   end
 
@@ -4364,10 +4434,13 @@ defmodule PtcManager.Operations do
   end
 
   defp repository_writing_job_active?(repository_id) do
+    released_reviews = released_review_job_ids()
+
     Job
     |> where(
       [job],
-      job.repository_id == ^repository_id and job.state in ^@capacity_job_states
+      job.repository_id == ^repository_id and job.state in ^@capacity_job_states and
+        job.id not in ^released_reviews
     )
     |> Repo.exists?()
   end

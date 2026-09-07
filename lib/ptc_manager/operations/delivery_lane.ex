@@ -24,9 +24,9 @@ defmodule PtcManager.Operations.DeliveryLane do
   def lane_for(item) do
     cond do
       stopped?(item) -> :stuck
-      job_state(item) == "queued" -> :queued
+      job_state(item) == "queued" or continuation_queued?(item) -> :queued
       stuck?(item) -> :stuck
-      review_in_progress?(item) -> :working
+      review_in_progress?(item) or continuation_starting?(item) -> :working
       ready?(item) -> :ready
       true -> :working
     end
@@ -44,9 +44,28 @@ defmodule PtcManager.Operations.DeliveryLane do
 
   def review_in_progress?(_item), do: false
 
+  def continuation_queued?(%{
+        active_job: %{state: state, review_state: "resume_pending", review_resume_expires_at: nil}
+      })
+      when state in ~w(blocked working idle), do: true
+
+  def continuation_queued?(_item), do: false
+
+  def continuation_starting?(%{
+        active_job: %{
+          state: state,
+          review_state: "resume_pending",
+          review_resume_expires_at: %DateTime{}
+        }
+      })
+      when state in ~w(blocked working idle), do: true
+
+  def continuation_starting?(_item), do: false
+
   def stuck?(item) do
     stopped?(item) or
-      (not review_in_progress?(item) and
+      (not review_in_progress?(item) and not continuation_starting?(item) and
+         not continuation_queued?(item) and
          (PtcManager.Reviews.held?(item.active_job) or
             job_state(item) in ["blocked", "reconciling", "publish_blocked", "failed", "lost"])) or
       unreconciled?(item) or
