@@ -17,6 +17,28 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     end
   end
 
+  test "a waiting continuation is queued and a reserved continuation shows progress", %{
+    conn: conn
+  } do
+    job = approved_job("Continue retained work") |> set_job_state("blocked")
+
+    job =
+      job
+      |> Job.changeset(%{review_state: "resume_pending", review_resume_expires_at: nil})
+      |> Repo.update!()
+
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#lane-queued #board-job-#{job.id}", "Continuation queued")
+    refute has_element?(view, "#lane-stuck #board-job-#{job.id}")
+
+    job
+    |> Job.changeset(%{review_resume_expires_at: DateTime.add(DateTime.utc_now(), 600)})
+    |> Repo.update!()
+
+    Operations.notify_changed(:test)
+    assert has_element?(view, "#lane-working #board-job-#{job.id}", "Continuation starting")
+  end
+
   test "a paused review has a clear decision link even during reconciliation", %{conn: conn} do
     job = approved_job("Decide on remaining findings") |> set_job_state("reconciling")
 

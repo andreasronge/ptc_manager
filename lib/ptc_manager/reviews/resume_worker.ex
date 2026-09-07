@@ -11,45 +11,72 @@ defmodule PtcManager.Reviews.ResumeWorker do
   end
 
   defp resume(id, generation) do
-    job =
-      Repo.get!(Job, id) |> Repo.preload([:repository, :issue, :worktree_allocation, :agent_runs])
+    case PtcManager.Operations.claim_review_continuation(id, generation) do
+      {:ok, job} ->
+        launch(job)
 
-    if job.review_state == "resume_pending" and job.review_generation == generation do
-      adapter =
-        Application.get_env(
-          :ptc_manager,
-          :review_resume_adapter,
-          PtcManager.Dispatch.HerdrAdapter
-        )
+      {:error, reason}
+      when reason in [
+             :dispatch_capacity,
+             :worker_unavailable,
+             :database_busy,
+             :merge_priority,
+             :delivery_priority,
+             :retained_agent_not_stopped
+           ] ->
+        {:snooze, 10}
 
-      outcome =
-        try do
-          adapter.resume_review_job(job)
-        rescue
-          _ -> {:error, :continuation_failed}
-        end
+      {:error, reason} when reason in [:stale_continuation, :continuation_already_claimed] ->
+        :ok
 
-      RepoTransaction.immediate(fn ->
-        current = Repo.get!(Job, id)
-
-        if current.review_state in ["resume_pending", "changes_requested"] and
-             current.review_generation == generation do
-          state = if match?({:ok, _}, outcome), do: "changes_requested", else: "paused"
-
-          current
-          |> Job.changeset(%{
-            review_state: state,
-            review_resume_expires_at: nil,
-            last_error:
-              if(state == "paused", do: "Continuation could not start; the work is preserved.")
-          })
-          |> Repo.update!()
-        end
-      end)
-
-      PtcManager.ExecutionProfiles.notify()
+      {:error, _reason} ->
+        finish(id, generation, {:error, :retained_workspace_not_ready}, false)
+        :ok
     end
+  end
 
+  defp launch(job) do
+    adapter =
+      Application.get_env(:ptc_manager, :review_resume_adapter, PtcManager.Dispatch.HerdrAdapter)
+
+    outcome =
+      try do
+        adapter.resume_review_job(job)
+      rescue
+        _ -> {:error, :continuation_failed}
+      end
+
+    finish(job.id, job.review_generation, outcome, true)
     :ok
+  end
+
+  defp finish(id, generation, outcome, reserved?) do
+    RepoTransaction.immediate(fn ->
+      current = Repo.get!(Job, id)
+
+      if current.review_state in ["resume_pending", "changes_requested"] and
+           current.review_generation == generation do
+        success = match?({:ok, _}, outcome)
+
+        current
+        |> Job.changeset(%{
+          state:
+            if(success,
+              do: "working",
+              else: if(reserved?, do: "reconciling", else: current.state)
+            ),
+          review_state: if(success, do: "changes_requested", else: "paused"),
+          review_resume_expires_at: nil,
+          last_error:
+            if(not success,
+              do:
+                "Continuation could not start; the work is preserved. Confirm the retained agent state before retrying."
+            )
+        })
+        |> Repo.update!()
+      end
+    end)
+
+    PtcManager.ExecutionProfiles.notify()
   end
 end

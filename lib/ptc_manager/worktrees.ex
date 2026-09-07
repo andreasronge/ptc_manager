@@ -106,7 +106,8 @@ defmodule PtcManager.Worktrees do
         {:error, :worktree_allocation_missing}
 
       %WorktreeAllocation{state: "attention"} = allocation ->
-        if Operations.worktree_consumes_execution_slot?(allocation) do
+        if PtcManager.Reviews.held?(allocation.job) or
+             Operations.worktree_consumes_execution_slot?(allocation) do
           {:error, :worktree_in_use}
         else
           remove_retained(allocation, adapter, :discard_worktree, %{

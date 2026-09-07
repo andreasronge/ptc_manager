@@ -535,9 +535,19 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       "Review needs your decision. Open the findings to continue existing work, take over, or cancel."
 
   def next_step(item, lane) do
-    if DeliveryLane.review_in_progress?(item),
-      do: "The review is running. No decision is needed yet; open review progress for details.",
-      else: phase_next_step(item, lane)
+    cond do
+      DeliveryLane.continuation_queued?(item) ->
+        "Continuation queued; waiting for the previous agent to stop and a worker slot to become free."
+
+      DeliveryLane.continuation_starting?(item) ->
+        "A worker slot is reserved; the retained work is starting."
+
+      DeliveryLane.review_in_progress?(item) ->
+        "The review is running. No decision is needed yet; open review progress for details."
+
+      true ->
+        phase_next_step(item, lane)
+    end
   end
 
   defp phase_next_step(_item, :queued),
@@ -700,15 +710,31 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   def card_id(%{active_job: %{id: id}}), do: "board-job-#{id}"
   def card_id(%{publication: %{id: id}}), do: "board-pr-#{id}"
 
-  def delivery_state(%{active_job: %{state: state}} = item),
-    do: if(DeliveryLane.review_in_progress?(item), do: "working", else: state)
+  def delivery_state(%{active_job: %{state: state}} = item) do
+    cond do
+      DeliveryLane.continuation_queued?(item) ->
+        "queued"
+
+      DeliveryLane.continuation_starting?(item) or DeliveryLane.review_in_progress?(item) ->
+        "working"
+
+      true ->
+        state
+    end
+  end
 
   def delivery_state(_item), do: "pr_open"
 
   def delivery_label(%{managed?: false}), do: "External PR"
 
-  def delivery_label(%{active_job: %{state: state}} = item),
-    do: if(DeliveryLane.review_in_progress?(item), do: "Under review", else: status_label(state))
+  def delivery_label(%{active_job: %{state: state}} = item) do
+    cond do
+      DeliveryLane.continuation_queued?(item) -> "Continuation queued"
+      DeliveryLane.continuation_starting?(item) -> "Continuation starting"
+      DeliveryLane.review_in_progress?(item) -> "Under review"
+      true -> status_label(state)
+    end
+  end
 
   def repository_label(item), do: item.repository.github_name
 

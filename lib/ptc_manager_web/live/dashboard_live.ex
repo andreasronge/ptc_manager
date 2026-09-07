@@ -694,7 +694,9 @@ defmodule PtcManagerWeb.DashboardLive do
   def worktree_state_label(state), do: state |> String.replace("_", " ")
 
   def discardable_worktree?(%{state: "attention"} = allocation),
-    do: not Operations.worktree_consumes_execution_slot?(allocation)
+    do:
+      not PtcManager.Reviews.held?(allocation.job) and
+        not Operations.worktree_consumes_execution_slot?(allocation)
 
   def discardable_worktree?(_allocation), do: false
 

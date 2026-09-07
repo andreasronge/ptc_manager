@@ -165,6 +165,11 @@ defmodule PtcManager.Reviews do
            job.review_generation == expected.review_generation and
            job.review_state == expected.review_state do
         update_job(job, %{
+          state:
+            if(expected.review_state in ~w(resume_pending changes_requested),
+              do: "reconciling",
+              else: job.state
+            ),
           review_state: "paused",
           last_error: to_string(reason),
           lease_expires_at: nil,
@@ -330,7 +335,7 @@ defmodule PtcManager.Reviews do
             review_state: "resume_pending",
             reviewed_head_sha: nil,
             review_generation: generation + 1,
-            review_resume_expires_at: DateTime.add(DateTime.utc_now(), 600, :second)
+            review_resume_expires_at: nil
           })
 
         %{job_id: id, generation: saved.review_generation}

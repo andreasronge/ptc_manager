@@ -118,8 +118,14 @@ Manual takeover and cancellation do not send the field to an agent. An idle reta
 pane is replaced using an explicitly directed Herdr split; it does not reset
 files or start a replacement job. Each continuation receives a fresh stop-report
 identity, so an earlier agent’s failure cannot overwrite its successful result. An unavailable or busy retained agent leaves
-a visible pause for recovery. Paused work reserves its existing implementation
-capacity. Manual takeover requests the retained pane to stop; confirm it has
+a visible pause for recovery. Paused and manual-takeover work releases implementation capacity once its
+implementer is confirmed stopped. Live, idle, blocked, or unknown agents continue
+to occupy capacity until their stopped state is observed. The worktree and review
+history stay preserved. **Continue existing work** queues a continuation, which
+reserves a slot through the same capacity gate as new implementations and repairs
+before launching. Queue waiting has no launch timeout; the bounded launch window
+starts only when a slot is reserved. An interrupted or uncertain launch keeps its
+slot until reconciliation confirms the outcome. Manual takeover requests the retained pane to stop; confirm it has
 stopped before editing. Cancellation requires a private reason and preserves
 all work. Posting an explanation on GitHub is a separate, editable approval.
 
