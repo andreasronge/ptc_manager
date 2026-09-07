@@ -108,6 +108,42 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
     assert Repo.get!(Job, job.id).review_state == "resume_pending"
   end
 
+  test "override records the maintainer decision and queues the reviewed commit", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "maintainer", 1, "small")
+    job = job |> Job.changeset(%{state: "working", fencing_token: 1}) |> Repo.update!()
+    {:ok, round} = PtcManager.Reviews.request(job.id, 1, "override", snapshot: Snapshot)
+    {:ok, view, _} = conn |> login() |> live("/jobs/#{job.id}/reviews")
+    refute has_element?(view, "#review-override")
+    PtcManager.Reviews.fail(round.id, :review_timeout)
+    worker = worker_fixture()
+
+    Repo.insert!(%PtcManager.Operations.WorktreeAllocation{
+      job_id: job.id,
+      worker_id: worker.id,
+      state: "active",
+      last_used_at: DateTime.utc_now()
+    })
+
+    assert has_element?(view, "#review-override", round.head_sha)
+
+    view
+    |> form("#review-override", decision: %{reason: "I verified this myself."})
+    |> render_submit()
+
+    updated = Repo.get!(Job, job.id)
+    assert updated.review_state == "resume_pending"
+    assert updated.review_resume_mode == "publication"
+    assert updated.reviewed_head_sha == round.head_sha
+    [approval] = PtcManager.Reviews.Override.list(job.id)
+    assert approval.actor == "maintainer"
+    assert has_element?(view, "#review-override-#{approval.id}", "I verified this myself.")
+    refute has_element?(view, "form#review-override")
+    assert Repo.get!(PtcManager.Reviews.Round, round.id).state == "failed"
+  end
+
   test "handoff expansion survives operation updates and round completion", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)
