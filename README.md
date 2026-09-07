@@ -186,13 +186,18 @@ reviewer model, provider, or effort starts a fresh session with the last useful
 review and handoff. A missing native session permits one fresh start within the
 original timeout; other execution failures still pause. The review history shows
 when this fallback was needed. Session IDs come from the CLI's structured metadata,
-never from model-authored review text or a machine-wide “last session.”
+never from model-authored review text or a machine-wide “last session.” Codex
+progress events are streamed and discarded after extracting bounded session
+metadata, so verbose tool output cannot exhaust the transcript capture limit.
+Diagnostics retain only a bounded tail; the deadline, exit-status check, and
+separate bounded assessment file still apply.
 
 The coding agent can pass a short plain-text note with
 `$PTC_OPERATION_WRAPPER review --handoff-file /absolute/path/to/note.txt`.
 The file can live outside the worktree and is optional, UTF-8, and limited to 20 KB.
 No template is required: explain changes, validation, and responses to findings.
-The review page shows this note, and the reviewer's summary serves as its return
+The review page keeps this note expanded across live refreshes until you close it.
+The reviewer's summary serves as its return
 handoff. These notes explain the work; they do not add requirements or approve it.
 Resumed reviewers receive the current note rather than a replay of all reviews.
 A restarted coding agent receives the last completed assessment and useful note;

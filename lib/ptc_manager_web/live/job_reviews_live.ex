@@ -11,12 +11,28 @@ defmodule PtcManagerWeb.JobReviewsLive do
      |> assign(
        page_title: "Job reviews",
        actor: session["actor"] || "maintainer",
-       job_id: String.to_integer(id)
+       job_id: String.to_integer(id),
+       expanded_handoffs: MapSet.new()
      )
      |> load_job()}
   end
 
   def handle_info({:operations_changed, _}, socket), do: {:noreply, load_job(socket)}
+
+  def handle_event("toggle-handoff", %{"round-id" => id}, socket) do
+    expanded = socket.assigns.expanded_handoffs
+
+    if Enum.any?(socket.assigns.rounds, &(to_string(&1.id) == id)) do
+      updated =
+        if MapSet.member?(expanded, id),
+          do: MapSet.delete(expanded, id),
+          else: MapSet.put(expanded, id)
+
+      {:noreply, assign(socket, expanded_handoffs: updated)}
+    else
+      {:noreply, socket}
+    end
+  end
 
   def handle_event("decide", %{"decision" => params}, socket) do
     with {generation, ""} <- Integer.parse(params["generation"]),
@@ -266,10 +282,29 @@ defmodule PtcManagerWeb.JobReviewsLive do
           <p :if={round.input["reviewer_session_note"]} class="mt-2 text-amber-200">
             {round.input["reviewer_session_note"]}
           </p>
-          <details :if={round.input["handoff"] not in [nil, ""]} class="mt-3">
-            <summary class="cursor-pointer text-teal-300">Coding agent handoff</summary>
-            <p class="mt-2 whitespace-pre-wrap">{round.input["handoff"]}</p>
-          </details>
+          <div :if={round.input["handoff"] not in [nil, ""]} class="mt-3">
+            <button
+              id={"handoff-toggle-#{round.id}"}
+              type="button"
+              phx-click="toggle-handoff"
+              phx-value-round-id={round.id}
+              aria-expanded={to_string(MapSet.member?(@expanded_handoffs, to_string(round.id)))}
+              aria-controls={"handoff-body-#{round.id}"}
+              class="cursor-pointer text-teal-300"
+            >
+              <span aria-hidden="true">
+                {if MapSet.member?(@expanded_handoffs, to_string(round.id)), do: "▾", else: "▸"}
+              </span>
+              Coding agent handoff
+            </button>
+            <p
+              :if={MapSet.member?(@expanded_handoffs, to_string(round.id))}
+              id={"handoff-body-#{round.id}"}
+              class="mt-2 whitespace-pre-wrap"
+            >
+              {round.input["handoff"]}
+            </p>
+          </div>
           <div :if={round.result} class="mt-3">
             <p class="whitespace-pre-wrap">{round.result["summary"]}</p>
             <ul class="mt-3 space-y-2">
