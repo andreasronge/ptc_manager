@@ -688,6 +688,36 @@ defmodule PtcManager.PublisherTest do
     assert Publications.next_agent_for_discovery() == nil
   end
 
+  test "missing agent PR discovery stops at a finite budget and preserves the job" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, _} = verified_publication_fixture()
+
+    for _ <- 1..5 do
+      assert {:ok, _} =
+               Publications.record_agent_discovery_retry(
+                 publication.id,
+                 String.duplicate("x", 2_000),
+                 60_000
+               )
+    end
+
+    stopped = Repo.get!(PrPublication, publication.id)
+    assert stopped.state == "blocked"
+    assert stopped.attempt_count == 5
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+
+    assert {:error, :invalid_publication_state} =
+             Publications.record_agent_discovery_retry(publication.id, :offline, 60_000)
+
+    assert {:ok, _} = Publications.retry_blocked(publication.id, "maintainer")
+  end
+
   test "retry wakes agent discovery after agent publication mode is disabled" do
     previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
     Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
@@ -805,6 +835,34 @@ defmodule PtcManager.PublisherTest do
     assert failed.pre_publication_verified_sha == result.head_sha
     assert failed.pre_publication_exit_status == 7
     assert failed.pre_publication_output == "dialyzer failed"
+    {:ok, settings, _} = PtcManager.ExecutionProfiles.freeze(nil, "standard", nil)
+
+    failed =
+      failed
+      |> Job.changeset(%{
+        execution_settings: settings,
+        review_state: "passed",
+        required_review_count: 2
+      })
+      |> Repo.update!()
+
+    assert PtcManager.Reviews.decision_available?(failed)
+
+    assert {:ok, pending} =
+             PtcManager.Reviews.decide(
+               job.id,
+               failed.review_generation,
+               "continue",
+               %{},
+               "maintainer"
+             )
+
+    assert pending.state == "blocked"
+    assert pending.review_state == "resume_pending"
+    assert Repo.get!(PrPublication, publication.id).state == "blocked"
+
+    assert {:error, :stale_verified_result} =
+             Publications.retry_blocked(publication.id, "maintainer")
   end
 
   test "database contention at the gate is retryable" do

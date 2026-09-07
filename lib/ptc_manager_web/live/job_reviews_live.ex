@@ -67,10 +67,16 @@ defmodule PtcManagerWeb.JobReviewsLive do
 
     assign(socket,
       job: job,
+      retry_available: Reviews.retry_available?(job),
       rounds: rounds,
+      last_clean:
+        Enum.find(
+          Enum.reverse(rounds),
+          &(&1.state == "completed" and &1.result["findings"] == [])
+        ),
       completed_count: Enum.count(rounds, &(&1.state == "completed")),
       failed_count: Enum.count(rounds, &(&1.state == "failed")),
-      active_count: Enum.count(rounds, &(&1.state in ~w(queued running))),
+      active_count: Enum.count(rounds, &(&1.state in ~w(preparing queued running))),
       latest_failed: match?(%{state: "failed"}, List.last(rounds)),
       profiles: PtcManager.ExecutionProfiles.list()
     )
@@ -115,6 +121,9 @@ defmodule PtcManagerWeb.JobReviewsLive do
                 ),
               else: "Review status: #{review_status(@job.review_state)}"}
           </h2>
+          <p :if={@last_clean && @job.review_state != "passed"} class="text-amber-200">
+            The earlier green review covers commit {@last_clean.head_sha}. It does not approve later edits.
+          </p>
           <p>{@completed_count} of {@job.required_review_count} completed reviews · Work preserved</p>
           <p>{@failed_count} failed attempts · {@active_count} in progress</p>
           <p>Review timeout: {div(Reviews.timeout_ms(@job), 60_000)} minutes</p>
@@ -147,7 +156,7 @@ defmodule PtcManagerWeb.JobReviewsLive do
           Confirm the retained agent has stopped in Operations before editing the workspace.
         </p>
         <.form
-          :if={@job.review_state in ~w(paused manual)}
+          :if={Reviews.decision_available?(@job)}
           for={%{}}
           as={:decision}
           id="review-decision"
@@ -170,6 +179,10 @@ defmodule PtcManagerWeb.JobReviewsLive do
                 value={profile.name}
               >{String.capitalize(profile.name)} · {profile.kind}/{profile.model} · reviewer {profile.reviewer_kind}/{profile.reviewer_model}</option></select>
           </label>
+          <p class="text-sm text-slate-400">
+            Retry review only runs the assessment without starting an implementer. If it passes,
+            a continuation publishes the reviewed commit. Continue existing work starts an implementer to make changes first.
+          </p>
           <p class="text-sm text-slate-400">
             Changing profile selects its implementation and reviewer models and review timeout. The same branch, files and review history are retained.
           </p>
@@ -195,11 +208,20 @@ defmodule PtcManagerWeb.JobReviewsLive do
           </label>
           <div class="flex flex-wrap gap-3">
             <button
+              :if={@job.review_state != "resume_pending"}
               name="decision[action]"
               value="continue"
               class="rounded bg-teal-300 px-4 py-2 text-slate-950"
             >
               Continue existing work
+            </button>
+            <button
+              :if={@retry_available}
+              name="decision[action]"
+              value="retry_review"
+              class="rounded bg-sky-300 px-4 py-2 text-slate-950"
+            >
+              Retry review only
             </button>
             <button name="decision[action]" value="manual" class="rounded bg-white/10 px-4 py-2">
               Take over manually
@@ -237,6 +259,9 @@ defmodule PtcManagerWeb.JobReviewsLive do
         >
           <h2 class="font-semibold">Attempt {round.number} · {round.state}</h2>
           <p class="break-all text-xs text-slate-400">Commit {round.head_sha}</p>
+          <p :if={round.input["snapshot_cleanup_error"]} class="mt-2 text-amber-200">
+            Snapshot cleanup pending: {round.input["snapshot_cleanup_error"]}
+          </p>
           <p :if={round.error} class="mt-2 text-amber-200">{round.error}</p>
           <div :if={round.result} class="mt-3">
             <p>{round.result["summary"]}</p>

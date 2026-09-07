@@ -657,7 +657,11 @@ defmodule PtcManager.Operations do
       Repo.transaction(fn ->
         {updated, _rows} =
           Job
-          |> where([job], job.id == ^job_id and job.state in ^@cancellable_job_states)
+          |> where(
+            [job],
+            job.id == ^job_id and job.state in ^@cancellable_job_states and
+              is_nil(job.review_recovery_expires_at)
+          )
           |> Repo.update_all(
             set: [
               state: "cancelled",
@@ -2977,7 +2981,8 @@ defmodule PtcManager.Operations do
       when state in ~w(blocked working idle) and is_list(runs) do
     waiting =
       job.review_state in ~w(paused manual) or
-        (job.review_state == "resume_pending" and is_nil(job.review_resume_expires_at))
+        (job.review_state == "resume_pending" and is_nil(job.review_resume_expires_at)) or
+        (job.review_state == "running" and job.review_resume_mode == "assessment")
 
     waiting and
       Enum.any?(
@@ -2992,7 +2997,7 @@ defmodule PtcManager.Operations do
 
   defp released_review_job_ids(repo \\ Repo) do
     Job
-    |> where([job], job.review_state in ~w(paused manual resume_pending))
+    |> where([job], job.review_state in ~w(paused manual resume_pending running))
     |> preload(:agent_runs)
     |> repo.all()
     |> Enum.filter(&review_capacity_released?/1)

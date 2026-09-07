@@ -90,7 +90,7 @@ the loop early. Repeating the same request or reviewing unchanged evidence does
 not spend another round. Code changes require another review. Failed attempts (including
 reviewer timeouts) remain in the history but do not consume completed review budget.
 Failures pause the job; there are no automatic retries. Continue with **0 — unused
-budget only** to retry without increasing the budget.
+budget only** when choosing **Retry review** to retry without increasing the budget.
 
 **Configuration → Execution profiles** includes **Review timeout (minutes)**,
 defaulting to 15 and configurable from 1 to 60. Approval freezes this value on the
@@ -117,7 +117,9 @@ mean normal continuation and do not reuse the previous continuation's note.
 Manual takeover and cancellation do not send the field to an agent. An idle retained
 pane is replaced using an explicitly directed Herdr split; it does not reset
 files or start a replacement job. Each continuation receives a fresh stop-report
-identity, so an earlier agent’s failure cannot overwrite its successful result. An unavailable or busy retained agent leaves
+identity, so an earlier agent’s failure cannot overwrite its successful result. Recovery checks the full retained identity before reserving capacity. An interrupted
+identity check pauses after two minutes; stale cancellation cannot stop a newer
+continuation. An unavailable or busy retained agent leaves
 a visible pause for recovery. Paused and manual-takeover work releases implementation capacity once its
 implementer is confirmed stopped. Live, idle, blocked, or unknown agents continue
 to occupy capacity until their stopped state is observed. The worktree and review
@@ -129,16 +131,44 @@ slot until reconciliation confirms the outcome. Manual takeover requests the ret
 stopped before editing. Cancellation requires a private reason and preserves
 all work. Posting an explanation on GitHub is a separate, editable approval.
 
-The first reviewer bridge supplies a complete patch up to 500 KB and bounded
-issue context, rather than a full interactive repository review. Larger or
-invalid inputs fail closed. Reviews are serialized in a dedicated Oban queue,
-expire after 30 minutes including queue time, and give the CLI 10 minutes.
-The helper caps combined stdout/stderr at 1 MB and retains a bounded failure
-message and exit status for the review record. It does not impose a process-wide
-file-size limit: the worker CLI maintains SQLite databases and WAL files that
-can exceed the review output budget. Diagnostics are untrusted display text;
-only a validated structured result can complete a review.
-A failed assessment consumes its admitted round. The deployed root-owned
+Review preparation and reviewer execution failures are separate durable attempts.
+The review page preserves the stage, error, and exit status when available; replaying
+an acknowledged request returns that attempt even if the working tree changes.
+Admission records a preparation worker in the same transaction. Database
+contention or an interrupted caller resumes that attempt without spending a
+new assessment or needing another maintainer retry.
+**Retry review** stops the retained implementer and assesses its committed work
+without starting another implementer. A clean result queues a continuation to
+publish that exact commit; findings pause for a decision. **Continue existing
+work** instead starts an implementer to address the failure or change the code.
+Unacknowledged partial failures that permit retry can also continue their retained
+work, provided no newer job supersedes them. Unsafe stop reports retain their
+existing restriction on restarting.
+A failed broker publication check offers continuation from the review page; the
+old publication remains blocked while the implementation is repaired.
+
+Before review, the implementation prompt requires all repository validation,
+including checks normally run by commit and pre-push hooks. Then it commits,
+requests review, and publishes the reviewed commit. If a later check requires
+edits, that new commit needs a new review. A green historical review remains
+visible but does not approve later edits.
+
+The reviewer gets an independent, coordinator-owned, read-only clone of the exact
+commit, including its local callers and tests. Ownership is saved before cloning;
+a background cleanup worker reclaims snapshots after interrupted reviews and
+retries failed cleanup, with errors visible in review history. Patches up to 500 KB are inline;
+larger patches are supplied as a complete local file under the same 50 MB bound
+and SHA-256 digest as publication verification. Git snapshot commands have a
+two-minute timeout and require GNU `timeout` (Homebrew coreutils supplies it on
+macOS). Codex web search is disabled; Claude is restricted to local reading tools.
+Cursor uses its read-only ask mode with instructions to inspect local evidence.
+The schema and helper contract version are frozen with the attempt. An incompatible
+helper deployment fails explicitly and requires a new attempt.
+Reviews run in a dedicated Oban queue with the configured timeout plus 15 minutes
+for queueing and result handling. The helper caps combined stdout/stderr at 1 MB
+and retains bounded diagnostics; it does not limit the CLI's database/WAL files.
+Only validated structured results complete assessments; failed attempts do not
+consume completed review budget. The deployed root-owned
 `ptc-manager-worker-review` helper runs as the worker; the normal deployment
 script installs it and its exact sudo rule. Browser demo mode never starts
 these reviewers or continuations. Repository test commands and coding
@@ -146,6 +176,10 @@ conventions stay in `AGENTS.md`; managed review orchestration comes from the
 PtcManager task prompt, so managed jobs do not need repository-specific review
 counts, tools, or session instructions. This does not isolate hostile agents
 that share the same worker account or direct GitHub credentials.
+
+Agent-created PR discovery uses the publication retry budget (five attempts by
+default), then preserves the job under Needs attention. An explicit retry resets
+that budget; missing PRs cannot loop forever.
 
 ## Run locally
 

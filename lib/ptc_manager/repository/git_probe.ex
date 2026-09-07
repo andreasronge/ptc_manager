@@ -108,13 +108,26 @@ defmodule PtcManager.Repository.GitProbe do
          true <- status == "",
          {:ok, head} <- revision(path, "HEAD^{commit}"),
          true <- head == result.head_sha,
-         {:ok, diff} <-
-           run_git(path, diff_args(result.base_sha, result.head_sha), {:collect, 500_000}),
-         true <- String.valid?(diff) do
-      {:ok, Map.put(result, :diff, diff)}
+         {:ok, patch} <- review_diff(path, result) do
+      {:ok, Map.merge(result, patch)}
     else
       false -> {:error, :review_requires_clean_text_commit}
       error -> error
+    end
+  end
+
+  defp review_diff(path, result) do
+    case run_git(path, diff_args(result.base_sha, result.head_sha), {:collect, 500_000}) do
+      {:ok, diff} ->
+        if String.valid?(diff),
+          do: {:ok, %{diff: diff}},
+          else: {:error, :review_requires_clean_text_commit}
+
+      {:error, :git_output_too_large} ->
+        {:ok, %{diff: nil, diff_on_disk: true}}
+
+      error ->
+        error
     end
   end
 

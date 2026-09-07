@@ -88,6 +88,19 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
                "source_ref" => captured.ref
              })
 
+    assert {:ok, review} =
+             SourceSnapshot.prepare_review(repository, 44, captured.ref, captured.sha)
+
+    assert review.path != snapshot.path
+    assert :ok = SourceSnapshot.verify(repository, review.path, captured.sha)
+
+    assert :ok =
+             SourceSnapshot.release_review(repository, 44, %{
+               "source_sha" => review.sha,
+               "source_path" => review.path
+             })
+
+    assert File.dir?(snapshot.path)
     assert snapshot.sha == captured.sha
     assert :ok = SourceSnapshot.verify(repository, snapshot.path, captured.sha)
 
@@ -96,6 +109,12 @@ defmodule PtcManager.Repository.SourceSnapshotTest do
                "source_sha" => snapshot.sha,
                "source_path" => snapshot.path
              })
+  end
+
+  @tag nightly: false
+  test "no snapshot means no checkout is required for cleanup" do
+    assert :ok =
+             SourceSnapshot.release(%Repository{local_path: "/missing/never-prepared"}, 42, %{})
   end
 
   @tag nightly: false

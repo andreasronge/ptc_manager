@@ -5,7 +5,7 @@ defmodule PtcManager.Reviews.Snapshot do
     with {:ok, evidence} <- PtcManager.Repository.GitProbe.review_patch(repository, job, path) do
       {:ok,
        evidence
-       |> Map.take([:head_sha, :base_sha, :diff_digest, :diff])
+       |> Map.take([:head_sha, :base_sha, :diff_digest, :diff, :diff_on_disk])
        |> Map.new(fn {key, value} -> {to_string(key), value} end)
        |> Map.put(
          "issue",

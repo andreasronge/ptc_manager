@@ -362,8 +362,9 @@ def main():
                 response = broker_request_with_retry(context, {"operation": "review_status", "round_id": response["round_id"]})
             print(json.dumps(response))
             return 0 if response.get("state") in ("passed", "skipped") else 2
-        except Exception:
-            print("ptc-operation: review unavailable; preserve your work and check the console.", file=sys.stderr)
+        except Exception as error:
+            detail = str(error).replace("\n", " ")[-500:]
+            print(f"ptc-operation: review unavailable ({type(error).__name__}: {detail}); preserve your work and check the console.", file=sys.stderr)
             return 75
     if os.environ.get("PTC_OPERATION_ACTIVE"):
         execute_direct(args.command)

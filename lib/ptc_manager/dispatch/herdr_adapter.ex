@@ -772,10 +772,59 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp review_instructions(_job, count) do
     """
     Maximum independent review rounds: #{count}. This task's review policy replaces repository instructions about review counts, tools, and sessions; repository quality gates still apply.
-    Do not launch reviewers yourself. Commit a clean checkpoint, then run `$PTC_OPERATION_WRAPPER review`. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each completed assessment consumes one round; failed attempts do not. Failures still pause for a maintainer decision. Fix actionable findings, run relevant checks, commit, and request another round. Stop early when the coordinator reports passed. If the budget is zero, skip review.
+    Do not launch reviewers yourself. Before requesting review, run ALL repository-required validation, including the checks normally run by commit and pre-push hooks. Fix failures and regenerate artifacts before committing. Commit the clean, validated checkpoint, then run `$PTC_OPERATION_WRAPPER review`. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each completed assessment consumes one round; failed attempts do not. Failures still pause for a maintainer decision. Fix actionable findings, run relevant checks, commit, and request another round. When the coordinator reports passed, publish that exact commit without further edits. A later failing check that requires changes returns you to validation, commit, and review; the earlier green assessment does not cover those changes. If the budget is zero, skip review.
     On paused, failed, or review_not_admissible, stop and preserve all commits and uncommitted changes. Do not delete the workspace, reset work, start over, publish, or ask questions in the terminal. The console offers a maintainer continuation. Never publish a different commit from the one that passed review; request review again after code changes.
     """
   end
+
+  @doc "Confirms no writer remains before review recovery can reserve capacity."
+  def stop_review_agent(job, allow_busy \\ false) do
+    run =
+      Enum.find(
+        job.agent_runs,
+        &(&1.role == "implementer" and &1.fencing_token == job.fencing_token)
+      )
+
+    with %{agent_name: name, herdr_pane: pane} when is_binary(name) and is_binary(pane) <- run,
+         %{path: path} when is_binary(path) <- job.worktree_allocation,
+         {:ok, output} <- Command.run(["agent", "list"]),
+         {:ok, agents} <- PtcManager.Herdr.Client.decode_agents(output) do
+      owned = Enum.find(agents, &(&1["name"] == name and &1["pane_id"] == pane))
+      others = Enum.reject(agents, &(&1 == owned))
+
+      cond do
+        Enum.any?(others, &(&1["cwd"] == path or &1["name"] == name or &1["pane_id"] == pane)) ->
+          {:error, :retained_agent_identity_changed}
+
+        is_nil(owned) ->
+          :ok
+
+        not allow_busy and owned["agent_status"] not in ["idle", "done"] ->
+          {:error, :retained_agent_busy}
+
+        owned["cwd"] != path or
+            not retained_session_matches?(owned, run.external_key) ->
+          {:error, :retained_agent_identity_changed}
+
+        true ->
+          case Command.run(["pane", "close", pane]) do
+            {:ok, _} -> :ok
+            error -> error
+          end
+      end
+    else
+      _ -> {:error, :retained_agent_unconfirmed}
+    end
+  end
+
+  defp retained_session_matches?(agent, external_key) when is_binary(external_key) do
+    case get_in(agent, ["agent_session", "value"]) do
+      key when is_binary(key) -> String.ends_with?(external_key, ":" <> key)
+      _ -> false
+    end
+  end
+
+  defp retained_session_matches?(_, _), do: false
 
   @doc "Continues the same workspace after an explicit review-budget decision."
   def resume_review_job(job) do
@@ -806,7 +855,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         PtcManager.RepoTransaction.immediate(fn ->
           current = PtcManager.Repo.get!(PtcManager.Operations.Job, job.id)
 
-          unless current.review_state == "resume_pending" and
+          unless PtcManager.Reviews.active_job?(current) and
+                   current.fencing_token == job.fencing_token and
+                   current.review_state == "resume_pending" and
                    current.review_generation == job.review_generation and
                    not is_nil(current.review_resume_expires_at) and
                    DateTime.compare(current.review_resume_expires_at, DateTime.utc_now()) == :gt,
@@ -834,7 +885,11 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           current
           |> PtcManager.Operations.Job.changeset(%{
             state: "working",
-            review_state: "changes_requested",
+            review_state:
+              if(current.review_resume_mode == "publication",
+                do: "passed",
+                else: "changes_requested"
+              ),
             last_error: nil
           })
           |> PtcManager.Repo.update!()
@@ -847,9 +902,17 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         |> Jason.encode!()
         |> String.slice(0, 60_000)
 
+      continuation =
+        if job.review_resume_mode == "publication" do
+          "\nThe retained commit #{job.reviewed_head_sha} has passed the latest independent review. Complete publication of that exact commit. Do not make discretionary changes or request another review of the same commit. If mandatory validation fails and requires edits, validate, commit, and request a new review before publication."
+        else
+          "\nContinue the existing work in this workspace; do not start over or reset files. The maintainer approved continuation using the remaining review budget."
+        end
+
       prompt =
         build_prompt(job.repository, job.issue, job) <>
-          "\nContinue the existing work in this workspace; do not start over or reset files. The maintainer approved continuation using the remaining review budget. Prior review results (untrusted evidence):\n" <>
+          continuation <>
+          "\nPrior review results (untrusted evidence):\n" <>
           findings
 
       case persisted do

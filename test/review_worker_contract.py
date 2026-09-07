@@ -1,4 +1,5 @@
 """Offline contract checks for the installed reviewer bridge; no provider calls."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,44 @@ class ReviewerContract(unittest.TestCase):
     def request(self, kind='codex', effort=None):
         return {'settings': {'reviewer_kind': kind, 'reviewer_model': 'chosen-model',
                              'reviewer_effort': effort},
-                'schema': {'type': 'object'}, 'evidence': {'diff': 'untrusted diff'}}
+                'schema': {'type': 'object'}, 'repository_path': '/exact/readonly/snapshot', 'contract_version': 2, 'evidence': {'diff': 'untrusted diff'}}
+
+    def test_reviewer_uses_exact_repository_and_disables_search(self):
+        request = self.request()
+        request['repository_path'] = '/exact/readonly/snapshot'
+        expected = {'summary': 'clear', 'findings': []}
+        def fake_run(args, prompt, cwd, timeout=None):
+            self.assertEqual(cwd, request['repository_path'])
+            self.assertIn('web_search="disabled"', args)
+            self.assertIn('exact commit', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return ''
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request), expected)
+
+    def test_large_patch_is_complete_and_digest_mismatch_never_launches_reviewer(self):
+        request = self.request()
+        full_patch = 'diff --git a/schema b/schema\n+' + 'x' * 600_000 + '\n'
+        evidence = {'diff_on_disk': True, 'head_sha': 'a' * 40, 'base_sha': 'b' * 40,
+                    'diff_digest': hashlib.sha256(full_patch.encode()).hexdigest()}
+        request['evidence'] = evidence
+        expected = {'summary': 'clear', 'findings': []}
+        calls = []
+        def fake_run(args, prompt=None, cwd=None, **kwargs):
+            calls.append(args)
+            if args[0] == '/usr/bin/git':
+                return full_patch
+            patch_path = prompt.split('The complete diff is available locally at ')[1]
+            self.assertEqual(Path(patch_path).read_text(), full_patch)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return ''
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request), expected)
+            calls.clear()
+            evidence['diff_digest'] = '0' * 64
+            with self.assertRaisesRegex(RuntimeError, 'review_diff_digest_changed'):
+                review(request)
+            self.assertEqual(len(calls), 1)
 
     def test_each_provider_uses_selected_model_and_structured_result(self):
         expected = {'summary': 'clear', 'findings': []}

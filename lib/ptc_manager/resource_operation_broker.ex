@@ -229,9 +229,9 @@ defmodule PtcManager.ResourceOperationBroker do
 
   defp review_response(round) do
     state =
-      if round.state == "completed",
+      if round.state in ["completed", "cached"],
         do: if(round.result["findings"] == [], do: "passed", else: "changes_requested"),
-        else: round.state
+        else: Map.get(%{"preparing" => "queued", "not_run" => "paused"}, round.state, round.state)
 
     %{
       "status" => "ok",

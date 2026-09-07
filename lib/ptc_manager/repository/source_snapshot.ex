@@ -1,5 +1,5 @@
 defmodule PtcManager.Repository.SourceSnapshot do
-  @moduledoc "Creates and verifies a coordinator-owned read-only clone for planning evidence."
+  @moduledoc "Creates and verifies a coordinator-owned read-only clone for planning and exact-commit review evidence."
 
   import Bitwise
 
@@ -13,7 +13,35 @@ defmodule PtcManager.Repository.SourceSnapshot do
   @marker ".ptc-manager-planning-snapshot"
 
   def prepare(%Repository{} = repository, action_id, existing_snapshot)
-      when is_integer(action_id) and is_map(existing_snapshot) do
+      when is_integer(action_id) and is_map(existing_snapshot),
+      do: prepare_owned(repository, action_id, existing_snapshot)
+
+  def prepare_review(repository, round_id, ref, sha) when is_integer(round_id) do
+    prepare_owned(repository, "review-#{round_id}", %{"source_ref" => ref, "source_sha" => sha})
+  end
+
+  def review_identity(repository, round_id, sha) when is_integer(round_id) do
+    with {:ok, path} <- Checkout.configured_path(repository),
+         true <- is_binary(sha) and Regex.match?(@sha, sha) do
+      {:ok,
+       %{
+         "source_path" => snapshot_path("review-#{round_id}", sha),
+         "source_sha" => sha,
+         "repository_path" => path
+       }}
+    else
+      _ -> {:error, :repository_snapshot_unavailable}
+    end
+  end
+
+  def release_review_owned(round_id, %{"repository_path" => path} = ownership)
+      when is_integer(round_id) and is_binary(path) do
+    if Path.type(path) == :absolute,
+      do: release_identity("review-#{round_id}", ownership, path),
+      else: {:error, :repository_snapshot_path_mismatch}
+  end
+
+  defp prepare_owned(repository, action_id, existing_snapshot) do
     with {:ok, repository_path} <- repository_path(repository),
          {:ok, source} <- source(repository, repository_path, existing_snapshot),
          snapshot_path <- snapshot_path(action_id, source.sha),
@@ -47,14 +75,38 @@ defmodule PtcManager.Repository.SourceSnapshot do
   end
 
   def release(%Repository{} = repository, action_id, snapshot)
-      when is_integer(action_id) and is_map(snapshot) do
+      when is_integer(action_id) and is_map(snapshot),
+      do: release_owned(repository, action_id, snapshot)
+
+  def release_review(repository, round_id, snapshot) when is_integer(round_id),
+    do: release_owned(repository, "review-#{round_id}", snapshot)
+
+  defp release_owned(
+         repository,
+         action_id,
+         %{"source_sha" => sha, "source_path" => path} = snapshot
+       )
+       when is_binary(sha) and is_binary(path) do
+    with {:ok, repository_path} <- repository_path(repository),
+         do: release_identity(action_id, snapshot, repository_path)
+  end
+
+  defp release_owned(_, _, _), do: :ok
+
+  defp release_identity(action_id, snapshot, repository_path) do
     with source_sha when is_binary(source_sha) <- snapshot["source_sha"],
+         true <- Regex.match?(@sha, source_sha),
          source_path when is_binary(source_path) <- snapshot["source_path"],
-         {:ok, repository_path} <- repository_path(repository),
          expected_path <- snapshot_path(action_id, source_sha),
-         true <- Path.expand(source_path) == expected_path,
-         :ok <- validate_snapshot_root() do
-      remove_existing_snapshot(expected_path, repository_path, action_id, source_sha)
+         true <- Path.expand(source_path) == expected_path do
+      case File.lstat(expected_path) do
+        {:error, :enoent} ->
+          :ok
+
+        _ ->
+          with :ok <- validate_snapshot_root(),
+               do: remove_existing_snapshot(expected_path, repository_path, action_id, source_sha)
+      end
     else
       nil -> :ok
       false -> {:error, :repository_snapshot_path_mismatch}
@@ -98,14 +150,15 @@ defmodule PtcManager.Repository.SourceSnapshot do
     # safe.directory setting. Create the bundle while Git is already operating
     # in the trusted source checkout, then import it into a coordinator-owned
     # repository without hardlinks back to the mutable source.
-    with {_output, 0} <- git_command(["init", "--quiet", "--", path]),
+    with :ok <- File.mkdir_p(Path.join(path, ".git")),
+         :ok <- write_marker(path, repository_path, action_id, source_sha),
+         {_output, 0} <- git_command(["init", "--quiet", "--", path]),
          {_output, 0} <-
            git_command(git_args(repository_path, ["bundle", "create", bundle_path, source_ref])),
          {_output, 0} <-
            git_command(["-C", path, "fetch", "--no-tags", "--", bundle_path, source_sha]),
          :ok <- File.rm(bundle_path),
          {_output, 0} <- git_command(["-C", path, "checkout", "--detach", source_sha]),
-         :ok <- write_marker(path, repository_path, action_id, source_sha),
          :ok <- make_read_only(path) do
       :ok
     else
@@ -516,7 +569,9 @@ defmodule PtcManager.Repository.SourceSnapshot do
   defp git_command(args) do
     binary = Application.get_env(:ptc_manager, :planning_git_binary, "/usr/bin/git")
 
-    System.cmd(binary, args,
+    timeout = System.find_executable("timeout") || System.find_executable("gtimeout")
+
+    System.cmd(timeout, ["--kill-after=5s", "120s", binary | args],
       env: [{"GIT_OPTIONAL_LOCKS", "0"}],
       stderr_to_stdout: true
     )

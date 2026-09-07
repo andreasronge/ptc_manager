@@ -4,6 +4,26 @@ defmodule PtcManager.Reviews.Adapter do
   @helper "/usr/local/bin/ptc-manager-worker-review"
 
   def review(round) do
+    job =
+      PtcManager.Repo.get!(PtcManager.Operations.Job, round.job_id)
+      |> PtcManager.Repo.preload(:repository)
+
+    alias PtcManager.Reviews.Snapshots
+
+    with true <- round.input["contract_version"] == 2,
+         {:ok, snapshot} <- Snapshots.prepare(round, job.repository) do
+      try do
+        run_review(round, snapshot.path)
+      after
+        Snapshots.cleanup(round.id)
+      end
+    else
+      false -> {:error, {:preparation, :review_contract_changed_retry_required}}
+      {:error, reason} -> {:error, {:preparation, reason}}
+    end
+  end
+
+  defp run_review(round, snapshot_path) do
     directory = Application.fetch_env!(:ptc_manager, :agent_action_output_dir)
 
     name =
@@ -12,15 +32,13 @@ defmodule PtcManager.Reviews.Adapter do
     request = Path.join(directory, name <> ".request.json")
     result = Path.join(directory, name <> ".result.json")
 
-    schema =
-      Application.app_dir(:ptc_manager, "priv/codex/independent_review.schema.json")
-      |> File.read!()
-      |> Jason.decode!()
-
     body = %{
       settings: round.input["settings"],
-      evidence: Map.drop(round.input, ["settings"]),
-      schema: schema
+      evidence:
+        Map.drop(round.input, ["settings", "schema", "source_snapshot", "snapshot_cleanup_error"]),
+      repository_path: snapshot_path,
+      contract_version: 2,
+      schema: round.input["schema"]
     }
 
     try do
@@ -33,7 +51,8 @@ defmodule PtcManager.Reviews.Adapter do
         {:ok, decoded}
       else
         {output, status} when is_binary(output) and is_integer(status) ->
-          {:error, {:reviewer_command_failed, status, WorkerHelper.bounded(output)}}
+          {:error,
+           {:reviewer_command_failed, status, String.slice(String.trim(output), -3_000, 3_000)}}
 
         {:error, reason} ->
           {:error, {:reviewer_request_failed, reason}}

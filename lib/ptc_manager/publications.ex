@@ -689,24 +689,34 @@ defmodule PtcManager.Publications do
     next_attempt_at = DateTime.add(now, delay_ms, :millisecond)
 
     outcome =
-      PrPublication
-      |> where(
-        [publication],
-        publication.id == ^publication_id and publication.source == "agent" and
-          publication.state == "queued"
-      )
-      |> Repo.update_all(
-        set: [
-          next_attempt_at: next_attempt_at,
-          last_error: message,
-          updated_at: now
-        ],
-        inc: [attempt_count: 1]
-      )
-      |> case do
-        {1, _rows} -> {:ok, Repo.get!(PrPublication, publication_id)}
-        {0, _rows} -> {:error, :invalid_publication_state}
-      end
+      RepoTransaction.immediate(fn ->
+        publication = Repo.get!(PrPublication, publication_id)
+        job = Repo.get!(Job, publication.job_id)
+
+        unless publication.source == "agent" and publication.state == "queued" and
+                 job.state == "ready_for_pr",
+               do: Repo.rollback(:invalid_publication_state)
+
+        publication =
+          publication
+          |> PrPublication.changeset(%{
+            attempt_count: publication.attempt_count + 1,
+            next_attempt_at: next_attempt_at,
+            last_error: message
+          })
+          |> Repo.update!()
+
+        if publication.attempt_count >=
+             Application.get_env(:ptc_manager, :publication_max_attempts, 5),
+           do:
+             block_agent_discovery!(
+               publication,
+               job,
+               String.slice("PR discovery budget reached: " <> message, 0, 500),
+               now
+             ),
+           else: publication
+      end)
 
     notify(outcome)
   end
@@ -725,29 +735,33 @@ defmodule PtcManager.Publications do
           Repo.rollback(:invalid_publication_state)
         end
 
-        publication
-        |> PrPublication.changeset(%{
-          state: "blocked",
-          next_attempt_at: nil,
-          last_error: message
-        })
-        |> Repo.update!()
-
-        job |> Job.changeset(%{state: "publish_blocked", last_error: message}) |> Repo.update!()
-        mark_worktree_attention(job.id, message, now)
-
-        insert_audit!(%{
-          actor: "github-reconciler",
-          action: "pr_publication.discovery_blocked",
-          target_type: "pr_publication",
-          target_id: publication.id,
-          details: %{"reason" => message}
-        })
-
-        load(publication.id)
+        block_agent_discovery!(publication, job, message, now)
       end)
 
     notify(outcome)
+  end
+
+  defp block_agent_discovery!(publication, job, message, now) do
+    publication
+    |> PrPublication.changeset(%{
+      state: "blocked",
+      next_attempt_at: nil,
+      last_error: message
+    })
+    |> Repo.update!()
+
+    job |> Job.changeset(%{state: "publish_blocked", last_error: message}) |> Repo.update!()
+    mark_worktree_attention(job.id, message, now)
+
+    insert_audit!(%{
+      actor: "github-reconciler",
+      action: "pr_publication.discovery_blocked",
+      target_type: "pr_publication",
+      target_id: publication.id,
+      details: %{"reason" => message}
+    })
+
+    load(publication.id)
   end
 
   def fail(publication_id, fencing_token, attempt_token, disposition, reason)
