@@ -1,4 +1,5 @@
 """Offline contract checks for the installed reviewer bridge; no provider calls."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,23 +20,133 @@ class ReviewerContract(unittest.TestCase):
     def request(self, kind='codex', effort=None):
         return {'settings': {'reviewer_kind': kind, 'reviewer_model': 'chosen-model',
                              'reviewer_effort': effort},
-                'schema': {'type': 'object'}, 'evidence': {'diff': 'untrusted diff'}}
+                'schema': {'type': 'object'}, 'repository_path': '/exact/readonly/snapshot', 'contract_version': 2, 'evidence': {'diff': 'untrusted diff'}}
+
+    def test_missing_session_restarts_once_with_handoff_but_other_errors_do_not(self):
+        request = self.request()
+        request['session_id'] = '0199a213-81c0-7800-8aa1-bbab2a035a53'
+        request['fallback_handoff'] = 'Previous review found a race; the implementer added locking.'
+        expected = {'summary': 'clear', 'findings': []}
+        calls = []
+        def fake_run(args, prompt, cwd, timeout=None):
+            calls.append(args)
+            if 'resume' in args:
+                raise RuntimeError('agent_command_failed exit=1: Session not found')
+            self.assertIn(request['fallback_handoff'], prompt)
+            self.assertLessEqual(timeout, 900)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0299a213-81c0-7800-8aa1-bbab2a035a53'})
+        with patch.dict(context, run=fake_run):
+            result = review(request)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('started fresh', result['session_note'])
+        with patch.dict(context, run=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('review_timeout'))):
+            with self.assertRaisesRegex(RuntimeError, 'review_timeout'):
+                review(request)
+
+    def test_claude_and_cursor_resume_the_selected_session(self):
+        session = '0199a213-81c0-7800-8aa1-bbab2a035a53'
+        for kind in ('claude', 'cursor'):
+            request = self.request(kind)
+            request['session_id'] = session
+            def fake_run(args, prompt, cwd, timeout=None):
+                self.assertEqual(args[args.index('--resume') + 1], session)
+                self.assertNotIn('--no-session-persistence', args)
+                self.assertEqual(cwd, request['repository_path'])
+                result = {'summary': 'clear', 'findings': []}
+                return json.dumps({'session_id': session, 'structured_output': result, 'result': json.dumps(result)})
+            with patch.dict(context, run=fake_run):
+                self.assertEqual(review(request)['session_id'], session)
+
+    def test_operation_wrapper_sends_plain_handoff_and_rejects_oversize_before_admission(self):
+        main = runpy.run_path(str(ROOT / 'deploy/ptc-operation'))['main']
+        with tempfile.TemporaryDirectory() as directory:
+            context_file = Path(directory, 'context.json')
+            context_file.write_text('{}')
+            note = Path(directory, 'note.txt')
+            note.write_text('Kept the locking strategy.\nTests passed.')
+            calls = []
+            def broker(context, fields):
+                calls.append(fields)
+                return {'state': 'passed'}
+            with patch.dict(os.environ, PTC_MANAGED_OPERATION_CONTEXT=str(context_file)), \
+                 patch.object(sys, 'argv', ['ptc-operation', 'review', '--handoff-file', str(note)]), \
+                 patch.dict(main.__globals__, broker_request_with_retry=broker):
+                self.assertEqual(main(), 0)
+                self.assertEqual(calls[0]['handoff'], note.read_text())
+                note.write_text('x' * 20_001)
+                self.assertEqual(main(), 75)
+                self.assertEqual(len(calls), 1)
+
+    def test_codex_resumes_only_the_supplied_reviewer_session(self):
+        request = self.request()
+        session = '0199a213-81c0-7800-8aa1-bbab2a035a53'
+        request['session_id'] = session
+        expected = {'summary': 'The race is fixed.', 'findings': []}
+        def fake_run(args, prompt, cwd, timeout=None):
+            self.assertIn('resume', args)
+            self.assertIn(session, args)
+            self.assertNotIn('--last', args)
+            self.assertNotIn('--ephemeral', args)
+            self.assertIn('read-only', args)
+            self.assertIn(request['repository_path'], args)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': session})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request), {'result': expected, 'session_id': session})
+
+    def test_reviewer_uses_exact_repository_and_can_read_linked_requirements(self):
+        request = self.request()
+        request['repository_path'] = '/exact/readonly/snapshot'
+        expected = {'summary': 'clear', 'findings': []}
+        def fake_run(args, prompt, cwd, timeout=None):
+            self.assertEqual(cwd, request['repository_path'])
+            self.assertIn('web_search="disabled"', args)
+            self.assertIn('exact commit', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)["result"], expected)
+
+    def test_large_patch_is_complete_and_digest_mismatch_never_launches_reviewer(self):
+        request = self.request()
+        full_patch = 'diff --git a/schema b/schema\n+' + 'x' * 600_000 + '\n'
+        evidence = {'diff_on_disk': True, 'head_sha': 'a' * 40, 'base_sha': 'b' * 40,
+                    'diff_digest': hashlib.sha256(full_patch.encode()).hexdigest()}
+        request['evidence'] = evidence
+        expected = {'summary': 'clear', 'findings': []}
+        calls = []
+        def fake_run(args, prompt=None, cwd=None, **kwargs):
+            calls.append(args)
+            if args[0] == '/usr/bin/git':
+                return full_patch
+            patch_path = prompt.split('The complete diff is available locally at ')[1]
+            self.assertEqual(Path(patch_path).read_text(), full_patch)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)["result"], expected)
+            calls.clear()
+            evidence['diff_digest'] = '0' * 64
+            with self.assertRaisesRegex(RuntimeError, 'review_diff_digest_changed'):
+                review(request)
+            self.assertEqual(len(calls), 1)
 
     def test_each_provider_uses_selected_model_and_structured_result(self):
         expected = {'summary': 'clear', 'findings': []}
         for kind in ('codex', 'claude', 'cursor'):
             commands = []
             def fake_run(args, prompt, cwd, timeout=None):
-                self.assertEqual(timeout, 900)
+                self.assertTrue(899 < timeout <= 900)
                 commands.append(args)
                 self.assertIn('untrusted diff', prompt)
                 if kind == 'codex':
                     Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
-                    return 'terminal text is ignored'
-                return json.dumps({'structured_output': expected} if kind == 'claude'
-                                  else {'result': json.dumps(expected)})
+                    return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+                return json.dumps({'structured_output': expected, 'session_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'} if kind == 'claude'
+                                  else {'result': json.dumps(expected), 'session_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
             with patch.dict(context, run=fake_run):
-                self.assertEqual(review(self.request(kind)), expected)
+                self.assertEqual(review(self.request(kind))["result"], expected)
             self.assertEqual(commands[0][commands[0].index('--model') + 1], 'chosen-model')
 
     def test_sol_reviewer_uses_extra_high_effort(self):
@@ -48,17 +159,17 @@ class ReviewerContract(unittest.TestCase):
             self.assertEqual(args[args.index('-c') + 1], 'model_reasoning_effort="xhigh"')
             self.assertIn('independent code reviewer', prompt)
             Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
-            return ''
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
 
         with patch.dict(context, run=fake_run):
-            self.assertEqual(review(request), expected)
+            self.assertEqual(review(request)["result"], expected)
 
     def test_custom_timeout_and_invalid_values(self):
         for kind in ('codex', 'claude', 'cursor'):
             request = self.request(kind)
             request['settings']['review_timeout_ms'] = 1_500_000
             def fake_run(args, prompt, cwd, timeout=None):
-                self.assertEqual(timeout, 1500)
+                self.assertTrue(1499 < timeout <= 1500)
                 raise RuntimeError('observed timeout')
             with patch.dict(context, run=fake_run):
                 with self.assertRaisesRegex(RuntimeError, 'observed timeout'):

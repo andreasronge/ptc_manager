@@ -25,6 +25,18 @@ defmodule PtcManager.GitHubClientTest do
     assert {:error, :github_graphql_token_required} = Client.viewer_login()
   end
 
+  test "review document resolution considers slash refs and pins immutable permalinks" do
+    assert Client.review_blob_expressions("feature/foo/docs/rules.md") ==
+             [
+               "feature/foo/docs:rules.md",
+               "feature/foo:docs/rules.md",
+               "feature:foo/docs/rules.md"
+             ]
+
+    sha = String.duplicate("a", 40)
+    assert Client.review_blob_expressions(sha <> "/docs/rules.md") == [sha <> ":docs/rules.md"]
+  end
+
   test "prefers Retry-After response timing" do
     assert Client.retry_delay_ms([{~c"retry-after", ~c"7"}], 1_000) == 7_000
   end

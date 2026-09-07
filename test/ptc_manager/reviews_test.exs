@@ -14,8 +14,220 @@ defmodule PtcManager.ReviewsTest do
          "base_sha" => String.duplicate("b", 40),
          "diff_digest" => String.duplicate("c", 64),
          "diff" => "a bounded patch",
-         "issue" => "Fix it"
+         "issue" => "Fix it",
+         "requirements" => Process.get(:review_test_requirements, "Original requirements")
        }}
+    end
+  end
+
+  defmodule FailedSnapshot do
+    def capture(_), do: {:error, :git_output_too_large}
+  end
+
+  defmodule LateFailingSnapshot do
+    def capture(job) do
+      round = List.last(Reviews.rounds(job.id))
+      {:ok, _} = Reviews.prepare_pending(round.id, snapshot: Snapshot)
+      {:ok, _} = Reviews.claim(round.id)
+      {:error, :late_capture_failure}
+    end
+  end
+
+  test "plain handoff survives a failed attempt and continuation retains useful review" do
+    job = job!(3)
+    note = "Kept the existing locking strategy. Added a concurrent-writer regression."
+    {:ok, round} = Reviews.request(job.id, 1, "handoff", snapshot: Snapshot, handoff: note)
+    assert round.input["handoff"] == note
+    {:ok, _} = Reviews.claim(round.id)
+    {:ok, _} = Reviews.complete(round.id, findings())
+    Process.put(:review_test_head, String.duplicate("d", 40))
+    {:ok, failed} = request(job, "failed-followup")
+    Reviews.fail(failed.id, :review_timeout)
+    text = PtcManager.Reviews.Context.handoff(job.id)
+    assert text =~ "Fix the race"
+    assert text =~ note
+    assert text =~ round.head_sha
+    assert text =~ "review_timeout"
+  end
+
+  test "reviewer sessions stay with their job and profile across rounds" do
+    job = job!(4)
+    session = Ecto.UUID.generate()
+    {:ok, first} = request(job, "first-session")
+    assert is_nil(PtcManager.Reviews.Context.session_id(first))
+    {:ok, _} = Reviews.claim(first.id)
+    assert {:ok, _} = PtcManager.Reviews.Context.record_session(first, session)
+    {:ok, _} = Reviews.complete(first.id, findings())
+    assert {:error, :stale_review} = PtcManager.Reviews.Context.record_session(first, session)
+
+    Process.put(:review_test_head, String.duplicate("d", 40))
+    {:ok, second} = request(job, "second-session")
+    assert PtcManager.Reviews.Context.session_id(second) == session
+    changed = put_in(second.input["settings"]["reviewer_model"], "different-model")
+    assert is_nil(PtcManager.Reviews.Context.session_id(changed))
+    other = job!(2)
+    {:ok, unrelated} = request(other, "unrelated")
+    assert is_nil(PtcManager.Reviews.Context.session_id(unrelated))
+  end
+
+  test "handoffs are bounded and retries preserve their original note" do
+    job = job!(2)
+
+    assert {:error, :review_not_admissible} =
+             Reviews.request(job.id, 1, "too-large", handoff: String.duplicate("x", 20_001))
+
+    assert Reviews.rounds(job.id) == []
+
+    {:ok, first} =
+      Reviews.request(job.id, 1, "note", snapshot: Snapshot, handoff: "Tested the race.")
+
+    Reviews.fail(first.id, :review_timeout)
+    {:ok, pending} = Reviews.decide(job.id, 0, "retry_review", %{}, "maintainer")
+    {:ok, retried} = Reviews.start_retry(pending)
+    assert retried.input["handoff"] == "Tested the race."
+  end
+
+  test "large Unicode handoffs are bounded without corrupting UTF-8" do
+    job = job!(2)
+    {:ok, round} = request(job, "large-handoff")
+    {:ok, _} = Reviews.claim(round.id)
+
+    result = %{
+      "summary" => "Review details",
+      "findings" =>
+        for(
+          _ <- 1..30,
+          do: %{"severity" => "high", "description" => String.duplicate("界", 4_000)}
+        )
+    }
+
+    {:ok, _} = Reviews.complete(round.id, result)
+    text = PtcManager.Reviews.Context.handoff(job.id)
+    assert byte_size(text) <= 60_000
+    assert String.valid?(text)
+    assert text =~ "shortened"
+
+    assert {:ok, prompt} =
+             PtcManager.Reviews.Context.append_handoff(String.duplicate("p", 115_000), job.id)
+
+    assert byte_size(prompt) <= 120_000
+  end
+
+  test "sweeper recovers a discarded continuation in the gap after stopping the old agent" do
+    job = job!(2)
+    job = job |> Job.changeset(%{review_state: "resume_pending"}) |> Repo.update!()
+    Reviews.sweep()
+    import Ecto.Query
+    query = from o in Oban.Job, where: o.worker == "PtcManager.Reviews.ResumeWorker"
+    assert [%{args: %{"job_id" => id}} = queued] = Repo.all(query)
+    assert id == job.id
+    queued |> Ecto.Changeset.change(state: "discarded") |> Repo.update!()
+    Reviews.sweep()
+    assert Repo.aggregate(from(o in query, where: o.state == "available"), :count) == 1
+  end
+
+  test "changed linked requirements invalidate cached approval for the same commit" do
+    job = job!(3)
+    {:ok, first} = request(job, "first-context")
+    {:ok, _} = Reviews.claim(first.id)
+    {:ok, _} = Reviews.complete(first.id, clean())
+    Process.put(:review_test_requirements, "Changed linked requirement")
+    {:ok, second} = request(job, "changed-context")
+    assert second.head_sha == first.head_sha
+    assert second.state == "queued"
+  end
+
+  test "a late preparation failure cannot invalidate a running review" do
+    job = job!(2)
+
+    assert {:ok, round} =
+             Reviews.request(job.id, 1, "overlapping-preparation", snapshot: LateFailingSnapshot)
+
+    assert round.state == "running"
+    assert Repo.get!(Job, job.id).review_state == "running"
+    assert {:ok, _} = Reviews.complete(round.id, clean())
+    assert Repo.get!(Job, job.id).review_state == "passed"
+  end
+
+  test "snapshot failures remain review attempts and replay does not recapture" do
+    job = job!(2)
+    assert {:ok, attempt} = Reviews.request(job.id, 1, "setup-failure", snapshot: FailedSnapshot)
+    assert attempt.state == "failed"
+    assert attempt.error =~ "git_output_too_large"
+    assert Repo.get!(Job, job.id).review_state == "paused"
+    assert {:ok, replay} = Reviews.request(job.id, 1, "setup-failure", snapshot: Snapshot)
+    assert replay.id == attempt.id
+    assert length(Reviews.rounds(job.id)) == 1
+  end
+
+  test "a lost admission response replays before inspecting a changed workspace" do
+    job = job!(2)
+    assert {:ok, attempt} = request(job, "lost-response")
+    assert {:ok, replay} = Reviews.request(job.id, 1, "lost-response", snapshot: FailedSnapshot)
+    assert replay.id == attempt.id
+  end
+
+  test "partial stopped work respects unsafe, acknowledged, and superseded outcomes" do
+    job = job!(2)
+    report = %{"reason_code" => "unsafe_to_proceed", "progress" => "partial"}
+
+    failed =
+      job
+      |> Job.changeset(%{
+        state: "failed",
+        stop_report: report,
+        stop_reported_at: DateTime.utc_now()
+      })
+      |> Repo.update!()
+
+    refute Reviews.decision_available?(failed)
+
+    assert {:error, :review_decision_stale} =
+             Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+
+    failed =
+      failed
+      |> Job.changeset(%{stop_report: %{report | "reason_code" => "environment_broken"}})
+      |> Repo.update!()
+
+    assert Reviews.decision_available?(failed)
+
+    acknowledged =
+      failed |> Job.changeset(%{stop_acknowledged_at: DateTime.utc_now()}) |> Repo.update!()
+
+    refute Reviews.decision_available?(acknowledged)
+    failed = acknowledged |> Job.changeset(%{stop_acknowledged_at: nil}) |> Repo.update!()
+
+    %Job{}
+    |> Job.changeset(%{
+      repository_id: job.repository_id,
+      issue_id: job.issue_id,
+      approval_id: job.approval_id,
+      kind: "implementation",
+      state: "done",
+      fencing_token: 1
+    })
+    |> Repo.insert!()
+
+    refute Reviews.decision_available?(failed)
+  end
+
+  test "failed retry admission rolls back to a recoverable continuation" do
+    job = job!(2)
+    {:ok, round} = request(job, "failed-first")
+    Reviews.fail(round.id, :review_timeout)
+    {:ok, pending} = Reviews.decide(job.id, 0, "retry_review", %{}, "maintainer")
+
+    Repo.query!(
+      "CREATE TEMP TRIGGER reject_review_admission BEFORE INSERT ON review_rounds BEGIN SELECT RAISE(ABORT, 'injected admission failure'); END"
+    )
+
+    try do
+      assert_raise Exqlite.Error, fn -> Reviews.start_retry(pending) end
+      assert Repo.get!(Job, job.id).review_state == "resume_pending"
+      assert length(Reviews.rounds(job.id)) == 1
+    after
+      Repo.query!("DROP TRIGGER reject_review_admission")
     end
   end
 
@@ -199,8 +411,9 @@ defmodule PtcManager.ReviewsTest do
 
     refute Reviews.publication_allowed?(%{approved | review_generation: 1}, evidence)
     assert {:ok, same} = request(job, "another-request")
-    assert same.id == round.id
-    assert length(Reviews.rounds(job.id)) == 1
+    assert same.state == "cached"
+    assert same.result == clean()
+    assert Enum.count(Reviews.rounds(job.id), &(&1.state == "completed")) == 1
   end
 
   test "a reviewer is claimed once and expired work pauses without losing the branch" do

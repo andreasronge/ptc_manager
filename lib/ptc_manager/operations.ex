@@ -657,7 +657,11 @@ defmodule PtcManager.Operations do
       Repo.transaction(fn ->
         {updated, _rows} =
           Job
-          |> where([job], job.id == ^job_id and job.state in ^@cancellable_job_states)
+          |> where(
+            [job],
+            job.id == ^job_id and job.state in ^@cancellable_job_states and
+              is_nil(job.review_recovery_expires_at)
+          )
           |> Repo.update_all(
             set: [
               state: "cancelled",
@@ -671,17 +675,32 @@ defmodule PtcManager.Operations do
         if updated != 1, do: Repo.rollback(:job_not_cancellable)
 
         job = Repo.get!(Job, job_id)
+        managed_review? = is_map(job.execution_settings)
+
+        job =
+          if managed_review? do
+            saved =
+              job
+              |> Job.changeset(%{
+                review_state: "cancelled",
+                review_generation: job.review_generation + 1,
+                cancellation_reason: message
+              })
+              |> Repo.update!()
+
+            %{job_id: saved.id, generation: saved.review_generation}
+            |> PtcManager.Reviews.CancelWorker.new()
+            |> Oban.insert!()
+
+            saved
+          else
+            job
+          end
+
         run = current_job_run(job)
 
-        if run do
-          run
-          |> AgentRun.changeset(%{
-            state: "lost",
-            status_text: "Cancelled by maintainer",
-            last_heartbeat_at: now,
-            ended_at: now
-          })
-          |> Repo.update!()
+        if run && not managed_review? do
+          end_cancelled_run(run, now)
         end
 
         mark_allocation!(job_id, %{
@@ -709,8 +728,15 @@ defmodule PtcManager.Operations do
 
     case outcome do
       {:ok, {job, run}} ->
+        result = close_cancelled_pane(job, run)
+
+        if match?({:ok, _}, result) and is_nil(job.review_resume_expires_at) and
+             is_map(job.execution_settings) and not is_nil(run) do
+          end_cancelled_run(run, now)
+        end
+
         notify_changed(__MODULE__)
-        close_cancelled_pane(job, run)
+        result
 
       {:error, reason} ->
         {:error, reason}
@@ -725,6 +751,17 @@ defmodule PtcManager.Operations do
         run.state in ^@live_agent_run_states
     )
     |> Repo.one()
+  end
+
+  defp end_cancelled_run(run, now) do
+    Repo.get!(AgentRun, run.id)
+    |> AgentRun.changeset(%{
+      state: "lost",
+      status_text: "Cancelled by maintainer",
+      last_heartbeat_at: now,
+      ended_at: now
+    })
+    |> Repo.update!()
   end
 
   defp close_cancelled_pane(job, %AgentRun{herdr_pane: pane})
@@ -2977,7 +3014,8 @@ defmodule PtcManager.Operations do
       when state in ~w(blocked working idle) and is_list(runs) do
     waiting =
       job.review_state in ~w(paused manual) or
-        (job.review_state == "resume_pending" and is_nil(job.review_resume_expires_at))
+        (job.review_state == "resume_pending" and is_nil(job.review_resume_expires_at)) or
+        (job.review_state == "running" and job.review_resume_mode == "assessment")
 
     waiting and
       Enum.any?(
@@ -2992,7 +3030,7 @@ defmodule PtcManager.Operations do
 
   defp released_review_job_ids(repo \\ Repo) do
     Job
-    |> where([job], job.review_state in ~w(paused manual resume_pending))
+    |> where([job], job.review_state in ~w(paused manual resume_pending running))
     |> preload(:agent_runs)
     |> repo.all()
     |> Enum.filter(&review_capacity_released?/1)
@@ -3011,6 +3049,8 @@ defmodule PtcManager.Operations do
 
       unless is_nil(job.review_resume_expires_at),
         do: Repo.rollback(:continuation_already_claimed)
+
+      unless is_nil(job.review_recovery_expires_at), do: Repo.rollback(:recovery_busy)
 
       unless job.worktree_allocation && job.worktree_allocation.state != "removed",
         do: Repo.rollback(:retained_workspace_not_ready)

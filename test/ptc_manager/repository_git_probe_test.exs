@@ -49,6 +49,27 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert File.read!(Path.join(path, "uncommitted.txt")) == "preserve this work"
   end
 
+  test "large generated diffs remain reviewable without truncating their evidence" do
+    path = repository_with_base()
+    branch = "ptc-manager/issue-42-job-7"
+    git!(path, ["switch", "-c", branch])
+
+    File.write!(
+      Path.join(path, "schema.json"),
+      Jason.encode!(%{"description" => String.duplicate("x", 600_000)})
+    )
+
+    git!(path, ["add", "."])
+    git!(path, ["commit", "-m", "generated schema"])
+    repository = %Repository{local_path: path, default_branch: "main"}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    assert {:ok, publication} = GitProbe.verify(repository, job)
+    assert {:ok, evidence} = GitProbe.review_patch(repository, job, path)
+    assert evidence.diff_digest == publication.diff_digest
+    assert evidence.diff == nil
+    assert evidence.diff_on_disk
+  end
+
   test "rejects an empty commit" do
     path = repository_with_base()
     branch = "ptc-manager/issue-42-job-8"

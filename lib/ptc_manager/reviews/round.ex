@@ -15,6 +15,7 @@ defmodule PtcManager.Reviews.Round do
     field :input, :map
     field :result, :map
     field :error, :string
+    field :failure, :map
     field :expires_at, :utc_datetime_usec
     timestamps(type: :utc_datetime_usec)
   end
@@ -34,6 +35,7 @@ defmodule PtcManager.Reviews.Round do
       :input,
       :result,
       :error,
+      :failure,
       :expires_at
     ])
     |> validate_required([
@@ -43,12 +45,16 @@ defmodule PtcManager.Reviews.Round do
       :number,
       :request_id,
       :state,
-      :head_sha,
-      :base_sha,
-      :diff_digest,
       :input,
       :expires_at
     ])
+    |> validate_evidence()
     |> unique_constraint([:job_id, :request_id])
+  end
+
+  defp validate_evidence(changeset) do
+    if get_field(changeset, :state) in ~w(queued running completed cached not_run),
+      do: validate_required(changeset, [:head_sha, :base_sha, :diff_digest]),
+      else: changeset
   end
 end

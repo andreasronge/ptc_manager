@@ -4,6 +4,26 @@ defmodule PtcManager.Reviews.Adapter do
   @helper "/usr/local/bin/ptc-manager-worker-review"
 
   def review(round) do
+    job =
+      PtcManager.Repo.get!(PtcManager.Operations.Job, round.job_id)
+      |> PtcManager.Repo.preload(:repository)
+
+    alias PtcManager.Reviews.Snapshots
+
+    with true <- round.input["contract_version"] == 2,
+         {:ok, snapshot} <- Snapshots.prepare(round, job.repository) do
+      try do
+        run_review(round, snapshot.path)
+      after
+        Snapshots.cleanup(round.id)
+      end
+    else
+      false -> {:error, {:preparation, :review_contract_changed_retry_required}}
+      {:error, reason} -> {:error, {:preparation, reason}}
+    end
+  end
+
+  defp run_review(round, snapshot_path) do
     directory = Application.fetch_env!(:ptc_manager, :agent_action_output_dir)
 
     name =
@@ -12,15 +32,26 @@ defmodule PtcManager.Reviews.Adapter do
     request = Path.join(directory, name <> ".request.json")
     result = Path.join(directory, name <> ".result.json")
 
-    schema =
-      Application.app_dir(:ptc_manager, "priv/codex/independent_review.schema.json")
-      |> File.read!()
-      |> Jason.decode!()
+    session_id = PtcManager.Reviews.Context.session_id(round)
+    fallback_handoff = PtcManager.Reviews.Context.handoff(round.job_id)
 
     body = %{
       settings: round.input["settings"],
-      evidence: Map.drop(round.input, ["settings"]),
-      schema: schema
+      evidence:
+        Map.take(
+          round.input,
+          ~w(head_sha base_sha diff_digest diff diff_on_disk issue issue_url requirements)
+        ),
+      session_id: session_id,
+      fallback_handoff: fallback_handoff,
+      handoff:
+        if(session_id,
+          do: round.input["handoff"] || "",
+          else: fallback_handoff
+        ),
+      repository_path: snapshot_path,
+      contract_version: 2,
+      schema: round.input["schema"]
     }
 
     try do
@@ -28,12 +59,20 @@ defmodule PtcManager.Reviews.Adapter do
            :ok <- File.chmod(request, 0o640),
            {_output, 0} <- WorkerHelper.run(@helper, ["review", request, result]),
            {data, 0} <- WorkerHelper.run(@helper, ["read-result", result]),
-           {:ok, decoded} <- Jason.decode(data),
-           true <- PtcManager.Reviews.valid_result?(decoded) do
+           {:ok, %{"result" => decoded, "session_id" => session_id} = envelope} <-
+             Jason.decode(data),
+           true <- PtcManager.Reviews.valid_result?(decoded),
+           {:ok, _} <-
+             PtcManager.Reviews.Context.record_session(
+               round,
+               session_id,
+               envelope["session_note"]
+             ) do
         {:ok, decoded}
       else
         {output, status} when is_binary(output) and is_integer(status) ->
-          {:error, {:reviewer_command_failed, status, WorkerHelper.bounded(output)}}
+          {:error,
+           {:reviewer_command_failed, status, String.slice(String.trim(output), -3_000, 3_000)}}
 
         {:error, reason} ->
           {:error, {:reviewer_request_failed, reason}}

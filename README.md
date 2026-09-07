@@ -90,7 +90,7 @@ the loop early. Repeating the same request or reviewing unchanged evidence does
 not spend another round. Code changes require another review. Failed attempts (including
 reviewer timeouts) remain in the history but do not consume completed review budget.
 Failures pause the job; there are no automatic retries. Continue with **0 — unused
-budget only** to retry without increasing the budget.
+budget only** when choosing **Retry review** to retry without increasing the budget.
 
 **Configuration → Execution profiles** includes **Review timeout (minutes)**,
 defaulting to 15 and configurable from 1 to 60. Approval freezes this value on the
@@ -117,7 +117,9 @@ mean normal continuation and do not reuse the previous continuation's note.
 Manual takeover and cancellation do not send the field to an agent. An idle retained
 pane is replaced using an explicitly directed Herdr split; it does not reset
 files or start a replacement job. Each continuation receives a fresh stop-report
-identity, so an earlier agent’s failure cannot overwrite its successful result. An unavailable or busy retained agent leaves
+identity, so an earlier agent’s failure cannot overwrite its successful result. Recovery checks the full retained identity before reserving capacity. An interrupted
+identity check pauses after two minutes; stale cancellation cannot stop a newer
+continuation. An unavailable or busy retained agent leaves
 a visible pause for recovery. Paused and manual-takeover work releases implementation capacity once its
 implementer is confirmed stopped. Live, idle, blocked, or unknown agents continue
 to occupy capacity until their stopped state is observed. The worktree and review
@@ -129,16 +131,83 @@ slot until reconciliation confirms the outcome. Manual takeover requests the ret
 stopped before editing. Cancellation requires a private reason and preserves
 all work. Posting an explanation on GitHub is a separate, editable approval.
 
-The first reviewer bridge supplies a complete patch up to 500 KB and bounded
-issue context, rather than a full interactive repository review. Larger or
-invalid inputs fail closed. Reviews are serialized in a dedicated Oban queue,
-expire after 30 minutes including queue time, and give the CLI 10 minutes.
-The helper caps combined stdout/stderr at 1 MB and retains a bounded failure
-message and exit status for the review record. It does not impose a process-wide
-file-size limit: the worker CLI maintains SQLite databases and WAL files that
-can exceed the review output budget. Diagnostics are untrusted display text;
-only a validated structured result can complete a review.
-A failed assessment consumes its admitted round. The deployed root-owned
+Review preparation and reviewer execution failures are separate durable attempts.
+The review page preserves the stage, error, and exit status when available; replaying
+an acknowledged request returns that attempt even if the working tree changes.
+Admission records a preparation worker in the same transaction. Database
+contention or an interrupted caller resumes that attempt without spending a
+new assessment or needing another maintainer retry.
+**Retry review** stops the retained implementer and assesses its committed work
+without starting another implementer. A clean result queues a continuation to
+publish that exact commit; findings pause for a decision. **Continue existing
+work** instead starts an implementer to address the failure or change the code.
+Unacknowledged partial failures that permit retry can also continue their retained
+work, provided no newer job supersedes them. Unsafe stop reports retain their
+existing restriction on restarting.
+A failed broker publication check offers continuation from the review page; the
+old publication remains blocked while the implementation is repaired.
+
+Before review, the implementation prompt requires all repository validation,
+including checks normally run by commit and pre-push hooks. Then it commits,
+requests review, and publishes the reviewed commit. If a later check requires
+edits, that new commit needs a new review. A green historical review remains
+visible but does not approve later edits.
+
+The reviewer gets an independent, coordinator-owned, read-only clone of the exact
+commit, including its local callers and tests. Ownership is saved before cloning;
+a background cleanup worker reclaims snapshots after interrupted reviews and
+retries failed cleanup, with errors visible in review history. Patches up to 500 KB are inline;
+larger patches are supplied as a complete local file under the same 50 MB bound
+and SHA-256 digest as publication verification. Git snapshot commands have a
+two-minute timeout and require GNU `timeout` (Homebrew coreutils supplies it on
+macOS). Requirements stay in the GitHub issue and its links. Before review,
+PtcManager uses its authenticated read-only GitHub client to capture the issue,
+recent comments, and linked GitHub issues, pull requests and text documents within
+the job's approved repository (up to nine sources total, with explicit text/comment
+limits). Links cannot widen the token's repository scope; out-of-repository links
+are identified as not fetched. Put essential cross-repository requirements in the
+approved issue. Document links support encoded paths and branch names containing
+slashes. Blob sizes are
+checked before reading their text, and the resolved object is immutable. Private
+document links require Contents read permission on that token. Missing GitHub
+context pauses preparation rather than becoming a completed review. Repository
+documents remain available in the local snapshot; other external sites are not
+fetched. The reviewer reports missing essential context instead of assuming it.
+Codex web search is disabled and its sandbox is read-only; Claude uses restricted
+Read/Glob/Grep tools; Cursor uses read-only ask mode. Reviewers receive the fetched
+text, never the coordinator's GitHub token.
+
+Each job keeps its reviewer's own session across rounds, including maintainer
+continuations. The coding agent and reviewer have separate sessions. Changing the
+reviewer model, provider, or effort starts a fresh session with the last useful
+review and handoff. A missing native session permits one fresh start within the
+original timeout; other execution failures still pause. The review history shows
+when this fallback was needed. Session IDs come from the CLI's structured metadata,
+never from model-authored review text or a machine-wide “last session.”
+
+The coding agent can pass a short plain-text note with
+`$PTC_OPERATION_WRAPPER review --handoff-file /absolute/path/to/note.txt`.
+The file can live outside the worktree and is optional, UTF-8, and limited to 20 KB.
+No template is required: explain changes, validation, and responses to findings.
+The review page shows this note, and the reviewer's summary serves as its return
+handoff. These notes explain the work; they do not add requirements or approve it.
+Resumed reviewers receive the current note rather than a replay of all reviews.
+A restarted coding agent receives the last completed assessment and useful note;
+a later timeout or preparation failure does not replace that assessment with null.
+Copied handoffs have a UTF-8 byte limit and a visible shortening notice; full notes
+and assessments remain in review history. Continuation prompts stay below the
+Linux single-argument limit.
+A cached review is reused only when its issue and fetched requirements evidence
+also match. Every round still assesses the current exact commit; session memory does not extend
+a previous green result to changed code.
+
+The schema and helper contract version are frozen with the attempt. An incompatible
+helper deployment fails explicitly and requires a new attempt.
+Reviews run in a dedicated Oban queue with the configured timeout plus 15 minutes
+for queueing and result handling. The helper caps combined stdout/stderr at 1 MB
+and retains bounded diagnostics; it does not limit the CLI's database/WAL files.
+Only validated structured results complete assessments; failed attempts do not
+consume completed review budget. The deployed root-owned
 `ptc-manager-worker-review` helper runs as the worker; the normal deployment
 script installs it and its exact sudo rule. Browser demo mode never starts
 these reviewers or continuations. Repository test commands and coding
@@ -146,6 +215,10 @@ conventions stay in `AGENTS.md`; managed review orchestration comes from the
 PtcManager task prompt, so managed jobs do not need repository-specific review
 counts, tools, or session instructions. This does not isolate hostile agents
 that share the same worker account or direct GitHub credentials.
+
+Agent-created PR discovery uses the publication retry budget (five attempts by
+default), then preserves the job under Needs attention. An explicit retry resets
+that budget; missing PRs cannot loop forever.
 
 ## Run locally
 
@@ -591,7 +664,9 @@ catalog contains:
   is kept for attention rather than discarded. It takes two clicks and refuses
   the deterministic phases that follow an agent — reconciliation, verification,
   and publication — because PtcManager, not an agent, owns those. If the pane
-  cannot be closed, the console says so and the job stays cancelled;
+  cannot be closed, the console says so and the job stays cancelled. Managed
+  jobs retry the stop durably until it is confirmed; their worktree can then
+  be explicitly discarded from retained worktrees;
 - **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr

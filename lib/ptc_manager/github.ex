@@ -12,6 +12,8 @@ defmodule PtcManager.GitHub do
   @callback get_repository(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   @callback list_open_issues(Repository.t()) :: {:ok, [map()]} | {:error, term()}
   @callback get_issue(Repository.t(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  @callback review_context(Repository.t(), {:issue, pos_integer()} | {:blob, String.t()}) ::
+              {:ok, map()} | {:error, term()}
 
   @doc """
   The login of the account whose token PtcManager reads GitHub with.
@@ -30,5 +32,5 @@ defmodule PtcManager.GitHub do
   """
   @callback list_labels(Repository.t()) :: {:ok, [String.t()]} | {:error, term()}
 
-  @optional_callbacks get_repository: 2, viewer_login: 0, list_labels: 1
+  @optional_callbacks get_repository: 2, viewer_login: 0, list_labels: 1, review_context: 2
 end

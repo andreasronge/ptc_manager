@@ -52,7 +52,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 7_200,
       result_type: "implementation",
       prompt:
-        "Fix the issue completely. Follow the repository instructions, validate the change, perform the configured reviews, commit it, and publish a pull request that closes the issue. Its description needs a summary, what you verified beyond the repository hooks, and a `## Retrospective` section with two items that may each be `none`: untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or that you had to guess at. If the Retrospective lists untracked follow-up work, add the label `ptc:follow-up` to the pull request. Do not merge it."
+        "Fix the issue completely. Follow the repository instructions, run all required checks, commit the validated change, perform the configured reviews, and publish the reviewed commit in a pull request that closes the issue. Its description needs a summary, what you verified beyond the repository hooks, and a `## Retrospective` section with two items that may each be `none`: untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or that you had to guess at. If the Retrospective lists untracked follow-up work, add the label `ptc:follow-up` to the pull request. Do not merge it."
     },
     %{
       key: "prepare_issue",

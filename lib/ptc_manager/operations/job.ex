@@ -23,6 +23,8 @@ defmodule PtcManager.Operations.Job do
     field :review_state, :string
     field :reviewed_head_sha, :string
     field :review_continuation_instructions, :string
+    field :review_recovery_expires_at, :utc_datetime_usec
+    field :review_resume_mode, :string
     field :review_generation, :integer, default: 0
     field :last_error, :string
     field :reconciling_at, :utc_datetime_usec
@@ -86,6 +88,8 @@ defmodule PtcManager.Operations.Job do
       :execution_settings,
       :review_state,
       :reviewed_head_sha,
+      :review_recovery_expires_at,
+      :review_resume_mode,
       :review_generation,
       :review_continuation_instructions,
       :last_error,

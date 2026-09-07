@@ -901,7 +901,7 @@ defmodule PtcManager.DispatchTest do
 
     prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(repository, issue, job)
 
-    assert prompt =~ "publish a pull request that closes the issue"
+    assert prompt =~ "publish the reviewed commit in a pull request that closes the issue"
     assert prompt =~ "Branch: #{job.branch_name} → main"
     assert prompt =~ "Maximum independent review rounds: 1"
     assert prompt =~ "Read the issue, its comments, linked issues"
