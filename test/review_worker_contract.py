@@ -28,7 +28,7 @@ class ReviewerContract(unittest.TestCase):
         request['fallback_handoff'] = 'Previous review found a race; the implementer added locking.'
         expected = {'summary': 'clear', 'findings': []}
         calls = []
-        def fake_run(args, prompt, cwd, timeout=None):
+        def fake_run(args, prompt, cwd, timeout=None, **kwargs):
             calls.append(args)
             if 'resume' in args:
                 raise RuntimeError('agent_command_failed exit=1: Session not found')
@@ -49,7 +49,7 @@ class ReviewerContract(unittest.TestCase):
         for kind in ('claude', 'cursor'):
             request = self.request(kind)
             request['session_id'] = session
-            def fake_run(args, prompt, cwd, timeout=None):
+            def fake_run(args, prompt, cwd, timeout=None, **kwargs):
                 self.assertEqual(args[args.index('--resume') + 1], session)
                 self.assertNotIn('--no-session-persistence', args)
                 self.assertEqual(cwd, request['repository_path'])
@@ -83,7 +83,7 @@ class ReviewerContract(unittest.TestCase):
         session = '0199a213-81c0-7800-8aa1-bbab2a035a53'
         request['session_id'] = session
         expected = {'summary': 'The race is fixed.', 'findings': []}
-        def fake_run(args, prompt, cwd, timeout=None):
+        def fake_run(args, prompt, cwd, timeout=None, **kwargs):
             self.assertIn('resume', args)
             self.assertIn(session, args)
             self.assertNotIn('--last', args)
@@ -99,7 +99,7 @@ class ReviewerContract(unittest.TestCase):
         request = self.request()
         request['repository_path'] = '/exact/readonly/snapshot'
         expected = {'summary': 'clear', 'findings': []}
-        def fake_run(args, prompt, cwd, timeout=None):
+        def fake_run(args, prompt, cwd, timeout=None, **kwargs):
             self.assertEqual(cwd, request['repository_path'])
             self.assertIn('web_search="disabled"', args)
             self.assertIn('exact commit', prompt)
@@ -136,7 +136,7 @@ class ReviewerContract(unittest.TestCase):
         expected = {'summary': 'clear', 'findings': []}
         for kind in ('codex', 'claude', 'cursor'):
             commands = []
-            def fake_run(args, prompt, cwd, timeout=None):
+            def fake_run(args, prompt, cwd, timeout=None, **kwargs):
                 self.assertTrue(899 < timeout <= 900)
                 commands.append(args)
                 self.assertIn('untrusted diff', prompt)
@@ -154,7 +154,7 @@ class ReviewerContract(unittest.TestCase):
         request['settings']['reviewer_model'] = 'gpt-5.6-sol'
         expected = {'summary': 'clear', 'findings': []}
 
-        def fake_run(args, prompt, cwd, timeout=None):
+        def fake_run(args, prompt, cwd, timeout=None, **kwargs):
             self.assertEqual(args[args.index('--model') + 1], 'gpt-5.6-sol')
             self.assertEqual(args[args.index('-c') + 1], 'model_reasoning_effort="xhigh"')
             self.assertIn('independent code reviewer', prompt)
@@ -168,7 +168,7 @@ class ReviewerContract(unittest.TestCase):
         for kind in ('codex', 'claude', 'cursor'):
             request = self.request(kind)
             request['settings']['review_timeout_ms'] = 1_500_000
-            def fake_run(args, prompt, cwd, timeout=None):
+            def fake_run(args, prompt, cwd, timeout=None, **kwargs):
                 self.assertTrue(1499 < timeout <= 1500)
                 raise RuntimeError('observed timeout')
             with patch.dict(context, run=fake_run):
@@ -227,6 +227,50 @@ class ReviewerContract(unittest.TestCase):
         self.assertEqual(result.returncode, 75)
         self.assertIn('preserve your work', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
+
+    def test_codex_review_ignores_large_progress_and_stderr_but_keeps_final_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory, 'codex')
+            binary.write_text("""#!/usr/bin/env python3
+import json, pathlib, sys
+print(json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'}), flush=True)
+for _ in range(3):
+    print(json.dumps({'type': 'item.completed', 'output': 'x' * 1_100_000}), flush=True)
+sys.stderr.write('verbose diagnostic' * 100_000)
+pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_text(json.dumps({'summary': 'clear', 'findings': []}))
+""")
+            binary.chmod(0o755)
+            request = self.request()
+            request['repository_path'] = directory
+            with patch.dict(context['BINARIES'], codex=str(binary)):
+                result = review(request)
+            self.assertEqual(result['result'], {'summary': 'clear', 'findings': []})
+            self.assertEqual(result['session_id'], '0199a213-81c0-7800-8aa1-bbab2a035a53')
+
+    def test_session_stream_handles_split_lines_and_rejects_missing_or_duplicate_identity(self):
+        event = json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'}).encode()
+        events = helper['CodexSessionEvents']()
+        events.feed(b'x' * 5000)
+        self.assertLessEqual(len(events.pending), 4096)
+        events.feed(b'\n' + event[:7])
+        events.feed(event[7:] + b'\n' + b'x' * 5000)
+        self.assertEqual(json.loads(events.result())['thread_id'], '0199a213-81c0-7800-8aa1-bbab2a035a53')
+        events.feed(b'\n')
+        with self.assertRaisesRegex(RuntimeError, 'multiple_reviewer_sessions'):
+            events.feed(event + b'\n')
+        with self.assertRaisesRegex(RuntimeError, 'missing_reviewer_session'):
+            helper['CodexSessionEvents']().result()
+
+    def test_streamed_progress_still_enforces_exit_status_timeout_and_result_file_limit(self):
+        with self.assertRaisesRegex(RuntimeError, 'exit=23.*useful failure'):
+            helper['run']([sys.executable, '-c', 'import sys; sys.stderr.write("x" * 1_100_000 + "useful failure"); sys.exit(23)'], session_events=True)
+        with self.assertRaisesRegex(RuntimeError, 'review_timeout'):
+            helper['run']([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.05, session_events=True)
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory, 'result.json')
+            result.write_text('x' * 150_001)
+            with self.assertRaisesRegex(RuntimeError, 'invalid_result_file'):
+                helper['read_json_file'](str(result), 150_000)
 
     def test_existing_cli_state_can_grow_past_four_megabytes(self):
         with tempfile.TemporaryDirectory() as directory:

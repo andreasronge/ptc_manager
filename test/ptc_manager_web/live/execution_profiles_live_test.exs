@@ -108,6 +108,35 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
     assert Repo.get!(Job, job.id).review_state == "resume_pending"
   end
 
+  test "handoff expansion survives operation updates and round completion", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "maintainer", 1, "small")
+    job = job |> Job.changeset(%{state: "working", fencing_token: 1}) |> Repo.update!()
+
+    {:ok, round} =
+      PtcManager.Reviews.request(job.id, 1, "handoff",
+        snapshot: Snapshot,
+        handoff: "Validated the new behavior."
+      )
+
+    {:ok, view, _} = conn |> login() |> live("/jobs/#{job.id}/reviews")
+    toggle = "#handoff-toggle-#{round.id}"
+    body = "#handoff-body-#{round.id}"
+    view |> element(toggle) |> render_click()
+    assert has_element?(view, toggle <> "[aria-expanded=true]")
+    assert has_element?(view, body, "Validated the new behavior.")
+    Operations.notify_changed(:test)
+    assert has_element?(view, body)
+    PtcManager.Reviews.fail(round.id, :review_timeout)
+    assert has_element?(view, "#review-round-#{round.id}", "failed")
+    assert has_element?(view, body)
+    view |> element(toggle) |> render_click()
+    Operations.notify_changed(:test)
+    refute has_element?(view, body)
+  end
+
   test "cancellation requires a reason and posting an explanation is a separate approval", %{
     conn: conn
   } do

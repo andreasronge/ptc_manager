@@ -16,7 +16,47 @@ import uuid
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
 
 
-def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000):
+class CodexSessionEvents:
+    """Keep only native session metadata, never the verbose progress transcript."""
+    def __init__(self):
+        self.pending = bytearray()
+        self.dropping = False
+        self.session_id = None
+
+    def feed(self, data):
+        parts = data.split(b"\n")
+        for index, part in enumerate(parts):
+            if not self.dropping:
+                if len(self.pending) + len(part) <= 4096:
+                    self.pending.extend(part)
+                else:
+                    self.pending.clear()
+                    self.dropping = True
+            if index < len(parts) - 1:
+                if not self.dropping:
+                    self.record(self.pending)
+                self.pending.clear()
+                self.dropping = False
+
+    def record(self, line):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            return
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            if self.session_id is not None:
+                raise RuntimeError("multiple_reviewer_sessions")
+            self.session_id = checked_session_id(event.get("thread_id"))
+
+    def result(self):
+        if self.pending and not self.dropping:
+            self.record(self.pending)
+        if self.session_id is None:
+            raise RuntimeError("missing_reviewer_session")
+        return json.dumps({"type": "thread.started", "thread_id": self.session_id})
+
+
+def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, session_events=False):
     # Bound captured output, not the CLI's persistent databases and WAL files.
     with tempfile.TemporaryFile() as input_file, selectors.DefaultSelector() as streams:
         if prompt:
@@ -26,6 +66,7 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000):
                                    stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
         stdout, stderr = bytearray(), bytearray()
         captured = 0
+        events = CodexSessionEvents() if session_events else None
         deadline = time.monotonic() + timeout
         streams.register(process.stdout, selectors.EVENT_READ, stdout)
         streams.register(process.stderr, selectors.EVENT_READ, stderr)
@@ -38,6 +79,13 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000):
                     data = os.read(key.fd, 16_384)
                     if not data:
                         streams.unregister(key.fileobj)
+                        continue
+                    if events is not None:
+                        if key.data is stdout:
+                            events.feed(data)
+                        else:
+                            stderr.extend(data)
+                            del stderr[:-4_000]
                         continue
                     captured += len(data)
                     if captured > max_output:
@@ -60,7 +108,7 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000):
         if process.returncode:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(f"agent_command_failed exit={process.returncode}: {detail}")
-        return stdout.decode()
+        return events.result() if events is not None else stdout.decode()
 
 
 def catalog(kind):
@@ -166,7 +214,7 @@ def run_review(request, remaining=None):
             if effort:
                 args += ["-c", 'model_reasoning_effort="' + effort + '"']
             args += ["-c", 'web_search="disabled"']
-            events = run(args + ["-"], prompt, repository_path, timeout=timeout)
+            events = run(args + ["-"], prompt, repository_path, timeout=timeout, session_events=True)
             started = [json.loads(line) for line in events.splitlines() if line.strip()]
             ids = [event["thread_id"] for event in started if event.get("type") == "thread.started"]
             if len(ids) != 1:
