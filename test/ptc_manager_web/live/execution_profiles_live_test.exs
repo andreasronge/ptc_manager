@@ -19,6 +19,51 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
          }}
   end
 
+  defmodule MissingCatalog do
+    def models(kind) when kind in ~w(claude codex), do: {:error, :model_catalog_unavailable}
+    def models(kind), do: {:ok, %{"kind" => kind, "models" => []}}
+  end
+
+  test "missing catalogs give manual guidance without an empty available list", %{conn: conn} do
+    old = Application.get_env(:ptc_manager, :review_adapter)
+    Application.put_env(:ptc_manager, :review_adapter, MissingCatalog)
+
+    on_exit(fn ->
+      if is_nil(old),
+        do: Application.delete_env(:ptc_manager, :review_adapter),
+        else: Application.put_env(:ptc_manager, :review_adapter, old)
+    end)
+
+    {:ok, view, _} = conn |> login() |> live("/execution-profiles")
+    view |> element("button", "Refresh available models") |> render_click()
+    html = render_async(view)
+    assert html =~ "Discovery unavailable"
+    assert has_element?(view, "#model-catalog-claude", "For Claude, try sonnet, opus or haiku")
+    refute has_element?(view, "#model-catalog-codex", "For Claude")
+    refute has_element?(view, "#model-catalog-cursor", "For Claude")
+    assert html =~ "No models were reported"
+    refute html =~ "Available model IDs"
+  end
+
+  test "Claude catalog context aliases can be saved for implementation and review", %{conn: conn} do
+    {:ok, view, _} = conn |> login() |> live("/execution-profiles")
+
+    view
+    |> form("#profile-strong",
+      profile: %{
+        kind: "claude",
+        model: "opus[1m]",
+        effort: "high",
+        reviewer_kind: "claude",
+        reviewer_model: "sonnet[1m]",
+        reviewer_effort: "high"
+      }
+    )
+    |> render_submit()
+
+    assert render(view) =~ "Existing jobs keep their approved settings"
+  end
+
   defp login(conn), do: init_test_session(conn, %{authenticated: true, actor: "maintainer"})
 
   test "edits presets and discovers models without altering already-approved jobs", %{conn: conn} do

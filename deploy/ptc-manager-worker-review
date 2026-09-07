@@ -134,8 +134,40 @@ def catalog(kind):
         if not models:
             raise RuntimeError("model_catalog_unavailable")
         return {"kind": kind, "source": "account", "models": models}
-    return {"kind": kind, "source": "manual", "models": [],
-            "note": "Claude CLI has no account model-list command. Enter an explicit model ID or alias; availability is checked when launched."}
+    # The Agent SDK obtains supportedModels from this initialization response.
+    # No user message is sent: this does not start a model turn.
+    request_id = str(uuid.uuid4())
+    request = {"type": "control_request", "request_id": request_id,
+               "request": {"subtype": "initialize"}}
+    with tempfile.TemporaryDirectory(prefix="ptc-models-") as directory:
+        output = run([BINARIES[kind], "--print", "--input-format", "stream-json",
+                      "--output-format", "stream-json", "--verbose",
+                      "--no-session-persistence", "--tools", "",
+                      "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                      "--setting-sources", ""],
+                     json.dumps(request) + "\n", directory, timeout=30)
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        response = event.get("response") if isinstance(event, dict) else None
+        if not (isinstance(event, dict) and event.get("type") == "control_response" and isinstance(response, dict)
+                and response.get("request_id") == request_id):
+            continue
+        data = response.get("response")
+        models = data.get("models") if isinstance(data, dict) else None
+        if response.get("subtype") != "success" or not isinstance(models, list) or not 0 < len(models) <= 500:
+            break
+        if not all(isinstance(m, dict) and isinstance(m.get("value"), str)
+                   and re.fullmatch(r"(?=.{1,120}$)[a-zA-Z0-9][a-zA-Z0-9._:-]*(?:\[1m\])?", m["value"])
+                   and isinstance(m.get("displayName"), str) and 0 < len(m["displayName"]) <= 300
+                   for m in models):
+            break
+        return {"kind": kind, "source": "cli", "models": [
+            {"id": m["value"], "name": m["displayName"]} for m in models],
+            "note": "Reported by Claude on the worker. IDs may be aliases; access is checked when launched."}
+    raise RuntimeError("model_catalog_unavailable")
 
 
 def review(request):
@@ -165,7 +197,7 @@ def run_review(request, remaining=None):
     timeout = min(timeout_ms / 1000, remaining) if remaining is not None else timeout_ms / 1000
     deadline = time.monotonic() + timeout
     kind, model = settings["reviewer_kind"], settings["reviewer_model"]
-    if kind not in BINARIES or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}", model):
+    if kind not in BINARIES or not re.fullmatch(r"(?=.{1,120}$)[a-zA-Z0-9][a-zA-Z0-9._:-]*(?:\[1m\])?", model):
         raise RuntimeError("invalid_review_profile")
     if request.get("contract_version") != 2:
         raise RuntimeError("review_contract_changed_retry_required")

@@ -40,8 +40,11 @@ defmodule PtcManager.ExecutionProfiles.Profile do
     |> validate_inclusion(:name, ~w(small standard strong))
     |> validate_inclusion(:kind, ~w(codex claude cursor))
     |> validate_inclusion(:reviewer_kind, ~w(codex claude cursor))
-    |> validate_format(:model, ~r/\A[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}\z/)
-    |> validate_format(:reviewer_model, ~r/\A[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}\z/)
+    |> validate_format(:model, ~r/\A(?=.{1,120}\z)[a-zA-Z0-9][a-zA-Z0-9._:-]*(?:\[1m\])?\z/)
+    |> validate_format(
+      :reviewer_model,
+      ~r/\A(?=.{1,120}\z)[a-zA-Z0-9][a-zA-Z0-9._:-]*(?:\[1m\])?\z/
+    )
     |> validate_inclusion(:effort, ~w(low medium high xhigh max))
     |> validate_inclusion(:reviewer_effort, ~w(low medium high xhigh max))
     |> validate_number(:max_reviews, greater_than_or_equal_to: 0, less_than_or_equal_to: 5)

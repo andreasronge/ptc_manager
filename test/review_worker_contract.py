@@ -17,6 +17,49 @@ context = review.__globals__
 
 
 class ReviewerContract(unittest.TestCase):
+    def test_claude_catalog_initializes_without_a_model_turn(self):
+        def fake_run(args, prompt=None, cwd=None, **kwargs):
+            request = json.loads(prompt)
+            self.assertEqual(request['type'], 'control_request')
+            self.assertEqual(request['request']['subtype'], 'initialize')
+            self.assertIn('--strict-mcp-config', args)
+            self.assertEqual(kwargs['timeout'], 30)
+            self.assertTrue(os.path.isdir(cwd))
+            return json.dumps({'type': 'control_response', 'response': {
+                'subtype': 'success', 'request_id': request['request_id'],
+                'response': {'models': [{'value': 'opus[1m]', 'displayName': 'Opus'}]}}})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(context['catalog']('claude')['models'],
+                             [{'id': 'opus[1m]', 'name': 'Opus'}])
+
+    def test_claude_catalog_rejects_empty_malformed_and_unmatched_responses(self):
+        for output in ('', '{}', 'not json', json.dumps({'type': 'control_response',
+                       'response': {'subtype': 'success', 'request_id': 'wrong',
+                                    'response': {'models': []}}})):
+            with patch.dict(context, run=lambda *a, **k: output):
+                with self.assertRaises(RuntimeError):
+                    context['catalog']('claude')
+
+    def test_claude_catalog_rejects_invalid_matching_payloads(self):
+        for models in ([], None, [None], [{'value': 'bad;command', 'displayName': 'Bad'}],
+                       [{'value': 'sonnet', 'displayName': 123}]):
+            def fake_run(args, prompt, *a, **k):
+                return json.dumps({'type': 'control_response', 'response': {
+                    'subtype': 'success', 'request_id': json.loads(prompt)['request_id'],
+                    'response': {'models': models}}})
+            with patch.dict(context, run=fake_run):
+                with self.assertRaises(RuntimeError):
+                    context['catalog']('claude')
+
+    def test_claude_review_accepts_catalog_context_alias(self):
+        request = self.request('claude')
+        request['settings']['reviewer_model'] = 'opus[1m]'
+        def fake_run(args, *a, **k):
+            self.assertEqual(args[args.index('--model') + 1], 'opus[1m]')
+            return json.dumps({'session_id': '0199a213-81c0-7800-8aa1-bbab2a035a53', 'structured_output': {'summary': 'clear', 'findings': []}})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)['result']['summary'], 'clear')
+
     def request(self, kind='codex', effort=None):
         return {'settings': {'reviewer_kind': kind, 'reviewer_model': 'chosen-model',
                              'reviewer_effort': effort},
