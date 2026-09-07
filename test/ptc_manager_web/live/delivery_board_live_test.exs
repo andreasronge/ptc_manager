@@ -50,6 +50,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     |> Repo.update!()
 
     {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#board-job-#{job.id}", "Review paused")
+    refute has_element?(view, "#board-job-#{job.id}", "reconciling")
     assert has_element?(view, "#board-job-#{job.id}", "Review needs your decision")
 
     assert has_element?(

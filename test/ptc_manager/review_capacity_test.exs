@@ -41,6 +41,16 @@ defmodule PtcManager.ReviewCapacityTest do
     def release_review_owned(_, _), do: {:error, :cleanup_temporarily_unavailable}
   end
 
+  defmodule BeforeLaunchFailureAdapter do
+    def stop_review_agent(_), do: :ok
+
+    def resume_review_job(_),
+      do:
+        {:error,
+         {:continuation_not_started,
+          Process.get(:prelaunch_failure, :retained_workspace_not_ready)}}
+  end
+
   defmodule UncertainAdapter do
     def stop_review_agent(_), do: :ok
     def resume_review_job(_job), do: {:error, :agent_launch_uncertain}
@@ -584,6 +594,59 @@ defmodule PtcManager.ReviewCapacityTest do
     assert :ok = PtcManager.Reviews.ResumeWorker.perform(args)
     refute_received {:resumed, _}
     assert {:error, :worktree_capacity} = Worktrees.ensure_slot(worker.worker_key, 1, nil)
+  end
+
+  test "a pre-launch failure releases confirmed stopped capacity and can be continued", %{
+    worker: worker
+  } do
+    {job, _} = paused_job(worker)
+    job |> Job.changeset(%{state: "reconciling"}) |> Repo.update!()
+    {:ok, pending} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+    Application.put_env(:ptc_manager, :review_resume_adapter, BeforeLaunchFailureAdapter)
+
+    assert :ok =
+             PtcManager.Reviews.ResumeWorker.perform(%Oban.Job{
+               args: %{"job_id" => job.id, "generation" => pending.review_generation}
+             })
+
+    current = Repo.get!(Job, job.id)
+    assert current.state == "blocked"
+    assert current.review_state == "paused"
+    assert current.last_error =~ "retained_workspace_not_ready"
+    assert :ok = Worktrees.ensure_slot(worker.worker_key, 1, nil)
+    Application.put_env(:ptc_manager, :review_resume_adapter, ResumeAdapter)
+    {:ok, next} = Reviews.decide(job.id, current.review_generation, "continue", %{}, "maintainer")
+
+    assert :ok =
+             PtcManager.Reviews.ResumeWorker.perform(%Oban.Job{
+               args: %{"job_id" => job.id, "generation" => next.review_generation}
+             })
+
+    assert_received {:resumed, id}
+    assert id == job.id
+  end
+
+  test "continuation failure exposes the native code without raw command output", %{
+    worker: worker
+  } do
+    {job, _} = paused_job(worker)
+    {:ok, pending} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+    Application.put_env(:ptc_manager, :review_resume_adapter, BeforeLaunchFailureAdapter)
+
+    Process.put(
+      :prelaunch_failure,
+      {:herdr_exit, 1,
+       Jason.encode!(%{error: %{code: "linked_worktree_source", message: "private raw output"}})}
+    )
+
+    assert :ok =
+             PtcManager.Reviews.ResumeWorker.perform(%Oban.Job{
+               args: %{"job_id" => job.id, "generation" => pending.review_generation}
+             })
+
+    error = Repo.get!(Job, job.id).last_error
+    assert error =~ "linked_worktree_source"
+    refute error =~ "private raw output"
   end
 
   test "an uncertain continuation keeps its reservation for reconciliation", %{worker: worker} do
