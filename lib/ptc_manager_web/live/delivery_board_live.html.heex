@@ -222,6 +222,18 @@
 
           <div class="mt-3 flex flex-wrap gap-3 text-xs">
             <.link
+              :if={
+                report_job_id =
+                  (item.active_job && item.active_job.id) ||
+                    (item.publication && item.publication.job_id)
+              }
+              id={"delivery-report-#{report_job_id}"}
+              navigate={"/jobs/#{report_job_id}/report"}
+              class="rounded-lg bg-white/10 px-3 py-2 text-teal-200"
+            >
+              Delivery report
+            </.link>
+            <.link
               :if={item.active_job && item.active_job.execution_settings}
               id={"job-reviews-#{item.active_job.id}"}
               navigate={"/jobs/#{item.active_job.id}/reviews"}

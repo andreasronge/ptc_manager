@@ -66,7 +66,8 @@ defmodule PtcManager.Reviews.Adapter do
              PtcManager.Reviews.Context.record_session(
                round,
                session_id,
-               envelope["session_note"]
+               envelope["session_note"],
+               envelope["usage"]
              ) do
         {:ok, decoded}
       else

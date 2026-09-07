@@ -37,6 +37,8 @@ defmodule PtcManager.Operations.PrPublication do
     field :mergeability, :string, default: "unknown"
     field :mergeable_state, :string
     field :checks_state, :string, default: "unknown"
+    field :comment_count, :integer
+    field :inline_comment_count, :integer
     field :checks_total, :integer, default: 0
     field :checks_failed, :integer, default: 0
     field :checks_pending, :integer, default: 0
@@ -85,6 +87,8 @@ defmodule PtcManager.Operations.PrPublication do
       :mergeability,
       :mergeable_state,
       :checks_state,
+      :comment_count,
+      :inline_comment_count,
       :checks_total,
       :checks_failed,
       :checks_pending,
@@ -108,6 +112,8 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_inclusion(:source, ["broker", "agent", "external"])
     |> validate_inclusion(:mergeability, ["unknown", "mergeable", "conflicting", "blocked"])
     |> validate_inclusion(:checks_state, ["unknown", "none", "pending", "success", "failure"])
+    |> validate_number(:comment_count, greater_than_or_equal_to: 0)
+    |> validate_number(:inline_comment_count, greater_than_or_equal_to: 0)
     |> validate_number(:checks_total, greater_than_or_equal_to: 0)
     |> validate_number(:checks_failed, greater_than_or_equal_to: 0)
     |> validate_number(:checks_pending, greater_than_or_equal_to: 0)

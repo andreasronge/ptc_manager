@@ -1,11 +1,13 @@
 defmodule PtcManager.ReviewWorkerContractTest do
   use ExUnit.Case, async: true
 
-  @tag :nightly
-  test "reviewer CLI arguments, structured results, output links and timeout fail closed" do
-    {output, status} =
-      System.cmd("python3", ["test/review_worker_contract.py"], stderr_to_stdout: true)
+  for script <- ["review_worker_contract.py", "delivery_metrics_contract.py"] do
+    @tag :nightly
+    test "offline wrapper contract: #{script}" do
+      {output, status} =
+        System.cmd("python3", ["test/" <> unquote(script)], stderr_to_stdout: true)
 
-    assert status == 0, output
+      assert status == 0, output
+    end
   end
 end

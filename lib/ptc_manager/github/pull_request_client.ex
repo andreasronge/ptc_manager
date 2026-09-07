@@ -109,6 +109,8 @@ defmodule PtcManager.GitHub.PullRequestClient do
       base_ref: get_in(pull, ["base", "ref"]),
       base_repository: base_repository,
       title: pull["title"],
+      comment_count: optional_count(pull["comments"]),
+      inline_comment_count: optional_count(pull["review_comments"]),
       author_login: get_in(pull, ["user", "login"]),
       labels: label_names(pull["labels"]),
       linked_issue_numbers: linked_issue_numbers(body, base_repository)
@@ -128,6 +130,9 @@ defmodule PtcManager.GitHub.PullRequestClient do
   end
 
   defp label_names(_labels), do: []
+
+  defp optional_count(n) when is_integer(n) and n >= 0, do: n
+  defp optional_count(_), do: nil
 
   defp valid_normalized?(result) do
     is_integer(result.pr_number) and result.pr_number > 0 and is_binary(result.pr_url) and

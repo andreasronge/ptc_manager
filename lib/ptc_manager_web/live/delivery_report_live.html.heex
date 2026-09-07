@@ -1,0 +1,329 @@
+<Layouts.app flash={@flash} current_path="/board">
+  <main class="mx-auto max-w-6xl space-y-6 p-6 text-slate-200" id="delivery-report">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <.link navigate="/board" class="text-teal-300">← Delivery</.link>
+      <span :if={Application.get_env(:ptc_manager, :demo_mode, false)} class="text-amber-300">
+        Demo data · no external actions
+      </span>
+      <button phx-click="refresh" class="rounded-lg bg-white/10 px-3 py-2">Refresh report</button>
+    </div>
+    <header>
+      <p class="text-sm text-slate-400">
+        {@report.job.repository.github_name} · issue #{@report.job.issue.number} · job #{@report.job.id}
+      </p>
+      <h1 class="mt-2 text-2xl font-semibold text-white">{@report.job.issue.title}</h1>
+      <p class="mt-2 text-sm text-slate-400">
+        Snapshot {Report.timestamp(@report.captured_at)} · {Report.human(@report.job.state)}
+      </p>
+      <div class="mt-3 flex flex-wrap gap-4 text-teal-300">
+        <a href={@report.job.issue.html_url} target="_blank" rel="noopener noreferrer">
+          GitHub issue
+        </a>
+        <a
+          :if={@report.publication && @report.publication.pr_url}
+          href={@report.publication.pr_url}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Pull request
+        </a>
+        <.link navigate={"/jobs/#{@report.job.id}/reviews"}>Review evidence and decisions</.link>
+      </div>
+    </header>
+    <div class="grid gap-4 sm:grid-cols-3">
+      <section class="rounded-xl border border-white/10 p-4">
+        <p class="text-sm text-slate-400">Submitted → Ready observed</p>
+        <p class="text-2xl">{Report.milliseconds(@report.ready_ms)}</p>
+        <p class="text-xs text-slate-400">
+          Latest Ready observation for this head. Historical gaps remain unknown.
+        </p>
+      </section>
+      <section class="rounded-xl border border-white/10 p-4">
+        <p class="text-sm text-slate-400">Review attempts</p>
+        <p class="text-2xl">{length(@report.rounds)}</p>
+        <p class="text-xs text-slate-400">
+          {Enum.count(@report.rounds, &(&1.state == "completed"))} assessed · {Enum.count(
+            @report.rounds,
+            &(&1.state == "failed")
+          )} failed
+        </p>
+      </section>
+      <section class="rounded-xl border border-white/10 p-4">
+        <p class="text-sm text-slate-400">Issue attempts</p>
+        <div class="flex flex-wrap gap-3">
+          <.link
+            :for={job <- @report.attempts}
+            navigate={"/jobs/#{job.id}/report"}
+            class="text-teal-300"
+          >
+            #{job.id} · {job.state}
+          </.link>
+        </div>
+        <p class="text-xs text-slate-400">Metrics below belong to the selected attempt.</p>
+      </section>
+    </div>
+    <nav class="flex flex-wrap gap-3 border-b border-white/10" aria-label="Report sections">
+      <button
+        :for={
+          {key, label} <- [
+            {"summary", "Merge summary"},
+            {"performance", "Time & resources"},
+            {"logbook", "Logbook"},
+            {"coverage", "Data coverage"}
+          ]
+        }
+        id={"report-tab-#{key}"}
+        phx-click="tab"
+        phx-value-tab={key}
+        aria-pressed={@tab == key}
+        class={[
+          "border-b-2 px-3 py-3",
+          if(@tab == key,
+            do: "border-teal-300 text-teal-300",
+            else: "border-transparent text-slate-400"
+          )
+        ]}
+      >
+        {label}
+      </button>
+    </nav>
+    <section :if={@tab == "summary"} id="report-summary" class="space-y-5">
+      <div class="rounded-xl border border-white/10 p-5">
+        <h2 class="text-lg font-semibold">Evidence for the current PR</h2>
+        <p class="break-all">
+          Remote head:
+          <code>{value(@report.publication && @report.publication.remote_head_sha)}</code>
+        </p>
+        <p>
+          PR checks: {value(@report.publication && @report.publication.checks_state)} · checked {Report.timestamp(
+            @report.publication && @report.publication.pr_checked_at
+          )}
+        </p>
+        <p>
+          Publication validation: {Report.validation_status(@report.job, @report.publication)} · {Report.milliseconds(
+            @report.job.pre_publication_duration_ms
+          )}
+        </p>
+        <p class="break-all">
+          Validated head: <code>{value(@report.job.pre_publication_verified_sha)}</code>
+        </p>
+        <p class="text-sm text-amber-200">
+          Earlier green reviews cover their exact commit. This report grants no merge approval.
+        </p>
+      </div>
+      <div :for={approval <- @report.overrides} class="rounded-xl border border-amber-400/30 p-5">
+        <h2 class="font-semibold">Maintainer override · {approval.actor}</h2>
+        <p>{approval.reason}</p>
+        <p class="break-all text-sm">
+          {approval.head_sha} · {Report.timestamp(approval.inserted_at)}
+        </p>
+      </div>
+      <h2 class="text-lg font-semibold">Review findings and coding handoffs</h2>
+      <p class="text-sm text-slate-400">
+        Handoffs are coding-agent claims. Compare successive commits and assessments; disappearance of a finding alone is not proof of a fix.
+      </p>
+      <p :if={@report.rounds == []}>No recorded reviews.</p>
+      <article
+        :for={round <- Enum.reverse(@report.rounds)}
+        class="rounded-xl border border-white/10 p-5"
+        id={"report-review-#{round.id}"}
+      >
+        <h3 class="font-semibold">Attempt {round.number} · {round.state}</h3>
+        <p class="break-all text-xs text-slate-400">{round.head_sha}</p>
+        <p :if={round.error} class="mt-2 text-amber-200">Assessment failed: {round.error}</p>
+        <p :if={round.result} class="mt-3">{round.result["summary"]}</p>
+        <ul :if={round.result} class="mt-2 list-inside list-disc">
+          <li :for={finding <- round.result["findings"] || []}>
+            {finding["severity"]}: {finding["description"]}
+          </li>
+        </ul>
+        <details :if={round.input["handoff"]} id={"report-handoff-#{round.id}"} class="mt-3">
+          <summary class="cursor-pointer text-teal-300">
+            Coding handoff before this review
+          </summary>
+          <p class="mt-2 whitespace-pre-wrap">{round.input["handoff"]}</p>
+        </details>
+        <p class="mt-2 text-xs text-slate-400">
+          Requested reviewer: {model(round.input["settings"], "Reviewer")}
+        </p>
+      </article>
+      <div class="rounded-xl border border-white/10 p-5">
+        <h2 class="font-semibold">Issue milestones and discussion</h2>
+        <p>Filed: {Report.timestamp(@report.job.issue.github_created_at)}</p>
+        <p>
+          Submitted: {Report.timestamp(@report.job.approval && @report.job.approval.approved_at)} · {value(
+            @report.job.approval && @report.job.approval.actor
+          )}
+        </p>
+        <p>
+          Last known issue comments when submitted: {value(
+            (@report.job.execution_settings || %{})["issue_comment_count_at_submission"]
+          )}
+        </p>
+        <p class="text-xs text-slate-400">
+          Observed: {value(
+            (@report.job.execution_settings || %{})["issue_comments_observed_at_submission"]
+          )}
+        </p>
+        <p>
+          Issue comments at last sync: {value(@report.job.issue.github_comment_count)} · {Report.timestamp(
+            @report.job.issue.comments_checked_at
+          )}
+        </p>
+        <p class="text-sm text-slate-400">
+          PR discussion: {value(@report.publication && @report.publication.comment_count)} · inline comments: {value(
+            @report.publication && @report.publication.inline_comment_count
+          )}
+        </p>
+      </div>
+      <div class="rounded-xl border border-white/10 p-5">
+        <h2 class="font-semibold">Requested model history</h2>
+        <div :for={entry <- @report.models} class="mt-3">
+          <p>{entry.role}: {model(entry.settings, entry.role)}</p>
+          <p class="text-xs text-slate-400">{Report.timestamp(entry.at)}</p>
+        </div>
+      </div>
+    </section>
+    <section :if={@tab == "performance"} id="report-performance" class="space-y-5">
+      <div class="rounded-xl border border-white/10 p-5">
+        <h2 class="text-lg font-semibold">Workspace preparation</h2>
+        <%= if w = @report.job.worktree_allocation do %>
+          <p>Worktree creation: {Report.milliseconds(w.worktree_created_duration_ms)}</p>
+          <p>
+            Repository setup: {Report.milliseconds(w.workspace_setup_duration_ms)} · {value(
+              w.workspace_setup_state
+            )}
+          </p>
+          <p>Cache: {value(w.workspace_setup_cache_state)}</p>
+          <p :for={{phase, ms} <- Enum.sort(w.workspace_setup_phase_durations || %{})}>
+            {Report.human(String.replace_suffix(phase, "_ms", ""))}: {Report.milliseconds(ms)}
+          </p>
+          <p
+            :if={map_size(w.workspace_setup_phase_durations || %{}) == 0}
+            class="text-sm text-slate-400"
+          >
+            This repository did not report setup phases.
+          </p>
+          <details id="report-setup-output" class="mt-3">
+            <summary class="cursor-pointer text-teal-300">Setup output</summary>
+            <pre class="whitespace-pre-wrap break-words text-xs">{w.workspace_setup_output || "Not recorded"}</pre>
+          </details>
+        <% else %>
+          <p>Not recorded</p>
+        <% end %>
+      </div>
+      <div class="rounded-xl border border-white/10 p-5">
+        <h2 class="text-lg font-semibold">Recorded phase intervals</h2>
+        <p class="text-sm text-slate-400">
+          Only closed intervals between recorded transitions. Older gaps and the current open interval are not counted. Working time includes tool and command waits.
+        </p>
+        <p :if={@report.phases == []}>Not recorded</p>
+        <p :for={phase <- @report.phases}>
+          {Report.human(phase.phase)} · {Report.milliseconds(phase.ms)} · {Report.timestamp(
+            phase.start
+          )}
+        </p>
+      </div>
+      <div class="overflow-x-auto rounded-xl border border-white/10 p-5">
+        <h2 class="text-lg font-semibold">Command invocations</h2>
+        <p class="text-sm text-slate-400">
+          Accumulated command time can overlap; it is not elapsed delivery time. Verify may include build, test and lint.
+        </p>
+        <table class="mt-3 w-full text-sm">
+          <thead class="text-left text-slate-400">
+            <tr>
+              <th>Label</th>
+              <th>Runs / measured</th>
+              <th>Failed</th>
+              <th>Run time</th>
+              <th>Queue</th>
+              <th>Peak memory</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={group <- @report.groups} class="border-t border-white/10">
+              <td class="py-3">{group.label}</td>
+              <td>{group.count} / {group.measured}</td>
+              <td>{group.failed}</td>
+              <td>{Report.milliseconds(group.run_ms)}</td>
+              <td>{Report.milliseconds(group.wait_ms)}</td>
+              <td>{Report.bytes(group.peak)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <details
+          :for={op <- @report.operations}
+          id={"report-operation-#{op.id}"}
+          class="mt-3 border-t border-white/10 pt-3"
+        >
+          <summary class="cursor-pointer">
+            #{op.id} · {op.label} · {op.state} · {Report.milliseconds(op.run_duration_ms)}
+          </summary>
+          <p>
+            Queue: {Report.milliseconds(op.wait_duration_ms)} · memory peak: {Report.bytes(
+              op.peak_memory_bytes
+            )}
+          </p>
+          <p>Average cores used: {value(PtcManager.DeliveryMetrics.average_cores(op))}</p>
+          <p :for={{key, v} <- metrics(op.resource_metrics)} class="text-xs">
+            {Report.human(key)}: {v}
+          </p>
+          <p class="text-xs text-slate-400">
+            CPU allowance is not actual usage; ancestor CPU and memory limits may be shared. Disk counters exclude cached reads.
+          </p>
+        </details>
+      </div>
+      <div class="rounded-xl border border-white/10 p-5">
+        <h2 class="text-lg font-semibold">Reviewer token usage · recorded subtotal</h2>
+        <p>
+          {value(@report.usage.input)} input · {value(@report.usage.cached)} cached input · {value(
+            @report.usage.output
+          )} output
+        </p>
+        <p class="text-sm text-slate-400">
+          Coverage: {@report.usage.measured} / {@report.usage.total} review attempts. Cached input is included in input. Usage is recorded per invocation, not by summing cumulative session totals. Coding-agent usage and failed-review usage are not yet collected; no total cost is inferred.
+        </p>
+      </div>
+    </section>
+    <section :if={@tab == "logbook"} id="report-logbook" class="space-y-3">
+      <h2 class="text-lg font-semibold">Logbook</h2>
+      <p class="text-sm text-slate-400">
+        Recorded events only. No heartbeat noise or reconstructed queue reasons.
+      </p>
+      <article
+        :for={{event, index} <- Enum.with_index(@report.events)}
+        id={"report-event-#{index}"}
+        class="border-l-2 border-teal-400/40 pl-4 py-2"
+      >
+        <p class="text-xs text-slate-400">{Report.timestamp(event.at)} · {event.source}</p>
+        <h3 class="font-semibold">{event.title}</h3>
+        <details :if={event.detail && event.detail != %{}}>
+          <summary class="cursor-pointer text-sm text-teal-300">Details</summary>
+          <pre class="whitespace-pre-wrap break-words text-xs">{detail(event.detail)}</pre>
+        </details>
+      </article>
+    </section>
+    <section
+      :if={@tab == "coverage"}
+      id="report-coverage"
+      class="space-y-4 rounded-xl border border-white/10 p-5"
+    >
+      <h2 class="text-lg font-semibold">Data coverage</h2>
+      <p>
+        Recorded: approval and issue timestamps, review evidence, requested model settings, wrapped command outcomes, available workspace timings and memory peaks.
+      </p>
+      <p>
+        New collection: atomic job phase transitions, issue/PR comment snapshots and Ready transitions, command CPU / I/O / pressure counters, successful Codex reviewer token usage.
+      </p>
+      <p>
+        Repository-dependent: setup phase breakdown and cache state. Slowest compilation files and test cases require repository profiling; raw command labels cannot provide those timings.
+      </p>
+      <p>
+        Not collected: coding-agent tokens,  full historical queue reasons, resource time-series samples. Unknown is never reported as zero.
+      </p>
+      <p>
+        Fresh report data is loaded only on navigation or Refresh, so expanding evidence does not close it while you read.
+      </p>
+    </section>
+  </main>
+</Layouts.app>

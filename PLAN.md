@@ -464,3 +464,9 @@ base, and diff, recording an actor and reason separately from the original revie
 This authorizes publication continuation only; validation and merge approval remain
 mandatory. Later decisions, fencing changes, or changed evidence invalidate that
 approval.
+
+Delivery reports are read-only projections of measured events and attributed
+agent evidence. They never convert handoff prose into a verified fix or count
+missing observations as zero. Readiness observations retain their PR head;
+phase events and the underlying transitions commit atomically. Operation resource
+totals and provider usage are diagnostic data, never execution authority.

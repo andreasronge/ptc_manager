@@ -198,7 +198,13 @@ defmodule PtcManager.GitHub.Sync do
 
   # Fields GitHub reports that are deliberately outside the content digest, so
   # they can never make a stored proposal stale.
-  @projection_fields [:github_created_at, :github_author_login, :github_labels]
+  @projection_fields [
+    :github_created_at,
+    :github_author_login,
+    :github_labels,
+    :github_comment_count,
+    :comments_checked_at
+  ]
 
   defp upsert_issue(nil, attrs) do
     %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()

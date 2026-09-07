@@ -24,6 +24,7 @@ defmodule PtcManager.Operations.ResourceOperation do
     field :run_duration_ms, :integer
     field :exit_status, :integer
     field :peak_memory_bytes, :integer
+    field :resource_metrics, :map
     field :cancellation_reason, :string
     field :last_error, :string
 
@@ -61,6 +62,7 @@ defmodule PtcManager.Operations.ResourceOperation do
       :run_duration_ms,
       :exit_status,
       :peak_memory_bytes,
+      :resource_metrics,
       :cancellation_reason,
       :last_error
     ])
@@ -89,6 +91,7 @@ defmodule PtcManager.Operations.ResourceOperation do
     |> validate_number(:run_duration_ms, greater_than_or_equal_to: 0)
     |> validate_number(:exit_status, greater_than_or_equal_to: 0, less_than_or_equal_to: 255)
     |> validate_number(:peak_memory_bytes, greater_than_or_equal_to: 0)
+    |> PtcManager.DeliveryMetrics.validate()
     |> validate_exactly_one_owner()
     |> validate_terminal_fields()
     |> unique_constraint(:invocation_id)

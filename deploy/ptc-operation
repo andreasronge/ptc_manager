@@ -155,6 +155,56 @@ def cgroup_peak(path):
     return int(value) if value and value != "max" else 0
 
 
+def resource_metrics(path):
+    """Optional cgroup counters. Telemetry failure must not fail the command."""
+    if not path:
+        return None
+    metrics = {}
+    def optional_read(file):
+        try:
+            return read_text(file)
+        except OSError:
+            return None
+    try:
+        def counters(name):
+            text = optional_read(os.path.join(path, name)) or ""
+            return {parts[0]: int(parts[1]) for line in text.splitlines()
+                    if len(parts := line.split()) == 2 and parts[1].isdigit()}
+        cpu = counters("cpu.stat")
+        for source, dest in (("usage_usec", "cpu_usage_usec"), ("user_usec", "cpu_user_usec"),
+                             ("system_usec", "cpu_system_usec"), ("throttled_usec", "cpu_throttled_usec")):
+            if source in cpu:
+                metrics[dest] = cpu[source]
+        memory = counters("memory.events")
+        for source, dest in (("high", "memory_high_events"), ("oom_kill", "oom_kills")):
+            if source in memory:
+                metrics[dest] = memory[source]
+        io = optional_read(os.path.join(path, "io.stat"))
+        if io is not None:
+            metrics.update(io_read_bytes=0, io_write_bytes=0)
+            for line in io.splitlines():
+                for entry in line.split()[1:]:
+                    key, _, value = entry.partition("=")
+                    if key in ("rbytes", "wbytes") and value.isdigit():
+                        metrics["io_read_bytes" if key == "rbytes" else "io_write_bytes"] += int(value)
+        metrics["allowed_cpus"] = len(os.sched_getaffinity(0))
+        # Ancestor limits constrain the operation too, but can be shared with peers.
+        current = path
+        while current.startswith("/sys/fs/cgroup"):
+            limit = optional_read(os.path.join(current, "memory.max"))
+            if limit and limit.strip().isdigit():
+                amount = int(limit)
+                metrics["memory_limit_bytes"] = min(metrics.get("memory_limit_bytes", amount), amount)
+            quota = (optional_read(os.path.join(current, "cpu.max")) or "").split()
+            if len(quota) == 2 and all(v.isdigit() for v in quota) and int(quota[1]) > 0:
+                amount = int(quota[0]) * 1000 // int(quota[1])
+                metrics["cpu_quota_millicores"] = min(metrics.get("cpu_quota_millicores", amount), amount)
+            current = os.path.dirname(current)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return metrics or None
+
+
 def cleanup_cgroup(path):
     if not path:
         return
@@ -335,6 +385,7 @@ def managed_run(args, context):
     thread.join(timeout=1)
 
     observed_peak = cgroup_peak(cgroup_path)
+    observed_metrics = resource_metrics(cgroup_path)
     cleanup_cgroup(cgroup_path)
 
     broker_request_with_retry(
@@ -345,6 +396,7 @@ def managed_run(args, context):
             "attempt_token": attempt_token,
             "exit_status": status if status >= 0 else 128 + abs(status),
             "peak_memory_bytes": observed_peak,
+            "resource_metrics": observed_metrics,
         },
     )
     slot_lock.close()

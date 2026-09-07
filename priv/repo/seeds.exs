@@ -432,6 +432,8 @@ if Repo.aggregate(Repository, :count) == 0 do
     Repo.insert_all(PtcManager.MachineUsage.Sample, demo_samples)
   end
 
+  if demo_mode, do: PtcManager.DeliveryReportDemo.seed(ready_issue, worker, now)
+
   IO.puts(
     "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation " <>
       "and issue ##{blocked_issue.number} blocked on GitHub."

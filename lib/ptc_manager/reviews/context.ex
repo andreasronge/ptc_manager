@@ -58,7 +58,7 @@ defmodule PtcManager.Reviews.Context do
       do: previous.input["reviewer_session_id"]
   end
 
-  def record_session(round, id, note \\ nil) do
+  def record_session(round, id, note \\ nil, usage \\ nil) do
     with {:ok, _} <- Ecto.UUID.cast(id),
          true <- is_nil(note) or (is_binary(note) and byte_size(note) <= 500) do
       RepoTransaction.immediate(fn ->
@@ -68,6 +68,7 @@ defmodule PtcManager.Reviews.Context do
 
         current
         |> Round.changeset(%{
+          usage: validated_usage(usage),
           input:
             current.input
             |> Map.put("reviewer_session_id", id)
@@ -79,6 +80,19 @@ defmodule PtcManager.Reviews.Context do
       _ -> {:error, :invalid_reviewer_session}
     end
   end
+
+  defp validated_usage(usage) when is_map(usage) do
+    keys = ~w(input_tokens cached_input_tokens output_tokens)
+
+    if Enum.all?(
+         keys,
+         &(is_integer(usage[&1]) and usage[&1] >= 0 and usage[&1] <= 1_000_000_000_000_000)
+       ) and usage["cached_input_tokens"] <= usage["input_tokens"],
+       do: Map.take(usage, keys),
+       else: nil
+  end
+
+  defp validated_usage(_), do: nil
 
   defp profile(round), do: Map.take(round.input["settings"] || %{}, @profile_keys)
   defp nonblank(text) when is_binary(text) and text != "", do: text

@@ -1694,3 +1694,62 @@ with `PTC_GIT_MEMORY_LIMIT_BYTES`. Git maps packfiles into virtual memory, so a
 `Cannot allocate memory` error can mean this limit is too small even when the
 machine has free RAM. Failed commands retain bounded diagnostic text; successful
 stderr remains excluded from parsed Git output and patch hashes.
+
+### Delivery reports and local report testing
+
+Every managed job on Delivery has a **Delivery report** link (`/jobs/:id/report`).
+The report has Merge summary, Time & resources, Logbook, and Data coverage tabs.
+It reads persisted evidence without calling GitHub or a model and without approving
+any action. It loads a snapshot on navigation or **Refresh report**; notifications
+do not replace expanded evidence while it is being read. Other attempts for the
+same issue remain accessible, with metrics scoped to the selected attempt.
+
+The merge view keeps coding handoffs separate from reviewer findings and shows
+exact reviewed and validated commits. It does not infer that a finding was fixed
+merely because a later review omitted it. Model history describes requested
+settings, including continuation changes and each reviewer attempt. GitHub issue
+comment counts are captured during sync; the last known count and its observation
+time are frozen at implementation submission (not presented as a fresh GitHub read);
+PR discussion and inline-comment counts are separate observations.
+
+Lifecycle snapshots are captured atomically by SQLite triggers, including fenced
+bulk updates. The report derives phase changes and entering/leaving Ready to merge
+from those snapshots using the same lane rules as the board. Ready observations are tied to the remote PR head.
+Historical states cannot be reconstructed reliably: old gaps and open intervals
+remain unmeasured. An interval labelled Working includes command/tool waits and
+must not be interpreted as CPU time. Accumulated command durations can overlap
+one another and the job timeline. A `verify` invocation may include build, test,
+and lint, so the report never invents constituent invocation counts.
+
+On Linux, the managed operation wrapper also reports optional cgroup CPU time,
+throttling, memory-pressure/OOM counters, disk bytes, CPU affinity and ancestor
+CPU/memory limits before cleaning up the operation cgroup. Average cores used
+means CPU-seconds divided by wall-seconds; allowed CPUs and shared ancestor limits
+are not actual usage or guaranteed dedicated capacity. Missing counters remain
+unknown and telemetry collection failure does not fail a command. Existing peak
+memory and worktree/setup timing continue to be used. Repository setup subphases
+appear only when the repository emits the existing setup metrics.
+
+Successful Codex reviews capture structured per-turn usage from that invocation,
+including cached input as a subset of input. Resuming a session does not add its
+prior cumulative usage again. Failed attempts, other providers, and interactive
+coding-agent usage are currently unmeasured; the report shows coverage and a
+recorded subtotal, never an estimated bill. Herdr metadata `tokens` are display
+labels, not usage accounting. Slow compilation files, per-test profiling and
+resource time-series graphs need repository/provider instrumentation and are
+explicitly listed as unavailable, rather than derived from terminal prose.
+
+To test locally, use the isolated demo commands under **Isolated browser
+checkpoint** above. Demo issue **#1318** now has a Ready-to-merge report with
+worktree/cache phases, a failed assessment, a changed reviewer model, review
+handoffs, command outcomes, partial telemetry, and token-usage coverage. The
+existing active/older jobs demonstrate missing data. Follow the issue's Delivery
+report link rather than relying on a database ID. All data is synthetic and the
+demo remains unable to dispatch work or write to GitHub.
+
+Offline wrapper contracts can also be run directly:
+
+```sh
+python3 test/review_worker_contract.py
+python3 test/delivery_metrics_contract.py
+```
