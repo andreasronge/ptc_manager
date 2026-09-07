@@ -478,6 +478,16 @@ The canary asks real Herdr to create a disposable worktree, runs the real
 checked-in setup script, reports phase timings, and removes its workspace and
 temporary branch. It does not start an AI agent and does not access GitHub.
 
+On a paused job's **Reviews** page, **Override review and finish PR** lets a
+maintainer accept the displayed reviewed commit with a short reason. The original
+review findings or failure remain visible alongside the separate approval record.
+Publication waits for worker capacity and still requires the normal validation
+gates. This does not approve merging or later edits: a different commit, review
+base, or diff needs its own review or approval. No additional review budget is
+needed for an override. After manual takeover, you may make a fresh approval of
+the displayed reviewed commit; an earlier approval or an old browser form is not
+carried forward.
+
 Before publication, PtcManager reads the contract from the verified candidate
 commit—not from a possibly dirty filesystem copy—and freezes its bootstrap
 command, pre-publication command, timeouts, and digest on the job. It then

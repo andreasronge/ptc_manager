@@ -83,6 +83,9 @@ defmodule PtcManagerWeb.JobReviewsLive do
 
     assign(socket,
       job: job,
+      override_candidate: PtcManager.Reviews.Override.candidate(job),
+      overrides: PtcManager.Reviews.Override.list(job.id),
+      active_override: PtcManager.Reviews.Override.current(job),
       retry_available: Reviews.retry_available?(job),
       rounds: rounds,
       last_clean:
@@ -97,6 +100,10 @@ defmodule PtcManagerWeb.JobReviewsLive do
       profiles: PtcManager.ExecutionProfiles.list()
     )
   end
+
+  defp decision_error(:override_reason_required),
+    do:
+      "Enter a short reason for approving this commit despite the review (up to 2,000 characters)."
 
   defp decision_error(:reason_required),
     do: "Enter a reason before cancelling the implementation."
@@ -268,6 +275,52 @@ defmodule PtcManagerWeb.JobReviewsLive do
         <p :if={@job.cancellation_action_id}>
           GitHub explanation queued as action #{@job.cancellation_action_id}.
         </p>
+        <.form
+          :if={@override_candidate}
+          for={%{}}
+          id="review-override"
+          phx-submit="decide"
+          class="rounded-xl border border-amber-400/40 p-5 space-y-3"
+        >
+          <h2 class="font-semibold">Approve this reviewed commit</h2>
+          <p>
+            Override the review for commit
+            <code class="break-all">{@override_candidate.head_sha}</code>
+            and finish its pull request. The review remains recorded. Tests must still pass; this does not approve merging or later edits.
+          </p>
+          <input type="hidden" name="decision[generation]" value={@job.review_generation} />
+          <input type="hidden" name="decision[round_id]" value={@override_candidate.id} />
+          <input type="hidden" name="decision[head_sha]" value={@override_candidate.head_sha} />
+          <input type="hidden" name="decision[action]" value="approve_commit" />
+          <label class="block">
+            Reason for overriding the review
+            <textarea
+              name="decision[reason]"
+              required
+              maxlength="2000"
+              rows="2"
+              class="block w-full bg-slate-900"
+            />
+          </label>
+          <button class="rounded bg-amber-300 px-4 py-2 text-slate-950">
+            Override review and finish PR
+          </button>
+        </.form>
+        <article
+          :for={approval <- @overrides}
+          id={"review-override-#{approval.id}"}
+          class="rounded-xl border border-amber-400/40 p-5"
+        >
+          <h2 class="font-semibold">Maintainer override</h2>
+          <p>
+            {approval.actor} approved commit <code class="break-all">{approval.head_sha}</code>
+            at {Calendar.strftime(approval.inserted_at, "%Y-%m-%d %H:%M UTC")}.
+          </p>
+          <p class="whitespace-pre-wrap">{approval.reason}</p>
+          <p :if={!@active_override || @active_override.id != approval.id}>
+            Historical approval; later decisions or changed work require their own approval.
+          </p>
+        </article>
         <article
           :for={round <- @rounds}
           id={"review-round-#{round.id}"}

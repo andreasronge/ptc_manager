@@ -31,14 +31,19 @@ defmodule PtcManager.Reviews do
       true
     else
       job.review_state == "passed" and job.reviewed_head_sha == head and
-        Repo.exists?(
-          from r in Round,
-            where:
-              r.job_id == ^job.id and r.fencing_token == ^job.fencing_token and
-                r.generation == ^job.review_generation and r.state == "completed" and
-                r.head_sha == ^head and
-                r.base_sha == ^base and r.diff_digest == ^digest
-        )
+        (PtcManager.Reviews.Override.approved?(job, %{
+           head_sha: head,
+           base_sha: base,
+           diff_digest: digest
+         }) or
+           Repo.exists?(
+             from r in Round,
+               where:
+                 r.job_id == ^job.id and r.fencing_token == ^job.fencing_token and
+                   r.generation == ^job.review_generation and r.state == "completed" and
+                   r.head_sha == ^head and
+                   r.base_sha == ^base and r.diff_digest == ^digest
+           ))
     end
   end
 
@@ -568,6 +573,9 @@ defmodule PtcManager.Reviews do
       finish_admission(admitted, PtcManager.Reviews.Snapshot)
     end
   end
+
+  def decide(id, generation, "approve_commit", attrs, actor),
+    do: PtcManager.Reviews.Override.approve(id, generation, attrs, actor)
 
   def decide(id, generation, action, attrs, actor) do
     RepoTransaction.immediate(fn ->

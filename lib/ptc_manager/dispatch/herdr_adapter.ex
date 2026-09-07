@@ -890,7 +890,14 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
       continuation =
         if job.review_resume_mode == "publication" do
-          "\nThe retained commit #{job.reviewed_head_sha} has passed the latest independent review. Complete publication of that exact commit. Do not make discretionary changes or request another review of the same commit. If mandatory validation fails and requires edits, validate, commit, and request a new review before publication."
+          approval =
+            if PtcManager.Reviews.Override.current(job),
+              do:
+                "The maintainer explicitly approved retained commit #{job.reviewed_head_sha}, overriding its previous review findings or failures. This approval takes precedence over instructions to fix those findings for this exact commit.",
+              else:
+                "The retained commit #{job.reviewed_head_sha} has passed the latest independent review."
+
+          "\n#{approval} Complete publication of that exact commit. Do not make discretionary changes or request another review of the same commit. If mandatory validation fails and requires edits, validate, commit, and request a new review before publication."
         else
           "\nContinue the existing work in this workspace; do not start over or reset files. The maintainer approved continuation using the remaining review budget."
         end

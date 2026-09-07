@@ -152,6 +152,174 @@ defmodule PtcManager.ReviewCapacityTest do
     assert :ok = Worktrees.discard_attention(allocation.id, "maintainer", TransientStopAdapter)
   end
 
+  defp override_round(worker, state \\ "failed") do
+    {job, _} = paused_job(worker)
+
+    round =
+      %PtcManager.Reviews.Round{}
+      |> PtcManager.Reviews.Round.changeset(%{
+        job_id: job.id,
+        fencing_token: job.fencing_token,
+        generation: job.review_generation,
+        number: 1,
+        request_id: "override-target",
+        state: state,
+        head_sha: String.duplicate("a", 40),
+        base_sha: String.duplicate("b", 40),
+        diff_digest: String.duplicate("c", 64),
+        input: %{},
+        result:
+          if(state == "completed",
+            do: %{
+              "summary" => "Check this tradeoff",
+              "findings" => [%{"severity" => "medium", "description" => "A disputed finding"}]
+            }
+          ),
+        expires_at: DateTime.add(DateTime.utc_now(), 60)
+      })
+      |> Repo.insert!()
+
+    {job, round}
+  end
+
+  defp override_attrs(round),
+    do: %{
+      "round_id" => to_string(round.id),
+      "head_sha" => round.head_sha,
+      "reason" => "I accept this tradeoff."
+    }
+
+  test "a maintainer override publishes only its exact commit without rewriting the review", %{
+    worker: worker
+  } do
+    {job, round} = override_round(worker, "completed")
+
+    assert {:ok, approved} =
+             Reviews.decide(job.id, 0, "approve_commit", override_attrs(round), "andreas")
+
+    assert approved.review_resume_mode == "publication"
+    assert approved.required_review_count == job.required_review_count
+    assert Repo.get!(PtcManager.Reviews.Round, round.id).result == round.result
+    [override] = PtcManager.Reviews.Override.list(job.id)
+    assert override.actor == "andreas"
+    assert override.reason == "I accept this tradeoff."
+    assert override.round_id == round.id
+    evidence = Map.take(Map.from_struct(round), [:head_sha, :base_sha, :diff_digest])
+    refute Reviews.publication_allowed?(approved, evidence)
+
+    assert :ok =
+             PtcManager.Reviews.ResumeWorker.perform(%Oban.Job{
+               args: %{"job_id" => job.id, "generation" => approved.review_generation}
+             })
+
+    current = Repo.get!(Job, job.id)
+    assert current.review_state == "passed"
+    assert Reviews.publication_allowed?(current, evidence)
+
+    for key <- [:head_sha, :base_sha, :diff_digest] do
+      refute Reviews.publication_allowed?(
+               current,
+               Map.put(
+                 evidence,
+                 key,
+                 String.duplicate("d", if(key == :diff_digest, do: 64, else: 40))
+               )
+             )
+    end
+
+    refute Reviews.publication_allowed?(
+             %{current | review_generation: current.review_generation + 1},
+             evidence
+           )
+
+    refute Reviews.publication_allowed?(
+             %{current | fencing_token: current.fencing_token + 1},
+             evidence
+           )
+
+    refute Reviews.publication_allowed?(%{current | review_state: "paused"}, evidence)
+
+    assert {:error, :review_decision_stale} =
+             Reviews.decide(job.id, 0, "approve_commit", override_attrs(round), "andreas")
+  end
+
+  test "override requires a reason, current evidence and an available decision", %{worker: worker} do
+    {job, round} = override_round(worker)
+    attrs = override_attrs(round)
+
+    for reason <- [nil, "  ", String.duplicate("x", 2001)] do
+      assert {:error, :override_reason_required} =
+               Reviews.decide(
+                 job.id,
+                 0,
+                 "approve_commit",
+                 Map.put(attrs, "reason", reason),
+                 "andreas"
+               )
+    end
+
+    assert {:error, :review_decision_stale} =
+             Reviews.decide(
+               job.id,
+               0,
+               "approve_commit",
+               Map.put(attrs, "head_sha", String.duplicate("e", 40)),
+               "andreas"
+             )
+
+    for changes <- [
+          %{review_state: "running"},
+          %{review_recovery_expires_at: DateTime.add(DateTime.utc_now(), 60)}
+        ] do
+      job |> Job.changeset(changes) |> Repo.update!()
+
+      assert {:error, :review_decision_stale} =
+               Reviews.decide(job.id, 0, "approve_commit", attrs, "andreas")
+
+      Repo.get!(Job, job.id)
+      |> Job.changeset(%{review_state: "paused", review_recovery_expires_at: nil})
+      |> Repo.update!()
+    end
+
+    assert PtcManager.Reviews.Override.list(job.id) == []
+    round |> PtcManager.Reviews.Round.changeset(%{head_sha: nil}) |> Repo.update!()
+    assert is_nil(PtcManager.Reviews.Override.candidate(Repo.get!(Job, job.id)))
+
+    assert {:error, :review_decision_stale} =
+             Reviews.decide(job.id, 0, "approve_commit", attrs, "andreas")
+  end
+
+  test "manual takeover requires a fresh approval of the displayed review", %{worker: worker} do
+    {job, round} = override_round(worker)
+    assert {:ok, manual} = Reviews.decide(job.id, 0, "manual", %{}, "maintainer")
+    assert manual.review_generation == 1
+
+    assert {:error, :review_decision_stale} =
+             Reviews.decide(job.id, 0, "approve_commit", override_attrs(round), "maintainer")
+
+    assert PtcManager.Reviews.Override.list(job.id) == []
+
+    assert {:ok, approved} =
+             Reviews.decide(job.id, 1, "approve_commit", override_attrs(round), "maintainer")
+
+    [approval] = PtcManager.Reviews.Override.list(job.id)
+    assert approval.generation == approved.review_generation
+    assert approval.generation == 2
+    assert approval.round_id == round.id
+    assert approval.head_sha == round.head_sha
+  end
+
+  test "a failed assessment can be overridden with exhausted review budget", %{worker: worker} do
+    {job, round} = override_round(worker)
+    job |> Job.changeset(%{required_review_count: 0}) |> Repo.update!()
+
+    assert {:ok, approved} =
+             Reviews.decide(job.id, 0, "approve_commit", override_attrs(round), "andreas")
+
+    assert approved.required_review_count == 0
+    assert Repo.get!(PtcManager.Reviews.Round, round.id).state == "failed"
+  end
+
   test "cancellation waits for a reserved launch and then durably stops it", %{worker: worker} do
     {job, run} = paused_job(worker)
     {:ok, pending} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")

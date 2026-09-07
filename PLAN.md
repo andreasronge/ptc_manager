@@ -458,3 +458,9 @@ and verified diff digest. It deliberately stops before performing a merge.
 - billing, organizations, or multiple human maintainers;
 - dedicated OS/GitHub credential separation between implementation agents and
   maintainer-action agents;
+
+A maintainer may explicitly override an implementation review for its exact head,
+base, and diff, recording an actor and reason separately from the original review.
+This authorizes publication continuation only; validation and merge approval remain
+mandatory. Later decisions, fencing changes, or changed evidence invalidate that
+approval.
