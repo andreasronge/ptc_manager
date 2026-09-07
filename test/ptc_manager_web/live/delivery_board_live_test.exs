@@ -469,6 +469,60 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
            )
   end
 
+  test "continuation hides the acknowledged stop while a later stop remains actionable", %{
+    conn: conn
+  } do
+    report = %{
+      "reason_code" => "environment_broken",
+      "summary" => "The previous review was unavailable.",
+      "detail" => "Work was preserved for continuation.",
+      "progress" => "partial"
+    }
+
+    stopped = stop_job("Continue retained work", report)
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#agent-stopped-board-job-#{stopped.id}")
+
+    {:ok, acknowledged} = Operations.acknowledge_job_stop(stopped.id, "maintainer")
+
+    resumed =
+      acknowledged
+      |> Job.changeset(%{
+        state: "working",
+        review_state: "changes_requested",
+        last_error: nil,
+        ended_at: nil
+      })
+      |> Repo.update!()
+
+    Operations.notify_changed(:test)
+
+    assert has_element?(view, "#lane-working #board-job-#{stopped.id}")
+
+    for selector <- [
+          "agent-stopped-board-job",
+          "retry-stopped",
+          "ask-on-issue",
+          "acknowledge-stop"
+        ] do
+      refute has_element?(view, "##{selector}-#{stopped.id}")
+    end
+
+    refute has_element?(view, "#board-job-#{stopped.id}", report["summary"])
+    assert Repo.get!(Job, stopped.id).stop_report == report
+
+    report_stop(resumed, %{report | "summary" => "A new prerequisite failed."})
+    Operations.notify_changed(:test)
+
+    assert has_element?(
+             view,
+             "#agent-stopped-board-job-#{stopped.id}",
+             "A new prerequisite failed."
+           )
+
+    assert has_element?(view, "#retry-stopped-#{stopped.id}")
+  end
+
   test "a stopped agent explains itself and offers the right recovery first", %{conn: conn} do
     stopped =
       stop_job("Record a live session", %{
@@ -680,7 +734,10 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
   end
 
   defp stop_job(title, report) do
-    job = approved_job(title) |> set_job_state("working")
+    title |> approved_job() |> set_job_state("working") |> report_stop(report)
+  end
+
+  defp report_stop(job, report) do
     {:ok, job} = Operations.issue_stop_report_token(job)
 
     job =

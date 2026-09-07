@@ -824,6 +824,7 @@ defmodule PtcManager.Operations do
               last_error: summary,
               stop_report: report,
               stop_reported_at: now,
+              stop_acknowledged_at: nil,
               updated_at: now
             ]
           )
