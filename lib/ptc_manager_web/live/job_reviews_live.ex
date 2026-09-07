@@ -263,8 +263,15 @@ defmodule PtcManagerWeb.JobReviewsLive do
             Snapshot cleanup pending: {round.input["snapshot_cleanup_error"]}
           </p>
           <p :if={round.error} class="mt-2 text-amber-200">{round.error}</p>
+          <p :if={round.input["reviewer_session_note"]} class="mt-2 text-amber-200">
+            {round.input["reviewer_session_note"]}
+          </p>
+          <details :if={round.input["handoff"] not in [nil, ""]} class="mt-3">
+            <summary class="cursor-pointer text-teal-300">Coding agent handoff</summary>
+            <p class="mt-2 whitespace-pre-wrap">{round.input["handoff"]}</p>
+          </details>
           <div :if={round.result} class="mt-3">
-            <p>{round.result["summary"]}</p>
+            <p class="whitespace-pre-wrap">{round.result["summary"]}</p>
             <ul class="mt-3 space-y-2">
               <li :for={finding <- round.result["findings"]}>
                 <strong>{finding["severity"]}</strong> — {finding["description"]}

@@ -116,7 +116,7 @@ defmodule PtcManager.ResourceOperationBroker do
   end
 
   defp handle_request(
-         %{"operation" => "review", "request_id" => request_id},
+         %{"operation" => "review", "request_id" => request_id} = request,
          %{"owner_type" => "job"} = payload
        ) do
     with {:ok, _run} <- active_run(payload, false),
@@ -124,7 +124,8 @@ defmodule PtcManager.ResourceOperationBroker do
            PtcManager.Reviews.request(
              integer(payload, "owner_id"),
              integer(payload, "fencing_token"),
-             request_id
+             request_id,
+             handoff: Map.get(request, "handoff", "")
            ) do
       review_response(result)
     else

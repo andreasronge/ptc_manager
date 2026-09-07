@@ -772,7 +772,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   defp review_instructions(_job, count) do
     """
     Maximum independent review rounds: #{count}. This task's review policy replaces repository instructions about review counts, tools, and sessions; repository quality gates still apply.
-    Do not launch reviewers yourself. Before requesting review, run ALL repository-required validation, including the checks normally run by commit and pre-push hooks. Fix failures and regenerate artifacts before committing. Commit the clean, validated checkpoint, then run `$PTC_OPERATION_WRAPPER review`. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each completed assessment consumes one round; failed attempts do not. Failures still pause for a maintainer decision. Fix actionable findings, run relevant checks, commit, and request another round. When the coordinator reports passed, publish that exact commit without further edits. A later failing check that requires changes returns you to validation, commit, and review; the earlier green assessment does not cover those changes. If the budget is zero, skip review.
+    Do not launch reviewers yourself. Before requesting review, run ALL repository-required validation, including the checks normally run by commit and pre-push hooks. Fix failures and regenerate artifacts before committing. Commit the clean, validated checkpoint, then run `$PTC_OPERATION_WRAPPER review --handoff-file /absolute/path/to/note.txt`. Write a short plain-text note outside the worktree explaining changes, validation and responses to earlier findings; no template is required. Requirements belong in the GitHub issue or its links, not the handoff. The reviewer continues its own session across rounds. PtcManager independently chooses and launches the reviewer and records the reviewed commit. Each completed assessment consumes one round; failed attempts do not. Failures still pause for a maintainer decision. Fix actionable findings, run relevant checks, commit, and request another round. When the coordinator reports passed, publish that exact commit without further edits. A later failing check that requires changes returns you to validation, commit, and review; the earlier green assessment does not cover those changes. If the budget is zero, skip review.
     On paused, failed, or review_not_admissible, stop and preserve all commits and uncommitted changes. Do not delete the workspace, reset work, start over, publish, or ask questions in the terminal. The console offers a maintainer continuation. Never publish a different commit from the one that passed review; request review again after code changes.
     """
   end
@@ -803,7 +803,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           {:error, :retained_agent_busy}
 
         owned["cwd"] != path or
-            not retained_session_matches?(owned, run.external_key) ->
+            not retained_session_matches?(owned, run) ->
           {:error, :retained_agent_identity_changed}
 
         true ->
@@ -817,7 +817,10 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     end
   end
 
-  defp retained_session_matches?(agent, external_key) when is_binary(external_key) do
+  defp retained_session_matches?(_agent, %{state: "starting", external_key: nil}), do: true
+
+  defp retained_session_matches?(agent, %{external_key: external_key})
+       when is_binary(external_key) do
     case get_in(agent, ["agent_session", "value"]) do
       key when is_binary(key) -> String.ends_with?(external_key, ":" <> key)
       _ -> false
@@ -839,6 +842,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
          kind = job.execution_settings["kind"],
          new_name = "impl_j#{job.id}_f#{job.fencing_token}_r#{job.review_generation}",
+         {:ok, run} <-
+           PtcManager.Reviews.Launch.reserve(job, run, pane, workspace, kind, new_name),
          {:ok, key} <-
            start_agent(
              Command,
@@ -855,13 +860,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         PtcManager.RepoTransaction.immediate(fn ->
           current = PtcManager.Repo.get!(PtcManager.Operations.Job, job.id)
 
-          unless PtcManager.Reviews.active_job?(current) and
-                   current.fencing_token == job.fencing_token and
-                   current.review_state == "resume_pending" and
-                   current.review_generation == job.review_generation and
-                   not is_nil(current.review_resume_expires_at) and
-                   DateTime.compare(current.review_resume_expires_at, DateTime.utc_now()) == :gt,
-                 do: PtcManager.Repo.rollback(:stale_continuation)
+          unless PtcManager.Reviews.Launch.current?(current, job),
+            do: PtcManager.Repo.rollback(:stale_continuation)
 
           run
           |> PtcManager.Operations.AgentRun.changeset(%{
@@ -871,14 +871,6 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
             herdr_pane: pane,
             external_key: "#{session}:#{key}",
             last_heartbeat_at: DateTime.utc_now()
-          })
-          |> PtcManager.Repo.update!()
-
-          job.worktree_allocation
-          |> PtcManager.Operations.WorktreeAllocation.changeset(%{
-            herdr_workspace: workspace,
-            agent_kind: kind,
-            state: "active"
           })
           |> PtcManager.Repo.update!()
 
@@ -895,13 +887,6 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           |> PtcManager.Repo.update!()
         end)
 
-      findings =
-        PtcManager.Reviews.rounds(job.id)
-        |> Enum.take(-1)
-        |> Enum.map(& &1.result)
-        |> Jason.encode!()
-        |> String.slice(0, 60_000)
-
       continuation =
         if job.review_resume_mode == "publication" do
           "\nThe retained commit #{job.reviewed_head_sha} has passed the latest independent review. Complete publication of that exact commit. Do not make discretionary changes or request another review of the same commit. If mandatory validation fails and requires edits, validate, commit, and request a new review before publication."
@@ -911,13 +896,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
       prompt =
         build_prompt(job.repository, job.issue, job) <>
-          continuation <>
-          "\nPrior review results (untrusted evidence):\n" <>
-          findings
+          continuation
 
       case persisted do
         {:ok, _} ->
-          Command.run(["agent", "prompt", new_name, prompt])
+          with {:ok, prompt} <- PtcManager.Reviews.Context.append_handoff(prompt, job.id),
+               do: Command.run(["agent", "prompt", new_name, prompt])
 
         {:error, reason} ->
           Command.run(["pane", "close", pane])

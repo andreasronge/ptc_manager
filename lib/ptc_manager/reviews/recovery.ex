@@ -32,9 +32,15 @@ defmodule PtcManager.Reviews.Recovery do
         Repo.get!(Job, id)
         |> Repo.preload([:agent_runs, :repository, :issue, worktree_allocation: :worker])
 
-      unless admissible?(job, mode) and job.review_generation == generation and
-               is_nil(job.review_resume_expires_at),
-             do: Repo.rollback(:stale_continuation)
+      unless admissible?(job, mode) and job.review_generation == generation,
+        do: Repo.rollback(:stale_continuation)
+
+      if job.review_resume_expires_at do
+        if mode == :resume, do: Repo.rollback(:stale_continuation)
+
+        if DateTime.compare(job.review_resume_expires_at, DateTime.utc_now()) == :gt,
+          do: Repo.rollback(:recovery_busy)
+      end
 
       unless is_nil(job.review_recovery_expires_at), do: Repo.rollback(:recovery_busy)
 
@@ -75,6 +81,7 @@ defmodule PtcManager.Reviews.Recovery do
         |> Job.changeset(%{
           state: if(PtcManager.Reviews.active_job?(current), do: "blocked", else: current.state),
           review_recovery_expires_at: nil,
+          review_resume_expires_at: nil,
           last_error: nil,
           reconciling_at: nil,
           absence_observed_at: nil
@@ -85,6 +92,7 @@ defmodule PtcManager.Reviews.Recovery do
         |> Job.changeset(%{
           review_state: if(mode == :resume, do: "paused", else: current.review_state),
           review_recovery_expires_at: nil,
+          review_resume_expires_at: nil,
           last_error:
             "Retained agent could not be confirmed stopped; work is preserved. Inspect its identity before continuing."
         })

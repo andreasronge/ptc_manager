@@ -20,7 +20,8 @@ import uuid
 def parse_args():
     parser = argparse.ArgumentParser(prog="ptc-operation")
     commands = parser.add_subparsers(dest="subcommand", required=True)
-    commands.add_parser("review")
+    review = commands.add_parser("review")
+    review.add_argument("--handoff-file", help="Optional plain-text note for the reviewer (up to 20 KB)")
     run = commands.add_parser("run")
     run.add_argument("--label", required=True)
     run.add_argument("command", nargs=argparse.REMAINDER)
@@ -356,7 +357,14 @@ def main():
         try:
             with open(os.environ["PTC_MANAGED_OPERATION_CONTEXT"], encoding="utf-8") as source:
                 context = json.load(source)
-            response = broker_request_with_retry(context, {"operation": "review", "request_id": str(uuid.uuid4())})
+            handoff = ""
+            if args.handoff_file:
+                with open(args.handoff_file, "rb") as source:
+                    data = source.read(20_001)
+                if len(data) > 20_000:
+                    raise ValueError("handoff exceeds 20 KB")
+                handoff = data.decode("utf-8")
+            response = broker_request_with_retry(context, {"operation": "review", "request_id": str(uuid.uuid4()), "handoff": handoff})
             while response.get("state") in ("queued", "running"):
                 time.sleep(2)
                 response = broker_request_with_retry(context, {"operation": "review_status", "round_id": response["round_id"]})

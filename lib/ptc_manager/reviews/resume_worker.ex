@@ -1,5 +1,13 @@
 defmodule PtcManager.Reviews.ResumeWorker do
-  use Oban.Worker, queue: :automations, max_attempts: 1
+  use Oban.Worker,
+    queue: :automations,
+    max_attempts: 1,
+    unique: [
+      period: 60,
+      fields: [:worker, :args],
+      states: [:available, :scheduled, :executing, :retryable]
+    ]
+
   alias PtcManager.{Repo, RepoTransaction}
   alias PtcManager.Operations.Job
   @impl true
@@ -57,6 +65,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
       {:error, reason}
       when reason in [
              :dispatch_capacity,
+             :recovery_busy,
              :worker_unavailable,
              :database_busy,
              :merge_priority,
@@ -84,11 +93,11 @@ defmodule PtcManager.Reviews.ResumeWorker do
         _ -> {:error, :continuation_failed}
       end
 
-    finish(job.id, job.review_generation, outcome, true)
+    finish(job.id, job.review_generation, outcome, true, job.review_resume_expires_at)
     :ok
   end
 
-  defp finish(id, generation, outcome, reserved?) do
+  defp finish(id, generation, outcome, reserved?, reservation \\ nil) do
     RepoTransaction.immediate(fn ->
       current = Repo.get!(Job, id)
 
@@ -123,6 +132,16 @@ defmodule PtcManager.Reviews.ResumeWorker do
             )
         })
         |> Repo.update!()
+      else
+        if reserved? and current.review_state in ~w(manual cancelled) and
+             current.review_generation == generation + 1 and
+             current.review_resume_expires_at == reservation do
+          current |> Job.changeset(%{review_resume_expires_at: nil}) |> Repo.update!()
+
+          %{job_id: id, generation: current.review_generation}
+          |> PtcManager.Reviews.CancelWorker.new()
+          |> Oban.insert!()
+        end
       end
     end)
 

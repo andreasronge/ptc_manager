@@ -14,6 +14,15 @@ defmodule PtcManager.ReviewCapacityTest do
     end
   end
 
+  defmodule TransientStopAdapter do
+    def stop_review_agent(_, true), do: Process.get(:stop_result, {:error, :offline})
+    def discard_worktree(_), do: :ok
+  end
+
+  defmodule FailedPaneClose do
+    def close_pane(_), do: {:error, :offline}
+  end
+
   defmodule BusyAdapter do
     def stop_review_agent(_), do: {:error, :retained_agent_busy}
     def resume_review_job(_), do: raise("must not launch")
@@ -38,7 +47,13 @@ defmodule PtcManager.ReviewCapacityTest do
   end
 
   setup do
-    keys = [:review_resume_adapter, :review_capacity_test_pid, :planning_snapshot_root]
+    keys = [
+      :review_resume_adapter,
+      :review_capacity_test_pid,
+      :planning_snapshot_root,
+      :herdr_client
+    ]
+
     old = Map.new(keys, &{&1, Application.fetch_env(:ptc_manager, &1)})
 
     on_exit(fn ->
@@ -102,6 +117,123 @@ defmodule PtcManager.ReviewCapacityTest do
       })
 
     {job, run}
+  end
+
+  test "failed cancellation retries and confirmed cancellation permits explicit discard", %{
+    worker: worker
+  } do
+    {job, run} = paused_job(worker)
+    run |> AgentRun.changeset(%{state: "working", ended_at: nil}) |> Repo.update!()
+    {:ok, cancelled} = Reviews.decide(job.id, 0, "cancel", %{"reason" => "Stop"}, "maintainer")
+    Application.put_env(:ptc_manager, :review_resume_adapter, TransientStopAdapter)
+    args = %Oban.Job{args: %{"job_id" => job.id, "generation" => cancelled.review_generation}}
+    allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
+    allocation |> WorktreeAllocation.changeset(%{state: "attention"}) |> Repo.update!()
+    assert {:snooze, 30} = PtcManager.Reviews.CancelWorker.perform(args)
+    assert Repo.get!(AgentRun, run.id).state == "working"
+
+    assert {:error, :worktree_in_use} =
+             Worktrees.discard_attention(allocation.id, "maintainer", TransientStopAdapter)
+
+    Process.put(:stop_result, :ok)
+    assert :ok = PtcManager.Reviews.CancelWorker.perform(args)
+    assert Repo.get!(AgentRun, run.id).state == "lost"
+    assert Reviews.held?(Repo.get!(Job, job.id))
+    assert :ok = Worktrees.discard_attention(allocation.id, "maintainer", TransientStopAdapter)
+  end
+
+  test "cancellation waits for a reserved launch and then durably stops it", %{worker: worker} do
+    {job, run} = paused_job(worker)
+    {:ok, pending} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+    {:ok, reserved} = Operations.claim_review_continuation(job.id, pending.review_generation)
+
+    {:ok, cancelled} =
+      Reviews.decide(
+        job.id,
+        pending.review_generation,
+        "cancel",
+        %{"reason" => "Stop this work"},
+        "maintainer"
+      )
+
+    args = %Oban.Job{args: %{"job_id" => job.id, "generation" => cancelled.review_generation}}
+    assert {:snooze, 10} = PtcManager.Reviews.CancelWorker.perform(args)
+    assert Repo.get!(AgentRun, run.id).state == "done"
+
+    cancelled
+    |> Job.changeset(%{review_resume_expires_at: DateTime.add(DateTime.utc_now(), -1)})
+    |> Repo.update!()
+
+    assert :ok = PtcManager.Reviews.CancelWorker.perform(args)
+    assert Repo.get!(AgentRun, run.id).state == "lost"
+    assert is_nil(Repo.get!(Job, job.id).review_resume_expires_at)
+
+    assert {:error, :stale_continuation} =
+             PtcManager.Reviews.Launch.reserve(
+               reserved,
+               run,
+               "new-pane",
+               "workspace",
+               "codex",
+               "new-agent"
+             )
+  end
+
+  test "launch identity is persisted before any external agent can start", %{worker: worker} do
+    {job, run} = paused_job(worker)
+    {:ok, pending} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+    {:ok, reserved} = Operations.claim_review_continuation(job.id, pending.review_generation)
+
+    assert {:ok, owned} =
+             PtcManager.Reviews.Launch.reserve(
+               reserved,
+               run,
+               "new-pane",
+               "workspace",
+               "codex",
+               "new-agent"
+             )
+
+    assert owned.state == "starting"
+    assert owned.agent_name == "new-agent"
+    assert owned.herdr_pane == "new-pane"
+    assert owned.external_key == nil
+  end
+
+  test "general Cancel agent uses durable cleanup during a reserved launch", %{worker: worker} do
+    {job, run} = paused_job(worker)
+    {:ok, pending} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+    {:ok, reserved} = Operations.claim_review_continuation(job.id, pending.review_generation)
+
+    {:ok, _} =
+      PtcManager.Reviews.Launch.reserve(
+        reserved,
+        run,
+        "new-pane",
+        "workspace",
+        "codex",
+        "new-agent"
+      )
+
+    Application.put_env(:ptc_manager, :herdr_client, FailedPaneClose)
+
+    assert {:ok, cancelled, {:pane_close_failed, :offline}} =
+             Operations.cancel_running_job(job.id, "maintainer")
+
+    assert cancelled.review_state == "cancelled"
+    assert cancelled.review_generation == pending.review_generation + 1
+    assert Repo.get!(AgentRun, run.id).state == "starting"
+
+    cancelled
+    |> Job.changeset(%{review_resume_expires_at: DateTime.add(DateTime.utc_now(), -1)})
+    |> Repo.update!()
+
+    assert :ok =
+             PtcManager.Reviews.CancelWorker.perform(%Oban.Job{
+               args: %{"job_id" => job.id, "generation" => cancelled.review_generation}
+             })
+
+    assert Repo.get!(AgentRun, run.id).state == "lost"
   end
 
   test "manual stop from reconciling releases confirmed stopped capacity", %{worker: worker} do

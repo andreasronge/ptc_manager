@@ -32,10 +32,23 @@ defmodule PtcManager.Reviews.Adapter do
     request = Path.join(directory, name <> ".request.json")
     result = Path.join(directory, name <> ".result.json")
 
+    session_id = PtcManager.Reviews.Context.session_id(round)
+    fallback_handoff = PtcManager.Reviews.Context.handoff(round.job_id)
+
     body = %{
       settings: round.input["settings"],
       evidence:
-        Map.drop(round.input, ["settings", "schema", "source_snapshot", "snapshot_cleanup_error"]),
+        Map.take(
+          round.input,
+          ~w(head_sha base_sha diff_digest diff diff_on_disk issue issue_url requirements)
+        ),
+      session_id: session_id,
+      fallback_handoff: fallback_handoff,
+      handoff:
+        if(session_id,
+          do: round.input["handoff"] || "",
+          else: fallback_handoff
+        ),
       repository_path: snapshot_path,
       contract_version: 2,
       schema: round.input["schema"]
@@ -46,8 +59,15 @@ defmodule PtcManager.Reviews.Adapter do
            :ok <- File.chmod(request, 0o640),
            {_output, 0} <- WorkerHelper.run(@helper, ["review", request, result]),
            {data, 0} <- WorkerHelper.run(@helper, ["read-result", result]),
-           {:ok, decoded} <- Jason.decode(data),
-           true <- PtcManager.Reviews.valid_result?(decoded) do
+           {:ok, %{"result" => decoded, "session_id" => session_id} = envelope} <-
+             Jason.decode(data),
+           true <- PtcManager.Reviews.valid_result?(decoded),
+           {:ok, _} <-
+             PtcManager.Reviews.Context.record_session(
+               round,
+               session_id,
+               envelope["session_note"]
+             ) do
         {:ok, decoded}
       else
         {output, status} when is_binary(output) and is_integer(status) ->

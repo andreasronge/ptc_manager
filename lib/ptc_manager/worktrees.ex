@@ -106,7 +106,8 @@ defmodule PtcManager.Worktrees do
         {:error, :worktree_allocation_missing}
 
       %WorktreeAllocation{state: "attention"} = allocation ->
-        if PtcManager.Reviews.held?(allocation.job) or
+        if (PtcManager.Reviews.held?(allocation.job) and
+              not cancelled_agent_stopped?(allocation.job)) or
              Operations.worktree_consumes_execution_slot?(allocation) do
           {:error, :worktree_in_use}
         else
@@ -120,6 +121,27 @@ defmodule PtcManager.Worktrees do
         {:error, :worktree_not_retained}
     end
   end
+
+  # Synchronization still holds cancelled jobs; only an explicit discard may
+  # release their workspace after durable stop confirmation.
+  defp cancelled_agent_stopped?(%{
+         state: "cancelled",
+         review_state: "cancelled",
+         review_resume_expires_at: nil,
+         review_recovery_expires_at: nil,
+         last_error: nil,
+         fencing_token: fence,
+         agent_runs: runs
+       })
+       when is_list(runs) do
+    Enum.any?(
+      runs,
+      &(&1.role == "implementer" and &1.fencing_token == fence and &1.state == "lost")
+    ) and
+      Enum.all?(runs, &(&1.role != "implementer" or &1.state in ~w(done failed lost)))
+  end
+
+  defp cancelled_agent_stopped?(_), do: false
 
   defp abandoned_reason(allocation, probe) do
     cond do

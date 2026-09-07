@@ -160,8 +160,47 @@ retries failed cleanup, with errors visible in review history. Patches up to 500
 larger patches are supplied as a complete local file under the same 50 MB bound
 and SHA-256 digest as publication verification. Git snapshot commands have a
 two-minute timeout and require GNU `timeout` (Homebrew coreutils supplies it on
-macOS). Codex web search is disabled; Claude is restricted to local reading tools.
-Cursor uses its read-only ask mode with instructions to inspect local evidence.
+macOS). Requirements stay in the GitHub issue and its links. Before review,
+PtcManager uses its authenticated read-only GitHub client to capture the issue,
+recent comments, and linked GitHub issues, pull requests and text documents within
+the job's approved repository (up to nine sources total, with explicit text/comment
+limits). Links cannot widen the token's repository scope; out-of-repository links
+are identified as not fetched. Put essential cross-repository requirements in the
+approved issue. Document links support encoded paths and branch names containing
+slashes. Blob sizes are
+checked before reading their text, and the resolved object is immutable. Private
+document links require Contents read permission on that token. Missing GitHub
+context pauses preparation rather than becoming a completed review. Repository
+documents remain available in the local snapshot; other external sites are not
+fetched. The reviewer reports missing essential context instead of assuming it.
+Codex web search is disabled and its sandbox is read-only; Claude uses restricted
+Read/Glob/Grep tools; Cursor uses read-only ask mode. Reviewers receive the fetched
+text, never the coordinator's GitHub token.
+
+Each job keeps its reviewer's own session across rounds, including maintainer
+continuations. The coding agent and reviewer have separate sessions. Changing the
+reviewer model, provider, or effort starts a fresh session with the last useful
+review and handoff. A missing native session permits one fresh start within the
+original timeout; other execution failures still pause. The review history shows
+when this fallback was needed. Session IDs come from the CLI's structured metadata,
+never from model-authored review text or a machine-wide “last session.”
+
+The coding agent can pass a short plain-text note with
+`$PTC_OPERATION_WRAPPER review --handoff-file /absolute/path/to/note.txt`.
+The file can live outside the worktree and is optional, UTF-8, and limited to 20 KB.
+No template is required: explain changes, validation, and responses to findings.
+The review page shows this note, and the reviewer's summary serves as its return
+handoff. These notes explain the work; they do not add requirements or approve it.
+Resumed reviewers receive the current note rather than a replay of all reviews.
+A restarted coding agent receives the last completed assessment and useful note;
+a later timeout or preparation failure does not replace that assessment with null.
+Copied handoffs have a UTF-8 byte limit and a visible shortening notice; full notes
+and assessments remain in review history. Continuation prompts stay below the
+Linux single-argument limit.
+A cached review is reused only when its issue and fetched requirements evidence
+also match. Every round still assesses the current exact commit; session memory does not extend
+a previous green result to changed code.
+
 The schema and helper contract version are frozen with the attempt. An incompatible
 helper deployment fails explicitly and requires a new attempt.
 Reviews run in a dedicated Oban queue with the configured timeout plus 15 minutes
@@ -625,7 +664,9 @@ catalog contains:
   is kept for attention rather than discarded. It takes two clicks and refuses
   the deterministic phases that follow an agent — reconciliation, verification,
   and publication — because PtcManager, not an agent, owns those. If the pane
-  cannot be closed, the console says so and the job stays cancelled;
+  cannot be closed, the console says so and the job stays cancelled. Managed
+  jobs retry the stop durably until it is confirmed; their worktree can then
+  be explicitly discarded from retained worktrees;
 - **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr

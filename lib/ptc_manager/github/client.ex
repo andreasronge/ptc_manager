@@ -54,6 +54,99 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
+  @impl true
+  def review_context(repository, {:issue, number}) do
+    fields =
+      "title body url comments(last: 20) { nodes { body url } pageInfo { hasPreviousPage } }"
+
+    query =
+      "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { item: issueOrPullRequest(number: $number) { ... on Issue { #{fields} } ... on PullRequest { #{fields} } } } }"
+
+    review_context_query(repository, query, %{"number" => number})
+  end
+
+  def review_context(repository, {:blob, path}) do
+    with {:ok, %{"oid" => oid, "isBinary" => false, "byteSize" => size}} when size <= 100_000 <-
+           review_blob_metadata(repository, path) do
+      query =
+        "query($owner: String!, $name: String!, $expression: String!) { repository(owner: $owner, name: $name) { item: object(expression: $expression) { ... on Blob { text byteSize } } } }"
+
+      with {:ok, item} <- review_context_query(repository, query, %{"expression" => oid}) do
+        {:ok,
+         Map.put(
+           item,
+           "url",
+           "GitHub document #{repository.github_owner}/#{repository.github_name}/blob/#{path} (#{oid})"
+         )}
+      end
+    else
+      _ -> {:error, :review_requirements_unavailable}
+    end
+  end
+
+  @doc false
+  def review_blob_expressions(path) do
+    parts = String.split(path, "/")
+
+    case parts do
+      [ref | rest] when rest != [] ->
+        if Regex.match?(~r/\A[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\z/, ref) do
+          [ref <> ":" <> Enum.join(rest, "/")]
+        else
+          for split <- min(length(parts) - 1, 32)..1//-1 do
+            {ref, file} = Enum.split(parts, split)
+            Enum.join(ref, "/") <> ":" <> Enum.join(file, "/")
+          end
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp review_blob_metadata(repository, path) do
+    candidates = review_blob_expressions(path) |> Enum.with_index()
+    declarations = Enum.map_join(candidates, ", ", fn {_, index} -> "$ref#{index}: String!" end)
+
+    fields =
+      Enum.map_join(candidates, " ", fn {_, index} ->
+        "candidate#{index}: object(expression: $ref#{index}) { ... on Blob { oid byteSize isBinary } }"
+      end)
+
+    query =
+      "query($owner: String!, $name: String!, #{declarations}) { repository(owner: $owner, name: $name) { #{fields} } }"
+
+    variables =
+      Map.new(candidates, fn {expression, index} -> {"ref#{index}", expression} end)
+      |> Map.merge(%{"owner" => repository.github_owner, "name" => repository.github_name})
+
+    with {:ok, %{"repository" => data}} when is_map(data) <- graphql(query, variables),
+         %{"oid" => _} = item <-
+           Enum.find_value(candidates, fn {_, index} ->
+             case data["candidate#{index}"] do
+               %{"oid" => _} = item -> item
+               _ -> nil
+             end
+           end) do
+      {:ok, item}
+    else
+      _ -> {:error, :review_requirements_unavailable}
+    end
+  end
+
+  defp review_context_query(repository, query, variables) do
+    variables =
+      Map.merge(variables, %{"owner" => repository.github_owner, "name" => repository.github_name})
+
+    with {:ok, %{"repository" => %{"item" => item}}} when is_map(item) <-
+           graphql(query, variables),
+         true <- (item["byteSize"] || 0) <= 100_000 do
+      {:ok, item}
+    else
+      _ -> {:error, :review_requirements_unavailable}
+    end
+  end
+
   def cancellation_comment_present?(repository, number, body) do
     query =
       "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { comments(last: 100) { nodes { body } } } } }"

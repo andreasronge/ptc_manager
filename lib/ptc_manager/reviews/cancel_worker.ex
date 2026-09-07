@@ -1,5 +1,12 @@
 defmodule PtcManager.Reviews.CancelWorker do
-  use Oban.Worker, queue: :automations, max_attempts: 1
+  use Oban.Worker,
+    queue: :automations,
+    max_attempts: 1,
+    unique: [
+      period: 60,
+      fields: [:worker, :args],
+      states: [:available, :scheduled, :executing, :retryable]
+    ]
 
   def perform(%Oban.Job{args: %{"job_id" => id, "generation" => generation}}) do
     if PtcManager.OperationalMode.reconciliation_allowed?() and
@@ -13,6 +20,7 @@ defmodule PtcManager.Reviews.CancelWorker do
 
       case PtcManager.Reviews.Recovery.stop(id, generation, adapter) do
         {:error, reason} when reason in [:recovery_busy, :database_busy] -> {:snooze, 10}
+        {:ok, {:recovery_failed, _}} -> {:snooze, 30}
         _ -> :ok
       end
     else

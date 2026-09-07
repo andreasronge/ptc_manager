@@ -47,7 +47,8 @@ defmodule PtcManager.Reviews do
 
   def request(job_id, fence, request_id, opts \\ []) do
     with true <- is_binary(request_id) and byte_size(request_id) in 1..80,
-         {:ok, admitted} <- admit(job_id, fence, request_id) do
+         true <- PtcManager.Reviews.Context.valid_handoff?(Keyword.get(opts, :handoff, "")),
+         {:ok, admitted} <- admit(job_id, fence, request_id, Keyword.get(opts, :handoff, "")) do
       finish_admission(admitted, Keyword.get(opts, :snapshot, PtcManager.Reviews.Snapshot))
     else
       false -> {:error, :review_not_admissible}
@@ -58,11 +59,11 @@ defmodule PtcManager.Reviews do
   defp finish_admission({:prepare, round, job}, snapshot), do: prepare(round, job, snapshot)
   defp finish_admission(result, _snapshot), do: {:ok, result}
 
-  defp admit(job_id, fence, request_id) do
-    RepoTransaction.immediate(fn -> admit_locked(job_id, fence, request_id) end)
+  defp admit(job_id, fence, request_id, handoff) do
+    RepoTransaction.immediate(fn -> admit_locked(job_id, fence, request_id, handoff) end)
   end
 
-  defp admit_locked(job_id, fence, request_id) do
+  defp admit_locked(job_id, fence, request_id, handoff) do
     job = Repo.get!(Job, job_id)
 
     unless is_map(job.execution_settings) and job.fencing_token == fence and
@@ -109,7 +110,8 @@ defmodule PtcManager.Reviews do
             input: %{
               "settings" => job.execution_settings,
               "contract_version" => 2,
-              "schema" => review_schema()
+              "schema" => review_schema(),
+              "handoff" => handoff
             },
             expires_at: DateTime.add(DateTime.utc_now(), timeout_ms(job) + 900_000, :millisecond)
           })
@@ -195,6 +197,9 @@ defmodule PtcManager.Reviews do
 
       unless preparation_current?(current, job), do: Repo.rollback(:stale_review)
 
+      requirements = input["requirements"]
+      issue_text = input["issue"]
+
       cached =
         Repo.one(
           from r in Round,
@@ -202,7 +207,9 @@ defmodule PtcManager.Reviews do
               r.job_id == ^job.id and r.generation == ^job.review_generation and
                 r.fencing_token == ^job.fencing_token and r.state == "completed" and
                 r.head_sha == ^input["head_sha"] and
-                r.base_sha == ^input["base_sha"] and r.diff_digest == ^input["diff_digest"],
+                r.base_sha == ^input["base_sha"] and r.diff_digest == ^input["diff_digest"] and
+                fragment("json_extract(?, '$.requirements') IS ?", r.input, ^requirements) and
+                fragment("json_extract(?, '$.issue') IS ?", r.input, ^issue_text),
             order_by: [desc: r.number],
             limit: 1
         )
@@ -344,8 +351,38 @@ defmodule PtcManager.Reviews do
             last_error:
               "Retained-agent recovery was interrupted; work is preserved. Continue to check its identity again."
           })
+
+          if current.review_state in ~w(manual cancelled) do
+            %{job_id: current.id, generation: current.review_generation}
+            |> PtcManager.Reviews.CancelWorker.new()
+            |> Oban.insert!()
+          end
         end
       end)
+    end)
+
+    Repo.all(
+      from j in Job,
+        where:
+          j.state in @active and j.review_state == "resume_pending" and
+            is_nil(j.review_resume_expires_at) and is_nil(j.review_recovery_expires_at)
+    )
+    |> Enum.each(fn job ->
+      %{job_id: job.id, generation: job.review_generation}
+      |> PtcManager.Reviews.ResumeWorker.new()
+      |> Oban.insert!()
+    end)
+
+    Repo.all(
+      from j in Job,
+        where:
+          j.review_state in ["manual", "cancelled"] and not is_nil(j.review_resume_expires_at) and
+            j.review_resume_expires_at < ^now
+    )
+    |> Enum.each(fn job ->
+      %{job_id: job.id, generation: job.review_generation}
+      |> PtcManager.Reviews.CancelWorker.new()
+      |> Oban.insert!()
     end)
 
     PtcManager.Reviews.Snapshots.sweep()
@@ -514,11 +551,19 @@ defmodule PtcManager.Reviews do
 
              unless active_job?(current) and current.review_state == "resume_pending" and
                       current.review_generation == job.review_generation and
-                      current.review_resume_mode == "assessment",
+                      current.review_resume_mode == "assessment" and
+                      is_nil(current.review_recovery_expires_at),
                     do: Repo.rollback(:stale_continuation)
 
              update_job(current, %{review_state: "pending", last_error: nil})
-             admit_locked(current.id, current.fencing_token, "retry-#{current.review_generation}")
+             handoff = List.last(rounds(current.id)).input["handoff"] || ""
+
+             admit_locked(
+               current.id,
+               current.fencing_token,
+               "retry-#{current.review_generation}",
+               handoff
+             )
            end) do
       finish_admission(admitted, PtcManager.Reviews.Snapshot)
     end
