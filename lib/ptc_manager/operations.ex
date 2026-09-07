@@ -923,12 +923,20 @@ defmodule PtcManager.Operations do
     now = utc_now()
 
     outcome =
-      Repo.transaction(fn ->
+      RepoTransaction.immediate(fn ->
         stopped = Repo.get!(Job, job_id)
 
         if is_nil(stopped.stop_reported_at) or not is_nil(stopped.stop_acknowledged_at) do
           Repo.rollback(:job_not_stopped)
         end
+
+        unless Repo.get!(Issue, stopped.issue_id).state == "open",
+          do: Repo.rollback(:issue_not_open)
+
+        if Repo.exists?(
+             from j in Job, where: j.issue_id == ^stopped.issue_id and j.id > ^stopped.id
+           ),
+           do: Repo.rollback(:newer_job_exists)
 
         # A hidden button is not a guard. An agent that judged the work unsafe
         # must not be restartable through a crafted event either.
@@ -2242,7 +2250,15 @@ defmodule PtcManager.Operations do
               state: "failed",
               ended_at: lifecycle_now,
               lease_expires_at: nil,
-              last_error: message
+              last_error: message,
+              stop_report: %{
+                "reason_code" => "environment_broken",
+                "summary" => "PtcManager could not start the implementation.",
+                "detail" => String.slice(message, 0, 2_000),
+                "progress" => "none"
+              },
+              stop_reported_at: lifecycle_now,
+              stop_acknowledged_at: nil
             })
             |> Repo.update!()
 

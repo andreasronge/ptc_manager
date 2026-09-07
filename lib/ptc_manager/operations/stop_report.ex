@@ -1,6 +1,8 @@
 defmodule PtcManager.Operations.StopReport do
   @moduledoc """
-  The one way an agent can say "I could not start" or "I could not continue".
+  A durable attention report for startup failures and agents that say "I could not start" or "I could not continue".
+
+  The coordinator also records this data when dispatch safely fails before an agent starts.
 
   Nothing is watching a managed pane, so an agent that asks a question there is
   asking nobody: PtcManager never parses terminal output, by design. An agent

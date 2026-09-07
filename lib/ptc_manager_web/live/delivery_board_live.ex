@@ -98,6 +98,16 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
        |> put_flash(:info, "Queued a fresh attempt with the same approval and review count.")
        |> load_board()}
     else
+      {:error, :issue_not_open} ->
+        {:noreply,
+         socket |> put_flash(:error, "The issue is closed; no retry was queued.") |> load_board()}
+
+      {:error, :newer_job_exists} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "A newer attempt already exists for this issue.")
+         |> load_board()}
+
       {:error, :job_not_stopped} ->
         {:noreply,
          socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}

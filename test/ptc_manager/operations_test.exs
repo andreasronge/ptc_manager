@@ -830,6 +830,50 @@ defmodule PtcManager.OperationsTest do
       assert Repo.get_by!(AuditEvent, action: "job.stop_acknowledged")
     end
 
+    test "dispatch failures stay visible and offer the existing explicit retry" do
+      %{job: job, worker: worker, run: run} = running_job_fixture("starting")
+      Repo.delete!(run)
+
+      assert {:ok, failed} =
+               Operations.mark_dispatch_failed(
+                 job.id,
+                 1,
+                 worker.worker_key,
+                 {:git_failed, "status", 128, "Cannot allocate memory"}
+               )
+
+      assert failed.stop_report["summary"] =~ "could not start"
+
+      assert [%{active_job: %{id: id}}] =
+               Enum.filter(Operations.delivery_board_items(), & &1[:stopped?])
+
+      assert id == failed.id
+      assert {:ok, retry} = Operations.retry_stopped_job(failed.id, "andreas")
+      assert retry.approval_id == failed.approval_id
+      assert retry.state == "queued"
+    end
+
+    test "retry refuses closed issues and newer attempts" do
+      {:ok, stopped} = stop_job()
+      issue = Repo.get!(Issue, stopped.issue_id)
+      issue |> Ecto.Changeset.change(state: "closed") |> Repo.update!()
+      assert {:error, :issue_not_open} = Operations.retry_stopped_job(stopped.id, "andreas")
+      Repo.get!(Issue, issue.id) |> Ecto.Changeset.change(state: "open") |> Repo.update!()
+
+      %Job{}
+      |> Job.changeset(%{
+        repository_id: stopped.repository_id,
+        issue_id: stopped.issue_id,
+        approval_id: stopped.approval_id,
+        kind: stopped.kind,
+        state: "queued"
+      })
+      |> Repo.insert!()
+
+      assert {:error, :newer_job_exists} = Operations.retry_stopped_job(stopped.id, "andreas")
+      assert is_nil(Repo.get!(Job, stopped.id).stop_acknowledged_at)
+    end
+
     test "trying again reuses the approval and cannot run twice" do
       assert {:ok, stopped} = stop_job()
 
