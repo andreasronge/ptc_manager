@@ -97,7 +97,11 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
         >
           {if @refreshing, do: "Checking worker accounts…", else: "Refresh available models"}
         </button>
-        <div :for={{kind, result} <- @catalogs} class="rounded border border-white/10 p-3">
+        <div
+          :for={{kind, result} <- @catalogs}
+          id={"model-catalog-#{kind}"}
+          class="rounded border border-white/10 p-3"
+        >
           <h2 class="font-semibold">{String.capitalize(kind)}</h2>
           <%= case result do %>
             <% {:ok, catalog} -> %>
@@ -105,14 +109,18 @@ defmodule PtcManagerWeb.ExecutionProfilesLive do
                 {catalog["note"] ||
                   "Reported by the worker account on the last refresh. Launch failures are shown for unavailable models."}
               </p>
-              <details>
+              <details :if={catalog["models"] != []}>
                 <summary>Available model IDs</summary>
                 <ul class="max-h-56 overflow-auto text-sm">
                   <li :for={model <- catalog["models"]}>{model["id"]} — {model["name"]}</li>
                 </ul>
               </details>
+              <p :if={catalog["models"] == []}>No models were reported. Enter a model ID manually.</p>
             <% _ -> %>
-              <p>Discovery unavailable. Check the worker login; saved models have not changed.</p>
+              <p>
+                Discovery unavailable. Check the worker login; saved models have not changed. Enter a model ID manually.
+                <span :if={kind == "claude"}>For Claude, try sonnet, opus or haiku.</span>
+              </p>
           <% end %>
         </div>
         <div class="grid gap-5 md:grid-cols-3">

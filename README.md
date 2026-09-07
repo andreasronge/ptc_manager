@@ -1753,3 +1753,15 @@ Offline wrapper contracts can also be run directly:
 python3 test/review_worker_contract.py
 python3 test/delivery_metrics_contract.py
 ```
+
+### Claude model discovery
+
+On Configuration → Execution profiles, **Refresh available models** queries the
+worker CLI. Claude uses the same initialization response that supplies the Agent
+SDK model list; it sends no user prompt and starts no model turn. Discovery runs
+in a temporary directory with tools, settings sources and MCP servers disabled,
+with a 30-second deadline and bounded output. It needs no additional SDK package.
+The returned IDs can be aliases (including `opus[1m]`); they are not a guarantee
+of access when an agent launches. A failed or empty catalog shows manual-entry
+guidance instead of an empty Available model IDs list. Saved profiles are unchanged.
+This requires deploying the updated worker-review helper through the normal deployment.
