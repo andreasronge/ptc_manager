@@ -113,7 +113,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
           state:
             if(success,
               do: "working",
-              else: if(reserved?, do: "reconciling", else: current.state)
+              else: failure_state(outcome, reserved?, current.state)
             ),
           review_state:
             if(success,
@@ -125,11 +125,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
               else: "paused"
             ),
           review_resume_expires_at: nil,
-          last_error:
-            if(not success,
-              do:
-                "Continuation could not start; the work is preserved. Confirm the retained agent state before retrying."
-            )
+          last_error: if(not success, do: failure_message(outcome))
         })
         |> Repo.update!()
       else
@@ -147,4 +143,32 @@ defmodule PtcManager.Reviews.ResumeWorker do
 
     PtcManager.ExecutionProfiles.notify()
   end
+
+  defp failure_state({:error, {:continuation_not_started, _}}, _reserved?, _state), do: "blocked"
+  defp failure_state(_, true, _state), do: "reconciling"
+  defp failure_state(_, false, state), do: state
+
+  defp failure_message({:error, {:continuation_not_started, reason}}) do
+    "Continuation did not start (#{failure_code(reason)}). The previous agent is stopped and the work is preserved. Continue to retry."
+  end
+
+  defp failure_message({:error, reason}) do
+    "Continuation could not start (#{failure_code(reason)}); the work is preserved. Confirm the retained agent state before retrying."
+  end
+
+  # Keep native error codes, never agent text or raw command output.
+  defp failure_code({:herdr_exit, status, output}) when is_binary(output) do
+    case Jason.decode(output) do
+      {:ok, %{"error" => %{"code" => code}}} when is_binary(code) ->
+        if Regex.match?(~r/\A[a-z][a-z0-9_]{0,63}\z/, code),
+          do: code,
+          else: "herdr_exit_#{status}"
+
+      _ ->
+        "herdr_exit_#{status}"
+    end
+  end
+
+  defp failure_code(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp failure_code(_), do: "continuation_failed"
 end

@@ -728,6 +728,9 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       DeliveryLane.continuation_starting?(item) or DeliveryLane.review_in_progress?(item) ->
         "working"
 
+      item.active_job.review_state == "paused" ->
+        "blocked"
+
       true ->
         state
     end
@@ -742,6 +745,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       DeliveryLane.continuation_queued?(item) -> "Continuation queued"
       DeliveryLane.continuation_starting?(item) -> "Continuation starting"
       DeliveryLane.review_in_progress?(item) -> "Under review"
+      item.active_job.review_state == "paused" -> "Review paused"
       true -> status_label(state)
     end
   end

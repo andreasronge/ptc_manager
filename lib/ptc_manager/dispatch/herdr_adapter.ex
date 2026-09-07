@@ -837,7 +837,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
            run,
          %{path: path} when is_binary(path) <- job.worktree_allocation,
          true <- File.dir?(path),
-         {:ok, pane, workspace} <- continuation_pane(name, old_pane, path),
+         {:ok, pane, workspace} <-
+           continuation_pane(name, old_pane, path, job.repository.local_path),
          {:ok, _report_path, _schema_path} <- StopReport.prepare(job),
          {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
          kind = job.execution_settings["kind"],
@@ -908,13 +909,14 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           {:error, reason}
       end
     else
+      {:error, _} = error -> error
       _ -> {:error, :retained_workspace_not_ready}
     end
   end
 
   # A full snapshot distinguishes an absent retained agent from an unavailable
   # Herdr server. Never start a second writer while the old agent is working.
-  defp continuation_pane(name, old_pane, path) do
+  defp continuation_pane(name, old_pane, path, repository_path) do
     with {:ok, output} <- Command.run(["agent", "list"]),
          {:ok, agents} <- PtcManager.Herdr.Client.decode_agents(output) do
       owned = Enum.find(agents, &(&1["name"] == name and &1["pane_id"] == old_pane))
@@ -954,9 +956,21 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
         true ->
           with {:ok, output} <-
-                 Command.run(["worktree", "open", "--cwd", path, "--path", path, "--no-focus"]),
+                 Command.run([
+                   "worktree",
+                   "open",
+                   "--cwd",
+                   repository_path,
+                   "--path",
+                   path,
+                   "--no-focus"
+                 ]),
                {:ok, workspace, pane} <- decode_worktree(output) do
             {:ok, pane, workspace}
+          else
+            # No agent occupies this checkout, and opening only creates a pane.
+            # Failure here cannot have started a new writer.
+            {:error, reason} -> {:error, {:continuation_not_started, reason}}
           end
       end
     end

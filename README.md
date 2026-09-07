@@ -127,7 +127,10 @@ history stay preserved. **Continue existing work** queues a continuation, which
 reserves a slot through the same capacity gate as new implementations and repairs
 before launching. Queue waiting has no launch timeout; the bounded launch window
 starts only when a slot is reserved. An interrupted or uncertain launch keeps its
-slot until reconciliation confirms the outcome. Manual takeover requests the retained pane to stop; confirm it has
+slot until reconciliation confirms the outcome. A failed workspace reopen before
+an agent starts pauses the review and releases confirmed-stopped capacity. The
+console shows “Review paused” and the specific Herdr error code. Continue retries
+from the same checkout, using the parent repository to reopen its workspace. Manual takeover requests the retained pane to stop; confirm it has
 stopped before editing. Cancellation requires a private reason and preserves
 all work. Posting an explanation on GitHub is a separate, editable approval.
 
