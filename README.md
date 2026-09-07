@@ -693,7 +693,9 @@ The report is a small JSON file validated against
 `priv/codex/agent_stop_report.schema.json`: a `reason_code`, one plain sentence,
 a detail paragraph, optionally the exact `prerequisite` that is missing, and
 whether anything was committed. It is data. It records a reason and never causes
-a state transition by itself.
+a state transition by itself. Once you acknowledge the report or continue the
+retained work, its explanation and recovery buttons disappear from the live card.
+The report remains stored; a later stop produces a new actionable report.
 
 When one arrives, the attempt ends the way every unfinished attempt does: the
 job ends, its run ends, and the partial worktree is kept for attention. The

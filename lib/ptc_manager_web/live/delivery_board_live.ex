@@ -320,8 +320,11 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   defp error_sentence(error), do: error
 
-  @doc "The agent's own report of why it could not finish, when there is one."
-  def stop_report(%{active_job: %{stop_report: report}}) when is_map(report), do: report
+  @doc "The unresolved stop report; acknowledged reports remain stored as history."
+  def stop_report(%{active_job: %{stop_report: report, stop_acknowledged_at: nil}})
+      when is_map(report),
+      do: report
+
   def stop_report(_item), do: nil
 
   @doc "Whether this recovery is the one PtcManager offers first for that reason."
