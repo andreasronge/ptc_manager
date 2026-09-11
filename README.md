@@ -1072,9 +1072,14 @@ tag. They remain part of a normal unfiltered `mix test` and run every night in
 GitHub Actions through `.github/workflows/nightly.yml`; the workflow can also
 be started manually. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
 only for local diagnosis—the checked-in defaults are the publication and
-deployment contract. CI runs the three partitions on separate runners using
-`PTC_TEST_PARTITION_ONLY`; every matrix job is required and retains the same
-60-second budget. Local precommit runs all three partitions together.
+deployment contract. CI runs five partitions on separate runners using
+`PTC_TEST_PARTITION_ONLY` with `PTC_TEST_PARTITIONS`; every matrix job is
+required and retains the same 60-second budget. Local precommit runs three
+partitions together on one machine, where the budget covers their combined
+wall clock; a CI runner measures one partition alone and is pinned to a single
+scheduler, so it needs smaller partitions to hold the same budget. Splitting
+further does not make the suite faster: roughly five sixths of its time is
+synchronous, because the SQLite-backed data cases cannot run `async: true`.
 
 ## Production configuration
 
