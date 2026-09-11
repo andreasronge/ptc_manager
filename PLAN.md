@@ -18,7 +18,12 @@ without replacing the user interface or GitHub integration.
    normally requires an individual approval. A maintainer may instead enable
    automatic implementation of ready issues for one repository. That recorded
    policy authorizes bounded job admission; merging and deployment remain
-   separate human decisions.
+   separate human decisions. A collection run is a second recorded policy,
+   made once per issue with sub-issues: it authorizes bounded admission of
+   the members it froze, merging a member pull request at exactly the head
+   PtcManager reviewed, and one bounded recovery per stuck mode; everything
+   else pauses and is escalated through one comment on the umbrella issue.
+   Deployment remains a human decision.
 2. GitHub is the source of truth for issues, pull requests, checks, and commits.
    PtcManager stores private summaries, approvals, execution state, and an audit
    log; it does not turn GitHub labels into an internal job queue. An optional

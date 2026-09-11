@@ -96,9 +96,6 @@ defmodule PtcManagerWeb.DashboardLive do
   end
 
   @impl true
-  # One form, two submit buttons: "Fix directly" is the same decision made
-  # without a preparation round, so it deliberately carries the same review
-  # count the maintainer picked next to it.
   def handle_event("start-collection-run", %{"issue-id" => issue_id} = params, socket) do
     case parse_issue_id(issue_id) do
       {:ok, id} ->
@@ -145,6 +142,9 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  # One form, two submit buttons: "Fix directly" is the same decision made
+  # without a preparation round, so it deliberately carries the same review
+  # count the maintainer picked next to it.
   def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
          {:ok, review_count} <- parse_review_count(params["review-count"]) do
