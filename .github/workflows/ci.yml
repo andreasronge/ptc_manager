@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3]
+        partition: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -31,5 +31,6 @@ jobs:
       - run: ./scripts/ci/pre-publication
         env:
           PTC_TEST_PARTITION_ONLY: ${{ matrix.partition }}
+          PTC_TEST_PARTITIONS: 5
           ERL_FLAGS: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
       - run: git diff --exit-code
