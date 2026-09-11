@@ -179,6 +179,9 @@ defmodule PtcManager.Collections do
         if is_binary(run.pause_scope),
           do: record_step!(run, "override", run.pause_scope, actor, %{})
 
+        # A queued escalation would post a comment about a pause that no
+        # longer exists.
+        cancel_queued_actions(run, actor)
         activate(run)
 
       _run ->
@@ -213,6 +216,7 @@ defmodule PtcManager.Collections do
 
         Enum.each(current, &insert_member!(run, &1.number, &1.issue, "accept"))
         record_step!(run, "override", run.pause_scope, actor, %{})
+        cancel_queued_actions(run, actor)
         activate(run)
       end
     end)
@@ -454,17 +458,24 @@ defmodule PtcManager.Collections do
       if issue.github_state_reason == "completed", do: :closed_completed, else: :closed_other
 
     job = latest_job(issue)
+    publication = job && job.pr_publication
 
     # A closed member keeps its job and publication visible, so a merge that
-    # closed it can still be handed off.
-    base(member, status, job, job && job.pr_publication)
-    |> maybe_attention(
-      status == :closed_other,
-      "child_closed_without_completion",
-      "##{issue.number} was closed as #{issue.github_state_reason || "unspecified"}, not completed.",
-      issue.id,
-      "member:#{issue.number}:closed:#{issue.github_state_reason}"
-    )
+    # closed it can still be handed off, and a merge at a head the run never
+    # authorized still waits for the maintainer.
+    case publication && unauthorized_merge(publication) do
+      %AgentAction{} = action ->
+        base(member, :attention, job, publication)
+        |> attention(
+          "action_failed",
+          "The pull request for ##{issue.number} was merged at a head the run did not authorize; review that merge before continuing.",
+          action.id,
+          "action:#{action.id}"
+        )
+
+      _authorized ->
+        closed_member(member, status, issue, job, publication)
+    end
   end
 
   def classify(%{issue: %Issue{} = issue} = member, run) do
@@ -475,6 +486,17 @@ defmodule PtcManager.Collections do
       is_nil(job) -> classify_unstarted(member, issue)
       true -> classify_job(member, issue, job, publication, run)
     end
+  end
+
+  defp closed_member(member, status, issue, job, publication) do
+    base(member, status, job, publication)
+    |> maybe_attention(
+      status == :closed_other,
+      "child_closed_without_completion",
+      "##{issue.number} was closed as #{issue.github_state_reason || "unspecified"}, not completed.",
+      issue.id,
+      "member:#{issue.number}:closed:#{issue.github_state_reason}"
+    )
   end
 
   defp classify_unstarted(member, issue) do
@@ -519,7 +541,21 @@ defmodule PtcManager.Collections do
   defp classify_job(member, issue, job, publication, run) do
     cond do
       publication && publication.pr_state == "merged" ->
-        base(member, :merged, job, publication)
+        # GitHub's merge is recorded as truth, but a merge at a head the run
+        # never authorized is not delivery: it waits for the maintainer.
+        case unauthorized_merge(publication) do
+          nil ->
+            base(member, :merged, job, publication)
+
+          action ->
+            base(member, :attention, job, publication)
+            |> attention(
+              "action_failed",
+              "The pull request for ##{issue.number} was merged at a head the run did not authorize; review that merge before continuing.",
+              action.id,
+              "action:#{action.id}"
+            )
+        end
 
       job.state == "done" ->
         base(member, :merged, job, publication)
@@ -1018,7 +1054,7 @@ defmodule PtcManager.Collections do
       {:exhausted, action} ->
         apply_pause(run, %{
           kind: "action_failed",
-          reason: "The close-out of the collection failed twice.",
+          reason: "The close-out of the collection failed #{@max_closeout_attempts} times.",
           member: nil,
           reference_id: action.id,
           scope: "action:#{action.id}"
@@ -1056,7 +1092,7 @@ defmodule PtcManager.Collections do
         :ok
 
       {:error, {:effect_refused, reason}} ->
-        Logger.info("Collection run #{run.id}: #{kind} #{scope} refused: #{inspect(reason)}")
+        Logger.warning("Collection run #{run.id}: #{kind} #{scope} refused: #{inspect(reason)}")
         :ok
 
       {:error, _reason} ->
@@ -1418,6 +1454,16 @@ defmodule PtcManager.Collections do
         order_by: [desc: action.id],
         limit: 1
     )
+  end
+
+  defp unauthorized_merge(publication) do
+    case latest_merge_action(publication) do
+      %AgentAction{state: "failed", last_error: error} = action when is_binary(error) ->
+        if String.contains?(error, "unexpected_merge_head"), do: action
+
+      _action ->
+        nil
+    end
   end
 
   defp merge_action_failed?(nil, _publication), do: false

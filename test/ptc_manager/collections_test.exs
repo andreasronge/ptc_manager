@@ -317,6 +317,55 @@ defmodule PtcManager.CollectionsTest do
       assert length(collection_actions(repository)) == 1
     end
 
+    test "a merge at an unauthorized head is not delivery until the maintainer says so" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      run = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+      job = job_for(first)
+      publication = open_publication!(first, job)
+
+      {:ok, merge} =
+        PtcManager.MaintainerActions.enqueue(
+          "merge_reviewed_pr",
+          publication.id,
+          "system:collection"
+        )
+
+      publication |> PrPublication.changeset(%{pr_state: "merged"}) |> Repo.update!()
+      job |> Repo.reload!() |> Job.changeset(%{state: "done"}) |> Repo.update!()
+
+      first
+      |> Repo.reload!()
+      |> Issue.changeset(%{state: "closed", github_state_reason: "completed"})
+      |> Repo.update!()
+
+      refresh_umbrella(umbrella, repository, [1], %{1 => "closed"})
+
+      merge
+      |> AgentAction.changeset(%{
+        state: "failed",
+        last_error: "postflight_failed: :unexpected_merge_head",
+        target_snapshot: %{"authorized_head_sha" => String.duplicate("a", 40)}
+      })
+      |> Repo.update!()
+
+      assert :ok = Collections.reconcile(repository.id)
+
+      assert %Run{state: "paused", pause_kind: "action_failed", pause_reference_id: reference} =
+               Repo.get!(Run, run.id)
+
+      assert reference == merge.id
+      refute Enum.any?(collection_actions(repository), &(&1.action_key == "collection_handoff"))
+
+      # It stays paused until an explicit override, then the handoff proceeds.
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused"} = Repo.get!(Run, run.id)
+      {:ok, _resumed} = Collections.resume(run.id, "andreas")
+      assert :ok = Collections.reconcile(repository.id)
+      assert Enum.any?(collection_actions(repository), &(&1.action_key == "collection_handoff"))
+    end
+
     test "a failed handoff is retried once, then pauses the run" do
       repository = repository_fixture()
       {umbrella, [first, _second]} = collection_fixture(repository, [1, 2], chain: true)
