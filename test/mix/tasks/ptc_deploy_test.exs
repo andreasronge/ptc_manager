@@ -811,6 +811,7 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "health_snapshot_service_was_active="
     assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.timer"
     assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.service"
+    assert script =~ ~s(if [ "$health_snapshot_service_load_state" != not-found ])
 
     assert byte_index(script, "sudo systemctl stop ptc_manager-health-snapshot.timer") <
              byte_index(script, "sudo systemctl stop ptc_manager-health-snapshot.service")
@@ -827,8 +828,11 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert byte_index(script, "restore_health_snapshot_installation || rollback_status=1") <
              byte_index(script, ~s(sudo systemctl start "$service_name" || rollback_status=1))
 
-    assert length(String.split(script, "restore_health_snapshot_installation")) == 4
+    assert length(String.split(script, "restore_health_snapshot_installation")) == 5
     assert script =~ "health_snapshot_backup_retained=true"
+
+    assert script =~
+             ~s(if [ "$exit_status" -ne 0 ] && [ "$health_snapshot_installation_prepared" = true ])
   end
 
   test "remote deployment gives agents a narrow writable result exchange" do
