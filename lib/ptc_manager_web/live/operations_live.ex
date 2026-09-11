@@ -509,6 +509,7 @@ defmodule PtcManagerWeb.OperationsLive do
   def terminal_refresh_label(_run), do: "Final retained terminal snapshot"
 
   def queued_action_label(%{action_key: "repair_and_merge_pr"}), do: "Approve and merge"
+  def queued_action_label(%{action_key: "merge_reviewed_pr"}), do: "Collection merge"
   def queued_action_label(%{action_key: "repair_pr"}), do: "Fix PR"
   def queued_action_label(%{action_key: "daily_digest"}), do: "Daily update"
   def queued_action_label(action), do: String.replace(action.action_key, "_", " ")

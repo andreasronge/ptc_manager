@@ -611,7 +611,10 @@ defmodule PtcManager.MaintainerActionsTest do
       "html_url" => issue.html_url,
       "state" => "open",
       "labels" => [],
-      "updated_at" => DateTime.to_iso8601(issue.github_updated_at)
+      "updated_at" => DateTime.to_iso8601(issue.github_updated_at),
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
     })
 
     previous_github = Application.fetch_env!(:ptc_manager, :github_client)
@@ -794,7 +797,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.target_label =~ "#42"
     assert action.prompt =~ "update GitHub with one outcome"
     assert action.prompt =~ "ptc:needs-decision"
-    assert action.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
+    assert action.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject,split")
 
     assert {:error, :agent_action_already_active} =
              MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
@@ -1468,6 +1471,117 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed.prompt =~ "instructions captured when this repair was queued"
     refute executed.prompt =~ "later configuration must not rewrite"
     assert_receive {:repair_postflight, {:ok, %{"outcome" => "repaired"}}}
+  end
+
+  test "a collection merge merges only its authorized head and never repairs" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    publication =
+      publication
+      |> PrPublication.changeset(%{checks_state: "success", mergeability: "mergeable"})
+      |> Repo.update!()
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("merge_reviewed_pr", publication.id, "system:collection")
+
+    assert queued.target_snapshot == %{"authorized_head_sha" => publication.remote_head_sha}
+    assert queued.prompt =~ ~s(push_authorized="false")
+
+    green =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "success", mergeability: "mergeable"})
+
+    Process.put(:merge_decision_statuses, [green, green])
+    assert {:ok, completed} = MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+    assert completed.id == queued.id
+    assert completed.state == "done"
+    assert completed.target_snapshot["authorized_head_sha"] == publication.remote_head_sha
+    assert completed.target_snapshot["head_sha"] == publication.remote_head_sha
+
+    # The real postflight, against what GitHub reports afterwards.
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, SettledMergeClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+    repaired = {:ok, %{"outcome" => "repaired"}}
+
+    Process.put(:settled_merge_status, green)
+    assert {:error, :authorized_merge_not_finished} = Sync.sync_action(completed, repaired)
+
+    Process.put(:settled_merge_status, %{green | head_sha: String.duplicate("e", 40)})
+
+    assert {:terminal_error, :unexpected_repair_head_change} =
+             Sync.sync_action(completed, repaired)
+
+    Process.put(:settled_merge_status, green)
+
+    assert {:ok, %{publication: %{pr_state: "open"}}} =
+             Sync.sync_action(completed, {:ok, %{"outcome" => "repair-blocked"}})
+
+    Process.put(:settled_merge_status, %{
+      green
+      | state: "merged",
+        head_sha: String.duplicate("e", 40)
+    })
+
+    assert {:terminal_error, :unexpected_merge_head} = Sync.sync_action(completed, repaired)
+    assert Repo.get!(PrPublication, publication.id).pr_state == "merged"
+
+    fresh_publication = open_publication_fixture(issue_fixture(repository))
+    retain_repair_worktree(fresh_publication)
+
+    {:ok, fresh_action} =
+      MaintainerActions.enqueue("merge_reviewed_pr", fresh_publication.id, "system:collection")
+
+    fresh_green =
+      fresh_publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "success", mergeability: "mergeable"})
+
+    Process.put(:merge_decision_statuses, [fresh_green, fresh_green])
+
+    {:ok, fresh_completed} =
+      MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+
+    assert fresh_completed.id == fresh_action.id
+    Process.put(:settled_merge_status, %{fresh_green | state: "merged"})
+    assert {:ok, %{publication: merged}} = Sync.sync_action(fresh_completed, repaired)
+    assert merged.pr_state == "merged"
+    assert Repo.get!(PtcManager.Operations.Job, fresh_publication.job_id).state == "done"
+  end
+
+  test "a collection merge refuses a moved or red head before the agent runs" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    green =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{checks_state: "success", mergeability: "mergeable"})
+
+    assert {:ok, first} =
+             MaintainerActions.enqueue("merge_reviewed_pr", publication.id, "system:collection")
+
+    Process.put(:merge_decision_statuses, [%{green | head_sha: String.duplicate("e", 40)}])
+    assert {:ok, failed} = MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+    assert failed.id == first.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "authorized_head_changed"
+
+    assert {:ok, second} =
+             MaintainerActions.enqueue("merge_reviewed_pr", publication.id, "system:collection")
+
+    Process.put(:merge_decision_statuses, [%{green | checks_state: "failure"}])
+    assert {:ok, failed} = MaintainerActions.run_once(adapter: RepairAdapter, sync: RepairSync)
+    assert failed.id == second.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "pull_request_not_mergeable"
+    refute_receive {:ran_agent_action, _action}
   end
 
   test "a merge the status reconciler recorded first is not reported as a failed repair" do
@@ -3135,7 +3249,7 @@ defmodule PtcManager.MaintainerActionsTest do
       assert {:ok, attrs} =
                Catalog.build("prepare_issue", %{issue: issue, repository: repository})
 
-      assert attrs.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
+      assert attrs.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject,split")
       refute attrs.prompt =~ "blocked_implementation"
       refute Map.has_key?(attrs, :target_snapshot)
 

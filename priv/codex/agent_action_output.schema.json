@@ -21,7 +21,7 @@
     "outcome": {
       "description": "One value from the allowed_outcomes list in the runtime_context of the task.",
       "type": "string",
-      "enum": ["ready", "blocked", "needs-decision", "reject", "followups-proposed", "followups-created", "no-followups", "merge-ready", "merge-blocked", "merge-needs-decision", "repaired", "repair-blocked", "completed", "no-changes", "needs_information", "needs_breakdown", "outdated", "duplicate"]
+      "enum": ["ready", "blocked", "needs-decision", "reject", "split", "structured", "followups-proposed", "followups-created", "no-followups", "merge-ready", "merge-blocked", "merge-needs-decision", "repaired", "repair-blocked", "completed", "no-changes", "needs_information", "needs_breakdown", "outdated", "duplicate"]
     },
     "private_summary": {"description": "Plain-language summary for the maintainer.", "type": "string", "minLength": 1, "maxLength": 4000},
     "why_it_matters": {"description": "Why the maintainer should care, in plain language.", "type": "string", "minLength": 1, "maxLength": 4000},

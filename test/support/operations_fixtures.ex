@@ -70,6 +70,7 @@ defmodule PtcManager.OperationsFixtures do
       state: "open",
       dependencies_projected: true,
       github_assignment_projected: true,
+      structure_projected: true,
       body_digest: body_digest,
       content_digest: digest("#{title}:#{body_digest}"),
       github_updated_at: updated_at

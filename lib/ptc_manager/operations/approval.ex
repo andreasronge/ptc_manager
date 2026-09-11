@@ -14,7 +14,7 @@ defmodule PtcManager.Operations.Approval do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @decisions ~w(start_implementation start_implementation_direct start_implementation_automatic)
+  @decisions ~w(start_implementation start_implementation_direct start_implementation_automatic start_implementation_collection)
 
   schema "approvals" do
     field :decision, :string
@@ -49,7 +49,8 @@ defmodule PtcManager.Operations.Approval do
   defp require_proposal(changeset) do
     if get_field(changeset, :decision) in [
          "start_implementation_direct",
-         "start_implementation_automatic"
+         "start_implementation_automatic",
+         "start_implementation_collection"
        ],
        do: changeset,
        else: validate_required(changeset, [:proposal_id, :proposal_digest])

@@ -53,7 +53,10 @@ defmodule PtcManager.TestScenario do
         "https://github.com/#{repository.github_owner}/#{repository.github_name}/issues/#{number}",
       "body" => "Exercise one deterministic implementation lifecycle.",
       "state" => "open",
-      "updated_at" => "2026-08-31T09:00:00Z"
+      "updated_at" => "2026-08-31T09:00:00Z",
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
     }
 
     issue =

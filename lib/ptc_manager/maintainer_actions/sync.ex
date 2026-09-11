@@ -53,7 +53,7 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   def sync_action(%{action_key: action_key} = action)
-      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"],
       do: sync_repair(action, :preflight)
 
   def sync_action(%{action_key: action_key, repository: repository})
@@ -65,8 +65,25 @@ defmodule PtcManager.MaintainerActions.Sync do
     do: GitHubSync.sync_repository(repository)
 
   def sync_action(%{action_key: action_key} = action, result)
-      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"],
       do: sync_repair(action, {:postflight, result})
+
+  # An action that may have created or related member issues is checked
+  # against the whole repository, because a single-issue refresh cannot see the
+  # sub-issues it created. Admission is deferred: a member must not start in the
+  # middle of a structure check, and the caller reconciles once afterwards.
+  def sync_action(%{action_key: action_key, repository: repository} = action, result)
+      when action_key in [
+             "prepare_issue",
+             "review_issue",
+             "structure_collection",
+             "collection_handoff",
+             "collection_closeout"
+           ] do
+    if structure_changing?(result),
+      do: GitHubSync.sync_repository(repository, admit: false),
+      else: sync_action(action)
+  end
 
   def sync_action(%{action_key: "post_cancellation_note"} = action, _result) do
     issue = Repo.get!(Issue, action.target_id) |> Repo.preload(:repository)
@@ -83,6 +100,15 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   def sync_action(action, _result), do: sync_action(action)
+
+  # What the agent wrote is untrusted, but here it only widens the read: a
+  # claimed structure change costs one repository sync, never trust.
+  defp structure_changing?({:ok, %{"outcome" => outcome}})
+       when outcome in ["split", "structured", "completed"],
+       do: true
+
+  defp structure_changing?({:ok, %{"created_issue_numbers" => [_ | _]}}), do: true
+  defp structure_changing?(_result), do: false
 
   defp sync_repair(%{target_id: publication_id} = action, phase) do
     publication =
@@ -133,18 +159,50 @@ defmodule PtcManager.MaintainerActions.Sync do
          %{state: "merged"} = result,
          {:postflight, {:ok, %{"outcome" => "repaired"}}}
        ) do
-    if merged_repair_matches?(action, publication, result) do
-      with {:ok, prepared} <- prepare_merged_repair(action, publication, result),
-           {:ok, %{state: "published", pr_state: "merged"} = updated} <-
-             Publications.record_remote_status(prepared.id, result) do
-        {:ok, %{pull_request: result, publication: updated}}
-      else
-        {:ok, _unexpected} -> {:terminal_error, :merged_repair_not_recorded}
-        {:error, :publication_not_open} -> settled_merged_repair(publication, result)
-        {:error, reason} -> {:terminal_error, reason}
-      end
+    if merged_repair_matches?(action, publication, result),
+      do: accept_merged(action, publication, result),
+      else: {:terminal_error, :unexpected_repair_head_change}
+  end
+
+  # A collection merge is held to the head it was authorized for. A merge of
+  # that head is accepted like a retained fix-and-merge; any other head, merged
+  # or pushed, ends the action with an error the run reads as a moved head.
+  defp reconcile_repair_status(
+         %{action_key: "merge_reviewed_pr"} = action,
+         publication,
+         %{state: "merged"} = result,
+         {:postflight, _execution_result}
+       ) do
+    if result.head_sha == authorized_head(action) do
+      accept_merged(action, publication, result)
     else
-      {:terminal_error, :unexpected_repair_head_change}
+      Publications.record_remote_status(publication.id, result)
+      {:terminal_error, :unexpected_merge_head}
+    end
+  end
+
+  defp reconcile_repair_status(
+         %{action_key: "merge_reviewed_pr"} = action,
+         publication,
+         %{state: "open"} = result,
+         {:postflight, execution_result}
+       ) do
+    cond do
+      result.head_sha != authorized_head(action) ->
+        Publications.record_remote_status(publication.id, result)
+        {:terminal_error, :unexpected_repair_head_change}
+
+      match?({:ok, %{"outcome" => "repair-blocked"}}, execution_result) ->
+        record_open_result(publication, result)
+
+      match?({:error, _reason}, execution_result) ->
+        {:terminal_error, {:repair_execution_failed, elem(execution_result, 1)}}
+
+      true ->
+        case Publications.record_remote_status(publication.id, result) do
+          {:ok, _updated} -> {:error, :authorized_merge_not_finished}
+          {:error, reason} -> {:terminal_error, reason}
+        end
     end
   end
 
@@ -169,6 +227,25 @@ defmodule PtcManager.MaintainerActions.Sync do
     if fresh_repair?(action, publication),
       do: reconcile_fresh_repair(action, publication, result, execution_result),
       else: reconcile_retained_repair(action, publication, result, postflight)
+  end
+
+  defp accept_merged(action, publication, result) do
+    with {:ok, prepared} <- prepare_merged_repair(action, publication, result),
+         {:ok, %{state: "published", pr_state: "merged"} = updated} <-
+           Publications.record_remote_status(prepared.id, result) do
+      {:ok, %{pull_request: result, publication: updated}}
+    else
+      {:ok, _unexpected} -> {:terminal_error, :merged_repair_not_recorded}
+      {:error, :publication_not_open} -> settled_merged_repair(publication, result)
+      {:error, reason} -> {:terminal_error, reason}
+    end
+  end
+
+  defp record_open_result(publication, result) do
+    case Publications.record_remote_status(publication.id, result) do
+      {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
+      {:error, reason} -> {:terminal_error, reason}
+    end
   end
 
   defp fresh_repair?(%{target_snapshot: %{"repair_mode" => mode}}, _publication),
@@ -211,10 +288,7 @@ defmodule PtcManager.MaintainerActions.Sync do
         {:terminal_error, {:repair_execution_failed, elem(execution_result, 1)}}
 
       match?({:ok, %{"outcome" => "repair-blocked"}}, execution_result) ->
-        case Publications.record_remote_status(publication.id, result) do
-          {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
-          {:error, reason} -> {:terminal_error, reason}
-        end
+        record_open_result(publication, result)
 
       action.action_key == "repair_and_merge_pr" ->
         case Publications.record_remote_status(publication.id, result) do
@@ -223,10 +297,7 @@ defmodule PtcManager.MaintainerActions.Sync do
         end
 
       true ->
-        case Publications.record_remote_status(publication.id, result) do
-          {:ok, updated} -> {:ok, %{pull_request: result, publication: updated}}
-          {:error, reason} -> {:terminal_error, reason}
-        end
+        record_open_result(publication, result)
     end
   end
 
@@ -392,6 +463,15 @@ defmodule PtcManager.MaintainerActions.Sync do
       _head -> nil
     end
   end
+
+  defp authorized_head(%{target_snapshot: snapshot}) when is_map(snapshot) do
+    case snapshot["authorized_head_sha"] do
+      head when is_binary(head) -> head
+      _head -> nil
+    end
+  end
+
+  defp authorized_head(_action), do: nil
 
   defp repair_intended_head(%{target_snapshot: snapshot}) when is_map(snapshot) do
     case snapshot["repair_intended_head_sha"] do

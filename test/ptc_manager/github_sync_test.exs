@@ -308,6 +308,120 @@ defmodule PtcManager.GitHubSyncTest do
     assert Repo.get!(IssueDependency, dependency.id).blocking_state_reason == "completed"
   end
 
+  test "projects the parent and sub-issues into the issue and its digest, failing closed when unknown" do
+    repository = repository_fixture(%{github_owner: "Example", github_name: "Project"})
+
+    child_node = %{
+      "number" => 1918,
+      "state" => "closed",
+      "state_reason" => "completed",
+      "repository" => %{"full_name" => "Example/Project"}
+    }
+
+    umbrella =
+      remote_issue(1465, "Gateway collection")
+      |> Map.put("sub_issues", %{"nodes" => [child_node], "total" => 1, "overflow" => false})
+
+    child =
+      remote_issue(1918, "Serving templates")
+      |> Map.put("parent", %{
+        "number" => 1465,
+        "repository" => %{"full_name" => "Example/Project"}
+      })
+
+    foreign_child =
+      remote_issue(1919, "Reparented elsewhere")
+      |> Map.put("parent", %{"number" => 7, "repository" => %{"full_name" => "Other/Repo"}})
+
+    unknown =
+      remote_issue(1920, "From an older query")
+      |> Map.drop(["parent", "sub_issues", "structure_projected"])
+
+    Process.put(:github_result, {:ok, [umbrella, child, foreign_child, unknown]})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+
+    synced_umbrella = Repo.get_by!(Issue, repository_id: repository.id, number: 1465)
+    assert Issue.collection?(synced_umbrella)
+    assert synced_umbrella.structure_projected
+    assert synced_umbrella.sub_issues["total"] == 1
+
+    assert [%{"number" => 1918, "state" => "closed", "state_reason" => "completed"}] =
+             Issue.sub_issue_nodes(synced_umbrella)
+
+    assert Issue.sub_issues_completed(synced_umbrella) == 1
+
+    synced_child = Repo.get_by!(Issue, repository_id: repository.id, number: 1918)
+    assert synced_child.parent_issue_number == 1465
+    refute Issue.collection?(synced_child)
+
+    assert Repo.get_by!(Issue, repository_id: repository.id, number: 1919).parent_issue_number ==
+             nil
+
+    synced_unknown = Repo.get_by!(Issue, repository_id: repository.id, number: 1920)
+    refute synced_unknown.structure_projected
+
+    assert {:error, :issue_structure_unknown} =
+             PtcManager.Operations.approve_issue_directly(synced_unknown.id, "andreas")
+
+    assert {:error, :issue_is_collection} =
+             PtcManager.Operations.approve_issue_directly(synced_umbrella.id, "andreas")
+
+    # A child closing changes the umbrella's canonical version, as a blocker
+    # closing changes a dependent's.
+    reopened = put_in(child_node["state"], "open")
+    digest_before = synced_umbrella.content_digest
+
+    Process.put(
+      :github_issue_result,
+      {:ok, Map.put(umbrella, "sub_issues", %{"nodes" => [reopened], "total" => 1})}
+    )
+
+    assert {:ok, %{changed?: true}} = Sync.sync_issue(repository, 1465, client: FakeClient)
+    assert Repo.reload!(synced_umbrella).content_digest != digest_before
+  end
+
+  test "fetches a same-repository member it has never seen, so a closed member gets a row" do
+    repository = repository_fixture(%{github_owner: "Example", github_name: "Project"})
+
+    umbrella =
+      remote_issue(1465, "Gateway collection")
+      |> Map.put("sub_issues", %{
+        "nodes" => [
+          %{
+            "number" => 1918,
+            "state" => "closed",
+            "state_reason" => "completed",
+            "repository" => %{"full_name" => "Example/Project"}
+          },
+          %{
+            "number" => 7,
+            "state" => "closed",
+            "state_reason" => "completed",
+            "repository" => %{"full_name" => "Other/Repo"}
+          }
+        ],
+        "total" => 2,
+        "overflow" => false
+      })
+
+    closed_member =
+      remote_issue(1918, "Serving templates")
+      |> Map.merge(%{"state" => "closed", "state_reason" => "completed"})
+      |> Map.put("parent", %{
+        "number" => 1465,
+        "repository" => %{"full_name" => "Example/Project"}
+      })
+
+    Process.put(:github_result, {:ok, [umbrella]})
+    Process.put(:github_issue_results, %{1918 => {:ok, closed_member}})
+    assert {:ok, %{issue_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    member = Repo.get_by!(Issue, repository_id: repository.id, number: 1918)
+    assert member.state == "closed"
+    assert member.parent_issue_number == 1465
+    refute Repo.get_by(Issue, repository_id: repository.id, number: 7)
+  end
+
   test "keeps an accessible cross-repository blocker as an exact snapshot" do
     repository = repository_fixture(%{github_owner: "Example", github_name: "Project"})
 
@@ -595,7 +709,10 @@ defmodule PtcManager.GitHubSyncTest do
       "html_url" => "https://github.com/example/repo/issues/#{number}",
       "body" => "Issue body #{number}",
       "state" => "open",
-      "updated_at" => updated_at
+      "updated_at" => updated_at,
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
     }
   end
 end

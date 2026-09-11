@@ -587,7 +587,11 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     do: "ptc-manager/repair-pr-#{publication.pr_number}-action-#{action.id}"
 
   defp pull_request_agent_name(action, publication) do
-    prefix = if action.action_key == "repair_and_merge_pr", do: "merge", else: "repair"
+    prefix =
+      if action.action_key in ["repair_and_merge_pr", "merge_reviewed_pr"],
+        do: "merge",
+        else: "repair"
+
     "#{prefix}_pr#{publication.pr_number}_a#{action.id}_f#{action.attempt_count}"
   end
 

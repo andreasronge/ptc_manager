@@ -45,9 +45,11 @@ defmodule PtcManager.Operations do
   # Cancel agent, which closes the Herdr pane, is the right tool there.
   @abandonable_job_states ~w(awaiting_reconciliation verifying_result publish_blocked)
   @live_agent_run_states ~w(queued starting working idle blocked waiting unknown)
-  @repair_action_keys ~w(repair_pr repair_and_merge_pr)
+  @repair_action_keys ~w(repair_pr repair_and_merge_pr merge_reviewed_pr)
   @legacy_heavy_action_keys ["review_issue" | @repair_action_keys]
-  @merge_action_key "repair_and_merge_pr"
+  # Both merge one exact pull request under the repository merge lock; the
+  # second never repairs, so a collection merges only a head PtcManager reviewed.
+  @merge_action_keys ~w(repair_and_merge_pr merge_reviewed_pr)
   @planning_action_keys ~w(
     daily_digest
     prepare_issue
@@ -576,7 +578,7 @@ defmodule PtcManager.Operations do
       base
       |> where(
         [action],
-        action.action_key == @merge_action_key and
+        action.action_key in @merge_action_keys and
           action.repository_id not in subquery(active_writing_repository_ids())
       )
       |> order_by([action], asc: action.requested_at, asc: action.id)
@@ -1161,7 +1163,7 @@ defmodule PtcManager.Operations do
     AgentAction
     |> where(
       [action],
-      action.repository_id == ^repository_id and action.action_key == @merge_action_key and
+      action.repository_id == ^repository_id and action.action_key in @merge_action_keys and
         action.state in ["queued", "running", "sync_pending"]
     )
     |> Repo.exists?()
@@ -2540,10 +2542,12 @@ defmodule PtcManager.Operations do
     retrospective_actions = latest_agent_actions("pr_retrospective")
     retrospective_issue_actions = retrospective_issue_actions()
     external_publications = external_publications_by_issue(issues)
+    collection_runs = PtcManager.Collections.live_runs_by_issue(issue_ids)
 
     Enum.map(issues, fn issue ->
       %{
         issue: issue,
+        collection_run: Map.get(collection_runs, issue.id),
         external_publication: Map.get(external_publications, issue.id),
         dependencies: Map.get(dependencies, issue.id, []),
         dependency_cycle: Map.get(dependency_cycles, issue.id),
@@ -3344,6 +3348,20 @@ defmodule PtcManager.Operations do
     do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil)
   end
 
+  @doc """
+  Queues one ready member of a collection under its active run.
+
+  The run is the recorded policy: it replaces the repository auto-fix setting
+  and its daily limit, and keeps every other gate.
+  """
+  def approve_collection_issue(issue_id) when is_integer(issue_id) do
+    do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil)
+  end
+
+  @doc "True when every projected blocker of the issue is closed as completed and no cycle exists."
+  def dependencies_resolved?(%Issue{} = issue),
+    do: issue_dependencies_resolved(Repo, issue) == :ok
+
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -3436,10 +3454,12 @@ defmodule PtcManager.Operations do
   end
 
   defp approval_decision(:automatic), do: "start_implementation_automatic"
+  defp approval_decision(:collection), do: "start_implementation_collection"
   defp approval_decision(:direct), do: "start_implementation_direct"
   defp approval_decision(_mode), do: "start_implementation"
 
   defp audit_action(:automatic), do: "issue.automatically_approved_for_implementation"
+  defp audit_action(:collection), do: "issue.approved_for_implementation_by_collection_run"
   defp audit_action(:direct), do: "issue.approved_for_direct_implementation"
   defp audit_action(_mode), do: "issue.approved_for_implementation"
 
@@ -3450,6 +3470,7 @@ defmodule PtcManager.Operations do
          :ok <- issue_unclaimed(issue),
          :ok <- issue_workflow_allows_implementation(issue),
          :ok <- issue_dependencies_resolved(repo, issue),
+         :ok <- issue_not_collection(issue),
          {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
       {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
     else
@@ -3461,17 +3482,24 @@ defmodule PtcManager.Operations do
   defp automatic_approval_allowed(repo, issue, :automatic),
     do: PtcManager.AutoImplementation.eligible(repo, issue)
 
+  defp automatic_approval_allowed(repo, issue, :collection),
+    do: PtcManager.Collections.eligible(repo, issue)
+
   defp automatic_approval_allowed(_repo, _issue, _mode), do: :ok
 
-  defp approvable_proposal(repo, issue, :automatic) do
+  defp approvable_proposal(repo, issue, mode) when mode in [:automatic, :collection] do
     case latest_proposal(repo, issue.id) do
       nil ->
         {:ok, nil}
 
       proposal ->
-        if proposal_matches_issue(proposal, issue) == :ok,
-          do: {:ok, proposal},
-          else: {:ok, nil}
+        # A fresh analysis that asked for a breakdown is a reason not to start
+        # unattended; a stale or absent one keeps today's standard fallback.
+        cond do
+          proposal_matches_issue(proposal, issue) != :ok -> {:ok, nil}
+          proposal.readiness == "needs_breakdown" -> {:error, :issue_needs_breakdown}
+          true -> {:ok, proposal}
+        end
     end
   end
 
@@ -4310,10 +4338,10 @@ defmodule PtcManager.Operations do
          repository_merge_locked_except?(action.repository_id, action.id),
        do: Repo.rollback(:merge_priority)
 
-    if action_key == @merge_action_key and repository_merge_precedes?(action),
+    if action_key in @merge_action_keys and repository_merge_precedes?(action),
       do: Repo.rollback(:merge_priority)
 
-    if action_key == @merge_action_key and repository_writing_job_active?(action.repository_id),
+    if action_key in @merge_action_keys and repository_writing_job_active?(action.repository_id),
       do: Repo.rollback(:merge_waiting_for_active_work)
 
     capacity =
@@ -4380,7 +4408,7 @@ defmodule PtcManager.Operations do
     AgentAction
     |> where(
       [action],
-      action.action_key == @merge_action_key and
+      action.action_key in @merge_action_keys and
         action.state in ["queued", "running", "sync_pending"]
     )
     |> select([action], action.repository_id)
@@ -4473,7 +4501,7 @@ defmodule PtcManager.Operations do
     |> where(
       [action],
       action.repository_id == ^repository_id and action.id != ^action_id and
-        action.action_key == @merge_action_key and
+        action.action_key in @merge_action_keys and
         action.state in ["queued", "running", "sync_pending"]
     )
     |> Repo.exists?()
@@ -4484,7 +4512,7 @@ defmodule PtcManager.Operations do
     |> where(
       [candidate],
       candidate.repository_id == ^action.repository_id and candidate.id != ^action.id and
-        candidate.action_key == @merge_action_key and
+        candidate.action_key in @merge_action_keys and
         (candidate.state in ["running", "sync_pending"] or
            (candidate.state == "queued" and
               (candidate.requested_at < ^action.requested_at or
@@ -4814,6 +4842,16 @@ defmodule PtcManager.Operations do
 
   defp issue_is_open(%Issue{state: "open"}), do: :ok
   defp issue_is_open(%Issue{}), do: {:error, :issue_closed}
+
+  # An issue with sub-issues is a collection: its children are implemented, it
+  # is not. Unknown structure fails closed exactly as unknown dependencies do.
+  @doc false
+  def issue_not_collection(%Issue{structure_projected: false}),
+    do: {:error, :issue_structure_unknown}
+
+  def issue_not_collection(%Issue{} = issue) do
+    if Issue.collection?(issue), do: {:error, :issue_is_collection}, else: :ok
+  end
 
   defp issue_unclaimed(%Issue{github_assignment_projected: false}),
     do: {:error, :issue_claim_unknown}

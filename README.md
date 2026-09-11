@@ -715,6 +715,76 @@ catalog contains:
   be reviewed and repaired, but do not receive a generated implementation
   retrospective because PtcManager did not start their agent.
 
+#### Collections
+
+An issue with GitHub sub-issues is a **collection**. Synchronization reads each
+issue's parent and sub-issues beside its blocked-by relations, so a collection
+is never implemented itself: it has no approve form, automatic implementation
+skips it, and the card shows a **Collection · done/total** badge while each
+member shows **Part of #N**. Collections form their own Planning group.
+Unknown structure fails closed like unknown dependencies, so an issue written
+before this release is unapprovable until the next sync.
+
+**Structure collection** asks an agent to turn a plan issue into ordered
+sub-issues, or to repair their relations: one sub-issue per reviewable pull
+request, every ordering as a native blocked-by relation, `ptc:ready` on a
+member whose only blockers are other members. **Prepare issue** and **Review
+issue** may answer `split` for the same reason, when an issue cannot be
+delivered as one reviewable pull request. Either result is accepted only when
+GitHub then shows a well-formed collection: at least two members, all in this
+repository, none a collection itself, every open member with exactly one
+`ptc:` label, blockers that are members or closed issues, no cycle, and no
+`ptc:ready` on the parent. An issue whose fresh analysis said it needs a
+breakdown is never admitted automatically.
+
+**Run collection** is one decision that the collection may be delivered
+unattended. It freezes the members and two flags, *Merge reviewed members*
+and *Recover a stuck member once*, and from then on deterministic code:
+
+- admits each member when it is `ptc:ready` and its blockers are closed,
+  under the run's own approval rather than the repository auto-fix policy;
+- merges a member pull request through **Merge reviewed pull request**, an
+  agent that merges exactly the head PtcManager reviewed after a fresh status
+  read shows green checks and a mergeable state. It never repairs: failing
+  checks, a conflict, or a moved head pause the run, because a repaired head
+  is one nobody reviewed. **Fix and merge** by hand clears that pause;
+- runs **Collection handoff** on the parent after each merge. The agent reads
+  the merged retrospective, updates the open members that are not being
+  worked on, and may add a fix-up sub-issue before its dependents; the next
+  member is admitted only after the handoff finishes, and an edit to a
+  protected member fails the action;
+- spends one bounded recovery per stuck member: a fresh attempt after an
+  environment or prerequisite stop that committed nothing, **Ask on the
+  issue** after an ambiguous one, a review retry after a failed round, two
+  extra rounds with the strong profile after an exhausted review. A manual
+  review takeover, an unsafe stop, a lost or cancelled attempt, and a blocked
+  publication are never recovered automatically;
+- pauses on everything else and escalates once through **Report collection
+  blocker**, which posts one comment on the parent and applies
+  `ptc:needs-decision` with options, so GitHub notifies you and the parent
+  returns through **Needs your decision**. The card shows the member, the
+  reason, and the buttons the state allows;
+- runs **Collection close-out** when every member is closed as completed. The
+  agent checks the parent's acceptance criteria against the default branch,
+  posts a summary, and asks whether to close the parent; it may create the
+  missing members instead. Closing the parent is your decision, and the run
+  completes when GitHub reports it closed.
+
+A pause clears by itself when its condition does: a newer attempt, a merged or
+moved pull request, a member back on `ptc:ready`, an answered decision.
+**Resume** is a scoped override that lifts one pause without repeating for the
+same job, head, or action. A changed sub-issue list on GitHub pauses the run
+until **Accept changes**, which refuses to drop a member with work in flight.
+**Pause** and **Cancel run** cancel queued collection actions, let running
+agents finish, and change nothing on GitHub. Every automatic effect is one
+row in the run's step log, written with the effect, so a bound is a row and
+a concurrent reconcile is a no-op.
+
+To bring an existing plan issue under a run, press **Structure collection**
+on it, check the members it created or related on GitHub, then **Run
+collection**. The reconciler runs after every GitHub sync, pull-request
+status change, and finished agent action, and once a minute as a backstop.
+
 ### When an agent cannot finish
 
 Nothing watches a managed pane. An agent that asks a question there is asking

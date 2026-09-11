@@ -67,7 +67,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "issue_maintenance",
       prompt:
-        "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Do not implement it, and explain the result simply."
+        "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), rejected by closing it, or split (`split`) when it cannot be delivered as one reviewable pull request: more than one independently reviewable deliverable, more than one subsystem, or a change too large for one review pass. Splitting means turning the plan into GitHub sub-issues with native blocked-by ordering as described in the runtime context, never marking the parent ready. Do not implement it, and explain the result simply."
     },
     %{
       key: "report_issue_blocker",
@@ -97,7 +97,68 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "issue_maintenance",
       prompt:
-        "Review whether the issue is genuinely ready to implement. Use the disposable workspace to run relevant tests and create temporary reproduction tests when useful. Improve the issue and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), or rejected by closing it. Exploratory source changes will be discarded: do not implement the fix, commit, push, or open a pull request. Explain the result simply."
+        "Review whether the issue is genuinely ready to implement. Use the disposable workspace to run relevant tests and create temporary reproduction tests when useful. Improve the issue and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), rejected by closing it, or split (`split`) when it cannot be delivered as one reviewable pull request: more than one independently reviewable deliverable, more than one subsystem, or a change too large for one review pass. Splitting means turning the plan into GitHub sub-issues with native blocked-by ordering as described in the runtime context, never marking the parent ready. Exploratory source changes will be discarded: do not implement the fix, commit, push, or open a pull request. Explain the result simply."
+    },
+    %{
+      key: "structure_collection",
+      name: "Structure collection",
+      description: "Turn a plan issue into ordered GitHub sub-issues, or repair their relations.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 1_800,
+      result_type: "issue_maintenance",
+      prompt:
+        "Make this issue a collection whose members can be implemented one pull request at a time. When it has no sub-issues yet, create one sub-issue per independently reviewable pull request, each with a goal, scope, and acceptance criteria that stand alone. Record every ordering as a native GitHub blocked-by relation using the calls in the runtime context; a `Blocked by #N` line in a member body helps readers but is not the record. Label a member `ptc:ready` when its only blockers are other members and it is fully specified, otherwise `ptc:blocked` or `ptc:needs-decision`. Never label the parent `ptc:ready`. Report `structured` when the parent has at least two sub-issues, `no-changes` when the issue fits one pull request, or `needs-decision` with options. Do not implement anything."
+    },
+    %{
+      key: "collection_handoff",
+      name: "Collection handoff",
+      description:
+        "After a member pull request merges, carry its retrospective into the remaining members.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 1_800,
+      result_type: "issue_maintenance",
+      prompt:
+        "A member pull request of this collection was merged. Read its description and retrospective, then update the open, unprotected members whose assumptions the merged work changed. When the retrospective names a defect or a small fix that a later member depends on, create one fix-up sub-issue of the parent labelled `ptc:ready`, with native blocked-by relations that place it before its dependents; never push code. Create an ordinary issue for follow-up work outside the collection only when it is concrete and not already tracked. Never edit a closed or protected issue, never change the parent's labels, never merge anything. Report `completed` when you changed GitHub, `no-changes` when nothing needed changing, or `needs-decision` with options."
+    },
+    %{
+      key: "collection_closeout",
+      name: "Collection close-out",
+      description: "Check a delivered collection against its acceptance criteria.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 1_800,
+      result_type: "issue_maintenance",
+      prompt:
+        "Every member of this collection is closed as completed. Check the parent issue's acceptance criteria against the default branch in the read-only snapshot and post one summary comment on the parent saying what is met and what is not. Report `needs-decision` with options such as closing the parent or keeping it open when the criteria are met or when you cannot tell; report `completed` when something is still missing and you created the missing sub-issues labelled `ptc:ready` with native blocked-by relations; report `no-changes` when the parent is already closed. Never close the parent yourself and never implement anything."
+    },
+    %{
+      key: "report_collection_blocker",
+      name: "Report collection blocker",
+      description: "Tell the maintainer, on the parent issue, why a collection run paused.",
+      target_type: "issue",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "planning",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 900,
+      result_type: "issue_maintenance",
+      prompt:
+        "A collection run paused on one of this issue's members. Write one comment on this issue naming the member, what stopped, and the console link from the runtime context, then leave the issue needing a decision (`ptc:needs-decision`) with two to four plain-language options. Do not implement anything, do not edit the member, do not mark anything ready, and do not close anything."
     },
     %{
       key: "resolve_issue_decision",
@@ -158,6 +219,21 @@ defmodule PtcManager.Automations.Defaults do
       result_type: "pull_request_repair",
       prompt:
         "Fix the pull request's failing CI or merge conflicts, validate and review the repair, push the existing branch, wait for required CI, and merge this PR when it is green and mergeable. Do not force-push or work on another PR."
+    },
+    %{
+      key: "merge_reviewed_pr",
+      name: "Merge reviewed pull request",
+      description: "Merge exactly the reviewed head of a collection member's pull request.",
+      target_type: "pull_request",
+      execution_profile: "retained_pr_repair",
+      github_access: "trusted_direct",
+      queue_lane: "writing",
+      resource_class: "heavy",
+      lock_policy: %{"type" => "repository_merge"},
+      timeout_seconds: 3_600,
+      result_type: "pull_request_repair",
+      prompt:
+        "Merge this pull request at exactly the authorized head named in the runtime context. Mark it ready for review if it is a draft, wait for required CI, and merge it when it is green and mergeable. Do not commit, push, rebase, or change the branch in any way: if the head differs from the authorized one, CI fails, or the pull request is not mergeable, report `repair-blocked` and stop."
     },
     %{
       key: "pr_retrospective",
@@ -271,7 +347,12 @@ defmodule PtcManager.Automations.Defaults do
   end
 
   def triggers(key, _repository)
-      when key in ["private_issue_analysis", "prepare_issue", "review_issue"] do
+      when key in [
+             "private_issue_analysis",
+             "prepare_issue",
+             "review_issue",
+             "structure_collection"
+           ] do
     [
       %{
         trigger_type: "contextual",
@@ -281,6 +362,7 @@ defmodule PtcManager.Automations.Defaults do
             "private_issue_analysis" -> "Investigate privately"
             "prepare_issue" -> "Prepare issue"
             "review_issue" -> "Review issue"
+            "structure_collection" -> "Structure collection"
           end,
         enabled: true,
         configuration: %{}

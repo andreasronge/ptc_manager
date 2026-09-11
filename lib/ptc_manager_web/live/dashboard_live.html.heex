@@ -172,6 +172,92 @@
                     >
                       {DeliveryLane.label(delivery_lane(item))} · Delivery board →
                     </.link>
+                  <% :collections -> %>
+                    <button
+                      :if={action = primary_issue_action(item, group)}
+                      id={"agent-action-#{action.key}-issue-#{item.issue.id}"}
+                      phx-click="run-agent-action"
+                      phx-value-action-key={action.key}
+                      phx-value-target-id={item.issue.id}
+                      disabled={active_agent_action?(item.issue_agent_action)}
+                      title={action.description}
+                      class="rounded-xl border border-violet-400/30 px-4 py-2.5 text-sm font-semibold text-violet-200 transition hover:bg-violet-400/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500"
+                    >
+                      {action.label}
+                    </button>
+                    <%= if run = collection_run(item) do %>
+                      <div
+                        id={"collection-run-#{run.id}"}
+                        class="flex flex-wrap items-center gap-2"
+                      >
+                        <span class={[
+                          "rounded-full px-2.5 py-1 text-xs ring-1",
+                          run.state == "paused" &&
+                            "bg-amber-400/15 text-amber-300 ring-amber-400/20",
+                          run.state != "paused" &&
+                            "bg-teal-400/15 text-teal-300 ring-teal-400/20"
+                        ]}>
+                          {collection_run_label(run)}
+                        </span>
+                        <span
+                          :if={run.pause_reason}
+                          id={"collection-run-reason-#{run.id}"}
+                          class="text-xs text-slate-400"
+                        >
+                          {run.pause_reason}
+                        </span>
+                        <button
+                          :for={decision <- collection_run_buttons(run)}
+                          id={"collection-run-#{decision}-#{run.id}"}
+                          type="button"
+                          phx-click="collection-run"
+                          phx-value-run-id={run.id}
+                          phx-value-decision={decision}
+                          data-confirm={
+                            if decision == :cancel,
+                              do:
+                                "Cancel this collection run? Running agents finish, queued ones are cancelled, and nothing on GitHub changes."
+                          }
+                          class="rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 hover:bg-white/10"
+                        >
+                          {collection_run_button_label(decision)}
+                        </button>
+                      </div>
+                    <% else %>
+                      <form
+                        id={"collection-run-form-#{item.issue.id}"}
+                        phx-submit="start-collection-run"
+                        class="flex flex-wrap items-end gap-3"
+                      >
+                        <input type="hidden" name="issue-id" value={item.issue.id} />
+                        <label class="flex items-center gap-2 text-xs font-medium text-slate-400">
+                          <input
+                            type="checkbox"
+                            name="auto-merge"
+                            value="true"
+                            checked
+                            class="rounded border-white/20 bg-slate-950"
+                          /> Merge reviewed members
+                        </label>
+                        <label class="flex items-center gap-2 text-xs font-medium text-slate-400">
+                          <input
+                            type="checkbox"
+                            name="auto-recover"
+                            value="true"
+                            checked
+                            class="rounded border-white/20 bg-slate-950"
+                          /> Recover a stuck member once
+                        </label>
+                        <button
+                          id={"start-collection-run-#{item.issue.id}"}
+                          type="submit"
+                          title="Admit, merge, and hand off every member without a click each; escalate to you on the umbrella issue when something needs a decision."
+                          class="rounded-xl bg-teal-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-300"
+                        >
+                          Run collection
+                        </button>
+                      </form>
+                    <% end %>
                   <% _other -> %>
                     <button
                       :if={action = primary_issue_action(item, group)}

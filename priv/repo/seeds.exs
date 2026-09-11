@@ -44,6 +44,7 @@ if Repo.aggregate(Repository, :count) == 0 do
         state: "open",
         workflow_label: "ptc:ready",
         dependencies_projected: true,
+        structure_projected: true,
         github_assignment_projected: true,
         github_author_login: "andreasronge",
         github_labels: %{"names" => []},

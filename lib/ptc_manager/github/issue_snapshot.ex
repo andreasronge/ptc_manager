@@ -31,6 +31,8 @@ defmodule PtcManager.GitHub.IssueSnapshot do
       remote["blocked_by_overflow"] == true or
         length(blocking_issues) > @max_projected_dependencies
 
+    structure = structure(remote, repository_full_name)
+
     canonical =
       %{
         "body" => body,
@@ -44,8 +46,12 @@ defmodule PtcManager.GitHub.IssueSnapshot do
       |> maybe_put_state_reason(normalize_state_reason(remote["state_reason"]))
       |> maybe_put_blockers(blocking_issues)
       |> maybe_put_dependency_counts(dependency_unknown_count, dependency_overflow)
+      |> maybe_put_structure(structure)
 
     %{
+      parent_issue_number: structure.parent_issue_number,
+      sub_issues: structure.sub_issues,
+      structure_projected: structure.structure_projected,
       repository_id: repository_id,
       number: remote["number"],
       title: remote["title"],
@@ -185,6 +191,97 @@ defmodule PtcManager.GitHub.IssueSnapshot do
         ])
       end)
     )
+  end
+
+  @max_projected_sub_issues 100
+
+  # Parent and sub-issue relations, projected only when GitHub answered them.
+  # A cross-repository parent is recorded as "no same-repository parent", and a
+  # sub-issue keeps its repository so a collection can refuse foreign members.
+  defp structure(%{"structure_projected" => true} = remote, repository_full_name) do
+    nodes =
+      remote
+      |> get_in(["sub_issues", "nodes"])
+      |> then(fn nodes -> if is_list(nodes), do: nodes, else: [] end)
+      |> Enum.map(&normalize_sub_issue(&1, repository_full_name))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq_by(&{&1["repository_full_name"], &1["number"]})
+      |> Enum.sort_by(&{&1["repository_full_name"], &1["number"]})
+
+    total =
+      case get_in(remote, ["sub_issues", "total"]) do
+        total when is_integer(total) and total >= length(nodes) -> total
+        _total -> length(nodes)
+      end
+
+    overflow =
+      get_in(remote, ["sub_issues", "overflow"]) == true or
+        total > @max_projected_sub_issues or total > length(nodes)
+
+    %{
+      parent_issue_number: parent_issue_number(remote["parent"], repository_full_name),
+      sub_issues: %{
+        "nodes" => Enum.take(nodes, @max_projected_sub_issues),
+        "total" => total,
+        "overflow" => overflow
+      },
+      structure_projected: true
+    }
+  end
+
+  defp structure(_remote, _repository_full_name) do
+    %{
+      parent_issue_number: nil,
+      sub_issues: %{"nodes" => [], "total" => 0},
+      structure_projected: false
+    }
+  end
+
+  defp parent_issue_number(%{"number" => number} = parent, repository_full_name)
+       when is_integer(number) and number > 0 do
+    case issue_repository_full_name(parent) do
+      nil -> number
+      ^repository_full_name -> number
+      _other_repository -> nil
+    end
+  end
+
+  defp parent_issue_number(_parent, _repository_full_name), do: nil
+
+  defp normalize_sub_issue(node, repository_full_name) when is_map(node) do
+    with number when is_integer(number) and number > 0 <- node["number"],
+         state when state in ["open", "closed"] <- normalize_state(node["state"]) do
+      %{
+        "number" => number,
+        "state" => state,
+        "state_reason" => normalize_state_reason(node["state_reason"]),
+        "repository_full_name" => issue_repository_full_name(node) || repository_full_name
+      }
+    else
+      _invalid -> nil
+    end
+  end
+
+  defp normalize_sub_issue(_node, _repository_full_name), do: nil
+
+  defp maybe_put_structure(canonical, %{structure_projected: false}), do: canonical
+
+  defp maybe_put_structure(canonical, structure) do
+    canonical
+    |> then(fn canonical ->
+      if structure.parent_issue_number,
+        do: Map.put(canonical, "parent", structure.parent_issue_number),
+        else: canonical
+    end)
+    |> then(fn canonical ->
+      # The whole projection is canonical: a member closing, its reason, and
+      # whether GitHub reported more members than were projected all change
+      # what a collection may do next.
+      case structure.sub_issues do
+        %{"nodes" => []} -> canonical
+        sub_issues -> Map.put(canonical, "sub_issues", sub_issues)
+      end
+    end)
   end
 
   defp maybe_put_dependency_counts(canonical, 0, false), do: canonical

@@ -926,7 +926,10 @@ defmodule PtcManager.DispatchTest do
       "html_url" => "https://github.com/example/repo/issues/#{number}",
       "body" => "Create one safe implementation attempt.",
       "state" => "open",
-      "updated_at" => "2026-08-29T09:00:00Z"
+      "updated_at" => "2026-08-29T09:00:00Z",
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
     }
   end
 

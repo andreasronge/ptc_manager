@@ -110,6 +110,59 @@ defmodule PtcManager.GitHubClientTest do
     assert blocker["repository"]["full_name"] == "Owner/Platform"
   end
 
+  test "projects parent and sub-issue relations only when GitHub answered them" do
+    issue = %{
+      "number" => 1465,
+      "title" => "HTTP MCP gateway",
+      "url" => "https://github.com/owner/app/issues/1465",
+      "body" => "",
+      "state" => "OPEN",
+      "updatedAt" => "2026-09-01T08:00:00Z",
+      "parent" => %{"number" => 12, "repository" => %{"nameWithOwner" => "Owner/App"}},
+      "subIssues" => %{
+        "totalCount" => 3,
+        "nodes" => [
+          %{
+            "number" => 1918,
+            "state" => "CLOSED",
+            "stateReason" => "COMPLETED",
+            "repository" => %{"nameWithOwner" => "Owner/App"}
+          },
+          nil,
+          %{
+            "number" => 1919,
+            "state" => "OPEN",
+            "stateReason" => nil,
+            "repository" => %{"nameWithOwner" => "Owner/App"}
+          }
+        ]
+      }
+    }
+
+    normalized = Client.normalize_graphql_issue(issue)
+
+    assert normalized["structure_projected"]
+
+    assert normalized["parent"] == %{
+             "number" => 12,
+             "repository" => %{"full_name" => "Owner/App"}
+           }
+
+    assert normalized["sub_issues"]["total"] == 3
+    # One node was hidden from the viewer, so the projection is incomplete.
+    assert normalized["sub_issues"]["overflow"]
+
+    assert [
+             %{"number" => 1918, "state" => "closed", "state_reason" => "completed"},
+             %{"number" => 1919}
+           ] =
+             normalized["sub_issues"]["nodes"]
+
+    without_structure = Client.normalize_graphql_issue(Map.drop(issue, ["parent", "subIssues"]))
+    refute Map.has_key?(without_structure, "structure_projected")
+    refute Map.has_key?(without_structure, "sub_issues")
+  end
+
   test "counts native blockers hidden from the authenticated viewer" do
     issue = %{
       "number" => 42,

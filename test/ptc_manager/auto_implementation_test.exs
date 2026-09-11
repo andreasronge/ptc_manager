@@ -157,6 +157,68 @@ defmodule PtcManager.AutoImplementationTest do
     assert Repo.aggregate(Job, :count) == 6
   end
 
+  test "a collection, an unknown structure, and a fresh breakdown request are never admitted" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+
+    collection =
+      issue_fixture(repository, %{
+        workflow_label: "ptc:ready",
+        sub_issues: %{
+          "nodes" => [
+            %{
+              "number" => 2,
+              "state" => "open",
+              "state_reason" => nil,
+              "repository_full_name" => "owner/repo"
+            }
+          ],
+          "total" => 1
+        }
+      })
+
+    unknown =
+      issue_fixture(repository, %{workflow_label: "ptc:ready", structure_projected: false})
+
+    breakdown = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    proposal_fixture(breakdown, %{readiness: "needs_breakdown", scope: "large"})
+
+    assert {:error, :issue_is_collection} = Operations.auto_approve_issue(collection.id)
+    assert {:error, :issue_structure_unknown} = Operations.auto_approve_issue(unknown.id)
+    assert {:error, :issue_needs_breakdown} = Operations.auto_approve_issue(breakdown.id)
+    assert AutoImplementation.reconcile(repository.id) == [{:error, :issue_needs_breakdown}]
+    assert Repo.aggregate(Job, :count) == 0
+
+    # A stale breakdown request keeps today's fallback, and a maintainer may
+    # always decide by hand.
+    Repo.reload!(breakdown)
+    |> Issue.changeset(%{content_digest: digest("edited")})
+    |> Repo.update!()
+
+    assert {:ok, _job} = Operations.auto_approve_issue(breakdown.id)
+
+    assert {:error, :issue_is_collection} =
+             Operations.approve_issue_directly(collection.id, "andreas")
+
+    remote = %{
+      workflow_label: "ptc:ready",
+      workflow_label_conflict: false,
+      structure_projected: true,
+      sub_issues: %{"nodes" => [], "total" => 1},
+      github_assignees: %{"logins" => []}
+    }
+
+    job = %Job{
+      approval: %Approval{decision: "start_implementation_automatic"},
+      repository: repository,
+      issue: collection
+    }
+
+    assert {:error, :issue_is_collection} = AutoImplementation.dispatch_allowed(job, remote)
+
+    assert {:error, :issue_structure_unknown} =
+             AutoImplementation.dispatch_allowed(job, %{remote | structure_projected: false})
+  end
+
   test "successful synchronization triggers admission once, including a newly applied ready label" do
     repository = repository_fixture(%{auto_fix_issues: true})
 
@@ -167,7 +229,10 @@ defmodule PtcManager.AutoImplementationTest do
       "html_url" => "https://github.com/example/repo/issues/910",
       "state" => "open",
       "updated_at" => "2026-09-06T08:00:00Z",
-      "labels" => []
+      "labels" => [],
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
     }
 
     Process.put(:auto_fix_remote, {:ok, [remote]})

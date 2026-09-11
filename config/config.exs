@@ -14,7 +14,11 @@ config :ptc_manager, Oban,
   repo: PtcManager.Repo,
   queues: [automations: 4, reviews: 1],
   plugins: [
-    {Oban.Plugins.Cron, crontab: [{"* * * * *", PtcManager.Automations.ScheduleTickWorker}]}
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"* * * * *", PtcManager.Automations.ScheduleTickWorker},
+       {"* * * * *", PtcManager.Collections.TickWorker}
+     ]}
   ]
 
 config :ptc_manager,

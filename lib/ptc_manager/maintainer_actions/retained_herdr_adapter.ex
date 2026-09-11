@@ -15,7 +15,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
 
   @impl true
   def run(%AgentAction{action_key: action_key, target_id: publication_id} = action)
-      when action_key in ["repair_pr", "repair_and_merge_pr"] do
+      when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"] do
     with %PrPublication{} = publication <-
            PrPublication
            |> Repo.get(publication_id)
@@ -55,7 +55,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
   """
   @impl true
   def ensure_ready(%AgentAction{action_key: action_key, target_id: publication_id})
-      when action_key in ["repair_pr", "repair_and_merge_pr"] do
+      when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"] do
     publication = PrPublication |> Repo.get(publication_id) |> Repo.preload(:job)
 
     case publication && retained_run(publication.job) do
