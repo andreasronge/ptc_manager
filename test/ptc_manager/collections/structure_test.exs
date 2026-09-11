@@ -143,8 +143,14 @@ defmodule PtcManager.Collections.StructureTest do
 
       issue_dependency_fixture(second, %{blocking_issue: first, blocking_repository: repository})
 
+      # A closed member still has to be synchronized before its structure counts.
+      assert Structure.validate(umbrella) == {:error, {:member_not_synchronized, 3}}
+      issue_fixture(repository, %{number: 3, state: "closed", github_state_reason: "completed"})
+
       assert Structure.validate(umbrella) == :ok
-      assert [%{number: 1}, %{number: 2}, %{number: 3, issue: nil}] = Structure.members(umbrella)
+
+      assert [%{number: 1}, %{number: 2}, %{number: 3, issue: %Issue{}}] =
+               Structure.members(umbrella)
 
       assert Structure.validate(%{umbrella | structure_projected: false}) ==
                {:error, :issue_structure_unknown}
@@ -347,6 +353,32 @@ defmodule PtcManager.Collections.StructureTest do
       assert Catalog.pull_request_actions(publication)
              |> Enum.map(& &1.key)
              |> Enum.member?("merge_reviewed_pr") == false
+    end
+  end
+
+  describe "routing" do
+    defmodule RecordingRepairAdapter do
+      def run(action), do: {:ok, {:routed, action.action_key}}
+      def ensure_ready(_action), do: :ready
+    end
+
+    test "the collection merge runs through the repair adapter like a fix-and-merge" do
+      previous = Application.get_env(:ptc_manager, :repair_agent_adapter)
+      Application.put_env(:ptc_manager, :repair_agent_adapter, RecordingRepairAdapter)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ptc_manager, :repair_agent_adapter, previous),
+          else: Application.delete_env(:ptc_manager, :repair_agent_adapter)
+      end)
+
+      action = %PtcManager.Operations.AgentAction{
+        action_key: "merge_reviewed_pr",
+        target_snapshot: %{"repair_mode" => "retained"}
+      }
+
+      assert {:ok, {:routed, "merge_reviewed_pr"}} = ActionAdapter.run(action)
+      assert :ready = ActionAdapter.ensure_ready(action)
     end
   end
 

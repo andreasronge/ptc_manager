@@ -353,7 +353,25 @@ defmodule PtcManager.GitHub.Sync do
       |> Enum.filter(&(&1.state == "open" and not MapSet.member?(open_numbers, &1.number)))
       |> Enum.map(& &1.number)
 
-    fetch_issue_numbers(missing_open_numbers, repository, client)
+    # A sub-issue that was closed before PtcManager ever saw it open has no row
+    # and is not in the open list, but a collection cannot be validated without
+    # it, so every same-repository member GitHub names is fetched once.
+    local_numbers = MapSet.new(local_issues, & &1.number)
+    full_name = String.downcase("#{repository.github_owner}/#{repository.github_name}")
+
+    unknown_member_numbers =
+      remote_issues
+      |> Enum.flat_map(fn remote -> get_in(remote, ["sub_issues", "nodes"]) || [] end)
+      |> Enum.filter(fn node ->
+        is_map(node) and is_integer(node["number"]) and
+          String.downcase(get_in(node, ["repository", "full_name"]) || full_name) == full_name and
+          not MapSet.member?(open_numbers, node["number"]) and
+          not MapSet.member?(local_numbers, node["number"])
+      end)
+      |> Enum.map(& &1["number"])
+      |> Enum.uniq()
+
+    fetch_issue_numbers(missing_open_numbers ++ unknown_member_numbers, repository, client)
   end
 
   defp fetch_issue_numbers(numbers, repository, client) do

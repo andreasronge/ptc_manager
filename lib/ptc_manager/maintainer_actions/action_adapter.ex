@@ -9,7 +9,8 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   alias PtcManager.Repo
   alias PtcManager.MaintainerActions.GenericHerdrAdapter
 
-  @repair_action_keys ~w(repair_pr repair_and_merge_pr)
+  # The collection merge runs in the same retained worktree as a repair.
+  @repair_action_keys ~w(repair_pr repair_and_merge_pr merge_reviewed_pr)
 
   @impl true
   def run(%AgentAction{action_key: "daily_digest"} = action),

@@ -511,6 +511,41 @@ defmodule PtcManager.CollectionsTest do
       assert %Run{state: "active", pause_kind: nil} = Repo.get!(Run, run.id)
     end
 
+    test "a failed escalation is attempted once more, then the console is the notification" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      run = start!(umbrella, %{auto_recover: false})
+      :ok = Collections.reconcile(repository.id)
+
+      job_for(first)
+      |> Job.changeset(%{state: "lost", ended_at: DateTime.utc_now(), last_error: "gone"})
+      |> Repo.update!()
+
+      :ok = Collections.reconcile(repository.id)
+      :ok = Collections.reconcile(repository.id)
+
+      assert [%AgentAction{action_key: "report_collection_blocker"} = first_attempt] =
+               collection_actions(repository)
+
+      first_attempt
+      |> AgentAction.changeset(%{state: "failed", last_error: "gh down"})
+      |> Repo.update!()
+
+      :ok = Collections.reconcile(repository.id)
+
+      assert [
+               _failed,
+               %AgentAction{action_key: "report_collection_blocker", state: "queued"} = second
+             ] = collection_actions(repository)
+
+      assert Enum.count(steps(run), &(&1.kind == "escalation")) == 2
+
+      second |> AgentAction.changeset(%{state: "failed", last_error: "gh down"}) |> Repo.update!()
+      :ok = Collections.reconcile(repository.id)
+      assert length(collection_actions(repository)) == 2
+      assert %Run{state: "paused", escalation_pending: false} = Repo.get!(Run, run.id)
+    end
+
     test "with automatic recovery off, the first stuck member pauses the run" do
       repository = repository_fixture()
       {umbrella, [first]} = collection_fixture(repository, [1])
@@ -615,6 +650,25 @@ defmodule PtcManager.CollectionsTest do
 
       assert :ok = Collections.reconcile(repository.id)
       assert %Run{state: "active"} = Repo.get!(Run, run.id)
+    end
+
+    test "a foreign issue with a member's number is drift, not the member" do
+      repository = repository_fixture()
+      {umbrella, [_first]} = collection_fixture(repository, [1])
+      run = start!(umbrella)
+
+      umbrella
+      |> Repo.reload!()
+      |> Issue.changeset(%{
+        sub_issues: %{
+          "nodes" => [%{"number" => 1, "state" => "open", "repository_full_name" => "other/repo"}],
+          "total" => 1
+        }
+      })
+      |> Repo.update!()
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_kind: "membership_changed"} = Repo.get!(Run, run.id)
     end
 
     test "accepting changes refuses to drop a member that is being worked on" do

@@ -92,7 +92,10 @@ defmodule PtcManager.Collections.Structure do
   defp not_nested(%{issue: %Issue{} = issue, number: number}),
     do: check(not Issue.collection?(issue), {:nested_collection, number})
 
-  defp not_nested(_member), do: :ok
+  # Open or closed, a member PtcManager has never synchronized cannot be
+  # proven flat; synchronization fetches every named member, so this is a gap
+  # the next sync closes rather than a state to accept.
+  defp not_nested(%{issue: nil, number: number}), do: {:error, {:member_not_synchronized, number}}
 
   defp labelled_when_open(%{issue: %Issue{state: "open"} = issue, number: number}) do
     check(

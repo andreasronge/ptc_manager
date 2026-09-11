@@ -380,6 +380,48 @@ defmodule PtcManager.GitHubSyncTest do
     assert Repo.reload!(synced_umbrella).content_digest != digest_before
   end
 
+  test "fetches a same-repository member it has never seen, so a closed member gets a row" do
+    repository = repository_fixture(%{github_owner: "Example", github_name: "Project"})
+
+    umbrella =
+      remote_issue(1465, "Gateway collection")
+      |> Map.put("sub_issues", %{
+        "nodes" => [
+          %{
+            "number" => 1918,
+            "state" => "closed",
+            "state_reason" => "completed",
+            "repository" => %{"full_name" => "Example/Project"}
+          },
+          %{
+            "number" => 7,
+            "state" => "closed",
+            "state_reason" => "completed",
+            "repository" => %{"full_name" => "Other/Repo"}
+          }
+        ],
+        "total" => 2,
+        "overflow" => false
+      })
+
+    closed_member =
+      remote_issue(1918, "Serving templates")
+      |> Map.merge(%{"state" => "closed", "state_reason" => "completed"})
+      |> Map.put("parent", %{
+        "number" => 1465,
+        "repository" => %{"full_name" => "Example/Project"}
+      })
+
+    Process.put(:github_result, {:ok, [umbrella]})
+    Process.put(:github_issue_results, %{1918 => {:ok, closed_member}})
+    assert {:ok, %{issue_count: 1}} = Sync.sync_repository(repository, client: FakeClient)
+
+    member = Repo.get_by!(Issue, repository_id: repository.id, number: 1918)
+    assert member.state == "closed"
+    assert member.parent_issue_number == 1465
+    refute Repo.get_by(Issue, repository_id: repository.id, number: 7)
+  end
+
   test "keeps an accessible cross-repository blocker as an exact snapshot" do
     repository = repository_fixture(%{github_owner: "Example", github_name: "Project"})
 

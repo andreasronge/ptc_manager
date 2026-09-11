@@ -424,7 +424,7 @@ defmodule PtcManager.Collections do
           reason: "condition cleared"
         })
 
-      run.escalation_pending and umbrella.state == "open" and
+      escalation_due?(run) and umbrella.state == "open" and
           outstanding_umbrella_actions(run, umbrella) == [] ->
         enqueue_escalation(run, umbrella)
 
@@ -1134,6 +1134,15 @@ defmodule PtcManager.Collections do
     end
   end
 
+  defp escalation_due?(%Run{escalation_pending: true}), do: true
+
+  defp escalation_due?(run) do
+    match?(
+      {:retry, attempt} when attempt > 1,
+      action_attempt(run, "escalation", "#{run.pause_sequence}:attempt:")
+    )
+  end
+
   defp enqueue_escalation(run, umbrella) do
     prefix = "#{run.pause_sequence}:attempt:"
 
@@ -1264,7 +1273,15 @@ defmodule PtcManager.Collections do
   ## Membership
 
   defp drifted?(run, umbrella) do
-    Structure.member_numbers(umbrella) != MapSet.new(run.members, & &1.issue_number)
+    umbrella = Repo.preload(umbrella, :repository)
+    full_name = Structure.repository_full_name(umbrella.repository)
+
+    current =
+      umbrella
+      |> Issue.sub_issue_nodes()
+      |> MapSet.new(&{String.downcase(&1["repository_full_name"] || ""), &1["number"]})
+
+    current != MapSet.new(run.members, &{full_name, &1.issue_number})
   end
 
   # Issues a handoff or close-out created become members once GitHub reports

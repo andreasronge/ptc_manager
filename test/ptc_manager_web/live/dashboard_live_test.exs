@@ -872,6 +872,13 @@ defmodule PtcManagerWeb.DashboardLiveTest do
         workflow_label: "ptc:ready"
       })
 
+    issue_fixture(repository, %{
+      number: 302,
+      parent_issue_number: 300,
+      state: "closed",
+      github_state_reason: "completed"
+    })
+
     proposal_fixture(umbrella)
 
     {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/")
