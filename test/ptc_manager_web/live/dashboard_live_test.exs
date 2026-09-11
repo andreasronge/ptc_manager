@@ -1438,6 +1438,9 @@ defmodule PtcManagerWeb.DashboardLiveTest do
          "html_url" => issue.html_url,
          "body" => "",
          "state" => "open",
+         "parent" => nil,
+         "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+         "structure_projected" => true,
          "labels" => [%{"name" => "wait"}],
          "updated_at" =>
            issue.github_updated_at |> DateTime.add(5, :second) |> DateTime.to_iso8601()

@@ -123,6 +123,24 @@ defmodule PtcManagerWeb.PlanningComponents do
       <.icon name="hero-arrow-path-mini" class="size-4" /> Claim status needs sync
     </span>
     <span
+      :if={PlanningGroup.collection?(@item)}
+      id={"issue-#{@item.issue.id}-collection"}
+      title="This issue has GitHub sub-issues. Its members are implemented; it is not."
+      class="inline-flex w-fit items-center gap-1.5 rounded-full bg-indigo-400/15 px-2.5 py-1 text-xs text-indigo-300 ring-1 ring-indigo-400/20"
+    >
+      <.icon name="hero-squares-2x2-mini" class="size-4" />
+      Collection · {PtcManager.Operations.Issue.sub_issues_completed(@item.issue)}/{@item.issue.sub_issues[
+        "total"
+      ]}
+    </span>
+    <span
+      :if={@item.issue.parent_issue_number}
+      id={"issue-#{@item.issue.id}-member"}
+      class="w-fit rounded-full bg-indigo-400/15 px-2.5 py-1 text-xs text-indigo-300 ring-1 ring-indigo-400/20"
+    >
+      Part of #{@item.issue.parent_issue_number}
+    </span>
+    <span
       :if={@item.proposal}
       class={[
         "w-fit rounded-full px-2.5 py-1 text-xs ring-1",

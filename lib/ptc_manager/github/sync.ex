@@ -230,14 +230,16 @@ defmodule PtcManager.GitHub.Sync do
            dependency_overflow: overflow,
            dependency_unknown_count: unknown_count,
            dependencies_projected: true,
-           github_assignment_projected: true
+           github_assignment_projected: true,
+           structure_projected: true
          },
          %{
            content_digest: digest,
            dependency_overflow: overflow,
            dependency_unknown_count: unknown_count,
            dependencies_projected: true,
-           github_assignment_projected: true
+           github_assignment_projected: true,
+           structure_projected: true
          }
        ),
        do: true

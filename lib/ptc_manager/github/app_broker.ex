@@ -613,8 +613,14 @@ defmodule PtcManager.GitHub.AppBroker do
   end
 
   @doc false
+  # The closing keyword is the only way a merged publication closes its issue,
+  # which is what lets a dependent issue start. GitHub honours it only for a
+  # merge into the default branch, and every broker publication targets that
+  # branch. Advisory findings below are escaped so they can never add one.
   def pull_request_body(issue_number, retrospective, advisory \\ []) do
     """
+    Closes ##{issue_number}.
+
     Automated implementation for ##{issue_number}.
 
     Ptc Manager verified the committed branch before publishing it. This pull request remains a draft until review is complete.

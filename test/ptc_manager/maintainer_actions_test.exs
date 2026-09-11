@@ -611,7 +611,10 @@ defmodule PtcManager.MaintainerActionsTest do
       "html_url" => issue.html_url,
       "state" => "open",
       "labels" => [],
-      "updated_at" => DateTime.to_iso8601(issue.github_updated_at)
+      "updated_at" => DateTime.to_iso8601(issue.github_updated_at),
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
     })
 
     previous_github = Application.fetch_env!(:ptc_manager, :github_client)

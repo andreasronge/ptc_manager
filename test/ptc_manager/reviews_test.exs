@@ -147,6 +147,11 @@ defmodule PtcManager.ReviewsTest do
     assert body =~ "complete assessment is in the PtcManager review history"
     assert PtcManager.GitHub.AppBroker.pull_request_body(42, "none") =~ "## Agent retrospective"
     refute PtcManager.GitHub.AppBroker.pull_request_body(42, "none") =~ "Advisory"
+
+    # Merging the publication must close its issue so a dependent issue can
+    # start; only the body's own closing line may say so.
+    assert String.starts_with?(body, "Closes #42.\n")
+    assert PtcManager.GitHub.LinkedIssues.from_body(body, "owner/repo") == [42]
   end
 
   test "reviewer text reaches the pull request as data, never as markup" do

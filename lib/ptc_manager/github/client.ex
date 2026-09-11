@@ -275,7 +275,46 @@ defmodule PtcManager.GitHub.Client do
           else: 0
         )
     }
+    |> Map.merge(normalize_graphql_structure(issue))
   end
+
+  # Parent and sub-issue relations are projected only when GitHub answered the
+  # fields, so a response from an older query shape stays "unknown" rather
+  # than "no sub-issues".
+  defp normalize_graphql_structure(%{"subIssues" => %{"nodes" => nodes} = sub_issues} = issue)
+       when is_list(nodes) do
+    nodes = Enum.filter(nodes, &is_map/1)
+    total = sub_issues["totalCount"] || length(nodes)
+
+    %{
+      "parent" => normalize_graphql_parent(issue["parent"]),
+      "sub_issues" => %{
+        "nodes" =>
+          Enum.map(nodes, fn node ->
+            %{
+              "number" => node["number"],
+              "state" => normalize_enum(node["state"]),
+              "state_reason" => normalize_enum(node["stateReason"]),
+              "repository" => %{"full_name" => get_in(node, ["repository", "nameWithOwner"])}
+            }
+          end),
+        "total" => total,
+        "overflow" => total > @per_page or total > length(nodes)
+      },
+      "structure_projected" => true
+    }
+  end
+
+  defp normalize_graphql_structure(_issue), do: %{}
+
+  defp normalize_graphql_parent(%{"number" => number} = parent) when is_integer(number) do
+    %{
+      "number" => number,
+      "repository" => %{"full_name" => get_in(parent, ["repository", "nameWithOwner"])}
+    }
+  end
+
+  defp normalize_graphql_parent(_parent), do: nil
 
   defp normalize_graphql_blocker(blocker) do
     %{
@@ -367,6 +406,11 @@ defmodule PtcManager.GitHub.Client do
         id databaseId number title url state stateReason
         repository { nameWithOwner }
       }
+    }
+    parent { number repository { nameWithOwner } }
+    subIssues(first: 100) {
+      totalCount
+      nodes { number state stateReason repository { nameWithOwner } }
     }
     """
   end

@@ -1194,6 +1194,31 @@ defmodule PtcManager.OperationsTest do
       assert group(planning_item(issue: %{workflow_label: "ptc:ready"})) == :ready
     end
 
+    test "an issue with sub-issues is a collection and is never startable" do
+      collection = %{
+        sub_issues: %{
+          "nodes" => [
+            %{"number" => 2, "state" => "open", "repository_full_name" => "owner/repo"}
+          ],
+          "total" => 1
+        }
+      }
+
+      item = planning_item(issue: collection)
+      assert group(item) == :collections
+      refute PlanningGroup.startable?(item)
+      refute PlanningGroup.approvable?(item)
+
+      # A question outranks the collection group; unknown structure is blocked.
+      assert group(
+               planning_item(issue: Map.put(collection, :workflow_label, "ptc:needs-decision"))
+             ) ==
+               :needs_decision
+
+      assert group(planning_item(issue: %{structure_projected: false})) == :blocked
+      refute PlanningGroup.startable?(planning_item(issue: %{structure_projected: false}))
+    end
+
     test "GitHub or a dependency can block an otherwise ready issue" do
       assert group(planning_item(issue: %{workflow_label: "ptc:blocked"})) == :blocked
       assert group(planning_item(issue: %{dependencies_projected: false})) == :blocked
@@ -1236,6 +1261,7 @@ defmodule PtcManager.OperationsTest do
       assert PlanningGroup.order() == [
                :ready,
                :needs_decision,
+               :collections,
                :follow_ups,
                :not_prepared,
                :blocked,
@@ -1401,6 +1427,9 @@ defmodule PtcManager.OperationsTest do
          "html_url" => issue.html_url,
          "body" => issue.body,
          "state" => "open",
+         "parent" => nil,
+         "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+         "structure_projected" => true,
          "labels" => Enum.map(label_names, &%{"name" => &1}),
          "updated_at" =>
            issue.github_updated_at |> DateTime.add(5, :second) |> DateTime.to_iso8601(),
@@ -1427,6 +1456,9 @@ defmodule PtcManager.OperationsTest do
       dependencies_projected: true,
       dependency_overflow: false,
       dependency_unknown_count: 0,
+      structure_projected: true,
+      parent_issue_number: nil,
+      sub_issues: %{"nodes" => [], "total" => 0},
       github_labels: %{"names" => []},
       content_digest: "digest",
       github_updated_at: @now

@@ -13,6 +13,7 @@ defmodule PtcManager.Operations.PlanningGroup do
   @groups [
     ready: "Ready to start",
     needs_decision: "Needs your decision",
+    collections: "Collections",
     follow_ups: "Suggested follow-ups",
     not_prepared: "Not prepared",
     blocked: "Blocked",
@@ -32,6 +33,10 @@ defmodule PtcManager.Operations.PlanningGroup do
   @doc "One sentence saying what the maintainer is looking at."
   def description(:ready), do: "Every deterministic check passes. Approving starts an agent."
   def description(:needs_decision), do: "An answer from you unblocks these."
+
+  def description(:collections),
+    do: "Issues with GitHub sub-issues. Their members are implemented; they are not."
+
   def description(:follow_ups), do: "Retrospectives that proposed work nobody has tracked yet."
   def description(:not_prepared), do: "No fresh, ready analysis. Prepare or fix them directly."
   def description(:blocked), do: "GitHub or a dependency says these cannot start yet."
@@ -65,6 +70,7 @@ defmodule PtcManager.Operations.PlanningGroup do
     cond do
       in_delivery?(item) -> :in_delivery
       needs_decision?(item) -> :needs_decision
+      collection?(item) -> :collections
       parked?(item, parked_labels) -> :waiting
       approvable?(item) -> :ready
       blocked?(item) -> stale_or(:blocked, item, now, stale_after_days)
@@ -128,6 +134,8 @@ defmodule PtcManager.Operations.PlanningGroup do
       item.issue.github_assignment_projected and
       item.issue.workflow_label in [nil, "ptc:ready"] and
       item.issue.dependencies_projected and
+      item.issue.structure_projected and
+      not collection?(item) and
       not item.issue.dependency_overflow and
       item.issue.dependency_unknown_count == 0 and
       is_nil(item.dependency_cycle) and
@@ -135,6 +143,9 @@ defmodule PtcManager.Operations.PlanningGroup do
   end
 
   def startable?(_item), do: false
+
+  @doc "True when GitHub reports sub-issues, so the issue is a collection and never implemented itself."
+  def collection?(%{issue: issue}), do: PtcManager.Operations.Issue.collection?(issue)
 
   @doc "True when GitHub reports an assignee, PtcManager's advisory work claim."
   def claimed?(%{github_assignees: %{"logins" => [_login | _rest]}}), do: true
@@ -167,6 +178,7 @@ defmodule PtcManager.Operations.PlanningGroup do
   defp blocked?(item) do
     item.issue.workflow_label == "ptc:blocked" or
       not item.issue.dependencies_projected or
+      not item.issue.structure_projected or
       item.issue.dependency_overflow or
       item.issue.dependency_unknown_count > 0 or
       Enum.any?(item.dependencies, &(not dependency_completed?(&1)))

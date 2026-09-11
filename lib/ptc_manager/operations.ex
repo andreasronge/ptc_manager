@@ -3450,6 +3450,7 @@ defmodule PtcManager.Operations do
          :ok <- issue_unclaimed(issue),
          :ok <- issue_workflow_allows_implementation(issue),
          :ok <- issue_dependencies_resolved(repo, issue),
+         :ok <- issue_not_collection(issue),
          {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
       {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
     else
@@ -3469,9 +3470,13 @@ defmodule PtcManager.Operations do
         {:ok, nil}
 
       proposal ->
-        if proposal_matches_issue(proposal, issue) == :ok,
-          do: {:ok, proposal},
-          else: {:ok, nil}
+        # A fresh analysis that asked for a breakdown is a reason not to start
+        # unattended; a stale or absent one keeps today's standard fallback.
+        cond do
+          proposal_matches_issue(proposal, issue) != :ok -> {:ok, nil}
+          proposal.readiness == "needs_breakdown" -> {:error, :issue_needs_breakdown}
+          true -> {:ok, proposal}
+        end
     end
   end
 
@@ -4814,6 +4819,16 @@ defmodule PtcManager.Operations do
 
   defp issue_is_open(%Issue{state: "open"}), do: :ok
   defp issue_is_open(%Issue{}), do: {:error, :issue_closed}
+
+  # An issue with sub-issues is a collection: its children are implemented, it
+  # is not. Unknown structure fails closed exactly as unknown dependencies do.
+  @doc false
+  def issue_not_collection(%Issue{structure_projected: false}),
+    do: {:error, :issue_structure_unknown}
+
+  def issue_not_collection(%Issue{} = issue) do
+    if Issue.collection?(issue), do: {:error, :issue_is_collection}, else: :ok
+  end
 
   defp issue_unclaimed(%Issue{github_assignment_projected: false}),
     do: {:error, :issue_claim_unknown}

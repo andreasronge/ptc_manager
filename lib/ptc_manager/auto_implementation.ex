@@ -41,7 +41,9 @@ defmodule PtcManager.AutoImplementation do
           from issue in Issue,
             where:
               issue.repository_id == ^repository_id and issue.state == "open" and
-                issue.workflow_label == "ptc:ready" and not issue.workflow_label_conflict,
+                issue.workflow_label == "ptc:ready" and not issue.workflow_label_conflict and
+                issue.structure_projected and
+                fragment("json_extract(?, '$.total') = 0", issue.sub_issues),
             order_by: [asc: issue.number]
 
         query = if number, do: where(query, [issue], issue.number == ^number), else: query
@@ -110,6 +112,12 @@ defmodule PtcManager.AutoImplementation do
 
       remote.workflow_label != "ptc:ready" or remote.workflow_label_conflict ->
         {:error, :issue_workflow_not_ready}
+
+      not remote.structure_projected ->
+        {:error, :issue_structure_unknown}
+
+      remote.sub_issues["total"] > 0 ->
+        {:error, :issue_is_collection}
 
       remote.github_assignees != %{"logins" => []} ->
         {:error, :issue_claimed}
