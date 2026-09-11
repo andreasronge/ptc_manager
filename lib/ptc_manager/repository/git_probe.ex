@@ -107,13 +107,13 @@ defmodule PtcManager.Repository.GitProbe do
   end
 
   @doc "Captures a complete bounded patch using the publication verifier's Git safeguards."
-  def review_patch(repository, job, path) do
+  def review_patch(repository, job, path, prior \\ nil) do
     with {:ok, result} <- verify_at(repository, job, path),
          {:ok, status} <- git(path, ["status", "--porcelain"]),
          true <- status == "",
          {:ok, head} <- revision(path, "HEAD^{commit}"),
          true <- head == result.head_sha,
-         {:ok, patch} <- review_diff(path, result) do
+         {:ok, patch} <- review_diff(path, result, prior) do
       {:ok, Map.merge(result, patch)}
     else
       false -> {:error, :review_requires_clean_text_commit}
@@ -121,20 +121,51 @@ defmodule PtcManager.Repository.GitProbe do
     end
   end
 
-  defp review_diff(path, result) do
-    case run_git(path, diff_args(result.base_sha, result.head_sha), {:collect, 500_000}) do
+  # The digest and base stay whole-range for publication and caching; only the
+  # patch handed to the reviewer narrows to the commits it has not seen yet.
+  defp review_diff(path, result, prior) do
+    case incremental_base(path, result, prior) do
+      nil -> capture_diff(path, result.base_sha, result.head_sha, %{})
+      base -> incremental_diff(path, result, base)
+    end
+  end
+
+  defp incremental_diff(path, result, base) do
+    case capture_diff(path, base, result.head_sha, %{review_base_sha: base}) do
+      # An empty or oversized increment is no evidence at all; review the whole change.
+      {:ok, %{diff: ""}} -> capture_diff(path, result.base_sha, result.head_sha, %{})
+      {:ok, %{diff: nil}} -> capture_diff(path, result.base_sha, result.head_sha, %{})
+      captured -> captured
+    end
+  end
+
+  defp capture_diff(path, base_sha, head_sha, attrs) do
+    case run_git(path, diff_args(base_sha, head_sha), {:collect, 500_000}) do
       {:ok, diff} ->
         if String.valid?(diff),
-          do: {:ok, %{diff: diff}},
+          do: {:ok, Map.put(attrs, :diff, diff)},
           else: {:error, :review_requires_clean_text_commit}
 
       {:error, :git_output_too_large} ->
-        {:ok, %{diff: nil, diff_on_disk: true}}
+        {:ok, Map.merge(attrs, %{diff: nil, diff_on_disk: true})}
 
       error ->
         error
     end
   end
+
+  # Only a commit this branch actually built on, assessed over the range this
+  # review publishes, can stand in for the merge base. A moved base — a rewound or
+  # advanced default branch — changes which commits the change contains at all.
+  defp incremental_base(path, result, %{head_sha: head, base_sha: base})
+       when is_binary(head) and is_binary(base) do
+    if base == result.base_sha and head not in [result.head_sha, result.base_sha] and
+         descendant?(path, head, result.head_sha) == :ok and
+         descendant?(path, result.base_sha, head) == :ok,
+       do: head
+  end
+
+  defp incremental_base(_path, _result, _prior), do: nil
 
   @doc "Verifies a repair against the immutable base commit reported by GitHub."
   def verify_repair_at(%Repository{}, %Job{} = job, path, github_base_sha)

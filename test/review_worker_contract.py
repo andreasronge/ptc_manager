@@ -138,6 +138,51 @@ class ReviewerContract(unittest.TestCase):
         with patch.dict(context, run=fake_run):
             self.assertEqual(review(request), {'result': expected, 'session_id': session, 'usage': None})
 
+    def test_scoped_diff_and_severity_rule_reach_the_reviewer(self):
+        request = self.request()
+        request['evidence'] = dict(request['evidence'], review_base_sha='a' * 40)
+        expected = {'summary': 'clear', 'findings': []}
+        def fake_run(args, prompt, cwd, timeout=None, **kwargs):
+            self.assertIn('only the commits added since ' + 'a' * 40, prompt)
+            self.assertIn('A review reporting no high or medium finding passes', prompt)
+            self.assertIn('complete change remains in the', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)['result'], expected)
+
+        request['evidence']['review_base_sha'] = 'nonsense'
+        with patch.dict(context, run=fake_run):
+            with self.assertRaisesRegex(RuntimeError, 'invalid_review_commit'):
+                review(request)
+
+    def test_a_regenerated_patch_never_claims_a_narrower_scope(self):
+        request = self.request()
+        full_patch = 'diff --git a/schema b/schema\n+' + 'x' * 600_000 + '\n'
+        request['evidence'] = {'diff_on_disk': True, 'head_sha': 'a' * 40, 'base_sha': 'b' * 40,
+                               'review_base_sha': 'c' * 40,
+                               'diff_digest': hashlib.sha256(full_patch.encode()).hexdigest()}
+        expected = {'summary': 'clear', 'findings': []}
+        def fake_run(args, prompt=None, cwd=None, **kwargs):
+            if args[0] == '/usr/bin/git':
+                return full_patch
+            self.assertNotIn('only the commits added since', prompt)
+            self.assertIn('The complete diff is available locally at', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)['result'], expected)
+
+    def test_a_whole_branch_review_claims_no_scope(self):
+        request = self.request()
+        expected = {'summary': 'clear', 'findings': []}
+        def fake_run(args, prompt, cwd, timeout=None, **kwargs):
+            self.assertNotIn('only the commits added since', prompt)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)['result'], expected)
+
     def test_reviewer_uses_exact_repository_and_can_read_linked_requirements(self):
         request = self.request()
         request['repository_path'] = '/exact/readonly/snapshot'

@@ -85,9 +85,29 @@ The implementer commits a clean checkpoint and calls
 `$PTC_OPERATION_WRAPPER review`. PtcManager captures the exact patch using the
 publication verifier's Git safeguards, launches a separate reviewer, and stores
 structured findings. Each completed assessment consumes a round, including assessments
-after fixes; fixing findings does not itself consume one. A clean review ends
-the loop early. Repeating the same request or reviewing unchanged evidence does
-not spend another round. Code changes require another review. Failed attempts (including
+after fixes; fixing findings does not itself consume one. A review passes when it
+reports no high and no medium finding, so a clean review and an advisory one both
+end the loop early. Low findings returned with a passing review are advisory: the
+implementer records them in the pull request retrospective as untracked follow-up
+work instead of editing the reviewed commit, and the review page marks that round
+as passed with advisory findings. A pull request the broker publishes carries them
+in an **Advisory review findings** section it builds from the passing assessment of
+that exact commit, because the retrospective in the reviewed commit message predates
+the review that produced them. That section is bounded and names what it leaves in the
+review history, and reviewer text reaches it as data: headings, mentions and
+issue-closing references are escaped, so no finding can restructure the pull request
+body or act on merge. Repeating the same request or reviewing unchanged
+evidence does not spend another round.
+
+After the first assessment of an attempt, the reviewer receives the commits added
+since the last commit that attempt already assessed, rather than the whole branch
+again; the complete change stays in the read-only snapshot it reads from, and the
+review page names the commit a scoped round starts from. A commit the branch did
+not build on — a rewritten history, or the merge base itself — carries no standing,
+and neither does an assessment made against a different merge base or against
+requirements that have since changed; those rounds review the whole change. The stored `base_sha`, `head_sha` and
+`diff_digest` always describe the complete change, so publication approval and the
+review cache keep verifying the exact whole commit. Code changes require another review. Failed attempts (including
 reviewer timeouts) remain in the history but do not consume completed review budget.
 Failures pause the job; there are no automatic retries. Continue with **0 — unused
 budget only** when choosing **Retry review** to retry without increasing the budget.
@@ -141,8 +161,8 @@ Admission records a preparation worker in the same transaction. Database
 contention or an interrupted caller resumes that attempt without spending a
 new assessment or needing another maintainer retry.
 **Retry review** stops the retained implementer and assesses its committed work
-without starting another implementer. A clean result queues a continuation to
-publish that exact commit; findings pause for a decision. **Continue existing
+without starting another implementer. A passing result queues a continuation to
+publish that exact commit; a high or medium finding pauses for a decision. **Continue existing
 work** instead starts an implementer to address the failure or change the code.
 Unacknowledged partial failures that permit retry can also continue their retained
 work, provided no newer job supersedes them. Unsafe stop reports retain their

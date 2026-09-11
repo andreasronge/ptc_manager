@@ -91,7 +91,7 @@ defmodule PtcManagerWeb.JobReviewsLive do
       last_clean:
         Enum.find(
           Enum.reverse(rounds),
-          &(&1.state == "completed" and &1.result["findings"] == [])
+          &(&1.state == "completed" and Reviews.outcome(&1.result) == "passed")
         ),
       completed_count: Enum.count(rounds, &(&1.state == "completed")),
       failed_count: Enum.count(rounds, &(&1.state == "failed")),
@@ -328,6 +328,9 @@ defmodule PtcManagerWeb.JobReviewsLive do
         >
           <h2 class="font-semibold">Attempt {round.number} · {round.state}</h2>
           <p class="break-all text-xs text-slate-400">Commit {round.head_sha}</p>
+          <p :if={round.input["review_base_sha"]} class="break-all text-xs text-slate-400">
+            Reviewed the changes since {round.input["review_base_sha"]}, assessed earlier in this attempt.
+          </p>
           <p :if={round.input["snapshot_cleanup_error"]} class="mt-2 text-amber-200">
             Snapshot cleanup pending: {round.input["snapshot_cleanup_error"]}
           </p>
@@ -359,6 +362,12 @@ defmodule PtcManagerWeb.JobReviewsLive do
             </p>
           </div>
           <div :if={round.result} class="mt-3">
+            <p
+              :if={round.result["findings"] != [] and Reviews.outcome(round.result) == "passed"}
+              class="text-amber-200"
+            >
+              Passed with advisory findings only; they belong in the pull request as follow-up work.
+            </p>
             <p class="whitespace-pre-wrap">{round.result["summary"]}</p>
             <ul class="mt-3 space-y-2">
               <li :for={finding <- round.result["findings"]}>

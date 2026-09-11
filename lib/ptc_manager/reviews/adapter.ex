@@ -40,7 +40,7 @@ defmodule PtcManager.Reviews.Adapter do
       evidence:
         Map.take(
           round.input,
-          ~w(head_sha base_sha diff_digest diff diff_on_disk issue issue_url requirements)
+          ~w(head_sha base_sha review_base_sha diff_digest diff diff_on_disk issue issue_url requirements)
         ),
       session_id: session_id,
       fallback_handoff: fallback_handoff,
