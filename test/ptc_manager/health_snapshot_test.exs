@@ -39,6 +39,7 @@ defmodule PtcManager.HealthSnapshotTest do
     snapshot = File.read!(ctx.out)
     assert is_map(Jason.decode!(snapshot))
     refute snapshot =~ "private-secret"
+    assert Jason.decode!(snapshot)["freshness_budget_seconds"] == 3600
   end
 
   test "an agent-created output symlink is replaced rather than followed", ctx do

@@ -7,6 +7,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   alias PtcManager.Automations
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.InvestigationWorkspaces
+  alias PtcManager.HealthSnapshotEvidence
   alias PtcManager.MaintainerActions.ActionAdapter, as: ResultValidator
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentAction
@@ -27,7 +28,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   def run(%AgentAction{automation_definition_version: version} = action)
       when not is_nil(version) do
     try do
-      with {:ok, profile} <- AgentProfiles.select(version.agent_selector),
+      with :ok <- validate_health_snapshot(action),
+           {:ok, profile} <- AgentProfiles.select(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
            {:ok, path, workspace, pane} <- prepare_workspace(action),
            name = agent_name(action),
@@ -39,6 +41,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
            :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
+           :ok <- validate_health_snapshot_for_handoff(action),
            :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
            {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
@@ -52,6 +55,37 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   def run(%AgentAction{}), do: {:error, :automation_version_missing}
+
+  defp validate_health_snapshot(%AgentAction{
+         action_key: "check_health",
+         target_snapshot: %{"health_snapshot_evidence" => snapshot}
+       }) do
+    case HealthSnapshotEvidence.validate(snapshot) do
+      {:ok, _snapshot} -> :ok
+      {:error, reason} -> {:error, {:health_snapshot_unavailable, reason}}
+    end
+  end
+
+  defp validate_health_snapshot(%AgentAction{action_key: "check_health"}),
+    do: {:error, {:health_snapshot_unavailable, :health_snapshot_missing}}
+
+  defp validate_health_snapshot(%AgentAction{}), do: :ok
+
+  defp validate_health_snapshot_for_handoff(%AgentAction{
+         action_key: "check_health",
+         automation_definition_version: %{timeout_seconds: timeout_seconds},
+         target_snapshot: %{"health_snapshot_evidence" => snapshot}
+       }) do
+    case HealthSnapshotEvidence.validate_for(snapshot, timeout_seconds) do
+      {:ok, _snapshot} -> :ok
+      {:error, reason} -> {:error, {:health_snapshot_unavailable, reason}}
+    end
+  end
+
+  defp validate_health_snapshot_for_handoff(%AgentAction{action_key: "check_health"}),
+    do: {:error, {:health_snapshot_unavailable, :health_snapshot_missing}}
+
+  defp validate_health_snapshot_for_handoff(%AgentAction{}), do: :ok
 
   defp action_path(%AgentAction{target_snapshot: %{"source_path" => path}})
        when is_binary(path),

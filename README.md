@@ -1290,6 +1290,8 @@ sudo install -o root -g root -m 0755 deploy/ptc-operation /usr/local/bin/ptc-ope
 sudo install -o root -g root -m 0755 deploy/ptc-manager-operation-recover /usr/local/bin/ptc-manager-operation-recover
 sudo install -o root -g root -m 0755 deploy/ptc-manager-herdr-launch /usr/local/bin/ptc-manager-herdr-launch
 sudo install -o root -g root -m 0755 deploy/ptc-manager-health-snapshot /usr/local/bin/ptc-manager-health-snapshot
+sudo install -o root -g root -m 0644 deploy/ptc_manager-health-snapshot.service /etc/systemd/system/ptc_manager-health-snapshot.service
+sudo install -o root -g root -m 0644 deploy/ptc_manager-health-snapshot.timer /etc/systemd/system/ptc_manager-health-snapshot.timer
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0644 deploy/ptc-manager-agent-context /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 deploy/ptc_manager-external-git /usr/local/bin/ptc-manager-external-git
@@ -1304,12 +1306,19 @@ binary and checkout paths, then start the release:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now ptc_manager-herdr ptc_manager
+sudo systemctl enable --now ptc_manager-herdr ptc_manager ptc_manager-health-snapshot.timer
+sudo systemctl start ptc_manager-health-snapshot.service
 sudo systemctl status ptc_manager
 ```
 
-`ptc-manager-health-snapshot` runs as root, on demand or from a timer, and
-writes `/var/lib/ptc_manager-output/ptc-health.json`. It exports capacity settings,
+`ptc-manager-health-snapshot` runs as a root oneshot every 15 minutes and writes
+`/var/lib/ptc_manager-output/ptc-health.json`. The normal deployment updates the
+writer and both systemd units from the deployed source archive, collects and
+verifies fresh evidence, then starts the timer before activating the release. It
+also writes `/etc/ptc_manager/health-snapshot.env` from the coordinator's
+resolved `DATABASE_PATH` and `PTC_HEALTH_OUT`, so collection reads the same
+database and publishes the same path that the running application expects. It
+exports capacity settings,
 record IDs, states and timings, plus counts from at most 10,000 service journal
 lines. Live record lists are limited to 500 rows; a list at that limit may be
 incomplete. The log counts include a limit indicator. Raw journal messages,
@@ -1321,8 +1330,10 @@ and exclusively created. Atomic replacement never follows an output symlink.
 Keep the output directory owned by the coordinator with its documented sticky
 bit, and its ancestors unwritable by agents. Environment overrides are for the trusted root
 invoker only. Database or journal read failures preserve the previous snapshot;
-consumers must check `captured_at` and treat a stale snapshot as unavailable,
-never as healthy. Snapshot data cannot authorize an action.
+the deterministic `check_health` preflight checks `captured_at` against the
+snapshot's one-hour `freshness_budget_seconds`. Missing, malformed, future-dated,
+or expired evidence fails the action as unavailable before an agent can analyze
+it or file an issue. Snapshot data cannot authorize an action.
 
 The coordinator, implementation worker, external-PR repairer, and Git verifier
 run as separate OS identities. Herdr, implementation agents, and the initial

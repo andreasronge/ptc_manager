@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish a read-only PtcManager health snapshot
+After=ptc_manager.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ptc_manager/health-snapshot.env
+ExecStartPre=/usr/bin/systemctl is-active --quiet ptc_manager.service
+ExecStart=/usr/local/bin/ptc-manager-health-snapshot
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ptc_manager-output

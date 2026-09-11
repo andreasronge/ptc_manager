@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the PtcManager health snapshot
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=ptc_manager-health-snapshot.service
+
+[Install]
+WantedBy=timers.target

@@ -15,11 +15,12 @@
 
 set -eu
 
-db="${PTC_HEALTH_DB:-/var/lib/ptc_manager/ptc_manager.db}"
+db="${PTC_HEALTH_DB:-${DATABASE_PATH:-/var/lib/ptc_manager/ptc_manager.db}}"
 out="${PTC_HEALTH_OUT:-/var/lib/ptc_manager-output/ptc-health.json}"
 unit="${PTC_HEALTH_UNIT:-ptc_manager.service}"
 since="${PTC_HEALTH_SINCE:--6 hours}"
 max_log_lines=10000
+freshness_budget_seconds=3600
 
 fail() {
   echo "ptc-manager-health-snapshot: $1" >&2
@@ -68,6 +69,7 @@ live_run_states="'queued','starting','working','idle','blocked','waiting','unkno
 
 {
   printf '{"captured_at":"%s"' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf ',"freshness_budget_seconds":%s' "$freshness_budget_seconds"
 
   printf ',"capacity_settings":'
   query "select light_agent_capacity, heavy_agent_capacity, operation_capacity

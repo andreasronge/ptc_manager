@@ -7,6 +7,10 @@ env_default = fn name, default ->
   end
 end
 
+config :ptc_manager,
+  health_snapshot_path:
+    env_default.("PTC_HEALTH_OUT", "/var/lib/ptc_manager-output/ptc-health.json")
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

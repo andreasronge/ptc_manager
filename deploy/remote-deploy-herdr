@@ -60,6 +60,7 @@ database_path=
 database_backup=
 failed_database=
 health_url=
+health_snapshot_path=
 maintenance_override=/etc/systemd/system/ptc_manager.service.d/90-ptc-manager-deploy-maintenance.conf
 maintenance_override_backup="/etc/systemd/system/ptc_manager.service.d/.ptc-manager-maintenance-${release_id}.backup"
 maintenance_override_preexisting=false
@@ -96,6 +97,12 @@ worker_tool_staging=
 worker_opt_staging=
 herdr_link_backup=
 herdr_link_backup_retained=false
+health_snapshot_backup="/tmp/ptc-manager-health-snapshot-backup-${release_id}"
+health_snapshot_installation_prepared=false
+health_snapshot_backup_retained=false
+health_snapshot_timer_was_enabled=false
+health_snapshot_timer_was_active=false
+health_snapshot_service_was_active=false
 production_workspace_cache=/home/agent/.cache/ptc-manager/workspaces
 gate_mise_root=/opt/ptc-manager-gate-mise
 gate_mise_data="$gate_mise_root/data"
@@ -133,6 +140,10 @@ sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 self_deploy_runner_candidate="/tmp/ptc-manager-self-deploy-runner-${release_id}"
 self_deploy_service_candidate="/tmp/ptc-manager-self-deploy-service-${release_id}"
 self_deploy_access_candidate="/tmp/ptc-manager-self-deploy-access-${release_id}"
+health_snapshot_candidate="/tmp/ptc-manager-health-snapshot-${release_id}"
+health_snapshot_service_candidate="/tmp/ptc-manager-health-snapshot-service-${release_id}"
+health_snapshot_timer_candidate="/tmp/ptc-manager-health-snapshot-timer-${release_id}"
+health_snapshot_env_candidate="/tmp/ptc-manager-health-snapshot-env-${release_id}"
 toolchain_manifest="/tmp/ptc-manager-toolchain-versions-${release_id}"
 toolchain_reader="/tmp/ptc-manager-toolchain-version-${release_id}"
 coordinator_environment_files=
@@ -154,7 +165,10 @@ cleanup_remote() {
     "$operation_recovery_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
-    "$self_deploy_access_candidate" "$toolchain_manifest" "$toolchain_reader"
+    "$self_deploy_access_candidate" "$health_snapshot_candidate" \
+    "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate" \
+    "$health_snapshot_env_candidate" \
+    "$toolchain_manifest" "$toolchain_reader"
   sudo rm -f -- "$maintenance_override_backup"
 
   case "$build_dir" in
@@ -187,6 +201,14 @@ cleanup_remote() {
       ;;
   esac
 
+  case "$health_snapshot_backup" in
+    /tmp/ptc-manager-health-snapshot-backup-*)
+      if [ "$health_snapshot_backup_retained" != true ]; then
+        sudo rm -rf -- "$health_snapshot_backup"
+      fi
+      ;;
+  esac
+
   case "$gate_tool_home" in
     /tmp/ptc-manager-gate-toolchain.*) sudo rm -rf -- "$gate_tool_home" ;;
   esac
@@ -208,6 +230,26 @@ health_check() {
   done
 
   return 1
+}
+
+verify_health_snapshot() {
+  previous_file_id=$1
+  sudo /usr/bin/python3 -I -c '
+import datetime, json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+snapshot = json.loads(path.read_text())
+captured = datetime.datetime.fromisoformat(snapshot["captured_at"].replace("Z", "+00:00"))
+budget = snapshot["freshness_budget_seconds"]
+now = datetime.datetime.now(datetime.timezone.utc)
+age = (now - captured).total_seconds()
+current_file_id = f"{path.stat().st_dev}:{path.stat().st_ino}"
+if sys.argv[2] and current_file_id == sys.argv[2]:
+    raise SystemExit("health snapshot collection did not replace the evidence file")
+if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0 or budget > 21600:
+    raise SystemExit("invalid health snapshot freshness budget")
+if age < 0 or age > budget:
+    raise SystemExit("health snapshot is not fresh")
+' "$health_snapshot_path" "$previous_file_id"
 }
 
 legacy_health_check() {
@@ -1138,6 +1180,103 @@ restore_worker_herdr() {
   return "$restore_status"
 }
 
+backup_health_snapshot_file() {
+  snapshot_file=$1
+  snapshot_backup_name=$2
+
+  if sudo test -e "$snapshot_file" || sudo test -L "$snapshot_file"; then
+    sudo cp -a "$snapshot_file" "$health_snapshot_backup/$snapshot_backup_name"
+  fi
+}
+
+backup_health_snapshot_installation() {
+  sudo install -d -o root -g root -m 0700 "$health_snapshot_backup"
+
+  if sudo systemctl is-enabled --quiet ptc_manager-health-snapshot.timer; then
+    health_snapshot_timer_was_enabled=true
+  fi
+
+  if sudo systemctl is-active --quiet ptc_manager-health-snapshot.timer; then
+    health_snapshot_timer_was_active=true
+  fi
+
+  if sudo systemctl is-active --quiet ptc_manager-health-snapshot.service; then
+    health_snapshot_service_was_active=true
+  fi
+
+  backup_health_snapshot_file /usr/local/bin/ptc-manager-health-snapshot writer
+  backup_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.service service
+  backup_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.timer timer
+  backup_health_snapshot_file /etc/ptc_manager/health-snapshot.env environment
+  health_snapshot_installation_prepared=true
+
+  if [ "$health_snapshot_timer_was_active" = true ]; then
+    sudo systemctl stop ptc_manager-health-snapshot.timer
+  fi
+
+  # A timer-triggered oneshot must finish before its executable and unit are
+  # replaced. Otherwise deployment verification could observe its output and
+  # never exercise the collector from the revision being deployed.
+  health_snapshot_service_load_state=$(
+    sudo systemctl show --property=LoadState --value ptc_manager-health-snapshot.service
+  )
+
+  if [ "$health_snapshot_service_load_state" != not-found ]; then
+    sudo systemctl stop ptc_manager-health-snapshot.service
+  fi
+}
+
+restore_health_snapshot_file() {
+  snapshot_file=$1
+  snapshot_backup_name=$2
+
+  sudo rm -f -- "$snapshot_file" || return 1
+
+  if sudo test -e "$health_snapshot_backup/$snapshot_backup_name" ||
+    sudo test -L "$health_snapshot_backup/$snapshot_backup_name"; then
+    sudo cp -a "$health_snapshot_backup/$snapshot_backup_name" "$snapshot_file" || return 1
+  fi
+}
+
+restore_health_snapshot_installation() {
+  [ "$health_snapshot_installation_prepared" = true ] || return 0
+
+  echo "Restoring the previous health snapshot collector." >&2
+  restore_status=0
+  if sudo systemctl is-active --quiet ptc_manager-health-snapshot.timer; then
+    sudo systemctl stop ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if sudo systemctl is-enabled --quiet ptc_manager-health-snapshot.timer; then
+    sudo systemctl disable ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  restore_health_snapshot_file /usr/local/bin/ptc-manager-health-snapshot writer || restore_status=1
+  restore_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.service service || restore_status=1
+  restore_health_snapshot_file /etc/systemd/system/ptc_manager-health-snapshot.timer timer || restore_status=1
+  restore_health_snapshot_file /etc/ptc_manager/health-snapshot.env environment || restore_status=1
+  sudo systemctl daemon-reload || restore_status=1
+
+  if [ "$health_snapshot_timer_was_enabled" = true ]; then
+    sudo systemctl enable ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if [ "$health_snapshot_timer_was_active" = true ]; then
+    sudo systemctl start ptc_manager-health-snapshot.timer || restore_status=1
+  fi
+
+  if [ "$health_snapshot_service_was_active" = true ]; then
+    sudo systemctl start ptc_manager-health-snapshot.service || restore_status=1
+  fi
+
+  if [ "$restore_status" -ne 0 ]; then
+    health_snapshot_backup_retained=true
+    echo "The previous health snapshot collector is kept at $health_snapshot_backup; restore it before deploying again." >&2
+  fi
+
+  return "$restore_status"
+}
+
 rollback() {
   deployment_phase=handling_failure
   rollback_status=0
@@ -1170,6 +1309,7 @@ rollback() {
     rollback_status=1
   restore_worker_herdr || rollback_status=1
   restore_preexisting_maintenance_override || rollback_status=1
+  restore_health_snapshot_installation || rollback_status=1
   sudo systemctl start "$service_name" || rollback_status=1
 
   if [ "$rollback_status" -eq 0 ] && legacy_health_check; then
@@ -1204,9 +1344,15 @@ finish() {
       restore_worker_herdr ||
         echo "Restoring the previous Herdr failed; check $worker_herdr and ptc_manager-herdr before deploying again." >&2
       restore_preexisting_maintenance_override || true
+      restore_health_snapshot_installation || true
       sudo systemctl start "$service_name" || true
       ;;
-    no_action) ;;
+    no_action)
+      if [ "$exit_status" -ne 0 ] && [ "$deployment_phase" = pre_stop ] &&
+        [ "$health_snapshot_installation_prepared" = true ]; then
+        restore_health_snapshot_installation || true
+      fi
+      ;;
   esac
 
   cleanup_remote
@@ -1254,6 +1400,9 @@ tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-self-deploy-runner >"$self_deploy_runner_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy.service >"$self_deploy_service_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_deploy_access_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-health-snapshot >"$health_snapshot_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-health-snapshot.service >"$health_snapshot_service_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-health-snapshot.timer >"$health_snapshot_timer_candidate"
 tar -xOf "$source_archive" deploy/toolchain-versions >"$toolchain_manifest"
 tar -xOf "$source_archive" deploy/ptc-manager-toolchain-version >"$toolchain_reader"
 chmod 0755 "$worker_git_candidate"
@@ -1272,6 +1421,8 @@ chmod 0755 "$herdr_launch_candidate"
 chmod 0440 "$sudoers_candidate"
 chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
+chmod 0755 "$health_snapshot_candidate"
+chmod 0644 "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate"
 chmod 0755 "$toolchain_reader"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
 
@@ -1310,6 +1461,8 @@ configured_database_path=$(read_environment_setting DATABASE_PATH $coordinator_e
 # shellcheck disable=SC2086
 configured_health_port=$(read_environment_setting PORT $coordinator_environment_files)
 # shellcheck disable=SC2086
+configured_health_snapshot_path=$(read_environment_setting PTC_HEALTH_OUT $coordinator_environment_files)
+# shellcheck disable=SC2086
 configured_coordinator_session=$(read_environment_setting PTC_HERDR_SESSION $coordinator_environment_files)
 # shellcheck disable=SC2086
 configured_worktree_root=$(read_environment_setting PTC_WORKTREE_ROOT $coordinator_environment_files)
@@ -1322,10 +1475,12 @@ configured_gate_mix_home=$(read_environment_setting PTC_PRE_PUBLICATION_MIX_HOME
 
 running_database_path=$(read_process_setting "$service_pid" DATABASE_PATH "")
 running_health_port=$(read_process_setting "$service_pid" PORT 4000)
+running_health_snapshot_path=$(read_process_setting "$service_pid" PTC_HEALTH_OUT /var/lib/ptc_manager-output/ptc-health.json)
 running_coordinator_session=$(read_process_setting "$service_pid" PTC_HERDR_SESSION default)
 running_worktree_root=$(read_process_setting "$service_pid" PTC_WORKTREE_ROOT "")
 
 configured_health_port=${configured_health_port:-4000}
+configured_health_snapshot_path=${configured_health_snapshot_path:-/var/lib/ptc_manager-output/ptc-health.json}
 configured_coordinator_session=${configured_coordinator_session:-default}
 configured_gate_user=${configured_gate_user:-ptc-manager-gate}
 configured_gate_home=${configured_gate_home:-/var/lib/ptc_manager-gate}
@@ -1340,6 +1495,7 @@ fi
 
 if [ "$running_database_path" != "$configured_database_path" ] ||
   [ "$running_health_port" != "$configured_health_port" ] ||
+  [ "$running_health_snapshot_path" != "$configured_health_snapshot_path" ] ||
   [ "$running_coordinator_session" != "$configured_coordinator_session" ] ||
   [ "$running_worktree_root" != "$configured_worktree_root" ]; then
   echo "systemd environment files differ from the running services; restart them before deploying" >&2
@@ -1383,6 +1539,30 @@ esac
 database_backup="${database_path}-before-${release_id}"
 failed_database="${database_path}-failed-${release_id}"
 health_url="http://127.0.0.1:${health_port}/health"
+health_snapshot_path=$configured_health_snapshot_path
+
+/usr/bin/python3 -I -c '
+import sys
+def quote(value):
+    if "\n" in value or "\r" in value:
+        raise SystemExit("health snapshot environment paths must not contain newlines")
+    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+print("DATABASE_PATH=" + quote(sys.argv[1]))
+print("PTC_HEALTH_OUT=" + quote(sys.argv[2]))
+' "$database_path" "$health_snapshot_path" >"$health_snapshot_env_candidate"
+chmod 0600 "$health_snapshot_env_candidate"
+
+case "$health_snapshot_path" in
+  /var/lib/ptc_manager-output/*..*|/var/lib/ptc_manager-output/)
+    echo "configured health snapshot path is not a file below /var/lib/ptc_manager-output" >&2
+    exit 1
+    ;;
+  /var/lib/ptc_manager-output/*) ;;
+  *)
+    echo "configured health snapshot path must be under /var/lib/ptc_manager-output" >&2
+    exit 1
+    ;;
+esac
 
 if ! sudo test -f "$database_path"; then
   echo "configured SQLite database is missing: $database_path" >&2
@@ -1506,6 +1686,15 @@ sudo install -o root -g root -m 0644 "$self_deploy_service_candidate" \
 sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager.service.d
 sudo install -o root -g root -m 0644 "$self_deploy_access_candidate" \
   /etc/systemd/system/ptc_manager.service.d/zz-ptc-manager-self-deploy-access.conf
+backup_health_snapshot_installation
+sudo install -o root -g root -m 0755 "$health_snapshot_candidate" \
+  /usr/local/bin/ptc-manager-health-snapshot
+sudo install -o root -g root -m 0644 "$health_snapshot_service_candidate" \
+  /etc/systemd/system/ptc_manager-health-snapshot.service
+sudo install -o root -g root -m 0644 "$health_snapshot_timer_candidate" \
+  /etc/systemd/system/ptc_manager-health-snapshot.timer
+sudo install -o root -g root -m 0600 "$health_snapshot_env_candidate" \
+  /etc/ptc_manager/health-snapshot.env
 
 ensure_repository_checkouts
 write_repository_access_dropin /.git "$manager_access_dropin"
@@ -1560,6 +1749,15 @@ install_maintenance_override
 sudo systemctl start "$service_name"
 
 health_check maintenance
+
+# The timer is installed from this exact archive on every deployment. Run the
+# collector synchronously as well: activation alone cannot prove that its
+# database and journal reads work or that consumers have current evidence.
+previous_health_snapshot_id=$(sudo stat -c '%d:%i' "$health_snapshot_path" 2>/dev/null || true)
+sudo systemctl is-active --quiet ptc_manager.service
+sudo systemctl start ptc_manager-health-snapshot.service
+verify_health_snapshot "$previous_health_snapshot_id"
+sudo systemctl enable --now ptc_manager-health-snapshot.timer
 
 migration_version=$(sudo sqlite3 -readonly "$database_path" \
   "select coalesce(max(version), 0) from schema_migrations;")

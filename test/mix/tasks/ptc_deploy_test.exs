@@ -754,6 +754,87 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "-m 2750"
   end
 
+  test "remote deployment installs, activates, and verifies health snapshot collection" do
+    script = File.read!(@remote_script)
+
+    service =
+      File.read!(@project_root <> "/deploy/ptc_manager-health-snapshot.service")
+
+    for source <- [
+          "deploy/ptc-manager-health-snapshot",
+          "deploy/ptc_manager-health-snapshot.service",
+          "deploy/ptc_manager-health-snapshot.timer"
+        ] do
+      assert script =~ ~s(tar -xOf "$source_archive" #{source})
+    end
+
+    assert script =~ "/usr/local/bin/ptc-manager-health-snapshot"
+    assert script =~ "/etc/systemd/system/ptc_manager-health-snapshot.service"
+    assert script =~ "/etc/systemd/system/ptc_manager-health-snapshot.timer"
+    assert script =~ "systemctl enable --now ptc_manager-health-snapshot.timer"
+    assert script =~ "systemctl start ptc_manager-health-snapshot.service"
+    assert script =~ "verify_health_snapshot"
+    assert script =~ ~s(' "$health_snapshot_path" "$previous_file_id")
+    assert script =~ "configured_health_snapshot_path"
+    assert script =~ "running_health_snapshot_path"
+    assert script =~ "/var/lib/ptc_manager-output/*"
+    assert script =~ "previous_health_snapshot_id="
+    assert script =~ "health snapshot collection did not replace the evidence file"
+    refute script =~ "previous_health_capture="
+    refute script =~ "captured <= previous"
+    refute script =~ "did not produce newer evidence"
+    assert script =~ "/etc/ptc_manager/health-snapshot.env"
+    assert script =~ ~s|print("DATABASE_PATH=" + quote(sys.argv[1]))|
+    assert script =~ ~s|print("PTC_HEALTH_OUT=" + quote(sys.argv[2]))|
+    assert script =~ ~s(' "$database_path" "$health_snapshot_path")
+    assert service =~ "ExecStartPre=/usr/bin/systemctl is-active --quiet ptc_manager.service"
+    refute service =~ "ExecCondition="
+
+    assert byte_index(script, "health_check maintenance") <
+             byte_index(
+               script,
+               "systemctl is-active --quiet ptc_manager.service\n" <>
+                 "sudo systemctl start ptc_manager-health-snapshot.service"
+             )
+
+    assert byte_index(script, "verify_health_snapshot") <
+             byte_index(script, "deployment_phase=post_effect")
+  end
+
+  test "remote deployment restores snapshot collection when a pre-effect deployment fails" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "backup_health_snapshot_installation"
+    assert script =~ "restore_health_snapshot_installation"
+    assert script =~ "health_snapshot_timer_was_enabled="
+    assert script =~ "health_snapshot_timer_was_active="
+    assert script =~ "health_snapshot_service_was_active="
+    assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.timer"
+    assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.service"
+    assert script =~ ~s(if [ "$health_snapshot_service_load_state" != not-found ])
+
+    assert byte_index(script, "sudo systemctl stop ptc_manager-health-snapshot.timer") <
+             byte_index(script, "sudo systemctl stop ptc_manager-health-snapshot.service")
+
+    assert byte_index(script, "backup_health_snapshot_file /etc/ptc_manager/health-snapshot.env") <
+             byte_index(script, "health_snapshot_installation_prepared=true")
+
+    assert byte_index(script, "backup_health_snapshot_installation") <
+             byte_index(
+               script,
+               ~s(sudo install -o root -g root -m 0755 "$health_snapshot_candidate")
+             )
+
+    assert byte_index(script, "restore_health_snapshot_installation || rollback_status=1") <
+             byte_index(script, ~s(sudo systemctl start "$service_name" || rollback_status=1))
+
+    assert length(String.split(script, "restore_health_snapshot_installation")) == 5
+    assert script =~ "health_snapshot_backup_retained=true"
+
+    assert script =~
+             ~s(if [ "$exit_status" -ne 0 ] && [ "$deployment_phase" = pre_stop ] &&)
+  end
+
   test "remote deployment gives agents a narrow writable result exchange" do
     script = File.read!(@remote_script)
 
