@@ -884,6 +884,11 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/")
 
     assert has_element?(view, "#planning-group-collections #issue-#{umbrella.id}")
+
+    # The expanded card explains a collection instead of asking for an analysis.
+    view |> element("#toggle-issue-#{umbrella.id}") |> render_click()
+    assert has_element?(view, "#collection-note-#{umbrella.id}")
+    refute render(view) =~ "still needs a manager investigation"
     assert has_element?(view, "#issue-#{umbrella.id}-collection", "Collection · 1/2")
     assert has_element?(view, "#issue-#{member.id}-member", "Part of #300")
     refute has_element?(view, "#approve-issue-#{umbrella.id}")

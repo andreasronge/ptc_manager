@@ -499,8 +499,18 @@
                   </div>
                 </div>
 
-                <p :if={!item.proposal} class="mt-4 text-sm text-amber-300">
+                <p
+                  :if={!item.proposal and !PlanningGroup.collection?(item)}
+                  class="mt-4 text-sm text-amber-300"
+                >
                   This issue still needs a manager investigation.
+                </p>
+                <p
+                  :if={PlanningGroup.collection?(item)}
+                  id={"collection-note-#{item.issue.id}"}
+                  class="mt-4 text-sm text-slate-400"
+                >
+                  A collection is never investigated or implemented itself; its members are. Start a run to deliver them.
                 </p>
 
                 <details
