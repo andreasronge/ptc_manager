@@ -832,7 +832,7 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "health_snapshot_backup_retained=true"
 
     assert script =~
-             ~s(if [ "$exit_status" -ne 0 ] && [ "$health_snapshot_installation_prepared" = true ])
+             ~s(if [ "$exit_status" -ne 0 ] && [ "$deployment_phase" = pre_stop ] &&)
   end
 
   test "remote deployment gives agents a narrow writable result exchange" do

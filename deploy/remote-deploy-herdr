@@ -1348,7 +1348,8 @@ finish() {
       sudo systemctl start "$service_name" || true
       ;;
     no_action)
-      if [ "$exit_status" -ne 0 ] && [ "$health_snapshot_installation_prepared" = true ]; then
+      if [ "$exit_status" -ne 0 ] && [ "$deployment_phase" = pre_stop ] &&
+        [ "$health_snapshot_installation_prepared" = true ]; then
         restore_health_snapshot_installation || true
       fi
       ;;
