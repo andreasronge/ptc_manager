@@ -50,6 +50,157 @@ defmodule PtcManager.ReviewsTest do
     assert text =~ "review_timeout"
   end
 
+  test "advisory findings pass the review instead of spending another round" do
+    job = job!(1)
+    {:ok, round} = request(job, "advisory")
+    {:ok, _} = Reviews.claim(round.id)
+    {:ok, _} = Reviews.complete(round.id, advisory())
+    completed = Repo.get!(PtcManager.Reviews.Round, round.id)
+    assert completed.state == "completed"
+    assert Reviews.outcome(completed.result) == "passed"
+
+    saved = Repo.get!(Job, job.id)
+    assert saved.review_state == "passed"
+    assert saved.reviewed_head_sha == round.head_sha
+    assert is_nil(saved.last_error)
+
+    text = PtcManager.Reviews.Context.handoff(job.id)
+    assert text =~ "(passed)"
+    assert text =~ "low: Two collections can record the same whole second."
+  end
+
+  test "a medium finding still withholds the pass and pauses an exhausted budget" do
+    job = job!(1)
+    {:ok, round} = request(job, "blocking")
+    {:ok, _} = Reviews.claim(round.id)
+
+    {:ok, _} =
+      Reviews.complete(round.id, %{
+        "summary" => "One boundary is unguarded.",
+        "findings" => [
+          %{"severity" => "medium", "description" => "Invalid evidence crashes cleanup."},
+          %{
+            "severity" => "low",
+            "description" => "Two collections can record the same whole second."
+          }
+        ]
+      })
+
+    assert Reviews.outcome(Repo.get!(PtcManager.Reviews.Round, round.id).result) ==
+             "changes_requested"
+
+    saved = Repo.get!(Job, job.id)
+    assert saved.review_state == "paused"
+    assert is_nil(saved.reviewed_head_sha)
+  end
+
+  test "the reviewed commit advances only with an assessment of this attempt" do
+    job = job!(3)
+    assert is_nil(reviewed_head(job))
+
+    {:ok, first} = request(job, "first-assessment")
+    {:ok, _} = Reviews.claim(first.id)
+    assert is_nil(reviewed_head(job))
+    {:ok, _} = Reviews.complete(first.id, findings())
+    assert reviewed_head(job) == first.head_sha
+
+    Process.put(:review_test_head, String.duplicate("d", 40))
+    {:ok, failed} = request(job, "failed-attempt")
+    Reviews.fail(failed.id, :review_timeout)
+    assert reviewed_head(job) == first.head_sha
+
+    restarted = job |> Job.changeset(%{fencing_token: 2}) |> Repo.update!()
+    assert is_nil(reviewed_head(restarted))
+  end
+
+  test "moved requirements leave the whole change to review again" do
+    job = job!(3)
+    {:ok, first} = request(job, "assessment-under-original")
+    {:ok, _} = Reviews.claim(first.id)
+    {:ok, _} = Reviews.complete(first.id, findings())
+
+    assert Reviews.last_reviewed_head(job, "Fix it", "Original requirements") == %{
+             head_sha: first.head_sha,
+             base_sha: first.base_sha
+           }
+
+    # The earlier commits were never assessed against the changed requirement.
+    assert is_nil(Reviews.last_reviewed_head(job, "Fix it", "Changed linked requirement"))
+    assert is_nil(Reviews.last_reviewed_head(job, "A reframed issue", "Original requirements"))
+  end
+
+  test "advisory findings of a passing assessment reach the pull request" do
+    job = job!(2)
+    {:ok, round} = request(job, "advisory-publication")
+    {:ok, _} = Reviews.claim(round.id)
+    {:ok, _} = Reviews.complete(round.id, advisory())
+
+    assert [%{"description" => description}] =
+             Reviews.advisory_findings(job.id, round.head_sha)
+
+    assert description == "Two collections can record the same whole second."
+    assert Reviews.advisory_findings(job.id, String.duplicate("f", 40)) == []
+
+    body = PtcManager.GitHub.AppBroker.pull_request_body(42, "none", advisory()["findings"])
+    assert body =~ "## Advisory review findings"
+    assert body =~ "- Two collections can record the same whole second."
+    assert body =~ "complete assessment is in the PtcManager review history"
+    assert PtcManager.GitHub.AppBroker.pull_request_body(42, "none") =~ "## Agent retrospective"
+    refute PtcManager.GitHub.AppBroker.pull_request_body(42, "none") =~ "Advisory"
+  end
+
+  test "reviewer text reaches the pull request as data, never as markup" do
+    findings =
+      [
+        %{
+          "severity" => "low",
+          "description" =>
+            "Closes #39 and thanks @maintainer.\n\n## Injected heading\n\n<details>hidden</details>"
+        }
+      ] ++
+        for(
+          index <- 1..12,
+          do: %{"severity" => "low", "description" => "Filler finding #{index}"}
+        )
+
+    body = PtcManager.GitHub.AppBroker.pull_request_body(42, "none", findings)
+
+    refute body =~ "Closes #39"
+    refute body =~ "## Injected heading"
+    refute body =~ "<details>"
+
+    assert body =~
+             "- Closes \\#39 and thanks \\@maintainer. \\#\\# Injected heading &lt;details>hidden&lt;/details>"
+
+    assert body =~ "Another 3 advisory findings and the complete assessment are in"
+    assert [_heading] = Regex.scan(~r/^## Advisory review findings$/m, body)
+
+    long = [%{"severity" => "low", "description" => String.duplicate("x", 4_000)}]
+    long_body = PtcManager.GitHub.AppBroker.pull_request_body(42, "none", long)
+    assert long_body =~ "[Text shortened; full source remains in the review history"
+    assert String.length(long_body) < 2_000
+  end
+
+  test "a blocking assessment leaves no advisory follow-up" do
+    job = job!(2)
+    {:ok, round} = request(job, "blocking-publication")
+    {:ok, _} = Reviews.claim(round.id)
+
+    {:ok, _} =
+      Reviews.complete(round.id, %{
+        "summary" => "Unsafe.",
+        "findings" => [
+          %{"severity" => "high", "description" => "Overwrites the new attempt."},
+          %{
+            "severity" => "low",
+            "description" => "Two collections can record the same whole second."
+          }
+        ]
+      })
+
+    assert Reviews.advisory_findings(job.id, round.head_sha) == []
+  end
+
   test "reviewer sessions stay with their job and profile across rounds" do
     job = job!(4)
     session = Ecto.UUID.generate()
@@ -244,6 +395,20 @@ defmodule PtcManager.ReviewsTest do
 
   defp request(job, id), do: Reviews.request(job.id, job.fencing_token, id, snapshot: Snapshot)
   defp clean, do: %{"summary" => "No actionable findings", "findings" => []}
+
+  defp reviewed_head(job),
+    do: Reviews.last_reviewed_head(job, "Fix it", "Original requirements")[:head_sha]
+
+  defp advisory,
+    do: %{
+      "summary" => "Nothing blocks this change.",
+      "findings" => [
+        %{
+          "severity" => "low",
+          "description" => "Two collections can record the same whole second."
+        }
+      ]
+    }
 
   defp findings,
     do: %{

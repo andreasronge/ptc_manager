@@ -99,7 +99,9 @@ defmodule PtcManager.Reviews.Context do
   defp nonblank(_), do: nil
 
   defp assessment_text(round) do
-    findings = Enum.map_join(round.result["findings"], "\n", & &1["description"])
-    "Latest completed review of #{round.head_sha}:\n#{round.result["summary"]}\n#{findings}"
+    findings =
+      Enum.map_join(round.result["findings"], "\n", &"#{&1["severity"]}: #{&1["description"]}")
+
+    "Latest completed review of #{round.head_sha} (#{Reviews.outcome(round.result)}):\n#{round.result["summary"]}\n#{findings}"
   end
 end

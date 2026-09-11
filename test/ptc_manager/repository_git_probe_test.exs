@@ -49,6 +49,87 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert File.read!(Path.join(path, "uncommitted.txt")) == "preserve this work"
   end
 
+  test "a later round reviews only the commits added since the last assessed one" do
+    path = repository_with_base()
+    branch = "ptc-manager/issue-42-job-7"
+    git!(path, ["switch", "-c", branch])
+    File.write!(Path.join(path, "README.md"), "base\nfirst round\n")
+    git!(path, ["commit", "-am", "implementation"])
+    repository = %Repository{local_path: path, default_branch: "main"}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    assert {:ok, first} = GitProbe.review_patch(repository, job, path)
+    refute Map.has_key?(first, :review_base_sha)
+
+    File.write!(Path.join(path, "guard.txt"), "answer to the finding\n")
+    git!(path, ["add", "guard.txt"])
+    git!(path, ["commit", "-m", "answer the finding"])
+
+    assert {:ok, second} = GitProbe.review_patch(repository, job, path, prior(first))
+    assert second.review_base_sha == first.head_sha
+    assert second.diff =~ "answer to the finding"
+    refute second.diff =~ "first round"
+
+    # Publication and cache evidence stay whole-range for the exact commit.
+    assert {:ok, publication} = GitProbe.verify(repository, job)
+    assert Map.drop(second, [:diff, :review_base_sha]) == publication
+  end
+
+  test "an unusable prior commit reviews the whole change instead" do
+    path = repository_with_base()
+    branch = "ptc-manager/issue-42-job-7"
+    git!(path, ["switch", "-c", branch])
+    File.write!(Path.join(path, "README.md"), "base\nonly round\n")
+    git!(path, ["commit", "-am", "implementation"])
+    repository = %Repository{local_path: path, default_branch: "main"}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    assert {:ok, whole} = GitProbe.review_patch(repository, job, path)
+
+    # Unknown, rewritten, identical and merge-base commits all lose their standing.
+    candidates =
+      [nil] ++
+        Enum.map(
+          [whole.head_sha, whole.base_sha, String.duplicate("a", 40), "not-a-sha"],
+          &%{head_sha: &1, base_sha: whole.base_sha}
+        )
+
+    for prior <- candidates do
+      assert {:ok, evidence} = GitProbe.review_patch(repository, job, path, prior)
+      refute Map.has_key?(evidence, :review_base_sha)
+      assert evidence.diff == whole.diff
+    end
+  end
+
+  test "a rewound default branch reviews the whole change again" do
+    path = repository_with_base()
+    original_base = String.trim(git!(path, ["rev-parse", "HEAD"]))
+    File.write!(Path.join(path, "upstream.txt"), "upstream work\n")
+    git!(path, ["add", "upstream.txt"])
+    git!(path, ["commit", "-m", "upstream work"])
+
+    branch = "ptc-manager/issue-42-job-7"
+    git!(path, ["switch", "-c", branch])
+    File.write!(Path.join(path, "README.md"), "base\nfirst round\n")
+    git!(path, ["commit", "-am", "implementation"])
+    repository = %Repository{local_path: path, default_branch: "main"}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    assert {:ok, first} = GitProbe.review_patch(repository, job, path)
+    refute first.base_sha == original_base
+
+    File.write!(Path.join(path, "guard.txt"), "answer to the finding\n")
+    git!(path, ["add", "guard.txt"])
+    git!(path, ["commit", "-m", "answer the finding"])
+    git!(path, ["branch", "-f", "main", original_base])
+
+    # The rewind moved commits nobody reviewed into this change; scoping would hide them.
+    assert {:ok, second} = GitProbe.review_patch(repository, job, path, prior(first))
+    refute Map.has_key?(second, :review_base_sha)
+    assert second.base_sha == original_base
+    assert second.diff =~ "upstream work"
+    assert second.diff =~ "answer to the finding"
+  end
+
+  defp prior(evidence), do: Map.take(evidence, [:head_sha, :base_sha])
+
   test "large generated diffs remain reviewable without truncating their evidence" do
     path = repository_with_base()
     branch = "ptc-manager/issue-42-job-7"

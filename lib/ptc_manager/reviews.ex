@@ -12,6 +12,72 @@ defmodule PtcManager.Reviews do
 
   def timeout_ms(job), do: (job.execution_settings || %{})["review_timeout_ms"] || 900_000
 
+  @blocking ~w(high medium)
+
+  @doc """
+  The single verdict of one assessment.
+
+  Only a high or medium finding withholds a pass. Low findings are advisory: they
+  travel to the pull request as follow-up work instead of spending another round
+  on a change the reviewer does not consider defective.
+  """
+  def outcome(%{"findings" => findings}) when is_list(findings),
+    do:
+      if(Enum.any?(findings, &(&1["severity"] in @blocking)),
+        do: "changes_requested",
+        else: "passed"
+      )
+
+  def outcome(_result), do: "changes_requested"
+
+  @doc """
+  The newest assessment this attempt made against exactly these requirements.
+
+  A later round reviews only what that assessment's commit did not contain.
+  Requirements that have moved since an assessment leave its commits unexamined
+  against the new text, so such a round carries no standing and the whole change is
+  reviewed again. Its own base travels with it, because an assessment of a range
+  says nothing about a range that later starts somewhere else.
+  """
+  def last_reviewed_head(%{id: id, fencing_token: fence}, issue, requirements) do
+    Repo.one(
+      from r in Round,
+        where:
+          r.job_id == ^id and r.fencing_token == ^fence and r.state in ~w(completed cached) and
+            not is_nil(r.head_sha) and not is_nil(r.base_sha) and
+            fragment("json_extract(?, '$.requirements') IS ?", r.input, ^requirements) and
+            fragment("json_extract(?, '$.issue') IS ?", r.input, ^issue),
+        order_by: [desc: r.number],
+        limit: 1,
+        select: %{head_sha: r.head_sha, base_sha: r.base_sha}
+    )
+  end
+
+  @doc """
+  Low-severity findings of the assessment that passed an exact commit.
+
+  Advisory follow-up work for the pull request, never a gate: an empty list is the
+  answer whenever that commit has no passing assessment.
+  """
+  def advisory_findings(job_id, head_sha) do
+    Repo.one(
+      from r in Round,
+        where:
+          r.job_id == ^job_id and r.head_sha == ^head_sha and r.state in ~w(completed cached),
+        order_by: [desc: r.number],
+        limit: 1
+    )
+    |> case do
+      %Round{result: result} -> if outcome(result) == "passed", do: low_findings(result), else: []
+      _missing -> []
+    end
+  end
+
+  defp low_findings(%{"findings" => findings}) when is_list(findings),
+    do: Enum.filter(findings, &(&1["severity"] == "low"))
+
+  defp low_findings(_result), do: []
+
   defp completed_count(id),
     do:
       Repo.aggregate(from(r in Round, where: r.job_id == ^id and r.state == "completed"), :count)
@@ -228,7 +294,7 @@ defmodule PtcManager.Reviews do
 
       cond do
         cached ->
-          state = if cached.result["findings"] == [], do: "passed", else: "changes_requested"
+          state = outcome(cached.result)
 
           update_job(job, %{
             review_state: state,
@@ -409,7 +475,7 @@ defmodule PtcManager.Reviews do
 
       state =
         cond do
-          result["findings"] == [] -> "passed"
+          outcome(result) == "passed" -> "passed"
           completed_count(job.id) + 1 >= job.required_review_count -> "paused"
           true -> "changes_requested"
         end

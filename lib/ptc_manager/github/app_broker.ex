@@ -13,6 +13,8 @@ defmodule PtcManager.GitHub.AppBroker do
   @output_limit 65_536
   @staging_prefix "ptc-manager-publish-"
   @retrospective_limit 4_000
+  @advisory_limit 10
+  @advisory_finding_limit 1_000
 
   import Bitwise, only: [band: 2]
 
@@ -588,7 +590,13 @@ defmodule PtcManager.GitHub.AppBroker do
   defp create_pull_request(token, repository, issue, publication, trusted_path) do
     title = "Implement ##{issue.number}: #{String.slice(issue.title, 0, 180)}"
     retrospective = agent_retrospective(trusted_path, publication.head_sha)
-    body = pull_request_body(issue.number, retrospective)
+
+    body =
+      pull_request_body(
+        issue.number,
+        retrospective,
+        PtcManager.Reviews.advisory_findings(publication.job_id, publication.head_sha)
+      )
 
     request(
       :post,
@@ -605,7 +613,7 @@ defmodule PtcManager.GitHub.AppBroker do
   end
 
   @doc false
-  def pull_request_body(issue_number, retrospective) do
+  def pull_request_body(issue_number, retrospective, advisory \\ []) do
     """
     Automated implementation for ##{issue_number}.
 
@@ -614,8 +622,45 @@ defmodule PtcManager.GitHub.AppBroker do
     ## Agent retrospective
 
     #{retrospective}
+    """ <> advisory_section(advisory)
+  end
+
+  # The review passed this commit; these carry to the pull request as follow-up
+  # work rather than as edits the passing assessment would no longer cover.
+  defp advisory_section([]), do: ""
+
+  defp advisory_section(findings) do
+    shown = Enum.take(findings, @advisory_limit)
+
+    """
+
+    ## Advisory review findings
+
+    The independent review passed this commit: it reported no defect that blocks it, and left the following low-severity follow-up work. #{remaining_advisory(length(findings) - length(shown))}
+
+    #{Enum.map_join(shown, "\n", &"- #{advisory_text(&1["description"])}")}
     """
   end
+
+  defp remaining_advisory(0),
+    do: "The complete assessment is in the PtcManager review history for this job."
+
+  defp remaining_advisory(count),
+    do:
+      "Another #{count} advisory finding#{if count == 1, do: "", else: "s"} and the complete assessment are in the PtcManager review history for this job."
+
+  # Reviewer text is validated data, never markup: no heading, list, mention or
+  # issue-closing reference it carries may restructure this body or act on merge.
+  defp advisory_text(description) when is_binary(description) do
+    description
+    |> String.replace("<", "&lt;")
+    |> then(&Regex.replace(~r/[#@]/u, &1, fn match -> "\\" <> match end))
+    |> PtcManager.Reviews.Context.bounded(@advisory_finding_limit)
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
+  end
+
+  defp advisory_text(_description), do: "(no description)"
 
   @doc false
   def agent_retrospective(path, head_sha) when is_binary(path) and is_binary(head_sha) do
