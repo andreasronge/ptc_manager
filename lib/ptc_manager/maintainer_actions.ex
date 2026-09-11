@@ -307,6 +307,23 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  # A repair or collection merge runs in the retained worktree of its pull
+  # request; without capacity it waits, without a worktree it fails.
+  defp prepare_repair_worktree(action, prepared, mode) do
+    case reserve_repair_worktree(prepared, mode) do
+      {:ok, _allocation} ->
+        {:ok, prepared}
+
+      {:error, :dispatch_capacity} ->
+        defer_preflight(action.id, :dispatch_capacity, action.sync_attempt_count)
+
+      {:error, reason} ->
+        if WorktreeSecurity.infrastructure_error?(reason),
+          do: defer_preflight(action.id, reason, action.sync_attempt_count),
+          else: fail_preflight(action.id, reason)
+    end
+  end
+
   defp prepare_and_claim(candidate, adapter, sync) do
     lock_id = {{__MODULE__, :agent_action_preflight, candidate.id}, self()}
 
@@ -548,8 +565,52 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  # A collection merge is authorized for one exact head. The fresh status must
+  # still show that head, green and mergeable, and the authorization survives
+  # the snapshot rewrite so the postflight can hold the merge to it.
+  defp prepare_for_execution(%{action_key: "merge_reviewed_pr"} = action, adapter, sync) do
+    authorized = get_in(action.target_snapshot || %{}, ["authorized_head_sha"])
+
+    case call_sync(sync, action) do
+      {:ok, %{pull_request: status}} ->
+        cond do
+          not is_binary(authorized) or status.head_sha != authorized ->
+            fail_preflight(action.id, :authorized_head_changed)
+
+          status[:checks_state] not in ["success", "none"] or status[:mergeability] != "mergeable" ->
+            fail_preflight(action.id, :pull_request_not_mergeable)
+
+          true ->
+            mode = repair_mode(adapter, action)
+
+            snapshot =
+              status
+              |> MergeDecisions.snapshot()
+              |> Map.merge(%{"repair_mode" => mode, "authorized_head_sha" => authorized})
+
+            with {:ok, prepared} <-
+                   Operations.record_agent_action_target_snapshot(
+                     action.id,
+                     snapshot,
+                     action.prompt
+                   ) do
+              prepare_repair_worktree(action, prepared, mode)
+            end
+        end
+
+      {:ok, _summary} ->
+        {:error, :pull_request_status_missing}
+
+      {:terminal_error, reason} ->
+        fail_preflight(action.id, reason)
+
+      {:error, reason} ->
+        defer_preflight(action.id, reason, action.sync_attempt_count)
+    end
+  end
+
   defp prepare_for_execution(%{action_key: action_key} = action, adapter, sync)
-       when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"] do
+       when action_key in ["repair_pr", "repair_and_merge_pr"] do
     case call_sync(sync, action) do
       {:ok, %{pull_request: status}} ->
         if action_key == "repair_and_merge_pr" or repair_needed?(status) do
@@ -561,18 +622,7 @@ defmodule PtcManager.MaintainerActions do
                    status |> MergeDecisions.snapshot() |> Map.put("repair_mode", mode),
                    action.prompt
                  ) do
-            case reserve_repair_worktree(prepared, mode) do
-              {:ok, _allocation} ->
-                {:ok, prepared}
-
-              {:error, :dispatch_capacity} ->
-                defer_preflight(action.id, :dispatch_capacity, action.sync_attempt_count)
-
-              {:error, reason} ->
-                if WorktreeSecurity.infrastructure_error?(reason),
-                  do: defer_preflight(action.id, reason, action.sync_attempt_count),
-                  else: fail_preflight(action.id, reason)
-            end
+            prepare_repair_worktree(action, prepared, mode)
           end
         else
           fail_preflight(action.id, :pull_request_no_longer_needs_repair)

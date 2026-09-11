@@ -85,6 +85,10 @@ defmodule PtcManager.Collections.Structure do
     check(String.downcase(name || "") == full_name, {:cross_repository_member, number})
   end
 
+  # A member whose own structure is unknown cannot be proven flat.
+  defp not_nested(%{issue: %Issue{structure_projected: false}, number: number}),
+    do: {:error, {:member_structure_unknown, number}}
+
   defp not_nested(%{issue: %Issue{} = issue, number: number}),
     do: check(not Issue.collection?(issue), {:nested_collection, number})
 

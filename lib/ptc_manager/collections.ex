@@ -625,7 +625,7 @@ defmodule PtcManager.Collections do
         )
         |> Map.put(:stop_report, report)
 
-      is_map(report) and step_exists?(run, "ask_on_issue", "#{job.id}:attempt:") ->
+      is_map(report) and step_exists?(run, "ask_on_issue", "member:#{issue.number}:attempt:") ->
         classify_asked(member, issue, job, publication, run)
 
       true ->
@@ -641,7 +641,7 @@ defmodule PtcManager.Collections do
 
   # The blocker was sent to the issue; what happens next depends on that action.
   defp classify_asked(member, issue, job, publication, run) do
-    case action_attempt(run, "ask_on_issue", "#{job.id}:attempt:") do
+    case action_attempt(run, "ask_on_issue", "member:#{issue.number}:attempt:") do
       {:outstanding, _action} ->
         base(member, :waiting_action, job, publication)
 
@@ -742,13 +742,13 @@ defmodule PtcManager.Collections do
       :retry ->
         if report["progress"] == "none",
           do:
-            spend(run, "retry", "#{job.id}", status, fn ->
+            spend(run, "retry", "member:#{status.number}", status, fn ->
               Operations.retry_stopped_job(job.id, @actor)
             end),
           else: apply_pause(run, status.attention)
 
       :ask_on_issue ->
-        spend(run, "ask_on_issue", "#{job.id}:attempt:1", status, fn ->
+        spend(run, "ask_on_issue", "member:#{status.number}:attempt:1", status, fn ->
           MaintainerActions.enqueue_blocked_issue_review(job.id, @actor)
         end)
 
@@ -760,9 +760,9 @@ defmodule PtcManager.Collections do
   defp recover_or_pause(run, %{attention: %{kind: "action_failed"}, ask_retry: true} = status) do
     job = status.job
 
-    case action_attempt(run, "ask_on_issue", "#{job.id}:attempt:") do
+    case action_attempt(run, "ask_on_issue", "member:#{status.number}:attempt:") do
       {:retry, attempt} ->
-        spend(run, "ask_on_issue", "#{job.id}:attempt:#{attempt}", status, fn ->
+        spend(run, "ask_on_issue", "member:#{status.number}:attempt:#{attempt}", status, fn ->
           reopen_stop_and_ask(job)
         end)
 
@@ -777,12 +777,12 @@ defmodule PtcManager.Collections do
         apply_pause(run, status.attention)
 
       Reviews.retry_available?(job) ->
-        spend(run, "review_retry", "#{job.id}:#{job.review_generation}", status, fn ->
+        spend(run, "review_retry", "member:#{status.number}", status, fn ->
           Reviews.decide(job.id, job.review_generation, "retry_review", %{}, @actor)
         end)
 
       true ->
-        spend(run, "review_continue", "#{job.id}:#{job.review_generation}", status, fn ->
+        spend(run, "review_continue", "member:#{status.number}", status, fn ->
           Reviews.decide(
             job.id,
             job.review_generation,
@@ -987,8 +987,8 @@ defmodule PtcManager.Collections do
   end
 
   defp closeout_or_finish(run, umbrella, statuses) do
-    case action_attempt(run, "closeout", "attempt:") do
-      {:retry, attempt} when attempt <= @max_closeout_attempts ->
+    case action_attempt(run, "closeout", "attempt:", @max_closeout_attempts) do
+      {:retry, attempt} ->
         members =
           for %{issue: %Issue{} = issue} <- statuses,
               do: %{
@@ -1334,7 +1334,7 @@ defmodule PtcManager.Collections do
 
   # Where one bounded, action-backed effect stands: never tried, outstanding,
   # done, retryable after a failure, or exhausted.
-  defp action_attempt(run, kind, prefix) do
+  defp action_attempt(run, kind, prefix, max \\ @max_action_attempts) do
     pattern = prefix <> "%"
 
     steps =
@@ -1362,7 +1362,7 @@ defmodule PtcManager.Collections do
           %AgentAction{state: "done"} = action ->
             {:done, action}
 
-          _failed when length(steps) < @max_action_attempts ->
+          _failed when length(steps) < max ->
             {:retry, length(steps) + 1}
 
           action ->

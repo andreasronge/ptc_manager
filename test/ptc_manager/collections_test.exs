@@ -431,26 +431,15 @@ defmodule PtcManager.CollectionsTest do
       assert :ok = Collections.reconcile(repository.id)
       assert %Job{state: "queued"} = retry = job_for(first)
       assert retry.id != job.id
-      assert Enum.any?(steps(run), &(&1.kind == "retry" and &1.scope == "#{job.id}"))
+      assert Enum.any?(steps(run), &(&1.kind == "retry" and &1.scope == "member:1"))
       assert %Run{state: "active"} = Repo.get!(Run, run.id)
 
+      # One automatic retry per member, whichever job it came from: the second
+      # stop is the maintainer's.
       stop.(retry)
+      second_retry = retry
       assert :ok = Collections.reconcile(repository.id)
-      assert %Job{state: "queued"} = second_retry = job_for(first)
-      assert second_retry.id != retry.id
-
-      # Recovery is one per scope, and a scope is a job: the third stop has a
-      # spent retry only when it comes from a job whose retry was spent.
-      stop.(second_retry)
-
-      Repo.insert!(%Step{
-        run_id: run.id,
-        kind: "retry",
-        scope: "#{second_retry.id}",
-        actor: "system:collection"
-      })
-
-      assert :ok = Collections.reconcile(repository.id)
+      assert job_for(first).id == retry.id
 
       assert %Run{state: "paused", pause_kind: "child_attempt_failed", escalation_pending: true} =
                paused = Repo.get!(Run, run.id)
@@ -508,16 +497,27 @@ defmodule PtcManager.CollectionsTest do
       assert continued.review_state == "resume_pending"
       assert continued.required_review_count == job.required_review_count + 2
       assert continued.execution_settings["name"] == "strong"
-      assert Enum.any?(steps(run), &(&1.kind == "review_continue" and &1.scope == "#{job.id}:0"))
+      assert Enum.any?(steps(run), &(&1.kind == "review_continue" and &1.scope == "member:1"))
 
+      # One continuation per member: a second exhaustion pauses the run.
       continued |> Job.changeset(%{review_state: "paused"}) |> Repo.update!()
       assert :ok = Collections.reconcile(repository.id)
-      assert Repo.get!(Job, job.id).review_state == "resume_pending"
-      assert Enum.any?(steps(run), &(&1.kind == "review_continue" and &1.scope == "#{job.id}:1"))
-
-      Repo.get!(Job, job.id) |> Job.changeset(%{review_state: "manual"}) |> Repo.update!()
-      assert :ok = Collections.reconcile(repository.id)
+      assert Repo.get!(Job, job.id).review_state == "paused"
       assert %Run{state: "paused", pause_kind: "child_review_held"} = Repo.get!(Run, run.id)
+
+      # A manual takeover is the maintainer's decision: no continuation, a pause.
+      other_repository = repository_fixture()
+      {other_umbrella, [other_first]} = collection_fixture(other_repository, [1])
+      other_run = start!(other_umbrella)
+      :ok = Collections.reconcile(other_repository.id)
+
+      job_for(other_first)
+      |> Job.changeset(%{state: "blocked", review_state: "manual"})
+      |> Repo.update!()
+
+      assert :ok = Collections.reconcile(other_repository.id)
+      assert %Run{state: "paused", pause_kind: "child_review_held"} = Repo.get!(Run, other_run.id)
+      refute Enum.any?(steps(other_run), &(&1.kind in ["review_continue", "review_retry"]))
     end
 
     test "resume is a scoped override that does not repeat for the same scope" do

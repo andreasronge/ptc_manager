@@ -274,16 +274,12 @@ defmodule PtcManager.GitHub.IssueSnapshot do
         else: canonical
     end)
     |> then(fn canonical ->
-      case structure.sub_issues["nodes"] do
-        [] ->
-          canonical
-
-        nodes ->
-          Map.put(
-            canonical,
-            "sub_issues",
-            Enum.map(nodes, &Map.take(&1, ["repository_full_name", "number", "state"]))
-          )
+      # The whole projection is canonical: a member closing, its reason, and
+      # whether GitHub reported more members than were projected all change
+      # what a collection may do next.
+      case structure.sub_issues do
+        %{"nodes" => []} -> canonical
+        sub_issues -> Map.put(canonical, "sub_issues", sub_issues)
       end
     end)
   end

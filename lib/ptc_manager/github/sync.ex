@@ -218,7 +218,10 @@ defmodule PtcManager.GitHub.Sync do
     :github_author_login,
     :github_labels,
     :github_comment_count,
-    :comments_checked_at
+    :comments_checked_at,
+    :parent_issue_number,
+    :sub_issues,
+    :structure_projected
   ]
 
   defp upsert_issue(nil, attrs) do
