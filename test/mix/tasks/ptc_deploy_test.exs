@@ -812,6 +812,9 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.timer"
     assert script =~ "sudo systemctl stop ptc_manager-health-snapshot.service"
 
+    assert byte_index(script, "sudo systemctl stop ptc_manager-health-snapshot.timer") <
+             byte_index(script, "sudo systemctl stop ptc_manager-health-snapshot.service")
+
     assert byte_index(script, "backup_health_snapshot_file /etc/ptc_manager/health-snapshot.env") <
              byte_index(script, "health_snapshot_installation_prepared=true")
 

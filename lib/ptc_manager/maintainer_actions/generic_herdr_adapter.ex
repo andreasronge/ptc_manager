@@ -44,7 +44,6 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            :ok <- validate_health_snapshot_for_handoff(action),
            :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
-           :ok <- validate_health_snapshot(action),
            {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
         {:ok, result}
       end

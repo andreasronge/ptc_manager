@@ -1217,9 +1217,7 @@ backup_health_snapshot_installation() {
   # A timer-triggered oneshot must finish before its executable and unit are
   # replaced. Otherwise deployment verification could observe its output and
   # never exercise the collector from the revision being deployed.
-  if [ "$health_snapshot_service_was_active" = true ]; then
-    sudo systemctl stop ptc_manager-health-snapshot.service
-  fi
+  sudo systemctl stop ptc_manager-health-snapshot.service
 }
 
 restore_health_snapshot_file() {
