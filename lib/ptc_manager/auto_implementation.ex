@@ -130,9 +130,13 @@ defmodule PtcManager.AutoImplementation do
     end
   end
 
+  def dispatch_allowed(%{approval: %{decision: "start_implementation_collection"}} = job, remote),
+    do: PtcManager.Collections.dispatch_allowed(job, remote)
+
   def dispatch_allowed(_job, _remote), do: :ok
 
-  defp linked_publication?(repo, issue) do
+  @doc false
+  def linked_publication?(repo, issue) do
     from(publication in PrPublication,
       where: publication.repository_id == ^issue.repository_id,
       select: publication.linked_issue_numbers

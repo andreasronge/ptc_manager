@@ -276,7 +276,16 @@ defmodule PtcManager.MaintainerActions do
       nil -> execute_next(adapter, sync, lane, resource_class)
       action -> reconcile_action(action, sync)
     end
+    |> tap(&reconcile_collections/1)
   end
+
+  # A finished action may have merged a member, handed off, or asked; the run
+  # that owns it should not wait for the next tick to notice.
+  defp reconcile_collections({:ok, %AgentAction{repository_id: repository_id}})
+       when is_integer(repository_id),
+       do: PtcManager.Collections.reconcile(repository_id)
+
+  defp reconcile_collections(_result), do: :ok
 
   defp execute_next(adapter, sync, lane, resource_class) do
     case Operations.next_agent_action_candidate_for_lane(

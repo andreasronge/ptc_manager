@@ -164,6 +164,8 @@ defmodule PtcManager.GitHub.Sync do
         summary.repository.id,
         Map.get(summary, :issue_number)
       )
+
+      PtcManager.Collections.reconcile(summary.repository.id)
     end
   end
 

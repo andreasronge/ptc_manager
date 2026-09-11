@@ -40,6 +40,8 @@ defmodule PtcManager.PublicationStatusReconciler do
         status_result
         |> combine_results(discovery_result)
         |> combine_results(external_result)
+        # A merged or moved member pull request changes what a run does next.
+        |> tap(fn _result -> PtcManager.Collections.reconcile_all() end)
     end
   end
 

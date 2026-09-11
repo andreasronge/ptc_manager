@@ -3346,6 +3346,20 @@ defmodule PtcManager.Operations do
     do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil)
   end
 
+  @doc """
+  Queues one ready member of a collection under its active run.
+
+  The run is the recorded policy: it replaces the repository auto-fix setting
+  and its daily limit, and keeps every other gate.
+  """
+  def approve_collection_issue(issue_id) when is_integer(issue_id) do
+    do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil)
+  end
+
+  @doc "True when every projected blocker of the issue is closed as completed and no cycle exists."
+  def dependencies_resolved?(%Issue{} = issue),
+    do: issue_dependencies_resolved(Repo, issue) == :ok
+
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -3438,10 +3452,12 @@ defmodule PtcManager.Operations do
   end
 
   defp approval_decision(:automatic), do: "start_implementation_automatic"
+  defp approval_decision(:collection), do: "start_implementation_collection"
   defp approval_decision(:direct), do: "start_implementation_direct"
   defp approval_decision(_mode), do: "start_implementation"
 
   defp audit_action(:automatic), do: "issue.automatically_approved_for_implementation"
+  defp audit_action(:collection), do: "issue.approved_for_implementation_by_collection_run"
   defp audit_action(:direct), do: "issue.approved_for_direct_implementation"
   defp audit_action(_mode), do: "issue.approved_for_implementation"
 
@@ -3464,9 +3480,12 @@ defmodule PtcManager.Operations do
   defp automatic_approval_allowed(repo, issue, :automatic),
     do: PtcManager.AutoImplementation.eligible(repo, issue)
 
+  defp automatic_approval_allowed(repo, issue, :collection),
+    do: PtcManager.Collections.eligible(repo, issue)
+
   defp automatic_approval_allowed(_repo, _issue, _mode), do: :ok
 
-  defp approvable_proposal(repo, issue, :automatic) do
+  defp approvable_proposal(repo, issue, mode) when mode in [:automatic, :collection] do
     case latest_proposal(repo, issue.id) do
       nil ->
         {:ok, nil}
