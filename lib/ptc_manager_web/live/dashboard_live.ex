@@ -99,6 +99,52 @@ defmodule PtcManagerWeb.DashboardLive do
   # One form, two submit buttons: "Fix directly" is the same decision made
   # without a preparation round, so it deliberately carries the same review
   # count the maintainer picked next to it.
+  def handle_event("start-collection-run", %{"issue-id" => issue_id} = params, socket) do
+    case parse_issue_id(issue_id) do
+      {:ok, id} ->
+        id
+        |> PtcManager.Collections.start(
+          %{
+            auto_merge: params["auto-merge"] == "true",
+            auto_recover: params["auto-recover"] == "true"
+          },
+          socket.assigns.actor
+        )
+        |> collection_run_result(socket, "Collection run started.")
+
+      {:error, _invalid} ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("collection-run", %{"run-id" => run_id, "decision" => decision}, socket)
+      when decision in ["pause", "resume", "accept", "cancel"] do
+    case Integer.parse(run_id) do
+      {id, ""} ->
+        {outcome, message} =
+          case decision do
+            "pause" ->
+              {PtcManager.Collections.pause(id, socket.assigns.actor), "Collection run paused."}
+
+            "resume" ->
+              {PtcManager.Collections.resume(id, socket.assigns.actor), "Collection run resumed."}
+
+            "accept" ->
+              {PtcManager.Collections.accept_changes(id, socket.assigns.actor),
+               "Membership accepted."}
+
+            "cancel" ->
+              {PtcManager.Collections.cancel(id, socket.assigns.actor),
+               "Collection run cancelled."}
+          end
+
+        collection_run_result(outcome, socket, message)
+
+      _invalid ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
          {:ok, review_count} <- parse_review_count(params["review-count"]) do
@@ -295,6 +341,52 @@ defmodule PtcManagerWeb.DashboardLive do
         {:noreply, put_flash(socket, :error, "Publication could not be retried safely.")}
     end
   end
+
+  defp collection_run_result(outcome, socket, message) do
+    case outcome do
+      {:ok, _run} ->
+        {:noreply, socket |> put_flash(:info, message) |> load_dashboard()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, collection_run_error(reason))}
+    end
+  end
+
+  defp collection_run_error(:not_a_collection), do: "This issue has no sub-issues."
+  defp collection_run_error(:run_already_live), do: "This collection already has a run."
+  defp collection_run_error(:issue_closed), do: "This issue is closed."
+  defp collection_run_error(:repository_disabled), do: "Enable the repository first."
+  defp collection_run_error(:run_not_paused), do: "This run is not paused."
+  defp collection_run_error(:run_not_live), do: "This run has already ended."
+
+  defp collection_run_error(:accept_changes_required),
+    do: "GitHub's sub-issues changed. Accept the new membership instead of resuming."
+
+  defp collection_run_error({:member_in_flight, number}),
+    do: "##{number} is being worked on and cannot be dropped from the run."
+
+  defp collection_run_error({:structure_invalid, {:member_without_workflow_label, number}}),
+    do: "##{number} needs exactly one ptc: workflow label first."
+
+  defp collection_run_error({:structure_invalid, {:member_not_synchronized, number}}),
+    do: "##{number} has not been synchronized yet. Sync GitHub first."
+
+  defp collection_run_error({:structure_invalid, {:foreign_blocker, number, blocker}}),
+    do: "##{number} is blocked by ##{blocker}, which is not a member."
+
+  defp collection_run_error({:structure_invalid, {:dependency_cycle, number}}),
+    do: "The members form a dependency cycle through ##{number}."
+
+  defp collection_run_error({:structure_invalid, reason}),
+    do: "The collection is not well formed: #{inspect(reason)}."
+
+  defp collection_run_error(:deployment_draining),
+    do: "A deployment is draining; try again shortly."
+
+  defp collection_run_error(:maintenance_mode), do: "PtcManager is in maintenance mode."
+
+  defp collection_run_error(reason),
+    do: "The collection run could not be changed: #{inspect(reason)}"
 
   defp approve_directly(issue_id, review_count, profile, socket) do
     issue_id
@@ -529,7 +621,46 @@ defmodule PtcManagerWeb.DashboardLive do
   def primary_issue_action(item, group) when group in [:not_prepared, :stale, :blocked, :waiting],
     do: List.first(ActionCatalog.issue_actions(item.issue))
 
+  def primary_issue_action(item, :collections) do
+    actions = ActionCatalog.issue_actions(item.issue)
+    Enum.find(actions, &(&1.key == "structure_collection"))
+  end
+
   def primary_issue_action(_item, _group), do: nil
+
+  @doc "The live collection run of an item, or nil."
+  def collection_run(item), do: Map.get(item, :collection_run)
+
+  @doc "One line saying where a collection run stands."
+  def collection_run_label(%{state: "active"}), do: "Running unattended"
+
+  def collection_run_label(%{state: "finishing"}),
+    do: "Delivered · waiting for the umbrella to close"
+
+  def collection_run_label(%{state: "paused", pause_kind: "membership_changed"}),
+    do: "Paused · GitHub's sub-issues changed"
+
+  def collection_run_label(%{state: "paused", paused_issue_number: number})
+      when is_integer(number),
+      do: "Paused on ##{number}"
+
+  def collection_run_label(%{state: "paused"}), do: "Paused"
+  def collection_run_label(_run), do: nil
+
+  @doc "Which run buttons a card offers."
+  def collection_run_buttons(%{state: "active"}), do: [:pause, :cancel]
+  def collection_run_buttons(%{state: "finishing"}), do: [:cancel]
+
+  def collection_run_buttons(%{state: "paused", pause_kind: "membership_changed"}),
+    do: [:accept, :cancel]
+
+  def collection_run_buttons(%{state: "paused"}), do: [:resume, :cancel]
+  def collection_run_buttons(_run), do: []
+
+  def collection_run_button_label(:pause), do: "Pause"
+  def collection_run_button_label(:resume), do: "Resume"
+  def collection_run_button_label(:accept), do: "Accept changes"
+  def collection_run_button_label(:cancel), do: "Cancel run"
 
   @doc "The actions the expanded card still has to offer after the primary one."
   def secondary_issue_actions(item, group) do

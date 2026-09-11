@@ -843,6 +843,69 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     refute has_element?(view, "#approve-issue-#{first.id}")
   end
 
+  test "a collection card offers a run instead of approval, with its controls", %{conn: conn} do
+    repository = repository_fixture()
+    full_name = String.downcase("#{repository.github_owner}/#{repository.github_name}")
+
+    umbrella =
+      issue_fixture(repository, %{
+        number: 300,
+        workflow_label: "ptc:ready",
+        sub_issues: %{
+          "nodes" => [
+            %{"number" => 301, "state" => "open", "repository_full_name" => full_name},
+            %{
+              "number" => 302,
+              "state" => "closed",
+              "state_reason" => "completed",
+              "repository_full_name" => full_name
+            }
+          ],
+          "total" => 2
+        }
+      })
+
+    member =
+      issue_fixture(repository, %{
+        number: 301,
+        parent_issue_number: 300,
+        workflow_label: "ptc:ready"
+      })
+
+    proposal_fixture(umbrella)
+
+    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#planning-group-collections #issue-#{umbrella.id}")
+    assert has_element?(view, "#issue-#{umbrella.id}-collection", "Collection · 1/2")
+    assert has_element?(view, "#issue-#{member.id}-member", "Part of #300")
+    refute has_element?(view, "#approve-issue-#{umbrella.id}")
+    assert has_element?(view, "#collection-run-form-#{umbrella.id}")
+    assert html =~ "Structure collection"
+
+    view
+    |> element("#collection-run-form-#{umbrella.id}")
+    |> render_submit(%{"issue-id" => umbrella.id, "auto-merge" => "true"})
+
+    assert run = PtcManager.Collections.current_run(umbrella.id)
+    # Both boxes start checked; the submit carries the form's current values.
+    assert run.auto_merge
+    assert run.auto_recover
+    assert has_element?(view, "#collection-run-#{run.id}", "Running unattended")
+    refute has_element?(view, "#collection-run-form-#{umbrella.id}")
+
+    view |> element("#collection-run-pause-#{run.id}") |> render_click()
+    assert has_element?(view, "#collection-run-#{run.id}", "Paused")
+    assert has_element?(view, "#collection-run-resume-#{run.id}")
+
+    view |> element("#collection-run-resume-#{run.id}") |> render_click()
+    assert has_element?(view, "#collection-run-#{run.id}", "Running unattended")
+
+    view |> element("#collection-run-cancel-#{run.id}") |> render_click()
+    assert has_element?(view, "#collection-run-form-#{umbrella.id}")
+    assert is_nil(PtcManager.Collections.current_run(umbrella.id))
+  end
+
   test "shows an unsynchronized dependency projection and keeps approval disabled", %{conn: conn} do
     repository = repository_fixture()
 

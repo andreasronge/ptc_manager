@@ -2542,10 +2542,12 @@ defmodule PtcManager.Operations do
     retrospective_actions = latest_agent_actions("pr_retrospective")
     retrospective_issue_actions = retrospective_issue_actions()
     external_publications = external_publications_by_issue(issues)
+    collection_runs = PtcManager.Collections.live_runs_by_issue(issue_ids)
 
     Enum.map(issues, fn issue ->
       %{
         issue: issue,
+        collection_run: Map.get(collection_runs, issue.id),
         external_publication: Map.get(external_publications, issue.id),
         dependencies: Map.get(dependencies, issue.id, []),
         dependency_cycle: Map.get(dependency_cycles, issue.id),
