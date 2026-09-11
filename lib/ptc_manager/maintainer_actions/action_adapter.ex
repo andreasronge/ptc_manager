@@ -164,6 +164,8 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
               "blocked",
               "needs-decision",
               "reject",
+              "split",
+              "structured",
               "followups-proposed",
               "followups-created",
               "no-followups",
@@ -197,7 +199,26 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
     do: {:error, :invalid_agent_action_output}
 
   defp validate_outcome("prepare_issue", outcome)
-       when outcome in ["ready", "blocked", "needs-decision", "reject"],
+       when outcome in ["ready", "blocked", "needs-decision", "reject", "split"],
+       do: :ok
+
+  defp validate_outcome("structure_collection", outcome)
+       when outcome in ["structured", "no-changes", "needs-decision"],
+       do: :ok
+
+  defp validate_outcome("collection_handoff", outcome)
+       when outcome in ["completed", "no-changes", "needs-decision"],
+       do: :ok
+
+  defp validate_outcome("collection_closeout", outcome)
+       when outcome in ["completed", "no-changes", "needs-decision"],
+       do: :ok
+
+  # An escalation may only ask; see Catalog's allowed outcomes for the reason.
+  defp validate_outcome("report_collection_blocker", "needs-decision"), do: :ok
+
+  defp validate_outcome("merge_reviewed_pr", outcome)
+       when outcome in ["repaired", "repair-blocked"],
        do: :ok
 
   # This action may only report a blocker. It cannot mark an issue ready or
@@ -207,8 +228,20 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
        do: :ok
 
   defp validate_outcome("review_issue", outcome)
-       when outcome in ["ready", "blocked", "needs-decision", "reject"],
+       when outcome in ["ready", "blocked", "needs-decision", "reject", "split"],
        do: :ok
+
+  # The generic completed/no-changes fallback below must not widen the
+  # collection actions past the outcomes their prompts state.
+  defp validate_outcome(action_key, _outcome)
+       when action_key in [
+              "structure_collection",
+              "collection_handoff",
+              "collection_closeout",
+              "report_collection_blocker",
+              "merge_reviewed_pr"
+            ],
+       do: {:error, :invalid_agent_action_outcome}
 
   defp validate_outcome("resolve_issue_decision", outcome)
        when outcome in ["ready", "blocked", "needs-decision", "reject"],
@@ -269,7 +302,11 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
               "prepare_issue",
               "report_issue_blocker",
               "review_issue",
-              "resolve_issue_decision"
+              "resolve_issue_decision",
+              "structure_collection",
+              "collection_handoff",
+              "collection_closeout",
+              "report_collection_blocker"
             ] do
     case IssueDecision.from_result(%{
            "outcome" => "needs-decision",
@@ -304,23 +341,53 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   defp validate_github_changes(_action_key, _changes), do: :ok
 
   defp validate_created_issue_numbers("private_issue_analysis", _outcome, []), do: :ok
+
+  defp validate_created_issue_numbers("prepare_issue", "split", numbers),
+    do: issue_numbers(numbers)
+
   defp validate_created_issue_numbers("prepare_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("report_issue_blocker", _outcome, []), do: :ok
+
+  defp validate_created_issue_numbers("review_issue", "split", numbers),
+    do: issue_numbers(numbers)
+
   defp validate_created_issue_numbers("review_issue", _outcome, []), do: :ok
   defp validate_created_issue_numbers("resolve_issue_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("prepare_merge_decision", _outcome, []), do: :ok
   defp validate_created_issue_numbers("repair_pr", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("merge_reviewed_pr", _outcome, []), do: :ok
+  defp validate_created_issue_numbers("report_collection_blocker", _outcome, []), do: :ok
+
+  # Structuring may only create issues while it reports a structure; a handoff
+  # or close-out only while it reports work done.
+  defp validate_created_issue_numbers("structure_collection", "structured", numbers),
+    do: issue_numbers(numbers)
+
+  defp validate_created_issue_numbers("structure_collection", _outcome, []), do: :ok
+
+  defp validate_created_issue_numbers("collection_handoff", "completed", numbers),
+    do: issue_numbers(numbers)
+
+  defp validate_created_issue_numbers("collection_handoff", _outcome, []), do: :ok
+
+  defp validate_created_issue_numbers("collection_closeout", "completed", [_ | _] = numbers),
+    do: issue_numbers(numbers)
+
+  defp validate_created_issue_numbers("collection_closeout", outcome, [])
+       when outcome in ["no-changes", "needs-decision"],
+       do: :ok
+
+  defp validate_created_issue_numbers(action_key, _outcome, _numbers)
+       when action_key in ["structure_collection", "collection_handoff", "collection_closeout"],
+       do: {:error, :invalid_created_issue_numbers}
+
   defp validate_created_issue_numbers("pr_retrospective", "followups-proposed", []), do: :ok
   defp validate_created_issue_numbers("pr_retrospective", "no-followups", []), do: :ok
   defp validate_created_issue_numbers("create_retrospective_issue", "no-followups", []), do: :ok
 
   defp validate_created_issue_numbers(_action_key, outcome, issue_numbers)
-       when outcome in ["completed", "no-changes"] and is_list(issue_numbers) do
-    if Enum.all?(issue_numbers, &(is_integer(&1) and &1 > 0)) and
-         Enum.uniq(issue_numbers) == issue_numbers,
-       do: :ok,
-       else: {:error, :invalid_created_issue_numbers}
-  end
+       when outcome in ["completed", "no-changes"] and is_list(issue_numbers),
+       do: issue_numbers(issue_numbers)
 
   defp validate_created_issue_numbers(
          "create_retrospective_issue",
@@ -336,6 +403,14 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   defp validate_created_issue_numbers(_action_key, _outcome, _issue_numbers),
     do: {:error, :invalid_created_issue_numbers}
+
+  defp issue_numbers(numbers) when is_list(numbers) do
+    if Enum.all?(numbers, &(is_integer(&1) and &1 > 0)) and Enum.uniq(numbers) == numbers,
+      do: :ok,
+      else: {:error, :invalid_created_issue_numbers}
+  end
+
+  defp issue_numbers(_numbers), do: {:error, :invalid_created_issue_numbers}
 
   defp validate_suggestions("pr_retrospective", "followups-proposed", suggestions)
        when suggestions != [] do

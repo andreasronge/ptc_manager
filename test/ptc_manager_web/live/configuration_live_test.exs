@@ -144,7 +144,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
 
     refute repository.enabled
     assert repository.local_path == "/srv/ptc_manager"
-    assert length(PtcManager.Automations.list_definitions(repository)) == 13
+    assert length(PtcManager.Automations.list_definitions(repository)) == 18
     assert has_element?(view, "#repository-health-#{repository.id}", "Disabled")
     assert has_element?(view, "#repository-health-#{repository.id}", "/srv/ptc_manager")
   end

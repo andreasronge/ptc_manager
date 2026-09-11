@@ -53,7 +53,7 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   def sync_action(%{action_key: action_key} = action)
-      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"],
       do: sync_repair(action, :preflight)
 
   def sync_action(%{action_key: action_key, repository: repository})
@@ -65,8 +65,25 @@ defmodule PtcManager.MaintainerActions.Sync do
     do: GitHubSync.sync_repository(repository)
 
   def sync_action(%{action_key: action_key} = action, result)
-      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"],
       do: sync_repair(action, {:postflight, result})
+
+  # An action that may have created or related member issues is checked
+  # against the whole repository, because a single-issue refresh cannot see the
+  # sub-issues it created. Admission is deferred: a member must not start in the
+  # middle of a structure check, and the caller reconciles once afterwards.
+  def sync_action(%{action_key: action_key, repository: repository} = action, result)
+      when action_key in [
+             "prepare_issue",
+             "review_issue",
+             "structure_collection",
+             "collection_handoff",
+             "collection_closeout"
+           ] do
+    if structure_changing?(result),
+      do: GitHubSync.sync_repository(repository, admit: false),
+      else: sync_action(action)
+  end
 
   def sync_action(%{action_key: "post_cancellation_note"} = action, _result) do
     issue = Repo.get!(Issue, action.target_id) |> Repo.preload(:repository)
@@ -83,6 +100,15 @@ defmodule PtcManager.MaintainerActions.Sync do
   end
 
   def sync_action(action, _result), do: sync_action(action)
+
+  # What the agent wrote is untrusted, but here it only widens the read: a
+  # claimed structure change costs one repository sync, never trust.
+  defp structure_changing?({:ok, %{"outcome" => outcome}})
+       when outcome in ["split", "structured", "completed"],
+       do: true
+
+  defp structure_changing?({:ok, %{"created_issue_numbers" => [_ | _]}}), do: true
+  defp structure_changing?(_result), do: false
 
   defp sync_repair(%{target_id: publication_id} = action, phase) do
     publication =

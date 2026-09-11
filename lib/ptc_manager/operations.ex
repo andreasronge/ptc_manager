@@ -45,9 +45,11 @@ defmodule PtcManager.Operations do
   # Cancel agent, which closes the Herdr pane, is the right tool there.
   @abandonable_job_states ~w(awaiting_reconciliation verifying_result publish_blocked)
   @live_agent_run_states ~w(queued starting working idle blocked waiting unknown)
-  @repair_action_keys ~w(repair_pr repair_and_merge_pr)
+  @repair_action_keys ~w(repair_pr repair_and_merge_pr merge_reviewed_pr)
   @legacy_heavy_action_keys ["review_issue" | @repair_action_keys]
-  @merge_action_key "repair_and_merge_pr"
+  # Both merge one exact pull request under the repository merge lock; the
+  # second never repairs, so a collection merges only a head PtcManager reviewed.
+  @merge_action_keys ~w(repair_and_merge_pr merge_reviewed_pr)
   @planning_action_keys ~w(
     daily_digest
     prepare_issue
@@ -576,7 +578,7 @@ defmodule PtcManager.Operations do
       base
       |> where(
         [action],
-        action.action_key == @merge_action_key and
+        action.action_key in @merge_action_keys and
           action.repository_id not in subquery(active_writing_repository_ids())
       )
       |> order_by([action], asc: action.requested_at, asc: action.id)
@@ -1161,7 +1163,7 @@ defmodule PtcManager.Operations do
     AgentAction
     |> where(
       [action],
-      action.repository_id == ^repository_id and action.action_key == @merge_action_key and
+      action.repository_id == ^repository_id and action.action_key in @merge_action_keys and
         action.state in ["queued", "running", "sync_pending"]
     )
     |> Repo.exists?()
@@ -4315,10 +4317,10 @@ defmodule PtcManager.Operations do
          repository_merge_locked_except?(action.repository_id, action.id),
        do: Repo.rollback(:merge_priority)
 
-    if action_key == @merge_action_key and repository_merge_precedes?(action),
+    if action_key in @merge_action_keys and repository_merge_precedes?(action),
       do: Repo.rollback(:merge_priority)
 
-    if action_key == @merge_action_key and repository_writing_job_active?(action.repository_id),
+    if action_key in @merge_action_keys and repository_writing_job_active?(action.repository_id),
       do: Repo.rollback(:merge_waiting_for_active_work)
 
     capacity =
@@ -4385,7 +4387,7 @@ defmodule PtcManager.Operations do
     AgentAction
     |> where(
       [action],
-      action.action_key == @merge_action_key and
+      action.action_key in @merge_action_keys and
         action.state in ["queued", "running", "sync_pending"]
     )
     |> select([action], action.repository_id)
@@ -4478,7 +4480,7 @@ defmodule PtcManager.Operations do
     |> where(
       [action],
       action.repository_id == ^repository_id and action.id != ^action_id and
-        action.action_key == @merge_action_key and
+        action.action_key in @merge_action_keys and
         action.state in ["queued", "running", "sync_pending"]
     )
     |> Repo.exists?()
@@ -4489,7 +4491,7 @@ defmodule PtcManager.Operations do
     |> where(
       [candidate],
       candidate.repository_id == ^action.repository_id and candidate.id != ^action.id and
-        candidate.action_key == @merge_action_key and
+        candidate.action_key in @merge_action_keys and
         (candidate.state in ["running", "sync_pending"] or
            (candidate.state == "queued" and
               (candidate.requested_at < ^action.requested_at or

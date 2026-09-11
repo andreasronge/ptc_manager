@@ -412,6 +412,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   def repair_and_merge_action(%{publication: nil}), do: nil
 
+  # Both hold the repository merge lock; the second is enqueued only by a
+  # collection run and never repairs.
+  @merge_action_keys ["repair_and_merge_pr", "merge_reviewed_pr"]
+
   def repair_and_merge_action(%{publication: publication}) do
     Enum.find(
       ActionCatalog.pull_request_actions(publication),
@@ -473,6 +477,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       }),
       do: "Waiting for confirmed merge"
 
+  def work_label(%{pr_agent_action: %{action_key: "merge_reviewed_pr", state: "queued"}}),
+    do: "Collection merge queued"
+
+  def work_label(%{pr_agent_action: %{action_key: "merge_reviewed_pr", state: "running"}}),
+    do: "Agent merging reviewed head"
+
+  def work_label(%{pr_agent_action: %{action_key: "merge_reviewed_pr", state: "sync_pending"}}),
+    do: "Waiting for confirmed merge"
+
   def work_label(%{pr_agent_action: %{action_key: "pr_retrospective", state: "queued"}}),
     do: "Retro queued"
 
@@ -490,6 +503,18 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       do: "Creating follow-up"
 
   def work_label(_item), do: nil
+
+  def queue_feedback(%{
+        pr_agent_action: %{action_key: "merge_reviewed_pr", state: "queued"},
+        queue_blocker: %{target_label: target_label}
+      }) do
+    "Waiting for #{short_action_target(target_label)} to finish its merge. " <>
+      "PtcManager starts merge work one at a time in this repository to avoid creating new conflicts."
+  end
+
+  def queue_feedback(%{pr_agent_action: %{action_key: "merge_reviewed_pr", state: "queued"}}) do
+    "Queued by the collection run. It merges exactly the reviewed head once earlier repository work finishes and a Herdr slot is available."
+  end
 
   def queue_feedback(%{
         pr_agent_action: %{action_key: "repair_and_merge_pr", state: "queued"},
@@ -595,12 +620,12 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   defp phase_next_step(item, :stuck) do
     cond do
       work_state(item) == "queued" ->
-        if item.pr_agent_action.action_key == "repair_and_merge_pr",
+        if item.pr_agent_action.action_key in @merge_action_keys,
           do: "This priority merge is queued; no new repository work will start ahead of it.",
           else: "The repair is safely queued and will start when a Herdr slot is free."
 
       work_state(item) == "running" ->
-        if item.pr_agent_action.action_key == "repair_and_merge_pr",
+        if item.pr_agent_action.action_key in @merge_action_keys,
           do:
             "The repository is locked while this Herdr agent fixes, verifies, and merges the PR.",
           else: "A Herdr agent is repairing the existing pull request now."
@@ -644,13 +669,13 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
         %{
           agent_action:
             %{
-              action_key: "repair_and_merge_pr",
+              action_key: action_key,
               repository_id: repository_id,
               state: state
             } = action
         },
         blockers
-        when state in ["running", "sync_pending"] ->
+        when action_key in @merge_action_keys and state in ["running", "sync_pending"] ->
           Map.put_new(blockers, repository_id, action)
 
         _run, blockers ->
@@ -680,7 +705,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
         queue_blocker =
           case item.pr_agent_action do
-            %{action_key: "repair_and_merge_pr", state: "queued", repository_id: repository_id} ->
+            %{action_key: action_key, state: "queued", repository_id: repository_id}
+            when action_key in @merge_action_keys ->
               Map.get(active_merge_actions_by_repository, repository_id)
 
             _action ->

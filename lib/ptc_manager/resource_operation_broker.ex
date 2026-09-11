@@ -385,6 +385,7 @@ defmodule PtcManager.ResourceOperationBroker do
   defp operation_priority(%AgentRun{agent_action_id: action_id}) when is_integer(action_id) do
     case Repo.get(AgentAction, action_id) do
       %AgentAction{action_key: "repair_and_merge_pr"} -> 500
+      %AgentAction{action_key: "merge_reviewed_pr"} -> 500
       %AgentAction{action_key: "repair_pr"} -> 400
       _action -> 100
     end

@@ -29,12 +29,22 @@ defmodule PtcManager.MaintainerActions do
   # snapshot released afterwards, and a decision digest recorded when it returns
   # a question. Keeping one list is what stops a new action getting three of the
   # four.
+  # The collection actions target the umbrella issue and may create or relate
+  # member issues, so their postflight re-synchronizes the whole repository
+  # before their outcome is checked against GitHub.
+  @collection_action_keys ~w(
+    structure_collection
+    collection_handoff
+    collection_closeout
+    report_collection_blocker
+  )
+
   @issue_maintenance_action_keys ~w(
     prepare_issue
     report_issue_blocker
     review_issue
     resolve_issue_decision
-  )
+  ) ++ @collection_action_keys
 
   @snapshot_action_keys ["daily_digest" | @issue_maintenance_action_keys]
 
@@ -60,7 +70,12 @@ defmodule PtcManager.MaintainerActions do
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
   def enqueue(action_key, issue_id, actor)
-      when action_key in ["private_issue_analysis", "prepare_issue", "review_issue"] and
+      when action_key in [
+             "private_issue_analysis",
+             "prepare_issue",
+             "review_issue",
+             "structure_collection"
+           ] and
              is_integer(issue_id) and is_binary(actor) do
     with %Issue{} = issue <- Issue |> Repo.get(issue_id) |> Repo.preload(:repository),
          :ok <- ensure_open(issue),
@@ -77,7 +92,8 @@ defmodule PtcManager.MaintainerActions do
              "prepare_merge_decision",
              "pr_retrospective",
              "repair_pr",
-             "repair_and_merge_pr"
+             "repair_and_merge_pr",
+             "merge_reviewed_pr"
            ] and
              is_integer(publication_id) and is_binary(actor) do
     RepoTransaction.immediate(fn ->
@@ -395,8 +411,13 @@ defmodule PtcManager.MaintainerActions do
       {:ok, _summary} ->
         issue = Repo.get!(Issue, action.target_id)
 
-        case ensure_open(issue) do
-          :ok -> prepare_issue_source_snapshot(action, issue)
+        # Any issue action may now create member issues (a split or a
+        # structure), so every one records the numbers that existed before it
+        # ran; the postflight accepts only numbers above that baseline.
+        with :ok <- ensure_open(issue),
+             {:ok, _action} <- record_issue_baseline(action) do
+          prepare_issue_source_snapshot(action, issue)
+        else
           {:error, reason} -> fail_preflight(action.id, reason)
         end
 
@@ -519,7 +540,7 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp prepare_for_execution(%{action_key: action_key} = action, adapter, sync)
-       when action_key in ["repair_pr", "repair_and_merge_pr"] do
+       when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"] do
     case call_sync(sync, action) do
       {:ok, %{pull_request: status}} ->
         if action_key == "repair_and_merge_pr" or repair_needed?(status) do
@@ -873,7 +894,8 @@ defmodule PtcManager.MaintainerActions do
          {:error, _reason},
          %{pull_request: %{head_sha: head_sha}}
        )
-       when action_key in ["repair_pr", "repair_and_merge_pr"] and is_map(snapshot) do
+       when action_key in ["repair_pr", "repair_and_merge_pr", "merge_reviewed_pr"] and
+              is_map(snapshot) do
     if snapshot["repair_intended_head_sha"] == head_sha do
       {:ok,
        %{
@@ -1004,8 +1026,32 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  # Collection actions store no private analysis of the umbrella: the umbrella
+  # is never implemented, so a readiness badge would only mislead. Their result
+  # is checked against the synchronized structure and recorded on the action.
   defp store_private_analysis(
-         %{id: action_id, action_key: action_key, target_id: issue_id},
+         %{id: action_id, action_key: action_key, target_id: issue_id} = action,
+         {:ok, result},
+         _summary
+       )
+       when action_key in @collection_action_keys do
+    issue = Repo.get!(Issue, issue_id)
+
+    outcome_check =
+      if action_key == "structure_collection" and result["outcome"] == "structured",
+        do: canonical_structure_matches(issue, result, action.baseline_issue_numbers),
+        else: canonical_collection_matches(issue, action, result)
+
+    with :ok <- outcome_check,
+         :ok <- record_decision_source(action_id, action_key, issue, result) do
+      {:ok, result}
+    else
+      {:error, reason} -> {:error, {:collection_action_failed, reason}}
+    end
+  end
+
+  defp store_private_analysis(
+         %{id: action_id, action_key: action_key, target_id: issue_id} = action,
          {:ok, result},
          _summary
        )
@@ -1021,7 +1067,12 @@ defmodule PtcManager.MaintainerActions do
       technical_evidence: result["technical_evidence"]
     }
 
-    with :ok <- canonical_outcome_matches(issue, result["outcome"]),
+    outcome_check =
+      if result["outcome"] == "split",
+        do: canonical_structure_matches(issue, result, action.baseline_issue_numbers),
+        else: canonical_outcome_matches(issue, result["outcome"])
+
+    with :ok <- outcome_check,
          {:ok, _proposal} <- Manager.store_analysis(issue, analysis),
          :ok <- record_decision_source(action_id, action_key, issue, result) do
       {:ok, result}
@@ -1114,6 +1165,135 @@ defmodule PtcManager.MaintainerActions do
   defp readiness("blocked"), do: "needs_information"
   defp readiness("needs-decision"), do: "needs_information"
   defp readiness("reject"), do: "outdated"
+  defp readiness("split"), do: "needs_breakdown"
+
+  defp record_issue_baseline(action) do
+    issue_numbers =
+      Repo.all(
+        from issue in Issue,
+          where: issue.repository_id == ^action.repository_id,
+          select: issue.number,
+          order_by: issue.number
+      )
+
+    Operations.record_agent_action_baseline(action.id, issue_numbers)
+  end
+
+  @doc """
+  Queues one collection action on an umbrella issue for a collection run.
+
+  The run reconciler is the only caller. `extra` carries what the Catalog
+  needs beyond the issue: the merged publication for a handoff, the members
+  for a close-out, or the paused member and reason for an escalation.
+  """
+  def enqueue_collection_action(action_key, issue_id, extra, actor)
+      when action_key in @collection_action_keys and is_integer(issue_id) and is_map(extra) and
+             is_binary(actor) do
+    with %Issue{} = issue <- Issue |> Repo.get(issue_id) |> Repo.preload(:repository),
+         :ok <- ensure_open(issue),
+         {:ok, attrs} <-
+           Catalog.build(
+             action_key,
+             Map.merge(extra, %{issue: issue, repository: issue.repository})
+           ) do
+      enqueue_versioned(issue.repository, action_key, attrs, actor)
+    else
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A structure outcome is checked against what GitHub now reports, not against
+  # the agent's claim: the umbrella must have become a collection whose members
+  # satisfy every structure invariant, and every issue the agent says it created
+  # must be newer than the baseline recorded before it ran.
+  defp canonical_structure_matches(%Issue{} = issue, result, baseline) do
+    created = result["created_issue_numbers"] || []
+    highest = baseline |> baseline_numbers() |> Enum.max(fn -> 0 end)
+
+    cond do
+      issue.state != "open" ->
+        {:error,
+         {:github_outcome_mismatch,
+          %{claimed_outcome: result["outcome"], issue_state: issue.state}}}
+
+      issue.workflow_label == "ptc:ready" or issue.workflow_label_conflict ->
+        {:error,
+         {:github_outcome_mismatch,
+          %{claimed_outcome: result["outcome"], workflow_label: issue.workflow_label}}}
+
+      (issue.sub_issues["total"] || 0) < 2 ->
+        {:error, {:collection_structure_mismatch, :fewer_than_two_members}}
+
+      Enum.any?(created, &(&1 <= highest)) ->
+        {:error, {:collection_structure_mismatch, :created_issue_not_new}}
+
+      true ->
+        case PtcManager.Collections.Structure.validate(issue) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:collection_structure_mismatch, reason}}
+        end
+    end
+  end
+
+  defp canonical_collection_matches(%Issue{} = issue, action, result) do
+    outcome = result["outcome"]
+    created = result["created_issue_numbers"] || []
+    highest = action.baseline_issue_numbers |> baseline_numbers() |> Enum.max(fn -> 0 end)
+    members = PtcManager.Collections.Structure.member_numbers(issue)
+    snapshot = action.target_snapshot || %{}
+
+    cond do
+      outcome == "needs-decision" and issue.workflow_label != "ptc:needs-decision" ->
+        {:error,
+         {:github_outcome_mismatch,
+          %{claimed_outcome: outcome, workflow_label: issue.workflow_label}}}
+
+      outcome == "no-changes" and action.action_key == "collection_closeout" and
+          issue.state == "open" ->
+        {:error,
+         {:github_outcome_mismatch, %{claimed_outcome: outcome, issue_state: issue.state}}}
+
+      Enum.any?(created, &(&1 <= highest)) ->
+        {:error, {:collection_structure_mismatch, :created_issue_not_new}}
+
+      action.action_key == "collection_closeout" and outcome == "completed" and
+          not Enum.all?(created, &MapSet.member?(members, &1)) ->
+        {:error, {:collection_structure_mismatch, :created_issue_not_member}}
+
+      protected_members_changed?(snapshot["protected_content_digests"], issue.repository_id) ->
+        {:error, {:collection_structure_mismatch, :protected_member_edited}}
+
+      outcome in ["completed", "no-changes"] and issue.state == "open" and
+          Issue.collection?(issue) ->
+        case PtcManager.Collections.Structure.validate(issue) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:collection_structure_mismatch, reason}}
+        end
+
+      true ->
+        :ok
+    end
+  end
+
+  defp protected_members_changed?(digests, repository_id)
+       when is_map(digests) and digests != %{} do
+    numbers = digests |> Map.keys() |> Enum.map(&String.to_integer/1)
+
+    current =
+      Repo.all(
+        from issue in Issue,
+          where: issue.repository_id == ^repository_id and issue.number in ^numbers,
+          select: {issue.number, issue.content_digest}
+      )
+      |> Map.new()
+
+    Enum.any?(digests, fn {number, digest} ->
+      Map.get(current, String.to_integer(number)) != digest
+    end)
+  end
+
+  defp protected_members_changed?(_digests, _repository_id), do: false
 
   defp ensure_decision_needed(%Issue{
          workflow_label: "ptc:needs-decision",

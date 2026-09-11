@@ -325,7 +325,12 @@ defmodule PtcManager.Automations do
         label: "Prepare issue",
         description: "Investigate and update GitHub"
       },
-      %{key: "review_issue", label: "Review issue", description: "Challenge issue readiness"}
+      %{key: "review_issue", label: "Review issue", description: "Challenge issue readiness"},
+      %{
+        key: "structure_collection",
+        label: "Structure collection",
+        description: "Turn a plan into ordered sub-issues"
+      }
     ]
   end
 

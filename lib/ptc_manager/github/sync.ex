@@ -21,7 +21,7 @@ defmodule PtcManager.GitHub.Sync do
     Operations.with_repository_lifecycle_lock(repository.id, fn ->
       case Operations.get_repository(repository.id) do
         nil -> {:ok, :repository_removed}
-        current_repository -> do_sync_repository(current_repository, client)
+        current_repository -> do_sync_repository(current_repository, client, opts)
       end
     end)
   end
@@ -37,14 +37,14 @@ defmodule PtcManager.GitHub.Sync do
 
         current_repository ->
           case Gateway.call(client, :get_issue, [current_repository, number]) do
-            {:ok, remote_issue} -> persist_issue(current_repository, remote_issue)
+            {:ok, remote_issue} -> persist_issue(current_repository, remote_issue, opts)
             {:error, reason} -> {:error, reason}
           end
       end
     end)
   end
 
-  defp do_sync_repository(repository, client) do
+  defp do_sync_repository(repository, client, opts) do
     syncing_repository = mark_syncing(repository)
 
     with {:ok, remote_issues} <- Gateway.call(client, :list_open_issues, [syncing_repository]),
@@ -54,7 +54,8 @@ defmodule PtcManager.GitHub.Sync do
         remote_issues,
         missing_issues,
         viewer_login(client),
-        Operations.read_repository_labels(client, syncing_repository)
+        Operations.read_repository_labels(client, syncing_repository),
+        opts
       )
     else
       {:error, reason} -> mark_failed(syncing_repository, reason)
@@ -74,7 +75,14 @@ defmodule PtcManager.GitHub.Sync do
     end
   end
 
-  defp persist_snapshot(repository, remote_issues, missing_issues, viewer_login, label_names) do
+  defp persist_snapshot(
+         repository,
+         remote_issues,
+         missing_issues,
+         viewer_login,
+         label_names,
+         opts
+       ) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     result =
@@ -135,11 +143,7 @@ defmodule PtcManager.GitHub.Sync do
 
     case result do
       {:ok, summary} ->
-        PtcManager.AutoImplementation.reconcile(
-          summary.repository.id,
-          Map.get(summary, :issue_number)
-        )
-
+        admit_after_sync(summary, opts)
         Operations.notify_changed(__MODULE__)
         {:ok, summary}
 
@@ -150,13 +154,26 @@ defmodule PtcManager.GitHub.Sync do
     error -> mark_failed(repository, error)
   end
 
+  # Admission runs only after a successful read. A postflight that re-syncs the
+  # structure of a collection passes `admit: false`, because a member must not
+  # be admitted in the middle of a structure check; the caller reconciles once
+  # afterwards instead.
+  defp admit_after_sync(summary, opts) do
+    if Keyword.get(opts, :admit, true) do
+      PtcManager.AutoImplementation.reconcile(
+        summary.repository.id,
+        Map.get(summary, :issue_number)
+      )
+    end
+  end
+
   defp put_label_names(attrs, nil, _now), do: attrs
 
   defp put_label_names(attrs, names, now) do
     Map.merge(attrs, %{github_label_names: %{"names" => names}, github_labels_checked_at: now})
   end
 
-  defp persist_issue(repository, remote_issue) do
+  defp persist_issue(repository, remote_issue, opts) do
     result =
       Repo.transaction(fn ->
         attrs = IssueSnapshot.normalize!(remote_issue, repository)
@@ -181,11 +198,7 @@ defmodule PtcManager.GitHub.Sync do
 
     case result do
       {:ok, summary} ->
-        PtcManager.AutoImplementation.reconcile(
-          summary.repository.id,
-          Map.get(summary, :issue_number)
-        )
-
+        admit_after_sync(summary, opts)
         Operations.notify_changed(__MODULE__)
         {:ok, summary}
 

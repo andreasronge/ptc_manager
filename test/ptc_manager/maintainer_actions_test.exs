@@ -797,7 +797,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action.target_label =~ "#42"
     assert action.prompt =~ "update GitHub with one outcome"
     assert action.prompt =~ "ptc:needs-decision"
-    assert action.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
+    assert action.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject,split")
 
     assert {:error, :agent_action_already_active} =
              MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
@@ -3138,7 +3138,7 @@ defmodule PtcManager.MaintainerActionsTest do
       assert {:ok, attrs} =
                Catalog.build("prepare_issue", %{issue: issue, repository: repository})
 
-      assert attrs.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject")
+      assert attrs.prompt =~ ~s(allowed_outcomes="ready,blocked,needs-decision,reject,split")
       refute attrs.prompt =~ "blocked_implementation"
       refute Map.has_key?(attrs, :target_snapshot)
 

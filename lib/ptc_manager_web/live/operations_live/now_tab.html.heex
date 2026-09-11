@@ -203,15 +203,15 @@
             </div>
             <span class={[
               "rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",
-              action.action_key == "repair_and_merge_pr" &&
+              action.action_key in ["repair_and_merge_pr", "merge_reviewed_pr"] &&
                 "bg-teal-400/15 text-teal-300 ring-teal-400/20",
               action.action_key == "repair_pr" &&
                 "bg-amber-400/15 text-amber-300 ring-amber-400/20",
-              action.action_key not in ["repair_and_merge_pr", "repair_pr"] &&
+              action.action_key not in ["repair_and_merge_pr", "merge_reviewed_pr", "repair_pr"] &&
                 "bg-sky-400/15 text-sky-300 ring-sky-400/20"
             ]}>
               <%= case action.action_key do %>
-                <% "repair_and_merge_pr" -> %>
+                <% key when key in ["repair_and_merge_pr", "merge_reviewed_pr"] -> %>
                   Merge priority
                 <% "repair_pr" -> %>
                   Repair priority
