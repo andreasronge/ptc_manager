@@ -19,11 +19,25 @@ defmodule PtcManager.Reviews.Recovery do
             _ -> {:error, :retained_agent_unconfirmed}
           end
 
-        finish(job, outcome, mode)
+        finish_with_retry(job, outcome, mode, 5)
       end
 
     PtcManager.Operations.notify_changed(__MODULE__)
     result
+  end
+
+  # The stop is already confirmed when the final write runs. Losing that write
+  # to a busy database strands the recovery lease until it expires and the
+  # sweep pauses the job, so retry briefly before giving the lease up.
+  defp finish_with_retry(job, outcome, mode, attempts) do
+    case finish(job, outcome, mode) do
+      {:error, :database_busy} when attempts > 1 ->
+        Process.sleep(500)
+        finish_with_retry(job, outcome, mode, attempts - 1)
+
+      other ->
+        other
+    end
   end
 
   defp claim(id, generation, mode) do

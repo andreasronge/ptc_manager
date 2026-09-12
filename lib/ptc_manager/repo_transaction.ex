@@ -10,6 +10,9 @@ defmodule PtcManager.RepoTransaction do
   `BEGIN`, which is how it reached supervised processes and terminated them.
   `BEGIN IMMEDIATE` takes the write lock up front, where `busy_timeout` applies
   and a waiting writer succeeds instead of failing.
+
+  `PtcManager.Repo` now begins every transaction that way by default; this
+  module remains for callers that want a busy database reported as a value.
   """
 
   alias PtcManager.Repo
