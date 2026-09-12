@@ -1541,7 +1541,7 @@ defmodule PtcManager.Collections do
     |> where([job], job.issue_id == ^issue_id)
     |> order_by([job], desc: job.id)
     |> limit(1)
-    |> preload(:pr_publication)
+    |> preload(pr_publication: :repository)
     |> Repo.one()
   end
 

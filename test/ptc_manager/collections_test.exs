@@ -6,8 +6,17 @@ defmodule PtcManager.CollectionsTest do
   alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication}
 
   defmodule PullClient do
+    alias PtcManager.Operations.{PrPublication, Repository}
+
     def list_open(_repository), do: {:ok, []}
-    def status(_publication), do: Process.get(:collection_status, {:error, :no_status})
+
+    # The real client reads the publication's repository to build the GitHub
+    # URL; a publication handed over without it fails exactly as it did in
+    # production, where the merge was deferred on every pass.
+    def status(%PrPublication{repository: %Repository{}}),
+      do: Process.get(:collection_status, {:error, :no_status})
+
+    def status(%PrPublication{}), do: raise("publication repository is not loaded")
   end
 
   defmodule FakeSourceSnapshot do
