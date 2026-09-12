@@ -188,8 +188,13 @@ PtcManager uses its authenticated read-only GitHub client to capture the issue,
 recent comments, and linked GitHub issues, pull requests and text documents within
 the job's approved repository (up to nine sources total, with explicit text/comment
 limits). Links cannot widen the token's repository scope; out-of-repository links
-are identified as not fetched. Put essential cross-repository requirements in the
-approved issue. Document links support encoded paths and branch names containing
+are identified as not fetched. A bare `#1234` always means this repository, so a
+number borrowed from another one resolves to an issue that does not exist here;
+that is recorded as missing context for the reviewer to weigh rather than failing
+the round, while a linked source GitHub never answered for still fails
+preparation so no review runs on partial requirements. Write a cross-repository
+reference as `owner/repo#1234` or a full URL, and put essential
+cross-repository requirements in the approved issue. Document links support encoded paths and branch names containing
 slashes. Blob sizes are
 checked before reading their text, and the resolved object is immutable. Private
 document links require Contents read permission on that token. Missing GitHub

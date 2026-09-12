@@ -49,6 +49,24 @@ defmodule PtcManager.Reviews.Requirements do
               scope
             )
 
+          # A reference GitHub says it does not have is evidence about the
+          # requirements, not a reason to withhold the review: `#1890` written
+          # in one repository about another's issue resolves here and cannot.
+          # The reviewer is told to raise missing context as a finding.
+          {:error, :review_context_missing} ->
+            note =
+              "Linked context named in this repository does not exist there: #{owner}/#{name} #{inspect(target)}"
+
+            collect(
+              rest,
+              MapSet.put(seen, reference),
+              [note | texts],
+              "",
+              client,
+              left - 1,
+              scope
+            )
+
           {:error, _} ->
             {:error, {:review_requirements_unavailable, owner <> "/" <> name, inspect(target)}}
         end

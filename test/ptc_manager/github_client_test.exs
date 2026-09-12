@@ -16,6 +16,31 @@ defmodule PtcManager.GitHubClientTest do
     :ok
   end
 
+  test "an answered absence is settled, an unanswered question is not" do
+    assert {:ok, %{"body" => "text"}} =
+             Client.review_context_item(
+               {:ok, %{"repository" => %{"item" => %{"body" => "text"}}}}
+             )
+
+    # GitHub answered: this repository has no such issue. Asking again cannot help.
+    assert {:error, :review_context_missing} =
+             Client.review_context_item({:ok, %{"repository" => %{"item" => nil}}})
+
+    assert {:error, :review_context_missing} =
+             Client.review_context_item(
+               {:ok, %{"repository" => %{"item" => %{"byteSize" => 100_001}}}}
+             )
+
+    # Nothing was answered, so the review must not proceed on partial requirements.
+    for unanswered <- [
+          {:error, :github_unavailable},
+          {:ok, %{"repository" => nil}},
+          {:ok, %{}}
+        ] do
+      assert {:error, :review_requirements_unavailable} = Client.review_context_item(unanswered)
+    end
+  end
+
   test "fails before an HTTP request when GraphQL authentication is missing" do
     Application.delete_env(:ptc_manager, :github_read_token)
     repository = %Repository{github_owner: "public-owner", github_name: "public-repo"}

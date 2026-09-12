@@ -138,14 +138,22 @@ defmodule PtcManager.GitHub.Client do
     variables =
       Map.merge(variables, %{"owner" => repository.github_owner, "name" => repository.github_name})
 
-    with {:ok, %{"repository" => %{"item" => item}}} when is_map(item) <-
-           graphql(query, variables),
-         true <- (item["byteSize"] || 0) <= 100_000 do
-      {:ok, item}
-    else
-      _ -> {:error, :review_requirements_unavailable}
-    end
+    query |> graphql(variables) |> review_context_item()
   end
+
+  @doc false
+  # A source GitHub answered for and does not have is settled; only a question
+  # GitHub never answered is worth asking again.
+  def review_context_item({:ok, %{"repository" => %{"item" => item}}}) when is_map(item) do
+    if (item["byteSize"] || 0) <= 100_000,
+      do: {:ok, item},
+      else: {:error, :review_context_missing}
+  end
+
+  def review_context_item({:ok, %{"repository" => %{"item" => nil}}}),
+    do: {:error, :review_context_missing}
+
+  def review_context_item(_unanswered), do: {:error, :review_requirements_unavailable}
 
   def cancellation_comment_present?(repository, number, body) do
     query =
