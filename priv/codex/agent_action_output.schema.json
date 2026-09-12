@@ -40,7 +40,7 @@
       "maxItems": 50,
       "items": {"type": "string", "minLength": 1, "maxLength": 1000}
     },
-    "decision_question": {"description": "A question for the maintainer. Only the prepare_issue, report_issue_blocker, review_issue, and resolve_issue_decision actions may fill this, and only with outcome needs-decision; every other action and outcome must use an empty string.", "type": "string", "maxLength": 1000},
+    "decision_question": {"description": "A question for the maintainer. Only the prepare_issue, report_issue_blocker, review_issue, resolve_issue_decision, structure_collection, collection_handoff, collection_closeout, and report_collection_blocker actions may fill this, and only with outcome needs-decision, which report_collection_blocker must always answer; every other action and outcome must use an empty string.", "type": "string", "maxLength": 1000},
     "decision_options": {
       "description": "Answer options for decision_question, two to four entries when it is set; an empty array whenever decision_question is empty.",
       "type": "array",
