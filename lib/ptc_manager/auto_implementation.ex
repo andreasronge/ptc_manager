@@ -119,7 +119,7 @@ defmodule PtcManager.AutoImplementation do
       remote.sub_issues["total"] > 0 ->
         {:error, :issue_is_collection}
 
-      remote.github_assignees != %{"logins" => []} ->
+      Issue.claimed_by_other?(remote, job.repository) ->
         {:error, :issue_claimed}
 
       linked_publication?(Repo, job.issue) ->
