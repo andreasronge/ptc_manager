@@ -138,12 +138,17 @@ defmodule PtcManager.GitHub.Client do
     variables =
       Map.merge(variables, %{"owner" => repository.github_owner, "name" => repository.github_name})
 
-    with {:ok, %{"repository" => %{"item" => item}}} when is_map(item) <-
-           graphql(query, variables),
-         true <- (item["byteSize"] || 0) <= 100_000 do
-      {:ok, item}
-    else
-      _ -> {:error, :review_requirements_unavailable}
+    case graphql(query, variables) do
+      {:ok, %{"repository" => %{"item" => item}}} when is_map(item) ->
+        if (item["byteSize"] || 0) <= 100_000,
+          do: {:ok, item},
+          else: {:error, :review_requirements_unavailable}
+
+      {:ok, %{"repository" => %{"item" => nil}}} ->
+        {:error, :review_context_not_found}
+
+      _ ->
+        {:error, :review_requirements_unavailable}
     end
   end
 

@@ -49,6 +49,26 @@ defmodule PtcManager.Reviews.Requirements do
               scope
             )
 
+          {:error, :review_context_not_found} ->
+            case {target, MapSet.size(seen)} do
+              {{:issue, number}, seen_count} when seen_count > 0 ->
+                note = "Linked issue was not found and was omitted: #{owner}/#{name} ##{number}"
+
+                collect(
+                  rest,
+                  MapSet.put(seen, reference),
+                  [note | texts],
+                  "",
+                  client,
+                  left - 1,
+                  scope
+                )
+
+              _ ->
+                {:error,
+                 {:review_requirements_unavailable, owner <> "/" <> name, inspect(target)}}
+            end
+
           {:error, _} ->
             {:error, {:review_requirements_unavailable, owner <> "/" <> name, inspect(target)}}
         end

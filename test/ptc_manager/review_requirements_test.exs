@@ -37,6 +37,15 @@ defmodule PtcManager.ReviewRequirementsTest do
     def review_context(_, _), do: {:error, :github_unavailable}
   end
 
+  defmodule MissingLinkedIssue do
+    def review_context(_, {:issue, 1}), do: {:ok, %{"body" => "See #1890"}}
+    def review_context(_, {:issue, 1890}), do: {:error, :review_context_not_found}
+  end
+
+  defmodule MissingRootIssue do
+    def review_context(_, {:issue, 1}), do: {:error, :review_context_not_found}
+  end
+
   defp job do
     %{
       repository: %{github_owner: "team", github_name: "private"},
@@ -73,6 +82,18 @@ defmodule PtcManager.ReviewRequirementsTest do
   test "unavailable linked context fails preparation instead of returning a clean review" do
     assert {:error, {:review_requirements_unavailable, "team/private", _}} =
              Requirements.capture(job(), Unavailable)
+  end
+
+  test "a missing linked issue is noted and omitted" do
+    assert {:ok, text} =
+             Requirements.capture(put_in(job().issue.body, "See #1890"), MissingLinkedIssue)
+
+    assert text =~ "Linked issue was not found and was omitted: team/private #1890"
+  end
+
+  test "a missing root issue still fails preparation" do
+    assert {:error, {:review_requirements_unavailable, "team/private", "{:issue, 1}"}} =
+             Requirements.capture(job(), MissingRootIssue)
   end
 
   test "links cannot redirect the context client to arbitrary network targets" do
