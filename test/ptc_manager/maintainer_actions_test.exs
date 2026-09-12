@@ -1845,6 +1845,7 @@ defmodule PtcManager.MaintainerActionsTest do
     refute_receive {:ran_agent_action, _action}
   end
 
+  @tag :nightly
   test "accepts a clean fast-forward repair verified from the retained worktree" do
     previous_client = Application.get_env(:ptc_manager, :pull_request_client)
     Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
@@ -2101,6 +2102,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "terminal"
   end
 
+  @tag :nightly
   test "a repaired result with untracked files moves the worktree to attention" do
     previous_client = Application.get_env(:ptc_manager, :pull_request_client)
     Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
@@ -2217,6 +2219,7 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
   end
 
+  @tag :nightly
   test "managed fix-and-merge uses one slot and records a same-turn repaired merge" do
     previous_client = Application.get_env(:ptc_manager, :pull_request_client)
     previous_dispatch = Application.get_env(:ptc_manager, :dispatch_enabled)
