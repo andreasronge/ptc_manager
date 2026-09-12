@@ -149,6 +149,21 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def pull_request_actions(%PrPublication{pr_state: state}) when state in ["merged", "closed"],
     do: []
 
+  # A head PtcManager did not verify blocks publication, and the repair actions
+  # are what resolve it. Offering nothing here strands the pull request: the
+  # state is the one `Publications.repair_lineage_open?/2` already accepts for
+  # repair verification. Any other blocked reason still offers nothing.
+  def pull_request_actions(
+        %PrPublication{
+          state: "blocked",
+          pr_state: "open",
+          last_error: "GitHub reports a different pull-request head commit."
+        } = publication
+      ) do
+    Automations.contextual_actions(publication_repository_id(publication), "delivery_pr")
+    |> Enum.filter(&(&1.key in ["repair_pr", "repair_and_merge_pr"]))
+  end
+
   def pull_request_actions(%PrPublication{state: "published", pr_state: "open"} = publication) do
     Automations.contextual_actions(publication_repository_id(publication), "delivery_pr")
     |> Enum.filter(fn action ->

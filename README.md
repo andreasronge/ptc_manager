@@ -708,10 +708,15 @@ catalog contains:
 - **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr
-  agent—not PtcManager—repairs and pushes the branch, watches required CI,
-  resolves any newly introduced conflict, and merges that exact PR with the
-  authenticated `gh` CLI. PtcManager verifies the resulting GitHub state and
-  retains the session until the PR is merged or closed. Imported PRs can still
+  agent—not PtcManager—repairs and pushes the branch, brings it up to date with
+  the latest default branch and revalidates so the result is proven against what
+  it merges into, watches required CI, resolves any newly introduced conflict,
+  and merges that exact PR with the authenticated `gh` CLI. PtcManager verifies
+  the resulting GitHub state and retains the session until the PR is merged or
+  closed. A head PtcManager has not verified blocks the publication, and that
+  verification is what clears it again; **Fix and merge** stays available on a
+  pull request blocked that way, so an action that stopped before its work was
+  verified leaves a branch that can be repaired rather than stranded. Imported PRs can still
   be reviewed and repaired, but do not receive a generated implementation
   retrospective because PtcManager did not start their agent.
 
