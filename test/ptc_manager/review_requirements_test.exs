@@ -37,6 +37,16 @@ defmodule PtcManager.ReviewRequirementsTest do
     def review_context(_, _), do: {:error, :github_unavailable}
   end
 
+  # Job 109: ptc_manager#75 wrote ptc_runner's issue numbers bare, so `#1890`
+  # resolved to an issue its own repository does not have.
+  defmodule CrossRepositoryNumber do
+    def review_context(_repository, {:issue, 1}),
+      do: {:ok, %{"body" => "Jobs 106 (#1890) and 107 (#1891) failed"}}
+
+    def review_context(_repository, {:issue, _absent}),
+      do: {:error, :review_context_missing}
+  end
+
   defp job do
     %{
       repository: %{github_owner: "team", github_name: "private"},
@@ -73,6 +83,16 @@ defmodule PtcManager.ReviewRequirementsTest do
   test "unavailable linked context fails preparation instead of returning a clean review" do
     assert {:error, {:review_requirements_unavailable, "team/private", _}} =
              Requirements.capture(job(), Unavailable)
+  end
+
+  test "a number this repository does not have is noted, not a reason to withhold review" do
+    assert {:ok, text} =
+             Requirements.capture(put_in(job().issue.body, ""), CrossRepositoryNumber)
+
+    assert text =~ "does not exist there"
+    assert text =~ "{:issue, 1890}"
+    assert text =~ "{:issue, 1891}"
+    assert text =~ "Jobs 106"
   end
 
   test "links cannot redirect the context client to arbitrary network targets" do
