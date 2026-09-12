@@ -11,6 +11,7 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   # The collection merge runs in the same retained worktree as a repair.
   @repair_action_keys ~w(repair_pr repair_and_merge_pr merge_reviewed_pr)
+  @decision_action_keys ~w(prepare_issue report_issue_blocker review_issue resolve_issue_decision structure_collection collection_handoff collection_closeout report_collection_blocker)
 
   @impl true
   def run(%AgentAction{action_key: "daily_digest"} = action),
@@ -298,17 +299,11 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
     end
   end
 
+  @doc "Action keys whose `needs-decision` result must carry a question and options."
+  def decision_action_keys, do: @decision_action_keys
+
   defp validate_decision(action_key, "needs-decision", question, options)
-       when action_key in [
-              "prepare_issue",
-              "report_issue_blocker",
-              "review_issue",
-              "resolve_issue_decision",
-              "structure_collection",
-              "collection_handoff",
-              "collection_closeout",
-              "report_collection_blocker"
-            ] do
+       when action_key in @decision_action_keys do
     case IssueDecision.from_result(%{
            "outcome" => "needs-decision",
            "decision_question" => question,

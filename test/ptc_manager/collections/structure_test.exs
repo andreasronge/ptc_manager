@@ -228,6 +228,22 @@ defmodule PtcManager.Collections.StructureTest do
       )
     end
 
+    # The agent fills the result from the JSON schema, so an action the schema
+    # does not allow to ask a question answers needs-decision with empty
+    # fields and is then rejected here as :invalid_issue_decision.
+    test "the output schema lets every decision action fill decision_question" do
+      description =
+        :ptc_manager
+        |> Application.app_dir("priv/codex/agent_action_output.schema.json")
+        |> File.read!()
+        |> Jason.decode!()
+        |> get_in(["properties", "decision_question", "description"])
+
+      for key <- ActionAdapter.decision_action_keys() do
+        assert description =~ key, "schema description does not name #{key}"
+      end
+    end
+
     test "each collection action accepts only its own outcomes" do
       assert :ok = ActionAdapter.validate_result(result(%{}), "structure_collection")
 
