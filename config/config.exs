@@ -13,6 +13,9 @@ config :ptc_manager, Oban,
   engine: Oban.Engines.Lite,
   repo: PtcManager.Repo,
   queues: [automations: 4, reviews: 1],
+  # An executor whose acknowledgement fails on a busy database leaves its row
+  # `executing` for good; the lifeline re-runs or discards it after ten minutes.
+  lifeline: [rescue_after: {10, :minutes}],
   plugins: [
     {Oban.Plugins.Cron,
      crontab: [
@@ -20,6 +23,11 @@ config :ptc_manager, Oban,
        {"* * * * *", PtcManager.Collections.TickWorker}
      ]}
   ]
+
+# Writers wait for SQLite's lock instead of failing after the 2 s default; the
+# console's pollers commit every few seconds, a failed write drops the
+# connection, and a swapping host can hold a commit for seconds.
+config :ptc_manager, PtcManager.Repo, busy_timeout: 5_000
 
 config :ptc_manager,
   operational_mode: :active,

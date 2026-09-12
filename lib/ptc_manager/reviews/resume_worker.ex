@@ -1,7 +1,10 @@
 defmodule PtcManager.Reviews.ResumeWorker do
+  # An acknowledgement that fails on a busy database orphans the attempt in
+  # `executing`; Oban's lifeline then re-runs it, and every step re-checks the
+  # job's generation, so a repeat is a no-op rather than a second writer.
   use Oban.Worker,
     queue: :automations,
-    max_attempts: 1,
+    max_attempts: 3,
     unique: [
       period: 60,
       fields: [:worker, :args],

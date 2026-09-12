@@ -17,7 +17,9 @@ defmodule PtcManager.Herdr.Sync do
   }
 
   alias PtcManager.Repo
+  alias PtcManager.RepoTransaction
   @terminal_states ~w(done failed lost)
+  @active_agent_states ~w(queued starting working blocked)
   @terminal_action_states ~w(done failed cancelled)
   @superseded_status "Superseded duplicate of the action-owned Herdr run."
   @recoverable_attention_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation)
@@ -104,41 +106,44 @@ defmodule PtcManager.Herdr.Sync do
          lease_now
        ) do
     result =
-      Repo.transaction(fn ->
-        case accept_worker_snapshot(session, identity, agent_now, stale_after_ms) do
-          {:ignored, worker, reason} ->
-            %{
-              worker: worker,
-              agent_count: 0,
-              lost_count: 0,
-              absent_count: 0,
-              snapshot_ignored: reason
-            }
+      Repo.transaction(
+        fn ->
+          case accept_worker_snapshot(session, identity, agent_now, stale_after_ms) do
+            {:ignored, worker, reason} ->
+              %{
+                worker: worker,
+                agent_count: 0,
+                lost_count: 0,
+                absent_count: 0,
+                snapshot_ignored: reason
+              }
 
-          {:recovering, worker, reason} ->
-            uncertain_count = quarantine_active_attempts(worker, agent_now, lease_now, reason)
+            {:recovering, worker, reason} ->
+              uncertain_count = quarantine_active_attempts(worker, agent_now, lease_now, reason)
 
-            %{
-              worker: worker,
-              agent_count: 0,
-              lost_count: 0,
-              absent_count: 0,
-              uncertain_count: uncertain_count,
-              recovery_pending: true
-            }
+              %{
+                worker: worker,
+                agent_count: 0,
+                lost_count: 0,
+                absent_count: 0,
+                uncertain_count: uncertain_count,
+                recovery_pending: true
+              }
 
-          {:accepted, worker} ->
-            persist_agents_snapshot(
-              worker,
-              session,
-              remote_agents,
-              snapshot_started_at,
-              agent_now,
-              lease_now,
-              reconcile_after_ms
-            )
-        end
-      end)
+            {:accepted, worker} ->
+              persist_agents_snapshot(
+                worker,
+                session,
+                remote_agents,
+                snapshot_started_at,
+                agent_now,
+                lease_now,
+                reconcile_after_ms
+              )
+          end
+        end,
+        mode: :immediate
+      )
 
     case result do
       {:ok, summary} ->
@@ -149,7 +154,12 @@ defmodule PtcManager.Herdr.Sync do
         mark_degraded(session, reason, stale_after_ms, agent_now, lease_now)
     end
   rescue
-    error -> mark_degraded(session, error, stale_after_ms, agent_now, lease_now)
+    # A busy database says nothing about Herdr: skip this cycle and let the
+    # next snapshot try again instead of degrading the worker.
+    error ->
+      if RepoTransaction.busy?(error),
+        do: {:error, :database_busy},
+        else: mark_degraded(session, error, stale_after_ms, agent_now, lease_now)
   end
 
   defp persist_agents_snapshot(
@@ -762,18 +772,21 @@ defmodule PtcManager.Herdr.Sync do
 
   defp mark_degraded(session, reason, stale_after_ms, agent_now, lease_now) do
     result =
-      Repo.transaction(fn ->
-        worker =
-          upsert_worker(session, "degraded", nil, %{
-            healthy_snapshot_count: 0,
-            coordinator_incarnation_id: nil
-          })
+      Repo.transaction(
+        fn ->
+          worker =
+            upsert_worker(session, "degraded", nil, %{
+              healthy_snapshot_count: 0,
+              coordinator_incarnation_id: nil
+            })
 
-        {lost_count, uncertain_count} =
-          mark_stale_runs_lost(worker, agent_now, stale_after_ms, lease_now)
+          {lost_count, uncertain_count} =
+            mark_stale_runs_lost(worker, agent_now, stale_after_ms, lease_now)
 
-        %{worker: worker, lost_count: lost_count, uncertain_count: uncertain_count}
-      end)
+          %{worker: worker, lost_count: lost_count, uncertain_count: uncertain_count}
+        end,
+        mode: :immediate
+      )
 
     case result do
       {:ok, summary} ->
@@ -834,7 +847,7 @@ defmodule PtcManager.Herdr.Sync do
          _agent_now,
          lease_now
        )
-       when run_state in @terminal_states and agent_state not in @terminal_states do
+       when run_state in @terminal_states and agent_state in @active_agent_states do
     case owned_job(run) do
       %Job{fencing_token: token, state: state} = job
       when token == run.fencing_token and
@@ -853,6 +866,13 @@ defmodule PtcManager.Herdr.Sync do
         :ok
     end
   end
+
+  # Herdr restores every pane as `idle` after a restart, and a finished agent
+  # keeps its pane until the retained worktree is removed. Neither is a writer,
+  # so only an active status may re-park a job whose run already ended.
+  defp reconcile_job(%AgentRun{state: run_state}, agent_state, _agent_now, _lease_now)
+       when run_state in @terminal_states and agent_state not in @terminal_states,
+       do: :ok
 
   defp reconcile_job(%AgentRun{} = run, agent_state, agent_now, lease_now) do
     case owned_job(run) do
@@ -1108,7 +1128,7 @@ defmodule PtcManager.Herdr.Sync do
          reconcile_after_ms,
          lifecycle_now
        ) do
-    observed_names = MapSet.new(normalized, & &1.agent_name)
+    observed_states = Map.new(normalized, &{&1.agent_name, &1.state})
 
     Job
     |> where(
@@ -1126,9 +1146,17 @@ defmodule PtcManager.Herdr.Sync do
 
       cond do
         PtcManager.Reviews.held?(job) ->
+          settle_held_reconciling_job(
+            job,
+            run,
+            Map.get(observed_states, attempt_name),
+            old_enough == true,
+            lifecycle_now
+          )
+
           false
 
-        !old_enough || MapSet.member?(observed_names, attempt_name) ->
+        !old_enough || Map.has_key?(observed_states, attempt_name) ->
           false
 
         job.absence_observed_at ->
@@ -1139,6 +1167,42 @@ defmodule PtcManager.Herdr.Sync do
           false
       end
     end)
+  end
+
+  # A paused or manual review parked in `reconciling` keeps its slot only while
+  # its agent may still be writing. Once the implementer run is terminal and the
+  # snapshot shows the attempt absent or not active, the job returns to
+  # `blocked`, where a finished implementer releases capacity and the retained
+  # work waits for the maintainer's decision. A `reconciling` stamp without a
+  # timestamp came from a recovery that already confirmed the stop.
+  defp settle_held_reconciling_job(job, run, observed_state, old_enough, lifecycle_now) do
+    settled? =
+      match?(%AgentRun{state: state} when state in @terminal_states, run) and
+        (is_nil(job.reconciling_at) or old_enough) and
+        observed_state not in @active_agent_states
+
+    if settled? do
+      {updated, _rows} =
+        Job
+        |> where(
+          [candidate],
+          candidate.id == ^job.id and candidate.state == "reconciling" and
+            candidate.fencing_token == ^job.fencing_token
+        )
+        |> Repo.update_all(
+          set: [
+            state: "blocked",
+            lease_expires_at: nil,
+            reconciling_at: nil,
+            absence_observed_at: nil,
+            updated_at: lifecycle_now
+          ]
+        )
+
+      if updated == 1, do: insert_reconciliation_audit!(job, "job.retained_agent_settled")
+    end
+
+    :ok
   end
 
   defp record_absence_observation(job, lease_now, lifecycle_now) do
