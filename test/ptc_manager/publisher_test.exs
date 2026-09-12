@@ -1225,6 +1225,50 @@ defmodule PtcManager.PublisherTest do
     assert repaired_job.result_diff_digest == verified.diff_digest
   end
 
+  test "a head PtcManager never verified still offers the repair buttons" do
+    {job, publication, _result} = published_publication_fixture()
+    remote = remote_status(job, publication, String.duplicate("e", 40))
+    assert {:ok, blocked} = Publications.record_remote_status(publication.id, remote)
+
+    keys =
+      blocked
+      |> PtcManager.MaintainerActions.Catalog.pull_request_actions()
+      |> Enum.map(& &1.key)
+      |> Enum.sort()
+
+    # Fix and merge is the only contextual repair trigger a repository ships.
+    assert keys == ["repair_and_merge_pr"]
+
+    # Every other blocked reason keeps its hands off the pull request.
+    other =
+      blocked
+      |> PtcManager.Operations.PrPublication.changeset(%{last_error: "Something else entirely."})
+      |> Repo.update!()
+
+    assert PtcManager.MaintainerActions.Catalog.pull_request_actions(other) == []
+  end
+
+  defp remote_status(job, publication, head_sha) do
+    %{
+      state: "open",
+      pr_number: publication.pr_number,
+      pr_url: publication.pr_url,
+      head_sha: head_sha,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: publication.remote_base_sha || String.duplicate("a", 40),
+      base_ref: "main",
+      base_repository: base_repository(job),
+      draft: false,
+      checks_state: "pending",
+      checks_total: 2,
+      checks_failed: 0,
+      checks_pending: 2,
+      mergeability: "unknown",
+      mergeable_state: "unknown"
+    }
+  end
+
   test "a changed GitHub PR base blocks the publication lineage" do
     {job, publication, result} = published_publication_fixture()
 
