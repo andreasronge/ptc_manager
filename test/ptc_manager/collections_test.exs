@@ -279,6 +279,27 @@ defmodule PtcManager.CollectionsTest do
                  remote
                  | github_assignees: %{"logins" => ["x"]}
                })
+
+      # The console's own agent assigns the issue while it works; that claim
+      # must not stop the console from running the issue again.
+      repository =
+        repository
+        |> PtcManager.Operations.Repository.changeset(%{github_viewer_login: "console-bot"})
+        |> Repo.update!()
+
+      job = %{job | repository: repository}
+
+      assert :ok =
+               PtcManager.AutoImplementation.dispatch_allowed(job, %{
+                 remote
+                 | github_assignees: %{"logins" => ["console-bot"]}
+               })
+
+      assert {:error, :issue_claimed} =
+               PtcManager.AutoImplementation.dispatch_allowed(job, %{
+                 remote
+                 | github_assignees: %{"logins" => ["console-bot", "x"]}
+               })
     end
   end
 
@@ -453,6 +474,68 @@ defmodule PtcManager.CollectionsTest do
   end
 
   describe "recovery and escalation" do
+    test "a member answered on GitHub after its blocker report is admitted again, once" do
+      repository = repository_fixture(%{github_viewer_login: "console-bot"})
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      run = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+      job = job_for(first)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      job
+      |> Job.changeset(%{
+        state: "failed",
+        stop_report: %{
+          "reason_code" => "ambiguous_requirement",
+          "summary" => "Which shape?",
+          "detail" => "d",
+          "progress" => "none"
+        },
+        stop_reported_at: now,
+        ended_at: now
+      })
+      |> Repo.update!()
+
+      # The stop asks the question on the issue; the agent labels it and, as
+      # every agent does, assigns it to the console's own identity.
+      :ok = Collections.reconcile(repository.id)
+      assert [%AgentAction{} = ask] = collection_actions(repository)
+      finish_action(ask, "needs-decision")
+
+      first
+      |> Issue.changeset(%{
+        workflow_label: "ptc:needs-decision",
+        github_assignees: %{"logins" => ["console-bot"]},
+        content_digest: "asked"
+      })
+      |> Repo.update!()
+
+      :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_kind: "child_needs_decision"} = Repo.get!(Run, run.id)
+
+      # The maintainer answers and marks the issue ready again.
+      Issue
+      |> Repo.get!(first.id)
+      |> Issue.changeset(%{workflow_label: "ptc:ready", content_digest: "answered"})
+      |> Repo.update!()
+
+      :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "active"} = Repo.get!(Run, run.id)
+      :ok = Collections.reconcile(repository.id)
+
+      assert %Job{state: "queued"} = again = job_for(first)
+      assert again.id != job.id
+      assert again.approval_id != job.approval_id
+      assert Enum.any?(steps(run), &(&1.kind == "admit" and &1.scope == "1:after:#{job.id}"))
+
+      # Stable: no second admission and no pause on the next passes.
+      :ok = Collections.reconcile(repository.id)
+      :ok = Collections.reconcile(repository.id)
+      assert job_for(first).id == again.id
+      assert %Run{state: "active"} = Repo.get!(Run, run.id)
+      assert Repo.aggregate(Job, :count) == 2
+    end
+
     test "a stop report is retried once; the second stop pauses and escalates on the umbrella" do
       repository = repository_fixture()
       {umbrella, [first]} = collection_fixture(repository, [1])

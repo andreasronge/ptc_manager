@@ -3465,14 +3465,15 @@ defmodule PtcManager.Operations do
 
   defp current_approvable_snapshot(repo, issue_id, mode) do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
+         repository = repo.get!(Repository, issue.repository_id),
          :ok <- automatic_approval_allowed(repo, issue, mode),
          :ok <- issue_is_open(issue),
-         :ok <- issue_unclaimed(issue),
+         :ok <- issue_unclaimed(issue, repository),
          :ok <- issue_workflow_allows_implementation(issue),
          :ok <- issue_dependencies_resolved(repo, issue),
          :ok <- issue_not_collection(issue),
          {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
-      {:ok, {issue, proposal, repo.get!(Repository, issue.repository_id)}}
+      {:ok, {issue, proposal, repository}}
     else
       nil -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -4853,23 +4854,21 @@ defmodule PtcManager.Operations do
     if Issue.collection?(issue), do: {:error, :issue_is_collection}, else: :ok
   end
 
-  defp issue_unclaimed(%Issue{github_assignment_projected: false}),
+  defp issue_unclaimed(%Issue{github_assignment_projected: false}, _repository),
     do: {:error, :issue_claim_unknown}
 
-  defp issue_unclaimed(%Issue{
-         github_assignment_projected: true,
-         github_assignees: %{"logins" => []}
-       }),
-       do: :ok
+  defp issue_unclaimed(
+         %Issue{github_assignment_projected: true, github_assignees: %{"logins" => logins}} =
+           issue,
+         repository
+       )
+       when is_list(logins) do
+    if Issue.claimed_by_other?(issue, repository),
+      do: {:error, :issue_claimed},
+      else: :ok
+  end
 
-  defp issue_unclaimed(%Issue{
-         github_assignment_projected: true,
-         github_assignees: %{"logins" => logins}
-       })
-       when is_list(logins),
-       do: {:error, :issue_claimed}
-
-  defp issue_unclaimed(%Issue{}), do: {:error, :issue_claim_unknown}
+  defp issue_unclaimed(%Issue{}, _repository), do: {:error, :issue_claim_unknown}
 
   defp issue_workflow_allows_implementation(%Issue{
          workflow_label_conflict: false,

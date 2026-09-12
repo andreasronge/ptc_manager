@@ -26,6 +26,8 @@ defmodule PtcManager.Collections do
   @actor "system:collection"
   @outstanding_states ~w(queued running sync_pending)
   @max_action_attempts 2
+  # A job in one of these states is over; the member may be admitted again.
+  @retired_job_states ~w(failed cancelled lost)
   @max_closeout_attempts 3
   @live_job_states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
 
@@ -248,7 +250,10 @@ defmodule PtcManager.Collections do
       not member?(repo, run, issue.number) ->
         {:error, :not_a_member}
 
-      repo.exists?(from job in Job, where: job.issue_id == ^issue.id) ->
+      repo.exists?(
+        from job in Job,
+          where: job.issue_id == ^issue.id and job.state not in ^@retired_job_states
+      ) ->
         {:error, :already_attempted}
 
       linked_publication?(repo, issue) ->
@@ -277,7 +282,7 @@ defmodule PtcManager.Collections do
       remote.sub_issues["total"] > 0 ->
         {:error, :issue_is_collection}
 
-      remote.github_assignees != %{"logins" => []} ->
+      Issue.claimed_by_other?(remote, job.repository) ->
         {:error, :issue_claimed}
 
       linked_publication?(Repo, job.issue) ->
@@ -701,15 +706,30 @@ defmodule PtcManager.Collections do
         |> Map.put(:ask_retry, true)
 
       {:done, _action} ->
-        base(member, :attention, job, publication)
-        |> attention(
-          "child_needs_decision",
-          "##{issue.number} is waiting for the maintainer's answer on GitHub.",
-          issue.id,
-          "member:#{issue.number}:label:#{issue.workflow_label}:#{issue.content_digest}"
-        )
+        # A ready label after the question was asked is the maintainer's
+        # answer: the member starts over under a fresh approval.
+        if ready_again?(issue) do
+          base(member, :ready, job, publication)
+        else
+          base(member, :attention, job, publication)
+          |> attention(
+            "child_needs_decision",
+            "##{issue.number} is waiting for the maintainer's answer on GitHub.",
+            issue.id,
+            "member:#{issue.number}:label:#{issue.workflow_label}:#{issue.content_digest}"
+          )
+        end
     end
   end
+
+  defp ready_again?(%Issue{
+         state: "open",
+         workflow_label: "ptc:ready",
+         workflow_label_conflict: false
+       }),
+       do: true
+
+  defp ready_again?(_issue), do: false
 
   defp base(member, status, job, publication) do
     %{
@@ -1012,15 +1032,20 @@ defmodule PtcManager.Collections do
 
   defp admissible(run, statuses) do
     Enum.filter(statuses, fn status ->
-      status.status == :ready and not step_exists?(run, "admit", "#{status.number}")
+      status.status == :ready and not step_exists?(run, "admit", admit_scope(status))
     end)
   end
 
   defp admit(run, status) do
-    apply_action(run, "admit", "#{status.number}", fn ->
+    apply_action(run, "admit", admit_scope(status), fn ->
       Operations.approve_collection_issue(status.issue.id)
     end)
   end
+
+  # One admission per answered attempt: a member re-admitted after job N is a
+  # different step from its first admission.
+  defp admit_scope(%{number: number, job: %Job{id: job_id}}), do: "#{number}:after:#{job_id}"
+  defp admit_scope(%{number: number}), do: "#{number}"
 
   defp closeout_or_finish(run, umbrella, statuses) do
     case action_attempt(run, "closeout", "attempt:", @max_closeout_attempts) do
@@ -1259,9 +1284,7 @@ defmodule PtcManager.Collections do
   end
 
   defp member_pause_cleared?(%Run{pause_kind: "child_needs_decision"}, status) do
-    status.status == :closed_completed or
-      (status.issue != nil and status.issue.state == "open" and
-         status.issue.workflow_label == "ptc:ready" and not status.issue.workflow_label_conflict)
+    status.status == :closed_completed or (status.issue != nil and ready_again?(status.issue))
   end
 
   defp member_pause_cleared?(%Run{pause_kind: "child_closed_without_completion"}, status),
