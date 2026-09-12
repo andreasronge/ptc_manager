@@ -520,6 +520,10 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert sudoers =~ "/usr/local/bin/ptc-manager-operation-recover *"
     assert helper =~ "operation cgroup does not match its fenced identity"
     assert helper =~ "cgroup.kill"
+    assert helper =~ ~s(exec 8<"$lock_path")
+    refute helper =~ ~s(exec 8>>"$lock_path")
+    assert helper =~ "cannot open operation slot lock"
+    assert helper =~ "exit 74"
   end
 
   test "deployment failure policy classifies the effect boundary" do

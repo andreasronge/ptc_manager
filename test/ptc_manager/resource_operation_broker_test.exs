@@ -15,7 +15,7 @@ defmodule PtcManager.ResourceOperationBrokerTest do
         {:recover, operation}
       )
 
-      :recovered
+      Application.get_env(:ptc_manager, :operation_recovery_test_result, :recovered)
     end
   end
 
@@ -275,6 +275,94 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     assert_receive {:recover, %{id: id}}
     assert id == operation.id
     assert Repo.get!(ResourceOperation, id).state == "lost"
+  end
+
+  test "repeated recovery contention enters maintenance after the retry bound" do
+    configure_recovery({:retry, "operation slot lock is still occupied"})
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    previous_timeout = Application.get_env(:ptc_manager, :resource_operation_recovery_retry_ms)
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    Application.put_env(:ptc_manager, :resource_operation_recovery_retry_ms, 30_000)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :operational_mode, previous_mode)
+      Application.put_env(:ptc_manager, :resource_operation_recovery_retry_ms, previous_timeout)
+    end)
+
+    operation = stale_running_operation("broker-recovery-retry")
+    ResourceOperationBroker.sweep()
+
+    first_retry = Repo.get!(ResourceOperation, operation.id)
+    assert first_retry.state == "recovery_pending"
+    assert first_retry.last_error =~ "Recovery is waiting"
+    assert PtcManager.OperationalMode.mode() == :active
+
+    ResourceOperationBroker.sweep()
+
+    escalated = Repo.get!(ResourceOperation, operation.id)
+    assert escalated.state == "recovery_pending"
+    assert escalated.last_error =~ "exceeded its retry bound"
+    assert PtcManager.OperationalMode.mode() == :maintenance
+  end
+
+  test "a recovery evaluation error is surfaced immediately" do
+    configure_recovery({:error, {:operation_recovery_failed, 74, "cannot open lock"}})
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous_mode) end)
+
+    operation = stale_running_operation("broker-recovery-error")
+    ResourceOperationBroker.sweep()
+
+    failed = Repo.get!(ResourceOperation, operation.id)
+    assert failed.state == "recovery_pending"
+    assert failed.last_error =~ "could not evaluate"
+    assert PtcManager.OperationalMode.mode() == :maintenance
+  end
+
+  defp configure_recovery(result) do
+    previous = Application.get_env(:ptc_manager, :resource_operation_recovery)
+    Application.put_env(:ptc_manager, :resource_operation_recovery, Recovery)
+    Application.put_env(:ptc_manager, :operation_recovery_test_pid, self())
+    Application.put_env(:ptc_manager, :operation_recovery_test_result, result)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :resource_operation_recovery, previous)
+      Application.delete_env(:ptc_manager, :operation_recovery_test_pid)
+      Application.delete_env(:ptc_manager, :operation_recovery_test_result)
+    end)
+  end
+
+  defp stale_running_operation(invocation_id) do
+    context = managed_run_fixture()
+    stale = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    {:ok, _operation} =
+      PtcManager.ResourceOperations.request(
+        %{
+          worker_id: context.worker.id,
+          repository_id: context.repository.id,
+          job_id: context.job.id,
+          agent_run_id: context.run.id,
+          invocation_id: invocation_id,
+          label: "test",
+          priority: 300,
+          state: "queued"
+        },
+        stale
+      )
+
+    {:ok, operation} = PtcManager.ResourceOperations.claim_next(context.worker.id, stale)
+
+    {:ok, operation} =
+      PtcManager.ResourceOperations.mark_running(
+        operation.id,
+        operation.attempt_token,
+        %{},
+        stale
+      )
+
+    operation
   end
 
   defp managed_run_fixture do
