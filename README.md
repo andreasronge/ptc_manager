@@ -1119,6 +1119,14 @@ therefore installs `deploy/ptc-manager-needrestart.conf` as
 `ptc_manager` and `ptc_manager-herdr` alone, so the deployment stays the only
 thing that restarts them.
 
+The agents' build, test and verify runs execute inside `ptc_manager-herdr`
+on the same four cores as the console. Under that load the console's process
+was starved and swapped out, and a SQLite write lock it held stayed held for
+seconds, which every other writer logged as "database is locked". The
+deployment therefore installs `deploy/ptc_manager-resources.conf` as a
+`ptc_manager.service` drop-in that raises the console's CPU and IO weight and
+protects 512 MB of its memory from reclaim.
+
 The Configuration page displays the derived checkout path. A repository can be
 removed there after explicit confirmation, but only when all managed jobs,
 actions, automation invocations, deployments, resource operations, and worktree

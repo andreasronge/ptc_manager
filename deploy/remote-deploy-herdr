@@ -135,6 +135,7 @@ gh_label_candidate="/tmp/ptc-manager-worker-gh-label-${release_id}"
 operation_wrapper_candidate="/tmp/ptc-operation-${release_id}"
 operation_recovery_candidate="/tmp/ptc-manager-operation-recover-${release_id}"
 needrestart_candidate="/tmp/ptc-manager-needrestart.conf-${release_id}"
+resources_dropin_candidate="/tmp/ptc-manager-resources.conf-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
 herdr_launch_candidate="/tmp/ptc-manager-herdr-launch-${release_id}"
 sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
@@ -165,6 +166,7 @@ cleanup_remote() {
     "$operation_wrapper_candidate" \
     "$operation_recovery_candidate" \
     "$needrestart_candidate" \
+    "$resources_dropin_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
     "$self_deploy_access_candidate" "$health_snapshot_candidate" \
@@ -1397,6 +1399,7 @@ tar -xOf "$source_archive" deploy/ptc-manager-worker-gh-label >"$gh_label_candid
 tar -xOf "$source_archive" deploy/ptc-operation >"$operation_wrapper_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-operation-recover >"$operation_recovery_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-needrestart.conf >"$needrestart_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-resources.conf >"$resources_dropin_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-launch >"$herdr_launch_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
@@ -1664,6 +1667,9 @@ sudo install -o root -g root -m 0755 "$operation_recovery_candidate" \
 sudo install -d -o root -g root -m 0755 /etc/needrestart/conf.d
 sudo install -o root -g root -m 0644 "$needrestart_candidate" \
   /etc/needrestart/conf.d/ptc-manager.conf
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/ptc_manager.service.d
+sudo install -o root -g root -m 0644 "$resources_dropin_candidate" \
+  /etc/systemd/system/ptc_manager.service.d/50-ptc-manager-resources.conf
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0644 "$agent_context_candidate" \
   /usr/local/libexec/ptc-manager-agent-context

@@ -20,6 +20,7 @@ defmodule PtcManager.Herdr.Sync do
   alias PtcManager.RepoTransaction
   @terminal_states ~w(done failed lost)
   @active_agent_states ~w(queued starting working blocked)
+  @touch_interval_ms 60_000
   @terminal_action_states ~w(done failed cancelled)
   @superseded_status "Superseded duplicate of the action-owned Herdr run."
   @recoverable_attention_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation)
@@ -209,6 +210,8 @@ defmodule PtcManager.Herdr.Sync do
         end
       end)
       |> MapSet.new()
+
+    refresh_heartbeats(observed_run_ids, agent_now)
 
     lost_count =
       mark_missing_runs_lost(
@@ -546,7 +549,7 @@ defmodule PtcManager.Herdr.Sync do
       |> Map.put(:status_text, run.status_text)
       |> preserve_identity(run)
 
-    run |> AgentRun.changeset(attrs) |> Repo.update!()
+    update_run!(run, attrs)
   end
 
   defp upsert_agent_run(
@@ -561,7 +564,7 @@ defmodule PtcManager.Herdr.Sync do
       |> Map.put(:ended_at, nil)
       |> preserve_identity(run)
 
-    run |> AgentRun.changeset(attrs) |> Repo.update!()
+    update_run!(run, attrs)
   end
 
   defp upsert_agent_run(
@@ -578,7 +581,7 @@ defmodule PtcManager.Herdr.Sync do
       |> Map.put(:status_text, "Retained with its pull request; waiting for merge or closure.")
       |> preserve_identity(run)
 
-    run |> AgentRun.changeset(attrs) |> Repo.update!()
+    update_run!(run, attrs)
   end
 
   defp upsert_agent_run(
@@ -593,7 +596,7 @@ defmodule PtcManager.Herdr.Sync do
       |> Map.put(:ended_at, nil)
       |> preserve_identity(run)
 
-    run |> AgentRun.changeset(attrs) |> Repo.update!()
+    update_run!(run, attrs)
   end
 
   defp upsert_agent_run(
@@ -616,7 +619,7 @@ defmodule PtcManager.Herdr.Sync do
       |> Map.put(:started_at, run.started_at)
       |> Map.put(:ended_at, run.ended_at)
 
-    run |> AgentRun.changeset(attrs) |> Repo.update!()
+    update_run!(run, attrs)
   end
 
   defp upsert_agent_run(
@@ -638,7 +641,7 @@ defmodule PtcManager.Herdr.Sync do
 
   defp upsert_agent_run(_worker, %AgentRun{} = run, attrs) do
     attrs = attrs |> Map.put(:started_at, run.started_at) |> preserve_identity(run)
-    run |> AgentRun.changeset(attrs) |> Repo.update!()
+    update_run!(run, attrs)
   end
 
   defp preserve_identity(attrs, run) do
@@ -647,6 +650,26 @@ defmodule PtcManager.Herdr.Sync do
       if Map.get(acc, key) in [nil, ""], do: Map.put(acc, key, Map.get(run, key)), else: acc
     end)
   end
+
+  # Most ticks observe the same agents in the same state. Writing the heartbeat
+  # through the changeset rewrote every run and its `updated_at` inside the
+  # write transaction on every tick; an unchanged run now produces an empty
+  # changeset, and one statement refreshes every observed heartbeat.
+  defp update_run!(run, attrs) do
+    run |> AgentRun.changeset(Map.delete(attrs, :last_heartbeat_at)) |> Repo.update!()
+  end
+
+  defp refresh_heartbeats(run_ids, now) do
+    ids = MapSet.to_list(run_ids)
+
+    AgentRun
+    |> where([run], run.id in ^ids and run.state not in ^@terminal_states)
+    |> Repo.update_all(set: [last_heartbeat_at: now])
+  end
+
+  # Allocation timestamps order least-recently-used cleanup; a live worktree
+  # is touched once a minute instead of on every tick.
+  defp touch_cutoff(now), do: DateTime.add(now, -@touch_interval_ms, :millisecond)
 
   defp insert_agent_run(worker, attrs) do
     %AgentRun{}
@@ -1295,11 +1318,15 @@ defmodule PtcManager.Herdr.Sync do
         else: retained_workspace
 
     if is_binary(workspace) and workspace != "" do
+      cutoff = touch_cutoff(now)
+
       WorktreeAllocation
       |> where(
         [allocation],
         allocation.job_id == ^job_id and
-          allocation.state not in ["terminal", "cleaning", "removed"]
+          allocation.state not in ["terminal", "cleaning", "removed"] and
+          (allocation.herdr_workspace != ^workspace or is_nil(allocation.herdr_workspace) or
+             is_nil(allocation.last_used_at) or allocation.last_used_at < ^cutoff)
       )
       |> Repo.update_all(set: [herdr_workspace: workspace, last_used_at: now, updated_at: now])
 
@@ -1360,6 +1387,8 @@ defmodule PtcManager.Herdr.Sync do
   defp reconcile_worktree_state(_job_id, _state, _now, _recovered_retained?), do: :ok
 
   defp mark_worktree_active(job_id, now, recovered_retained?) do
+    cutoff = touch_cutoff(now)
+
     WorktreeAllocation
     |> join(:inner, [allocation], job in Job, on: job.id == allocation.job_id)
     |> where(
@@ -1368,7 +1397,9 @@ defmodule PtcManager.Herdr.Sync do
         allocation.state not in ["terminal", "cleaning", "removed"] and
         (allocation.state != "attention" or
            job.state in ^@recoverable_attention_job_states or
-           (^recovered_retained? and allocation.last_error == ^@missing_retained_error))
+           (^recovered_retained? and allocation.last_error == ^@missing_retained_error)) and
+        (allocation.state != "active" or not is_nil(allocation.last_error) or
+           is_nil(allocation.last_used_at) or allocation.last_used_at < ^cutoff)
     )
     |> Repo.update_all(
       set: [state: "active", last_error: nil, last_used_at: now, updated_at: now]

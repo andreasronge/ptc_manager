@@ -1360,6 +1360,43 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.get!(Job, job.id).state == "reconciling"
   end
 
+  test "an unchanged snapshot refreshes heartbeats without rewriting runs or allocations" do
+    %{job: job, run: run, worker: worker} =
+      managed_job_fixture("steady", %{agent_name: :deterministic})
+
+    allocation =
+      %WorktreeAllocation{}
+      |> WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: "active",
+        path: "/tmp/steady-worktree",
+        herdr_workspace: "steady-workspace",
+        last_used_at: now()
+      })
+      |> Repo.insert!()
+
+    remote =
+      remote_agent("working")
+      |> Map.put("name", run.agent_name)
+      |> Map.put("workspace_id", "steady-workspace")
+
+    Process.put(:herdr_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "steady")
+
+    settled_run = Repo.get!(AgentRun, run.id)
+    settled_allocation = Repo.get!(WorktreeAllocation, allocation.id)
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "steady")
+
+    refreshed_run = Repo.get!(AgentRun, run.id)
+    assert DateTime.compare(refreshed_run.last_heartbeat_at, settled_run.last_heartbeat_at) == :gt
+    assert refreshed_run.updated_at == settled_run.updated_at
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).updated_at ==
+             settled_allocation.updated_at
+  end
+
   defp active_repair_run_fixture(session, worker_attrs \\ %{}) do
     repository = repository_fixture()
 
