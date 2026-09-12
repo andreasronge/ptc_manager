@@ -1282,6 +1282,84 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.get!(Job, job.id).state == "failed"
   end
 
+  test "a restored idle pane for a finished retained agent does not re-park a paused job" do
+    %{job: job, run: run} =
+      managed_job_fixture("restored-idle", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    job
+    |> Job.changeset(%{state: "blocked", review_state: "paused", lease_expires_at: nil})
+    |> Repo.update!()
+
+    for observed <- ~w(idle done unknown) do
+      Process.put(
+        :herdr_result,
+        {:ok, [remote_agent(observed) |> Map.put("name", run.agent_name)]}
+      )
+
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "restored-idle")
+      assert Repo.get!(Job, job.id).state == "blocked"
+      assert Repo.get!(AgentRun, run.id).state == "done"
+    end
+
+    Process.put(
+      :herdr_result,
+      {:ok, [remote_agent("working") |> Map.put("name", run.agent_name)]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "restored-idle")
+    assert Repo.get!(Job, job.id).state == "reconciling"
+  end
+
+  test "a held job parked in reconciling settles back to blocked once its agent is not active" do
+    %{job: job, run: run} =
+      managed_job_fixture("held-settle", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    idle = remote_agent("idle") |> Map.put("name", run.agent_name)
+
+    for {observed, review_state} <- [{[], "paused"}, {[idle], "manual"}] do
+      job
+      |> Job.changeset(%{
+        state: "reconciling",
+        review_state: review_state,
+        reconciling_at: nil,
+        absence_observed_at: nil,
+        last_error: "Retained-agent recovery was interrupted; work is preserved."
+      })
+      |> Repo.update!()
+
+      Process.put(:herdr_result, {:ok, observed})
+      assert {:ok, %{absent_count: 0}} = Sync.sync(client: FakeClient, session: "held-settle")
+
+      settled = Repo.get!(Job, job.id) |> Repo.preload(:agent_runs)
+      assert settled.state == "blocked"
+      assert settled.review_state == review_state
+      assert settled.last_error =~ "work is preserved"
+      assert Operations.review_capacity_released?(settled)
+    end
+
+    job
+    |> Job.changeset(%{state: "reconciling", review_state: "paused", reconciling_at: now()})
+    |> Repo.update!()
+
+    Process.put(
+      :herdr_result,
+      {:ok, [remote_agent("working") |> Map.put("name", run.agent_name)]}
+    )
+
+    assert {:ok, _summary} =
+             Sync.sync(client: FakeClient, session: "held-settle", reconcile_after_ms: 0)
+
+    assert Repo.get!(Job, job.id).state == "reconciling"
+  end
+
   defp active_repair_run_fixture(session, worker_attrs \\ %{}) do
     repository = repository_fixture()
 

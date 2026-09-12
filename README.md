@@ -1111,6 +1111,14 @@ because nothing is drained around it. Each repository's **service access**
 health names what is outstanding: a grant that is missing, a grant loaded but
 waiting for a service to start, or access already in force.
 
+Ubuntu's unattended upgrades run `needrestart`, which restarts every service
+linked against an upgraded library; a libc update once restarted both units
+that way and every retained session came back as an idle pane. The deployment
+therefore installs `deploy/ptc-manager-needrestart.conf` as
+`/etc/needrestart/conf.d/ptc-manager.conf`, which tells `needrestart` to leave
+`ptc_manager` and `ptc_manager-herdr` alone, so the deployment stays the only
+thing that restarts them.
+
 The Configuration page displays the derived checkout path. A repository can be
 removed there after explicit confirmation, but only when all managed jobs,
 actions, automation invocations, deployments, resource operations, and worktree
