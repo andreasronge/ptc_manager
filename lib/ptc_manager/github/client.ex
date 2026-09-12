@@ -138,7 +138,7 @@ defmodule PtcManager.GitHub.Client do
     variables =
       Map.merge(variables, %{"owner" => repository.github_owner, "name" => repository.github_name})
 
-    query |> graphql(variables) |> review_context_item()
+    query |> graphql(variables, review_context: true) |> review_context_item()
   end
 
   @doc false
@@ -342,30 +342,50 @@ defmodule PtcManager.GitHub.Client do
 
   defp graphql(query, variables, opts \\ []) do
     payload = Jason.encode!(%{"query" => query, "variables" => variables})
-    repository_lookup? = opts[:repository_lookup] == true
 
     with :ok <- require_graphql_token(),
          {:ok, body} <- post(@graphql_url, payload),
          {:ok, decoded} <- Jason.decode(body) do
-      case decoded do
-        %{"data" => %{"repository" => nil} = data, "errors" => errors}
-        when repository_lookup? ->
-          if Enum.any?(errors, &(is_map(&1) and &1["type"] == "NOT_FOUND")),
-            do: {:ok, data},
-            else: {:error, {:github_graphql_error, bounded_errors(errors)}}
-
-        %{"errors" => [_error | _rest] = errors} ->
-          {:error, {:github_graphql_error, bounded_errors(errors)}}
-
-        %{"data" => data} when is_map(data) ->
-          {:ok, data}
-
-        _unexpected ->
-          {:error, :unexpected_github_response}
-      end
+      decode_graphql_response(decoded, opts)
     else
       {:error, %Jason.DecodeError{} = reason} -> {:error, {:invalid_github_json, reason}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # GitHub answers a number a repository does not have with `item: null` *and* a
+  # NOT_FOUND error, so a plain "any errors" rule cannot tell that settled answer
+  # from a rate limit. Only errors that are all NOT_FOUND, and all about the item
+  # this query asked for, count as an answer.
+  def decode_graphql_response(decoded, opts \\ []) do
+    repository_lookup? = opts[:repository_lookup] == true
+    review_context? = opts[:review_context] == true
+
+    case decoded do
+      %{"data" => %{"repository" => nil} = data, "errors" => errors}
+      when repository_lookup? ->
+        if Enum.any?(errors, &(is_map(&1) and &1["type"] == "NOT_FOUND")),
+          do: {:ok, data},
+          else: {:error, {:github_graphql_error, bounded_errors(errors)}}
+
+      %{"data" => %{"repository" => %{"item" => nil}} = data, "errors" => [_ | _] = errors}
+      when review_context? ->
+        if Enum.all?(
+             errors,
+             &match?(%{"type" => "NOT_FOUND", "path" => ["repository", "item"]}, &1)
+           ),
+           do: {:ok, data},
+           else: {:error, {:github_graphql_error, bounded_errors(errors)}}
+
+      %{"errors" => [_error | _rest] = errors} ->
+        {:error, {:github_graphql_error, bounded_errors(errors)}}
+
+      %{"data" => data} when is_map(data) ->
+        {:ok, data}
+
+      _unexpected ->
+        {:error, :unexpected_github_response}
     end
   end
 

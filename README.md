@@ -191,8 +191,12 @@ limits). Links cannot widen the token's repository scope; out-of-repository link
 are identified as not fetched. A bare `#1234` always means this repository, so a
 number borrowed from another one resolves to an issue that does not exist here;
 that is recorded as missing context for the reviewer to weigh rather than failing
-the round, while a linked source GitHub never answered for still fails
-preparation so no review runs on partial requirements. Write a cross-repository
+the round. GitHub reports such a number with both a null item and a `NOT_FOUND`
+error, so only errors that are all `NOT_FOUND` and all about the requested item
+count as that answer; a rate limit riding alongside one, or any other unanswered
+linked source, still fails preparation so no review runs on partial requirements.
+The job's own issue is not a link: if that cannot be read there is nothing to
+review against, and the round fails. Write a cross-repository
 reference as `owner/repo#1234` or a full URL, and put essential
 cross-repository requirements in the approved issue. Document links support encoded paths and branch names containing
 slashes. Blob sizes are

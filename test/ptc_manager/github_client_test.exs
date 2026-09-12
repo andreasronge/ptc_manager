@@ -16,6 +16,38 @@ defmodule PtcManager.GitHubClientTest do
     :ok
   end
 
+  test "GitHub answers a missing number with both a null item and a NOT_FOUND error" do
+    # Verified against the API: repository ptc_manager, issue 1890.
+    answered = %{
+      "data" => %{"repository" => %{"item" => nil}},
+      "errors" => [
+        %{
+          "type" => "NOT_FOUND",
+          "path" => ["repository", "item"],
+          "message" => "Could not resolve to an issue or pull request with the number of 1890."
+        }
+      ]
+    }
+
+    assert {:ok, %{"repository" => %{"item" => nil}}} =
+             Client.decode_graphql_response(answered, review_context: true)
+
+    # Without the review-context opt the same body stays an error for other callers.
+    assert {:error, {:github_graphql_error, _}} = Client.decode_graphql_response(answered)
+
+    # A rate limit riding along with the absence is not an answer.
+    mixed = put_in(answered["errors"], answered["errors"] ++ [%{"type" => "RATE_LIMITED"}])
+
+    assert {:error, {:github_graphql_error, _}} =
+             Client.decode_graphql_response(mixed, review_context: true)
+
+    # Nor is a NOT_FOUND about some other part of the query.
+    elsewhere = put_in(answered["errors"], [%{"type" => "NOT_FOUND", "path" => ["repository"]}])
+
+    assert {:error, {:github_graphql_error, _}} =
+             Client.decode_graphql_response(elsewhere, review_context: true)
+  end
+
   test "an answered absence is settled, an unanswered question is not" do
     assert {:ok, %{"body" => "text"}} =
              Client.review_context_item(
