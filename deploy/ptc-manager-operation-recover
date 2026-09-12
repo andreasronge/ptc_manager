@@ -58,9 +58,20 @@ while [ "$(date +%s)" -le "$deadline" ]; do
   if [ "$requested_path" != - ] && [ -d "$requested_path" ] && ! grep -q 'populated 0' "$requested_path/cgroup.events"; then
     cgroup_empty=false
   fi
-  if [ "$cgroup_empty" = true ] && ( exec 8>>"$lock_path"; flock -n 8 ); then
-    [ "$requested_path" = - ] || [ ! -d "$requested_path" ] || rmdir -- "$requested_path"
-    exit 0
+  if [ "$cgroup_empty" = true ]; then
+    set +e
+    ( exec 8<"$lock_path"; flock -n 8 )
+    lock_status=$?
+    set -e
+
+    case "$lock_status" in
+      0)
+        [ "$requested_path" = - ] || [ ! -d "$requested_path" ] || rmdir -- "$requested_path"
+        exit 0
+        ;;
+      1) ;;
+      *) echo "cannot open operation slot lock" >&2; exit 74 ;;
+    esac
   fi
   sleep 0.1
 done

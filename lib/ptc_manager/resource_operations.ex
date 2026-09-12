@@ -181,6 +181,45 @@ defmodule PtcManager.ResourceOperations do
     |> Repo.all()
   end
 
+  def record_recovery_retry(id, attempt_token, reason, at \\ now(), retry_after_ms \\ 60_000) do
+    transition(id, attempt_token, ["recovery_pending"], fn operation ->
+      waiting? = String.starts_with?(operation.last_error || "", "Recovery is waiting:")
+      escalated? = String.starts_with?(operation.last_error || "", "Operation recovery exceeded")
+
+      cond do
+        escalated? ->
+          ResourceOperation.changeset(operation, %{})
+
+        waiting? and duration_ms(operation.last_heartbeat_at, at) >= retry_after_ms ->
+          ResourceOperation.changeset(operation, %{
+            last_error:
+              "Operation recovery exceeded its retry bound and requires maintainer attention: #{bounded(reason)}"
+          })
+
+        true ->
+          ResourceOperation.changeset(operation, %{
+            last_error: "Recovery is waiting: #{bounded(reason)}"
+          })
+      end
+    end)
+    |> case do
+      {:ok, %{last_error: "Operation recovery exceeded" <> _} = operation} ->
+        {:escalate, operation}
+
+      other ->
+        other
+    end
+  end
+
+  def record_recovery_error(id, attempt_token, reason) do
+    transition(id, attempt_token, ["recovery_pending"], fn operation ->
+      ResourceOperation.changeset(operation, %{
+        last_error:
+          "Operation recovery could not evaluate the fenced slot and requires maintainer attention: #{bounded(inspect(reason))}"
+      })
+    end)
+  end
+
   def release_recovered(id, attempt_token, reason, at \\ now()) do
     finish(
       id,
@@ -467,5 +506,7 @@ defmodule PtcManager.ResourceOperations do
   defp duration_ms(_from, nil), do: 0
   defp duration_ms(from, to), do: max(DateTime.diff(to, from, :millisecond), 0)
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+  defp bounded(value), do: value |> to_string() |> String.trim() |> String.slice(0, 700)
   defp notify, do: Operations.notify_changed(__MODULE__)
 end

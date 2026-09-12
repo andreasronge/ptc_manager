@@ -8,6 +8,7 @@ defmodule PtcManager.ResourceOperationBroker do
   import Ecto.Query
 
   alias PtcManager.ManagedOperationContext
+  alias PtcManager.OperationalMode
   alias PtcManager.Operations.{AgentAction, AgentRun, Job}
   alias PtcManager.Operations.ResourceOperation
   alias PtcManager.Repo
@@ -420,13 +421,44 @@ defmodule PtcManager.ResourceOperationBroker do
             )
 
         {:retry, reason} ->
-          _ = reason
-          :ok
+          retry_after_ms =
+            Application.get_env(:ptc_manager, :resource_operation_recovery_retry_ms, 60_000)
 
-        {:error, _reason} ->
-          :ok
+          case ResourceOperations.record_recovery_retry(
+                 operation.id,
+                 operation.attempt_token,
+                 reason,
+                 now(),
+                 retry_after_ms
+               ) do
+            {:escalate, _operation} ->
+              escalate_recovery(operation, {:retry_bound_exceeded, reason})
+
+            _result ->
+              :ok
+          end
+
+        {:error, reason} ->
+          _ =
+            ResourceOperations.record_recovery_error(
+              operation.id,
+              operation.attempt_token,
+              reason
+            )
+
+          escalate_recovery(operation, reason)
       end
     end)
+  end
+
+  defp escalate_recovery(operation, reason) do
+    if OperationalMode.mode() != :maintenance do
+      Logger.error(
+        "Resource operation #{operation.id} recovery requires maintainer attention: #{inspect(reason)}"
+      )
+    end
+
+    OperationalMode.enter_maintenance()
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)

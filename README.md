@@ -1389,6 +1389,13 @@ sudo systemctl start ptc_manager-health-snapshot.service
 sudo systemctl status ptc_manager
 ```
 
+Operation slot lock files are persistent coordination artifacts created by the
+worker that first uses each slot. Recovery opens an existing lock without
+creating it, so a missing or unreadable lock is treated as a recovery error.
+Lock contention remains fail-closed; if it persists beyond the bounded recovery
+window, PtcManager enters maintenance mode and leaves the fenced operation
+visible for maintainer investigation.
+
 `ptc-manager-health-snapshot` runs as a root oneshot every 15 minutes and writes
 `/var/lib/ptc_manager-output/ptc-health.json`. The normal deployment updates the
 writer and both systemd units from the deployed source archive, collects and
