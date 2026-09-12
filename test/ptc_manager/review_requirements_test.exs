@@ -47,6 +47,10 @@ defmodule PtcManager.ReviewRequirementsTest do
       do: {:error, :review_context_missing}
   end
 
+  defmodule MissingRootIssue do
+    def review_context(_repository, _target), do: {:error, :review_context_missing}
+  end
+
   defp job do
     %{
       repository: %{github_owner: "team", github_name: "private"},
@@ -93,6 +97,11 @@ defmodule PtcManager.ReviewRequirementsTest do
     assert text =~ "{:issue, 1890}"
     assert text =~ "{:issue, 1891}"
     assert text =~ "Jobs 106"
+  end
+
+  test "the job's own issue going missing still fails preparation" do
+    assert {:error, {:review_requirements_unavailable, "team/private", "{:issue, 1}"}} =
+             Requirements.capture(job(), MissingRootIssue)
   end
 
   test "links cannot redirect the context client to arbitrary network targets" do

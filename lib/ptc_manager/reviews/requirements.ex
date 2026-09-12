@@ -27,6 +27,8 @@ defmodule PtcManager.Reviews.Requirements do
     else
       {owner, name, target} = reference
       repository = %PtcManager.Operations.Repository{github_owner: owner, github_name: name}
+      root? = MapSet.size(seen) == 0
+      target_type = elem(target, 0)
 
       if {String.downcase(owner), String.downcase(name)} != scope do
         note =
@@ -49,13 +51,16 @@ defmodule PtcManager.Reviews.Requirements do
               scope
             )
 
-          # A reference GitHub says it does not have is evidence about the
-          # requirements, not a reason to withhold the review: `#1890` written
-          # in one repository about another's issue resolves here and cannot.
-          # The reviewer is told to raise missing context as a finding.
-          {:error, :review_context_missing} ->
+          # A linked reference GitHub says it does not have is evidence about
+          # the requirements, not a reason to withhold the review: `#1890`
+          # written in one repository about another's issue resolves here and
+          # cannot. The reviewer is told to raise missing context as a finding.
+          #
+          # The job's own issue is not a link. Nothing is left to review against
+          # if that is the source GitHub cannot find, so it still fails.
+          {:error, :review_context_missing} when target_type == :issue and not root? ->
             note =
-              "Linked context named in this repository does not exist there: #{owner}/#{name} #{inspect(target)}"
+              "Linked issue named in this repository does not exist there: #{owner}/#{name} #{inspect(target)}"
 
             collect(
               rest,
