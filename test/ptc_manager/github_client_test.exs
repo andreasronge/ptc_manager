@@ -37,6 +37,30 @@ defmodule PtcManager.GitHubClientTest do
     assert Client.review_blob_expressions(sha <> "/docs/rules.md") == [sha <> ":docs/rules.md"]
   end
 
+  test "review lookup accepts only item-scoped NOT_FOUND errors as missing context" do
+    data = %{"repository" => %{"item" => nil}}
+    missing = %{"type" => "NOT_FOUND", "path" => ["repository", "item"]}
+    response = %{"data" => data, "errors" => [missing]}
+
+    assert {:ok, ^data} = Client.decode_graphql_response(response, review_context: true)
+    assert {:error, _} = Client.decode_graphql_response(response)
+
+    for error <- [
+          %{"type" => "NOT_FOUND", "path" => ["repository"]},
+          %{"type" => "FORBIDDEN", "path" => ["repository", "item"]}
+        ] do
+      assert {:error, _} =
+               Client.decode_graphql_response(%{"data" => data, "errors" => [error]},
+                 review_context: true
+               )
+
+      assert {:error, _} =
+               Client.decode_graphql_response(%{"data" => data, "errors" => [missing, error]},
+                 review_context: true
+               )
+    end
+  end
+
   test "prefers Retry-After response timing" do
     assert Client.retry_delay_ms([{~c"retry-after", ~c"7"}], 1_000) == 7_000
   end

@@ -192,8 +192,9 @@ are identified as not fetched. Put essential cross-repository requirements in th
 approved issue. Document links support encoded paths and branch names containing
 slashes. Blob sizes are
 checked before reading their text, and the resolved object is immutable. Private
-document links require Contents read permission on that token. Missing GitHub
-context pauses preparation rather than becoming a completed review. Repository
+document links require Contents read permission on that token. Missing linked issues are omitted with an explicit note in the review handoff. A missing
+root issue, unavailable GitHub data, or missing document still pauses preparation
+rather than becoming a completed review. Repository
 documents remain available in the local snapshot; other external sites are not
 fetched. The reviewer reports missing essential context instead of assuming it.
 Codex web search is disabled and its sandbox is read-only; Claude uses restricted
