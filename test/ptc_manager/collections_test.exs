@@ -865,6 +865,60 @@ defmodule PtcManager.CollectionsTest do
       assert %Run{state: "completed"} = Repo.get!(Run, run.id)
     end
 
+    test "a close-out that created members closes out again once they are delivered" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      run = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+
+      {_publication, umbrella} =
+        merged!(first, job_for(first), umbrella, repository, [1], %{1 => "closed"})
+
+      :ok = Collections.reconcile(repository.id)
+      [handoff] = collection_actions(repository)
+      finish_action(handoff, "no-changes")
+      :ok = Collections.reconcile(repository.id)
+      [_handoff, closeout] = collection_actions(repository)
+
+      # The close-out found a gap and filed #7 as a new sub-issue.
+      seven =
+        issue_fixture(repository, %{
+          number: 7,
+          parent_issue_number: umbrella.number,
+          workflow_label: "ptc:ready"
+        })
+
+      umbrella = refresh_umbrella(umbrella, repository, [1, 7], %{1 => "closed"})
+      finish_action(closeout, "completed", [7])
+
+      :ok = Collections.reconcile(repository.id)
+      assert Repo.get_by!(Member, run_id: run.id, issue_number: 7).added_by == "closeout"
+      :ok = Collections.reconcile(repository.id)
+      assert %Job{state: "queued"} = job = job_for(seven)
+
+      # #7 is delivered like any member; nothing else is left to do.
+      {_publication, _umbrella} =
+        merged!(seven, job, umbrella, repository, [1, 7], %{1 => "closed", 7 => "closed"})
+
+      :ok = Collections.reconcile(repository.id)
+      [_, _, second_handoff] = collection_actions(repository)
+      finish_action(second_handoff, "no-changes")
+
+      # A second close-out judges the complete membership.
+      assert :ok = Collections.reconcile(repository.id)
+
+      assert [_, _, _, %AgentAction{action_key: "collection_closeout", state: "queued"} = again] =
+               collection_actions(repository)
+
+      assert again.prompt =~ "#7"
+      assert Enum.any?(steps(run), &(&1.kind == "closeout" and &1.scope == "attempt:2"))
+      assert %Run{state: "active"} = Repo.get!(Run, run.id)
+
+      finish_action(again, "needs-decision")
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "finishing"} = Repo.get!(Run, run.id)
+    end
+
     test "an umbrella closed with unfinished members cancels the run" do
       repository = repository_fixture()
       {umbrella, [_first, _second]} = collection_fixture(repository, [1, 2], chain: true)
