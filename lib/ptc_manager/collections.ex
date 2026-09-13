@@ -419,6 +419,46 @@ defmodule PtcManager.Collections do
     end
   end
 
+  defp enqueue_closeout(run, umbrella, statuses, attempt) do
+    members =
+      for %{issue: %Issue{} = issue} <- statuses,
+          do: %{
+            number: issue.number,
+            title: issue.title,
+            workflow_label: issue.workflow_label,
+            blockers: []
+          }
+
+    apply_action(run, "closeout", "attempt:#{attempt}", fn ->
+      MaintainerActions.enqueue_collection_action(
+        "collection_closeout",
+        umbrella.id,
+        %{members: members},
+        @actor
+      )
+    end)
+  end
+
+  # Every close-out that reports "completed" must have created members, and
+  # they must all be delivered before this runs, so the number of attempts is
+  # bounded by real work; the cap keeps a close-out that keeps splitting from
+  # running away.
+  defp closeout_again(run, umbrella, statuses, action) do
+    attempt = Enum.count(run.steps, &(&1.kind == "closeout")) + 1
+
+    if attempt > @max_closeout_attempts do
+      apply_pause(run, %{
+        kind: "action_failed",
+        reason: "The close-out created new members #{@max_closeout_attempts} times in a row.",
+        member: nil,
+        reference_id: action.id,
+        scope: "action:#{action.id}"
+      })
+    else
+      enqueue_closeout(run, umbrella, statuses, attempt)
+    end
+  end
+
   defp paused_pass(run, umbrella, statuses) do
     cond do
       umbrella.state == "closed" ->
@@ -1050,29 +1090,14 @@ defmodule PtcManager.Collections do
   defp closeout_or_finish(run, umbrella, statuses) do
     case action_attempt(run, "closeout", "attempt:", @max_closeout_attempts) do
       {:retry, attempt} ->
-        members =
-          for %{issue: %Issue{} = issue} <- statuses,
-              do: %{
-                number: issue.number,
-                title: issue.title,
-                workflow_label: issue.workflow_label,
-                blockers: []
-              }
-
-        apply_action(run, "closeout", "attempt:#{attempt}", fn ->
-          MaintainerActions.enqueue_collection_action(
-            "collection_closeout",
-            umbrella.id,
-            %{members: members},
-            @actor
-          )
-        end)
+        enqueue_closeout(run, umbrella, statuses, attempt)
 
       {:done, action} ->
         case action_outcome(action) do
-          # It created the missing members; they were adopted and the run
-          # continues, or it will close out again when they finish.
-          "completed" -> :ok
+          # It created the missing members. They were adopted, and this
+          # function runs again only once they are delivered too, so the
+          # collection closes out again against the complete membership.
+          "completed" -> closeout_again(run, umbrella, statuses, action)
           _decided -> apply_transition(run, &finish/1, "collection_run.finishing", %{})
         end
 
