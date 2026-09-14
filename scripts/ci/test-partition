@@ -1,0 +1,49 @@
+#!/bin/sh
+# Prints the test files that belong to one partition, one per line.
+#
+#   scripts/ci/test-partition <partition> <partitions> [weights-file]
+#
+# Mix's own --partitions option deals files round-robin over the sorted file
+# list, so the heaviest modules can land together and a new file shifts every
+# file after it. This script balances by measured cost instead: every file is
+# given the weight recorded for it in scripts/ci/test-weights (milliseconds
+# from a CI run's "slowest modules" block), unlisted files get the default
+# weight below, and files are dealt heaviest first to whichever partition is
+# lightest so far. The result is deterministic for a given file list and
+# weights file.
+set -eu
+
+partition=$1
+partitions=$2
+weights=${3:-$(dirname "$0")/test-weights}
+default_weight_ms=300
+
+case "$partition:$partitions" in
+  *[!0-9:]* | *:0 | 0:*) echo "test-partition: partition and partitions must be positive integers" >&2; exit 2 ;;
+esac
+[ "$partition" -le "$partitions" ] || { echo "test-partition: partition $partition exceeds $partitions" >&2; exit 2; }
+[ -r "$weights" ] || { echo "test-partition: cannot read weights file $weights" >&2; exit 2; }
+
+root=$(cd "$(dirname "$0")/../.." && pwd -P)
+cd "$root"
+
+find test/ -name '*_test.exs' -type f | sort |
+  awk -v weights="$weights" -v default_weight="$default_weight_ms" '
+    BEGIN {
+      while ((getline line < weights) > 0) {
+        if (line ~ /^[ \t]*(#|$)/) continue
+        split(line, fields, "\t")
+        weight[fields[2]] = fields[1] + 0
+      }
+    }
+    { printf "%d\t%s\n", ($0 in weight) ? weight[$0] : default_weight, $0 }
+  ' |
+  sort -t "$(printf '\t')" -k1,1rn -k2,2 |
+  awk -F '\t' -v partitions="$partitions" -v wanted="$partition" '
+    {
+      lightest = 1
+      for (i = 2; i <= partitions; i++) if (load[i] < load[lightest]) lightest = i
+      load[lightest] += $1
+      if (lightest == wanted) print $2
+    }
+  '

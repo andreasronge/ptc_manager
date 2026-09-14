@@ -32,5 +32,6 @@ jobs:
         env:
           PTC_TEST_PARTITION_ONLY: ${{ matrix.partition }}
           PTC_TEST_PARTITIONS: 5
+          PTC_TEST_SLOWEST_MODULES: 40
           ERL_FLAGS: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
       - run: git diff --exit-code

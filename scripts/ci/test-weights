@@ -1,0 +1,35 @@
+# Measured cost of the heaviest test files, in milliseconds, one per line as
+# "<ms><TAB><path>". scripts/ci/test-partition deals files heaviest first to
+# the lightest partition; a file missing here counts as 300 ms.
+#
+# Take the numbers from the "slowest modules" block each partition prints
+# when the suite runs with PTC_TEST_SLOWEST_MODULES set; use a CI run, because
+# a CI runner is pinned to one scheduler and local timings differ from it.
+# Only files that cost more than about a second matter for the balance.
+2895	test/mix/tasks/ptc_demo_reset_test.exs
+7186	test/mix/tasks/ptc_deploy_test.exs
+2001	test/ptc_manager/automations_test.exs
+11361	test/ptc_manager/deployments_test.exs
+4919	test/ptc_manager/dispatch/herdr_adapter_test.exs
+8057	test/ptc_manager/dispatch_test.exs
+1892	test/ptc_manager/github_sync_test.exs
+4172	test/ptc_manager/health_snapshot_test.exs
+8079	test/ptc_manager/maintainer_actions_test.exs
+1060	test/ptc_manager/operations_test.exs
+5120	test/ptc_manager/publisher_test.exs
+2861	test/ptc_manager/repository_checkout_test.exs
+4543	test/ptc_manager/repository_contract_test.exs
+1910	test/ptc_manager/result_reconciler_test.exs
+2966	test/ptc_manager/review_capacity_test.exs
+4467	test/ptc_manager/reviews_test.exs
+1929	test/ptc_manager/test_scenario_test.exs
+1398	test/ptc_manager/toolchain_test.exs
+2530	test/ptc_manager/worktrees_test.exs
+2595	test/ptc_manager_web/live/automations_live_test.exs
+11239	test/ptc_manager_web/live/configuration_live_test.exs
+1243	test/ptc_manager_web/live/daily_digest_live_test.exs
+1625	test/ptc_manager_web/live/dashboard_live_test.exs
+1413	test/ptc_manager_web/live/delivery_board_live_test.exs
+2963	test/ptc_manager_web/live/deployments_live_test.exs
+1023	test/scripts/duplication_gate_test.exs
+2773	test/scripts/test_suite_test.exs

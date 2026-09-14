@@ -1181,6 +1181,18 @@ scheduler, so it needs smaller partitions to hold the same budget. Splitting
 further does not make the suite faster: roughly five sixths of its time is
 synchronous, because the SQLite-backed data cases cannot run `async: true`.
 
+Files are dealt to partitions by `scripts/ci/test-partition` rather than by
+Mix's `--partitions` option, which deals the sorted file list round-robin and
+once put the three heaviest modules in one partition while a new file shifted
+every file after it. The script gives each file the cost recorded in
+`scripts/ci/test-weights` (milliseconds, unlisted files count as 300) and deals
+files heaviest first to the lightest partition, so the assignment is
+deterministic and balanced. To refresh the weights, run the suite once with
+`PTC_TEST_SLOWEST_MODULES=30` (which also turns on ExUnit's trace mode, so it
+is never the default) and copy the numbers from the "slowest modules" block of
+each partition's log; a CI partition log is the reference, because a CI runner
+is pinned to one scheduler and local timings differ from it.
+
 ## Production configuration
 
 Production requires these environment variables:
