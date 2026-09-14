@@ -30,7 +30,7 @@ defmodule PtcManager.DemoSeedTest do
     Code.eval_file("priv/repo/seeds.exs")
 
     assert Repo.aggregate(Repository, :count) == 1
-    assert Repo.aggregate(Issue, :count) == 8
+    assert Repo.aggregate(Issue, :count) == 9
     assert Repo.aggregate(AgentRun, :count) == 3
     assert Enum.count(Repo.all(AgentRun), &(&1.state == "working")) == 2
     assert Repo.aggregate(ResourceOperation, :count) == 10
@@ -62,6 +62,15 @@ defmodule PtcManager.DemoSeedTest do
       event = Enum.find(report.events, &(&1.source == "Operation ##{op.id}"))
       assert event.at == op.finished_at
     end
+
+    # One agent stop nobody answered, so the dashboard's "Needs attention"
+    # section has a row in the browser checkpoint.
+    stopped = Repo.get_by!(Job, state: "failed")
+    assert stopped.stop_report["reason_code"] == "ambiguous_requirement"
+    assert is_nil(stopped.stop_acknowledged_at)
+
+    assert [%{kind: :stop_unacknowledged, target_id: stopped_id}] = PtcManager.Stalls.detect()
+    assert stopped_id == stopped.id
 
     # One merged pull request the agent labelled as having unfinished business.
     follow_up = Repo.get_by!(PrPublication, pr_number: 1_311)

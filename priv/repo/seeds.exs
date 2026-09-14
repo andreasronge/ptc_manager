@@ -296,6 +296,35 @@ if Repo.aggregate(Repository, :count) == 0 do
   end
 
   if demo_mode do
+    # An agent that stopped on a question nobody has answered: the one stall the
+    # dashboard's "Needs attention" section shows in the browser checkpoint.
+    {:ok, stopped_issue} =
+      Operations.create_issue(issue_attrs.(1333, "Handle a manifest with no tools", 400, %{}))
+
+    {:ok, stopped_job} = Operations.approve_issue_directly(stopped_issue.id, "demo-maintainer")
+
+    stopped_job
+    |> Job.changeset(%{
+      state: "failed",
+      fencing_token: 1,
+      branch_name: "ptc-manager/issue-1333-job-#{stopped_job.id}",
+      started_at: DateTime.add(now, -50, :minute),
+      ended_at: DateTime.add(now, -35, :minute),
+      last_error: "The issue does not say whether an empty manifest is an error or a no-op.",
+      stop_report: %{
+        "reason_code" => "ambiguous_requirement",
+        "summary" => "The issue does not say whether an empty manifest is an error or a no-op.",
+        "detail" =>
+          "Both readings pass the existing tests; the choice changes the exit status of ptc run.",
+        "progress" => "none"
+      },
+      stop_reported_at: DateTime.add(now, -35, :minute),
+      stop_acknowledged_at: nil
+    })
+    |> Repo.update!()
+  end
+
+  if demo_mode do
     Enum.with_index([18_000, 31_000, 44_000, 67_000, 96_000], 1)
     |> Enum.each(fn {duration_ms, index} ->
       finished_at = DateTime.add(now, -(index * 12), :minute)

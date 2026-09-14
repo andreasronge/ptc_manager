@@ -191,6 +191,78 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(view, "#job-review-count-#{job.id}", "Up to 3 review rounds")
   end
 
+  test "lists stalls under Needs attention with a link to the page that answers them", %{
+    conn: conn
+  } do
+    repository = repository_fixture()
+    other = repository_fixture(%{github_owner: "andreas", github_name: "elsewhere"})
+    issue = issue_fixture(repository, %{number: 77, title: "Stopped on a question"})
+    {:ok, job} = Operations.approve_issue_directly(issue.id, "maintainer")
+
+    job
+    |> Job.changeset(%{
+      state: "failed",
+      stop_report: %{"reason_code" => "ambiguous_requirement", "summary" => "Which one?"},
+      stop_reported_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.update!()
+
+    {:ok, view, _html} =
+      conn
+      |> authenticated_conn()
+      |> live(~p"/")
+
+    assert has_element?(view, "#needs-attention-title", "Needs attention")
+    assert has_element?(view, "#stall-stop_unacknowledged-job-#{job.id}", "#77")
+    assert has_element?(view, "#stall-stop_unacknowledged-job-#{job.id} a[href='/board']", "Open")
+
+    {:ok, filtered, _html} =
+      conn
+      |> authenticated_conn()
+      |> live("/?repo=#{other.github_owner}/#{other.github_name}")
+
+    refute has_element?(filtered, "#needs-attention")
+
+    {:ok, _job} = Operations.acknowledge_job_stop(job.id, "maintainer")
+    refute has_element?(view, "#needs-attention")
+  end
+
+  test "stall links lead to the page with the answering button" do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "links"})
+    planning = "/?repo=andreas/links#issue-9"
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{kind: :review_snoozing, target_type: "job", target_id: 5, issue_id: 9},
+             [repository]
+           ) == "/jobs/5/reviews"
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{
+               kind: :dispatch_rejected,
+               target_type: "job",
+               target_id: 5,
+               issue_id: 9,
+               repository_id: repository.id
+             },
+             [repository]
+           ) == planning
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{
+               kind: :action_repeating_failure,
+               target_type: "agent_action",
+               target_id: 5,
+               issue_id: nil
+             },
+             [repository]
+           ) == "/board"
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{kind: :operation_slot_orphaned, target_type: "resource_operation", target_id: 5},
+             [repository]
+           ) == "/operations"
+  end
+
   test "preserves the browser-managed technical evidence state across ticks", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)

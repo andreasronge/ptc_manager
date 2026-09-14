@@ -3,6 +3,7 @@ defmodule PtcManager.Operations.Job do
   import Ecto.Changeset
 
   @states ~w(queued starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open publish_blocked done failed cancelled lost)
+  @terminal_states ~w(done failed cancelled lost)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   schema "jobs" do
@@ -64,6 +65,9 @@ defmodule PtcManager.Operations.Job do
     has_one :worktree_allocation, PtcManager.Operations.WorktreeAllocation
     timestamps(type: :utc_datetime_usec)
   end
+
+  @doc "States in which a job still owns work: everything before done, failed, cancelled, or lost."
+  def live_states, do: @states -- @terminal_states
 
   def changeset(job, attrs) do
     job

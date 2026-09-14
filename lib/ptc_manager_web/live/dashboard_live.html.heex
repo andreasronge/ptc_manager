@@ -47,6 +47,50 @@
     </div>
   </section>
 
+  <section
+    :if={@stalls != []}
+    id="needs-attention"
+    aria-labelledby="needs-attention-title"
+    class="mb-8 rounded-2xl border border-amber-400/30 bg-amber-400/5 p-5"
+  >
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h2 id="needs-attention-title" class="text-lg font-semibold">Needs attention</h2>
+      <span class="text-xs text-slate-500">
+        Computed from the console's own records; each row names what answers it
+      </span>
+    </div>
+    <ul id="stalls" class="mt-4 space-y-3">
+      <li
+        :for={stall <- @stalls}
+        id={"stall-#{stall.kind}-#{stall.target_type}-#{stall.target_id}"}
+        class="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 sm:flex-row sm:items-start sm:justify-between"
+      >
+        <div class="min-w-0">
+          <p class="flex flex-wrap items-center gap-2 text-sm font-semibold">
+            <span class={[
+              "rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide",
+              stall.severity == :alarm && "bg-rose-500/20 text-rose-200",
+              stall.severity == :attention && "bg-amber-400/20 text-amber-100"
+            ]}>
+              {stall.severity}
+            </span>
+            {Stalls.label(stall.kind)}
+          </p>
+          <p class="mt-1 text-sm leading-6 text-slate-300">{stall.detail}</p>
+          <p :if={stall.since} class="mt-1 text-xs text-slate-500">
+            Since {AgentHealth.humanize(max(DateTime.diff(@now, stall.since, :millisecond), 0))} ago
+          </p>
+        </div>
+        <.link
+          navigate={stall_path(stall, @repositories)}
+          class="shrink-0 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10"
+        >
+          Open
+        </.link>
+      </li>
+    </ul>
+  </section>
+
   <div class="grid gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
     <section aria-labelledby="issue-inbox-title" class="min-w-0">
       <div class="mb-4 flex items-center justify-between">

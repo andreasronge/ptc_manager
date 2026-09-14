@@ -8,11 +8,17 @@ defmodule PtcManager.Reviews do
   @active ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result)
   def active_job?(%{state: state}), do: state in @active
 
+  @doc "Job states in which a review can still run or resume."
+  def active_states, do: @active
+
   def rounds(id), do: Repo.all(from r in Round, where: r.job_id == ^id, order_by: r.number)
 
   def timeout_ms(job), do: (job.execution_settings || %{})["review_timeout_ms"] || 900_000
 
   @blocking ~w(high medium)
+
+  @doc "Finding severities that block publication; lower ones travel to the pull request."
+  def blocking_severities, do: @blocking
 
   @doc """
   The single verdict of one assessment.

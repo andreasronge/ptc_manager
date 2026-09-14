@@ -11,7 +11,8 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
-  alias PtcManager.Operations
+  alias PtcManager.{Operations, Stalls}
+  alias PtcManager.Operations.AgentHealth
   alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PlanningGroup
   alias PtcManager.Repository.MaintainerLabels
@@ -485,8 +486,16 @@ defmodule PtcManagerWeb.DashboardLive do
   @impl true
   def handle_info(:tick, socket) do
     Process.send_after(self(), :tick, 60_000)
-    {:noreply, assign(socket, :now, DateTime.utc_now())}
+    now = DateTime.utc_now()
+
+    {:noreply, socket |> assign(:now, now) |> assign_stalls(now, socket.assigns.repositories)}
   end
+
+  # A Herdr sync broadcasts every few seconds; the stalls it could change are
+  # time-based and the minute tick recomputes them. Every other change is a
+  # mutation a person or a worker made, which may have answered a stall.
+  def handle_info({:operations_changed, PtcManager.Herdr.Sync}, socket),
+    do: {:noreply, load_dashboard(socket, stalls: false)}
 
   def handle_info({:operations_changed, _source}, socket),
     do: {:noreply, load_dashboard(socket)}
@@ -902,7 +911,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
   defp dependency_completed?(_dependency), do: false
 
-  defp load_dashboard(socket) do
+  defp load_dashboard(socket, opts \\ []) do
     repositories = Operations.list_repositories()
     selected_repository = socket.assigns.selected_repository
 
@@ -914,7 +923,13 @@ defmodule PtcManagerWeb.DashboardLive do
       Operations.follow_up_items()
       |> filter_repository(selected_repository, & &1.repository)
 
-    assign(socket,
+    socket
+    |> then(fn socket ->
+      if Keyword.get(opts, :stalls, true),
+        do: assign_stalls(socket, socket.assigns.now, repositories),
+        else: socket
+    end)
+    |> assign(
       repositories: repositories,
       execution_profiles: PtcManager.ExecutionProfiles.list(),
       issues: issues,
@@ -930,6 +945,45 @@ defmodule PtcManagerWeb.DashboardLive do
       publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false)
     )
   end
+
+  # Stalls carry a repository id rather than a struct, so the repository filter
+  # resolves it against the repositories the page already lists.
+  defp assign_stalls(socket, now, repositories) do
+    stalls =
+      Stalls.detect(now)
+      |> filter_repository(socket.assigns.selected_repository, fn stall ->
+        Enum.find(repositories, &(&1.id == stall.repository_id))
+      end)
+
+    assign(socket, :stalls, stalls)
+  end
+
+  @doc false
+  def stall_path(
+        %{target_type: "collection_run", repository_id: id, issue_id: issue_id},
+        repositories
+      ) do
+    case Enum.find(repositories, &(&1.id == id)) do
+      nil -> ~p"/"
+      repository -> "/?repo=#{repository_key(repository)}#issue-#{issue_id}"
+    end
+  end
+
+  # A cancelled job has no board card, and a failed issue action is rerun from
+  # the issue's card: both answers are on Planning.
+  def stall_path(%{kind: kind, issue_id: issue_id} = stall, repositories)
+      when kind in [:dispatch_rejected, :action_repeating_failure] and is_integer(issue_id),
+      do: stall_path(%{stall | target_type: "collection_run"}, repositories)
+
+  def stall_path(%{kind: kind, target_id: job_id}, _repositories)
+      when kind in [:review_snoozing, :review_repeated_finding],
+      do: ~p"/jobs/#{job_id}/reviews"
+
+  def stall_path(%{target_type: type}, _repositories)
+      when type in ["job", "pr_publication", "agent_action"],
+      do: ~p"/board"
+
+  def stall_path(_stall, _repositories), do: ~p"/operations"
 
   defp group_issues(issues, follow_ups, now) do
     grouped =

@@ -332,7 +332,8 @@ PTC_DEMO_MODE=true PTC_DATABASE_PATH=tmp/ptc_manager_demo.db PORT=4100 mix phx.s
 Open <http://localhost:4100>, sign in with `ptc-manager-dev`, and check
 Planning, Delivery, and Operations. The demo seed fills every Planning group, so
 the groups, the collapsed cards, the two ages, the external-author badge, the
-triage-label chips, and one suggested follow-up are all visible without GitHub.
+triage-label chips, one suggested follow-up, and one stalled agent under
+**Needs attention** are all visible without GitHub.
 Label writes are deliberately refused in demo mode. No GitHub, Herdr, or LLM credentials are
 used, even if effectful PtcManager variables exist in your shell. To restore
 the exact starting state, stop the demo Phoenix server, run the reset command
@@ -576,6 +577,30 @@ is stored only as a private PtcManager proposal; it cannot update GitHub. Queued
 running, failed, and completed investigations remain visible in Operations.
 
 ### The Planning page
+
+Above the backlog, a **Needs attention** section lists the stalls the console
+can compute from its own records: a collection run pausing and resuming within
+a minute, a run whose every member is delivered but has no close-out, a run
+with no job, action, or step for half an hour, an agent stop nobody answered,
+an action that failed twice in a row with the same error, a review round or
+continuation snoozing because the console is not active, a review round that
+repeats a finding from the previous one, an expensive-operation slot held by an
+operation with no heartbeat and no recovery, a dispatch rejection nothing
+retried, a green member pull request of a run with automatic merging that has
+no merge action, and an agent out of contact or waiting for a person. Each row
+says what is wrong and what answers it, and **Open** leads to the page with
+that button. `PtcManager.Stalls` computes the list when the page loads, once a
+minute, and after any change that is not a Herdr sync; nothing is stored, so
+the section is empty exactly when the records show nothing stalled. The run
+detectors are silent while the console is not active or the repository is
+disabled, because nothing reconciles then. A review round or continuation
+counts as snoozing on a restricted mode only when its own record last changed
+more than five minutes ago, because a canary and a drain restrict the mode by
+design and the mode itself carries no timestamp yet. The thresholds, half an
+hour without progress, five minutes without a heartbeat or recovery, and the
+five-minute review grace, are the application settings
+`:stall_run_no_progress_ms`, `:stall_operation_recovery_ms`, and
+`:stall_mode_grace_ms`.
 
 Planning groups the open backlog by what the maintainer can do next, instead of
 by GitHub's update time. The groups, in order, are **Ready to start**, **Needs
