@@ -1187,11 +1187,13 @@ once put the three heaviest modules in one partition while a new file shifted
 every file after it. The script gives each file the cost recorded in
 `scripts/ci/test-weights` (milliseconds, unlisted files count as 300) and deals
 files heaviest first to the lightest partition, so the assignment is
-deterministic and balanced. To refresh the weights, run the suite once with
-`PTC_TEST_SLOWEST_MODULES=30` (which also turns on ExUnit's trace mode, so it
-is never the default) and copy the numbers from the "slowest modules" block of
-each partition's log; a CI partition log is the reference, because a CI runner
-is pinned to one scheduler and local timings differ from it.
+deterministic and balanced. Each weight is the larger of the file's cost on a
+CI runner and on a development machine, because the two differ several times
+over for files that spawn processes and both splits have to stay under the
+budget. To refresh them, run the suite with `PTC_TEST_SLOWEST_MODULES=30`
+(which also turns on ExUnit's trace mode, so it is never the default) in both
+places and copy the larger number from the "slowest modules" block of each
+partition's log.
 
 ## Production configuration
 

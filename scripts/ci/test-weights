@@ -1,29 +1,38 @@
-# Measured cost of the heaviest test files, in milliseconds, one per line as
+# Cost of the heavier test files, in milliseconds, one per line as
 # "<ms><TAB><path>". scripts/ci/test-partition deals files heaviest first to
 # the lightest partition; a file missing here counts as 300 ms.
 #
-# Take the numbers from the "slowest modules" block each partition prints
-# when the suite runs with PTC_TEST_SLOWEST_MODULES set; use a CI run, because
-# a CI runner is pinned to one scheduler and local timings differ from it.
-# Only files that cost more than about a second matter for the balance.
-25558	test/mix/tasks/ptc_demo_reset_test.exs
-2534	test/mix/tasks/ptc_deploy_test.exs
-1613	test/ptc_manager/auto_implementation_test.exs
-2593	test/ptc_manager/automations_test.exs
-3322	test/ptc_manager/collections_test.exs
-2357	test/ptc_manager/deployments_test.exs
-4340	test/ptc_manager/dispatch_test.exs
-1548	test/ptc_manager/github_sync_test.exs
-2035	test/ptc_manager/herdr_sync_test.exs
-8768	test/ptc_manager/maintainer_actions_test.exs
-3773	test/ptc_manager/operations_test.exs
-5471	test/ptc_manager/publisher_test.exs
-1747	test/ptc_manager/review_capacity_test.exs
-3033	test/ptc_manager/reviews_test.exs
-2142	test/ptc_manager/test_scenario_test.exs
-3141	test/ptc_manager/worktrees_test.exs
-1139	test/ptc_manager_web/live/automations_live_test.exs
-1708	test/ptc_manager_web/live/configuration_live_test.exs
-5529	test/ptc_manager_web/live/dashboard_live_test.exs
-4248	test/ptc_manager_web/live/delivery_board_live_test.exs
-1207	test/scripts/test_suite_test.exs
+# Each number is the larger of the file's cost on a CI runner (pinned to one
+# scheduler, five partitions) and on a development machine (three partitions
+# in parallel), so both splits stay balanced; the two differ by up to six
+# times for files that spawn processes. Take the numbers from the "slowest
+# modules" block each partition prints when the suite runs with
+# PTC_TEST_SLOWEST_MODULES set. Only files above about a second matter.
+7186	test/mix/tasks/ptc_deploy_test.exs
+2001	test/ptc_manager/automations_test.exs
+2020	test/ptc_manager/collections_test.exs
+11361	test/ptc_manager/deployments_test.exs
+4919	test/ptc_manager/dispatch/herdr_adapter_test.exs
+8057	test/ptc_manager/dispatch_test.exs
+1892	test/ptc_manager/github_sync_test.exs
+4172	test/ptc_manager/health_snapshot_test.exs
+2163	test/ptc_manager/herdr_sync_test.exs
+8502	test/ptc_manager/maintainer_actions_test.exs
+4027	test/ptc_manager/operations_test.exs
+6653	test/ptc_manager/publisher_test.exs
+2861	test/ptc_manager/repository_checkout_test.exs
+4543	test/ptc_manager/repository_contract_test.exs
+1910	test/ptc_manager/result_reconciler_test.exs
+2966	test/ptc_manager/review_capacity_test.exs
+4467	test/ptc_manager/reviews_test.exs
+2474	test/ptc_manager/test_scenario_test.exs
+1398	test/ptc_manager/toolchain_test.exs
+3207	test/ptc_manager/worktrees_test.exs
+2595	test/ptc_manager_web/live/automations_live_test.exs
+11239	test/ptc_manager_web/live/configuration_live_test.exs
+1243	test/ptc_manager_web/live/daily_digest_live_test.exs
+3549	test/ptc_manager_web/live/dashboard_live_test.exs
+3831	test/ptc_manager_web/live/delivery_board_live_test.exs
+2963	test/ptc_manager_web/live/deployments_live_test.exs
+1023	test/scripts/duplication_gate_test.exs
+2773	test/scripts/test_suite_test.exs
