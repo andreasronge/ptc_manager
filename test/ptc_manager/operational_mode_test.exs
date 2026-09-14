@@ -102,6 +102,49 @@ defmodule PtcManager.OperationalModeTest do
     assert %AuditEvent{actor: "deploy"} = Audit.last_transition()
   end
 
+  test "a restricted boot is recorded as the deployment script's transition" do
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    assert :ok = OperationalMode.record_boot()
+    assert is_nil(Audit.last_transition())
+
+    Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+    assert :ok = OperationalMode.record_boot()
+
+    assert %AuditEvent{actor: "deploy", details: %{"previous" => "boot", "next" => "maintenance"}} =
+             Audit.last_transition()
+
+    assert Audit.deploy_owned?()
+
+    refute Audit.deploy_owned?(
+             DateTime.add(DateTime.utc_now(), Audit.deploy_window_ms(), :millisecond)
+           )
+  end
+
+  test "a canary whose process is gone is stale, a live one is not" do
+    Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+    refute OperationalMode.stale_canary?()
+
+    assert :ok = OperationalMode.admit_canary("release-stale", "test")
+    assert OperationalMode.stale_canary?(), "admitted but never claimed"
+
+    assert :ok = OperationalMode.claim_canary("release-stale")
+    refute OperationalMode.stale_canary?()
+
+    dead = spawn(fn -> :ok end)
+    ref = Process.monitor(dead)
+    assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+
+    Application.put_env(
+      :ptc_manager,
+      :operational_mode,
+      {:canary, "release-stale", {:claimed, dead}}
+    )
+
+    assert OperationalMode.stale_canary?()
+    assert :ok = OperationalMode.enter_maintenance("test")
+    assert OperationalMode.mode() == :maintenance
+  end
+
   test "poller callbacks do not launch tasks while maintenance is active" do
     keys = [
       :operational_mode,

@@ -94,30 +94,48 @@ defmodule PtcManager.OperationalMode do
   end
 
   # Every coarse transition goes through here so that a change of mode, and
-  # only a change, is recorded with the actor that asked for it. The audit
-  # write happens outside the lock and never fails the transition.
+  # only a change, is recorded with the actor that asked for it. The audit is
+  # written inside the lock so the records keep the order of the transitions;
+  # it never fails the transition.
   defp transition(actor, decide) do
-    outcome =
-      :global.trans(@mode_lock, fn ->
-        previous = mode()
+    :global.trans(@mode_lock, fn ->
+      previous = mode()
 
-        case decide.(previous) do
-          {:ok, next} ->
-            Application.put_env(:ptc_manager, :operational_mode, next)
-            {:ok, previous, next}
+      case decide.(previous) do
+        {:ok, next} ->
+          Application.put_env(:ptc_manager, :operational_mode, next)
+          if previous != next, do: Audit.record(actor, previous, next)
+          :ok
 
-          {:error, _reason} = error ->
-            error
-        end
-      end)
+        {:error, _reason} = error ->
+          error
+      end
+    end)
+  end
 
-    case outcome do
-      {:ok, previous, next} ->
-        if previous != next, do: Audit.record(actor, previous, next)
-        :ok
+  @doc """
+  Records a release that started restricted. The deployment script installs a
+  systemd override that boots the new release in maintenance and writes no
+  event of its own, so the boot is recorded as the script's transition; the
+  Deployments page and the stall detectors then know who owns the window.
+  """
+  def record_boot do
+    case mode() do
+      :active -> :ok
+      restricted -> Audit.record("deploy", :boot, restricted)
+    end
+  end
 
-      {:error, _reason} = error ->
-        error
+  @doc """
+  Whether the mode is a canary whose process is gone: admitted but never
+  claimed, or claimed by a process that no longer runs. Such a canary can only
+  be replaced, never finished.
+  """
+  def stale_canary? do
+    case Application.get_env(:ptc_manager, :operational_mode) do
+      {:canary, _invocation_id, :unclaimed} -> true
+      {:canary, _invocation_id, {_step, owner}} when is_pid(owner) -> not Process.alive?(owner)
+      _mode -> false
     end
   end
 
@@ -155,7 +173,7 @@ defmodule PtcManager.OperationalMode do
     end)
   end
 
-  def admit_canary(_invocation_id, _actor), do: {:error, :invalid_canary_id}
+  def admit_canary(_invocation_id, actor) when is_binary(actor), do: {:error, :invalid_canary_id}
 
   def claim_canary(invocation_id) when is_binary(invocation_id) do
     owner = self()

@@ -590,18 +590,20 @@ continuation snoozing because the console is not active, a review round that
 repeats a finding from the previous one, an expensive-operation slot held by an
 operation with no heartbeat and no recovery, a dispatch rejection nothing
 retried, a green member pull request of a run with automatic merging that has
-no merge action, and an agent out of contact or waiting for a person. Each row
-says what is wrong and what answers it, and **Open** leads to the page with
-that button. `PtcManager.Stalls` computes the list when the page loads, once a
+no merge action, an agent out of contact or waiting for a person, a console
+stopped by a failed operation recovery, and a console restricted for over a
+minute with no deployment in flight and no deployment script behind it. Each
+row says what is wrong and what answers it, and **Open** leads to the page
+with that button. `PtcManager.Stalls` computes the list when the page loads, once a
 minute, and after any change that is not a Herdr sync; nothing is stored, so
 the section is empty exactly when the records show nothing stalled. The run
 detectors are silent while the console is not active or the repository is
 disabled, because nothing reconciles then. A review round or continuation
 counts as snoozing on a restricted mode only when its own record last changed
 more than five minutes ago, because a canary and a drain restrict the mode by
-design. The thresholds, half an
-hour without progress, five minutes without a heartbeat or recovery, and the
-five-minute review grace, are the application settings
+design. The thresholds, half an hour without progress, five minutes without a
+heartbeat or recovery, and the five-minute review grace, are the application
+settings
 `:stall_run_no_progress_ms`, `:stall_operation_recovery_ms`, and
 `:stall_mode_grace_ms`.
 
@@ -1376,17 +1378,21 @@ Every change of operational mode writes an audit event
 actor that asked for it: `deployments` for the drain around a deployment,
 `canary` for a canary's own failure, `broker_recovery` for an expensive
 operation whose recovery failed, `deploy` for the deployment script, and the
-signed-in maintainer for the **Activate** button. A canary that is not
-admitted, because the console is not in maintenance, is refused without
+signed-in maintainer for the **Activate** button. A release that starts
+restricted, which is how the deployment script's systemd override boots the
+new release, records that boot as the script's transition. A canary that is
+not admitted, because the console is not in maintenance, is refused without
 changing the mode. The Deployments page shows the current mode with its last
 transition whenever the console is not active, and offers **Activate**, which
 runs the read-only canary and resumes ordinary work, only while the mode is
-maintenance, no deployment is in flight, and the last transition was not the
-deployment script's, since a direct deployment owns its maintenance window
-until its own canary has run. The dashboard's **Needs attention** section
-raises an alarm when the console was stopped by a failed recovery, and when it
-has been restricted for over a minute with no deployment in flight and no
-deployment script behind it.
+maintenance or an abandoned canary, no deployment is in flight, and the
+deployment script does not own the window: a direct deployment runs its own
+canary within thirty minutes of its last transition (`:mode_deploy_window_ms`),
+and a second admission inside that window would abort it. After the window a
+console the script left restricted can be activated from the page. The
+dashboard's **Needs attention** section raises an alarm when the console was
+stopped by a failed recovery, and when it has been restricted for over a
+minute with no deployment in flight and no deployment script behind it.
 
 The task discovers the coordinator's active systemd environment files and
 checks the configured manual Herdr session. If the optional

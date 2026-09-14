@@ -26,6 +26,7 @@ defmodule PtcManager.OperationalMode.Audit do
   @target_type "operational_mode"
   # The mode is a singleton; audit events need an integer target.
   @target_id 0
+  @deploy_actor "deploy"
 
   @doc "The audit action name every transition writes."
   def action, do: @action
@@ -42,7 +43,7 @@ defmodule PtcManager.OperationalMode.Audit do
 
     :ok
   rescue
-    exception ->
+    exception in [Exqlite.Error, DBConnection.ConnectionError] ->
       Logger.error(
         "Operational mode transition #{name(previous)} -> #{name(next)} by #{actor} was not recorded: " <>
           Exception.message(exception)
@@ -61,6 +62,25 @@ defmodule PtcManager.OperationalMode.Audit do
         order_by: [desc: event.id],
         limit: 1
     )
+  end
+
+  @doc """
+  Milliseconds after the deployment script's last transition during which it
+  still owns a restricted console: a direct deployment boots in maintenance and
+  runs its own canary within this window. After it, a console the script left
+  restricted is a stall and may be activated from the console.
+  """
+  def deploy_window_ms, do: Application.get_env(:ptc_manager, :mode_deploy_window_ms, 1_800_000)
+
+  @doc "Whether the deployment script made the last transition within `deploy_window_ms/0`."
+  def deploy_owned?(now \\ DateTime.utc_now()) do
+    case last_transition() do
+      %AuditEvent{actor: @deploy_actor, inserted_at: at} ->
+        DateTime.diff(now, at, :millisecond) < deploy_window_ms()
+
+      _other ->
+        false
+    end
   end
 
   @doc "A mode as the audit records it."

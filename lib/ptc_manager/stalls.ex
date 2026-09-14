@@ -559,18 +559,18 @@ defmodule PtcManager.Stalls do
 
   @doc """
   The console has not been active for longer than a reconcile, no deployment
-  is in flight, and the last recorded transition was not the deployment
-  script's. A direct deployment restricts the mode for the length of its canary
-  and records itself as `deploy`; anything else that leaves the console
-  restricted is a stall.
+  is in flight, and the deployment script does not own the window: a direct
+  deployment boots the release restricted and runs its own canary within
+  `Audit.deploy_window_ms/0`. Anything else that leaves the console restricted,
+  including a script that left it so for longer, is a stall.
   """
   def mode_not_active(now) do
     mode = OperationalMode.mode()
 
     with false <- mode == :active,
          [] <- Deployments.active(),
-         %{actor: actor} = event when actor not in ["deploy", "broker_recovery"] <-
-           Audit.last_transition(),
+         false <- Audit.deploy_owned?(now),
+         %{actor: actor} = event when actor != "broker_recovery" <- Audit.last_transition(),
          true <- elapsed_ms(event.inserted_at, now) > @reconcile_interval_ms do
       [
         mode_stall(
@@ -578,13 +578,20 @@ defmodule PtcManager.Stalls do
           event.inserted_at,
           "The console has been in #{mode_words(mode)} for " <>
             "#{humanize(elapsed_ms(event.inserted_at, now))} with no deployment in flight; " <>
-            "the last transition was made by #{actor}. Activate it from the Deployments page."
+            "the last transition was made by #{actor}. #{mode_advice(mode)}"
         )
       ]
     else
       _other -> []
     end
   end
+
+  defp mode_advice(:maintenance), do: "Activate it from the Deployments page."
+
+  defp mode_advice({:canary, _id}),
+    do: "If the canary's process is gone, the Deployments page offers to replace it."
+
+  defp mode_advice(_mode), do: "See the Deployments page."
 
   defp mode_stall(kind, since, detail) do
     %{

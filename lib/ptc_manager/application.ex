@@ -15,6 +15,11 @@ defmodule PtcManager.Application do
       {Ecto.Migrator,
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
       PtcManager.CapacitySettings,
+      %{
+        id: PtcManager.OperationalMode.BootRecord,
+        start: {Task, :start_link, [&PtcManager.OperationalMode.record_boot/0]},
+        restart: :temporary
+      },
       PtcManager.Automations.Bootstrap,
       {Oban, Application.fetch_env!(:ptc_manager, Oban)},
       PtcManager.Repository.StartupPreflight,

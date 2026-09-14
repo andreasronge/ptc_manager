@@ -510,6 +510,16 @@ defmodule PtcManager.StallsTest do
       Application.put_env(:ptc_manager, :operational_mode, :active)
       :ok = PtcManager.OperationalMode.enter_maintenance("deploy")
       assert Stalls.mode_not_active(later) == [], "the deployment script owns the window"
+
+      after_window =
+        DateTime.add(
+          DateTime.utc_now(),
+          PtcManager.OperationalMode.Audit.deploy_window_ms() + 1_000,
+          :millisecond
+        )
+
+      assert [%{kind: :mode_not_active, detail: expired}] = Stalls.mode_not_active(after_window)
+      assert expired =~ "made by deploy"
     end
   end
 

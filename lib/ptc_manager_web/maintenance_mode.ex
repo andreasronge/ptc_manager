@@ -15,8 +15,11 @@ defmodule PtcManagerWeb.MaintenanceMode do
     {:cont, attach_hook(socket, :maintenance_mode, :handle_event, &handle_event/3)}
   end
 
-  defp handle_event(event, _params, socket)
-       when event in @read_only_events or event in @recovery_events,
+  defp handle_event(event, _params, socket) when event in @read_only_events,
+    do: {:cont, socket}
+
+  defp handle_event(event, _params, %{view: PtcManagerWeb.DeploymentsLive} = socket)
+       when event in @recovery_events,
        do: {:cont, socket}
 
   defp handle_event(_event, _params, socket) do
