@@ -3,6 +3,7 @@ defmodule PtcManager.Operations.AgentAction do
   import Ecto.Changeset
 
   @states ~w(queued running sync_pending done failed cancelled)
+  @pending_states ~w(queued running sync_pending)
   @target_types ~w(repository issue pull_request daily_digest)
 
   schema "agent_actions" do
@@ -34,6 +35,9 @@ defmodule PtcManager.Operations.AgentAction do
 
     timestamps(type: :utc_datetime_usec)
   end
+
+  @doc "States in which an action still has work ahead of it: queued, running, or waiting to sync."
+  def pending_states, do: @pending_states
 
   def changeset(action, attrs) do
     action

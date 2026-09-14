@@ -20,6 +20,11 @@ defmodule PtcManager.Reviews do
   @doc "Finding severities that block publication; lower ones travel to the pull request."
   def blocking_severities, do: @blocking
 
+  @open_review_states ~w(running paused manual changes_requested resume_pending)
+
+  @doc "Job review states in which a review is still open: running, waiting on a decision, or resuming."
+  def open_states, do: @open_review_states
+
   @doc """
   The single verdict of one assessment.
 

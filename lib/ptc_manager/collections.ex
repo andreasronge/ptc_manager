@@ -24,7 +24,7 @@ defmodule PtcManager.Collections do
   alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication, Repository}
 
   @actor "system:collection"
-  @outstanding_states ~w(queued running sync_pending)
+  @outstanding_states PtcManager.Operations.AgentAction.pending_states()
   @max_action_attempts 2
   # A job in one of these states is over; the member may be admitted again.
   @retired_job_states ~w(failed cancelled lost)

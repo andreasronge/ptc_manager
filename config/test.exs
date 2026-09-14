@@ -1,6 +1,7 @@
 import Config
 
 config :ptc_manager, :admin_password, "test-password"
+config :ptc_manager, :operator_token, "test-operator-token-0123456789abcdef"
 
 config :ptc_manager, Oban,
   engine: Oban.Engines.Lite,

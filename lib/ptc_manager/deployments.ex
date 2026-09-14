@@ -11,7 +11,7 @@ defmodule PtcManager.Deployments do
 
   @driving_run_states ~w(queued starting working)
   @attention_run_states ~w(blocked unknown)
-  @active_action_states ~w(queued running sync_pending)
+  @active_action_states PtcManager.Operations.AgentAction.pending_states()
   @driven_job_states ~w(starting working idle blocked reconciling)
   @active_deployment_states ~w(queued draining starting running)
   @finished_deployment_states ~w(completed failed cancelled)

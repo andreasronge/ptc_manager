@@ -346,6 +346,9 @@ The authenticated routes are:
   [The Planning page](#the-planning-page);
 - `/board` — active delivery Kanban;
 - `/updates` — easy-to-read daily briefings of merged pull requests and dated direct commits;
+- `/api/operator/state` and `/api/operator/stalls` — JSON for a monitoring
+  program, behind a bearer token rather than the session; see
+  [Operator read surface](#operator-read-surface);
 - `/operations` — three tabs. **Now** shows live CPU, memory, build-disk and
   slot signals, a machine-usage chart for the last hour, day, or week, the
   agents and expensive commands running at this moment, the work queue, and
@@ -1180,6 +1183,39 @@ duplication ratchet policy used by `ptc_runner`: known clones live in
 `.duplication-baseline.json`, while `scripts/duplication_gate.sh check` rejects
 new duplication.
 
+### Operator read surface
+
+A program that monitors the console, such as a coding agent the maintainer
+runs, reads two JSON routes instead of the database:
+
+```sh
+curl -sS -H "Authorization: Bearer $PTC_OPERATOR_TOKEN" https://<host>/api/operator/state
+curl -sS -H "Authorization: Bearer $PTC_OPERATOR_TOKEN" https://<host>/api/operator/stalls
+```
+
+`state` carries, per enabled repository, the live collection runs with their
+members, statuses, and last five steps; the live jobs and those ended in the
+last day, with stop reports; queued, running, and sync-pending agent actions;
+the review rounds of jobs whose review is open; and the open publications with
+checks, mergeability, and whether the head drifted. Once per response it
+carries the operational mode, deployments in flight, capacity and slot usage,
+the resource operations holding a slot, worker health, live and retained agent
+runs with their health assessment, and the last fifty audit events. `stalls`
+is the list the dashboard's **Needs attention** section shows. Both carry
+`captured_at` and the deployed SHA.
+
+Every value is an explicit projection of a record; no struct is encoded whole,
+so prompts never leave the console. Fields an agent may have written (stop
+reports, findings, error text, action results, audit details, status text,
+pull-request titles, and the words a stall quotes) sit under an `untrusted`
+key on each record, so a reader treats them as data.
+
+The token is read from the `Authorization` header only and compared in
+constant time; a console with no `PTC_OPERATOR_TOKEN` answers 404 on both
+routes. The routes never write, and there is no rate limit: they sit behind
+the same Tailscale boundary as the console. The token belongs in the
+coordinator's environment file and in no worker or agent environment.
+
 ## Verify
 
 ```sh
@@ -1227,6 +1263,9 @@ Production requires these environment variables:
 - `DATABASE_PATH`: absolute path to the SQLite database;
 - `SECRET_KEY_BASE`: Phoenix signing/encryption secret;
 - `PTC_MANAGER_PASSWORD`: unique maintainer password of at least 16 nonblank characters;
+- `PTC_OPERATOR_TOKEN` (optional): at least 32 nonblank characters; enables the
+  [operator read surface](#operator-read-surface). Leave it unset on a console
+  no program monitors;
 - `PHX_HOST`: external hostname shown in generated URLs;
 - `PORT`: local listening port, normally `4000`.
 

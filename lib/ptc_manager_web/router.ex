@@ -14,6 +14,13 @@ defmodule PtcManagerWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Authentication runs before content negotiation so an unconfigured console
+  # answers 404 to every request, whatever it accepts.
+  pipeline :operator_api do
+    plug PtcManagerWeb.OperatorAuth
+    plug :accepts, ["json"]
+  end
+
   scope "/", PtcManagerWeb do
     pipe_through :browser
 
@@ -25,6 +32,13 @@ defmodule PtcManagerWeb.Router do
     pipe_through :api
 
     get "/health", HealthController, :show
+  end
+
+  scope "/api/operator", PtcManagerWeb do
+    pipe_through :operator_api
+
+    get "/state", OperatorController, :state
+    get "/stalls", OperatorController, :stalls
   end
 
   scope "/", PtcManagerWeb do
