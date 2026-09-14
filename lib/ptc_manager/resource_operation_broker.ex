@@ -458,7 +458,7 @@ defmodule PtcManager.ResourceOperationBroker do
       )
     end
 
-    OperationalMode.enter_maintenance()
+    OperationalMode.enter_maintenance("broker_recovery")
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)

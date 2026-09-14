@@ -1,7 +1,8 @@
 defmodule PtcManagerWeb.DeploymentsLive do
   use PtcManagerWeb, :live_view
 
-  alias PtcManager.{Deployments, Toolchain}
+  alias PtcManager.{DeploymentCanary, Deployments, OperationalMode, Toolchain}
+  alias PtcManager.OperationalMode.Audit
   alias PtcManagerWeb.TimeFormat
 
   @impl true
@@ -44,6 +45,35 @@ defmodule PtcManagerWeb.DeploymentsLive do
 
       _invalid ->
         {:noreply, put_flash(socket, :error, "Repository is no longer available.")}
+    end
+  end
+
+  # The rescue the maintainer's agent performed by hand through the release
+  # RPC: run the read-only canary and activate ordinary work. It is offered
+  # only while nothing else owns the restricted mode; see `activation/1`.
+  def handle_event("activate", _params, socket) do
+    actor = socket.assigns.actor
+    invocation_id = "console-#{System.os_time(:second)}-#{System.unique_integer([:positive])}"
+
+    with %{available?: true} <- socket.assigns.activation,
+         {:ok, _summary} <- DeploymentCanary.run(invocation_id, actor: actor),
+         :ok <- DeploymentCanary.activate(invocation_id, actor: actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "The canary passed and the console is active again.")
+       |> load()}
+    else
+      %{available?: false} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The console cannot be activated from here right now.")
+         |> load()}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The canary did not pass: #{reason_text(reason)}")
+         |> load()}
     end
   end
 
@@ -107,6 +137,8 @@ defmodule PtcManagerWeb.DeploymentsLive do
       |> assign(:repositories, repositories)
       |> assign(:recent_deployments, Deployments.list_recent())
       |> assign(:toolchain, Toolchain.report())
+      |> assign(:mode, OperationalMode.mode())
+      |> assign(:activation, activation())
       |> assign_statuses()
 
     if connected?(socket) do
@@ -125,6 +157,36 @@ defmodule PtcManagerWeb.DeploymentsLive do
     else
       socket
     end
+  end
+
+  # Activation is offered only in maintenance with no deployment in flight and
+  # when the last recorded transition was not the deployment script's: during
+  # a direct deployment the script has installed maintenance itself and is
+  # about to run its own canary, which a second admission would break.
+  defp activation do
+    last = Audit.last_transition()
+    mode = OperationalMode.mode()
+    deployments = Deployments.active()
+
+    reason =
+      cond do
+        mode == :active ->
+          nil
+
+        mode != :maintenance ->
+          "The console is in #{OperationalMode.label(mode)}, not maintenance."
+
+        deployments != [] ->
+          "A deployment is in flight; it activates the console when it finishes."
+
+        match?(%{actor: "deploy"}, last) ->
+          "The deployment script owns this maintenance window."
+
+        true ->
+          nil
+      end
+
+    %{available?: mode == :maintenance and is_nil(reason), reason: reason, last_transition: last}
   end
 
   defp assign_statuses(socket) do

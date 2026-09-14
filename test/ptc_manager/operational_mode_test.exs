@@ -1,7 +1,12 @@
 defmodule PtcManager.OperationalModeTest do
-  use ExUnit.Case, async: false
+  use PtcManager.DataCase, async: false
+
+  import Ecto.Query
 
   alias PtcManager.OperationalMode
+  alias PtcManager.OperationalMode.Audit
+  alias PtcManager.Operations.AuditEvent
+  alias PtcManager.Repo
 
   setup do
     previous = Application.get_env(:ptc_manager, :operational_mode)
@@ -26,8 +31,8 @@ defmodule PtcManager.OperationalModeTest do
   end
 
   test "canary mode admits only the exact allowlisted invocation" do
-    assert :ok = OperationalMode.enter_maintenance()
-    assert :ok = OperationalMode.admit_canary("release-abc")
+    assert :ok = OperationalMode.enter_maintenance("test")
+    assert :ok = OperationalMode.admit_canary("release-abc", "test")
 
     assert OperationalMode.mode() == {:canary, "release-abc"}
     assert OperationalMode.maintenance?()
@@ -38,29 +43,63 @@ defmodule PtcManager.OperationalModeTest do
     assert {:error, :canary_not_admitted} = OperationalMode.authorize_canary("release-abc")
     assert {:error, :canary_not_admitted} = OperationalMode.authorize_canary("release-other")
     assert {:error, :maintenance_mode} = OperationalMode.authorize_ordinary_work()
-    assert {:error, :canary_not_admitted} = OperationalMode.activate_canary("release-abc")
+    assert {:error, :canary_not_admitted} = OperationalMode.activate_canary("release-abc", "test")
     assert :ok = OperationalMode.mark_canary_passed("release-abc")
-    assert :ok = OperationalMode.activate_canary("release-abc", wake: fn -> :ok end)
+    assert :ok = OperationalMode.activate_canary("release-abc", "test", wake: fn -> :ok end)
     assert OperationalMode.mode() == :active
   end
 
   test "a different process cannot consume or activate the canary capability" do
-    assert :ok = OperationalMode.enter_maintenance()
-    assert :ok = OperationalMode.admit_canary("release-owner")
+    assert :ok = OperationalMode.enter_maintenance("test")
+    assert :ok = OperationalMode.admit_canary("release-owner", "test")
     assert :ok = OperationalMode.claim_canary("release-owner")
 
     task = Task.async(fn -> OperationalMode.authorize_canary("release-owner") end)
     assert Task.await(task) == {:error, :canary_not_admitted}
 
     assert {:error, :canary_not_admitted} =
-             OperationalMode.activate_canary("release-owner", wake: fn -> :ok end)
+             OperationalMode.activate_canary("release-owner", "test", wake: fn -> :ok end)
 
     assert :ok = OperationalMode.authorize_canary("release-owner")
     assert :ok = OperationalMode.mark_canary_passed("release-owner")
-    assert :ok = OperationalMode.enter_maintenance()
+    assert :ok = OperationalMode.enter_maintenance("test")
 
     assert {:error, :canary_not_admitted} =
-             OperationalMode.activate_canary("release-owner", wake: fn -> :ok end)
+             OperationalMode.activate_canary("release-owner", "test", wake: fn -> :ok end)
+  end
+
+  test "every change of mode is recorded with its actor, and a repeat is not a change" do
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+
+    assert :ok = OperationalMode.enter_draining("deployments")
+    assert :ok = OperationalMode.enter_draining("deployments")
+    assert :ok = OperationalMode.leave_draining("deployments")
+    assert {:error, :not_draining} = OperationalMode.leave_draining("deployments")
+    assert :ok = OperationalMode.enter_maintenance("broker_recovery")
+    assert :ok = OperationalMode.enter_maintenance("broker_recovery")
+    assert :ok = OperationalMode.admit_canary("release-audit", "deploy")
+    assert :ok = OperationalMode.claim_canary("release-audit")
+    assert :ok = OperationalMode.authorize_canary("release-audit")
+    assert :ok = OperationalMode.mark_canary_passed("release-audit")
+    assert :ok = OperationalMode.activate_canary("release-audit", "deploy", wake: fn -> :ok end)
+
+    transitions =
+      Repo.all(
+        from event in AuditEvent,
+          where: event.action == ^Audit.action(),
+          order_by: event.id,
+          select: {event.actor, event.details["previous"], event.details["next"]}
+      )
+
+    assert transitions == [
+             {"deployments", "active", "draining"},
+             {"deployments", "draining", "active"},
+             {"broker_recovery", "active", "maintenance"},
+             {"deploy", "maintenance", "canary"},
+             {"deploy", "canary", "active"}
+           ]
+
+    assert %AuditEvent{actor: "deploy"} = Audit.last_transition()
   end
 
   test "poller callbacks do not launch tasks while maintenance is active" do

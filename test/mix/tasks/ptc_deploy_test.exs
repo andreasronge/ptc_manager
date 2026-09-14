@@ -500,7 +500,7 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "/usr/local/bin/ptc-manager-self-deploy-runner"
     assert script =~ "/etc/systemd/system/ptc-manager-self-deploy.service"
     assert script =~ "printf '%s\\n' \"$source_commit_sha\" >\"$new_release/RELEASE_SHA\""
-    assert script =~ "PtcManager.OperationalMode.enter_draining()"
+    assert script =~ ~s|PtcManager.OperationalMode.enter_draining("deploy")|
     assert sudoers =~ "/bin/systemctl start --no-block ptc-manager-self-deploy.service"
     assert unit =~ "Type=oneshot"
     assert unit =~ "User=agent"
@@ -561,7 +561,9 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert local =~ "'$commit_sha' direct"
     assert managed =~ "\"$requested_sha\" managed"
     assert remote =~ "if [ \"$activation_owner\" = managed ]"
-    assert remote =~ "OperationalMode.enter_draining()"
+    assert remote =~ ~s|OperationalMode.enter_draining("deploy")|
+    assert remote =~ ~s|OperationalMode.enter_maintenance("deploy")|
+    assert remote =~ ~s|actor: \\"deploy\\"|
   end
 
   test "busy-agent filter accepts every Herdr response envelope" do

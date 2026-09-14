@@ -983,6 +983,8 @@ defmodule PtcManagerWeb.DashboardLive do
       when type in ["job", "pr_publication", "agent_action"],
       do: ~p"/board"
 
+  def stall_path(%{target_type: "operational_mode"}, _repositories), do: ~p"/deployments"
+
   def stall_path(_stall, _repositories), do: ~p"/operations"
 
   defp group_issues(issues, follow_ups, now) do

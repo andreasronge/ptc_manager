@@ -17,6 +17,38 @@
     </section>
 
     <section
+      :if={@mode != :active}
+      id="operational-mode"
+      class="rounded-2xl border border-amber-400/30 bg-amber-400/5 p-5"
+    >
+      <h2 class="font-semibold text-white">
+        The console is in {OperationalMode.label(@mode)}
+      </h2>
+      <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
+        <%= if @activation.last_transition do %>
+          Last transition: {@activation.last_transition.details["previous"]} to {@activation.last_transition.details[
+            "next"
+          ]} by {@activation.last_transition.actor}, {since(
+            @now,
+            @activation.last_transition.inserted_at
+          )}.
+        <% else %>
+          No transition has been recorded since the release started.
+        <% end %>
+        <span :if={@activation.reason}>{@activation.reason}</span>
+      </p>
+      <button
+        :if={@activation.available?}
+        id="activate-console"
+        phx-click="activate"
+        data-confirm="Run the read-only canary and activate ordinary work?"
+        class="mt-4 inline-flex items-center gap-2 rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300"
+      >
+        <.icon name="hero-play-mini" class="size-4" /> Activate
+      </button>
+    </section>
+
+    <section
       :if={@deployment_statuses == []}
       id="no-deployments-configured"
       class="rounded-2xl border border-dashed border-white/15 bg-slate-900/50 p-6"

@@ -8,6 +8,33 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
     def latest(_repository), do: {:ok, String.duplicate("b", 40)}
   end
 
+  test "offers Activate only when nothing else owns the maintenance window", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :operational_mode)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous) end)
+    repository = repository_fixture()
+    issue_fixture(repository)
+    worker_fixture(%{status: "online"})
+
+    :ok = PtcManager.OperationalMode.enter_maintenance("deploy")
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#operational-mode", "deployment script owns")
+    refute has_element?(view, "#activate-console")
+
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    :ok = PtcManager.OperationalMode.enter_maintenance("broker_recovery")
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#operational-mode", "by broker_recovery")
+    assert has_element?(view, "#activate-console")
+
+    view |> element("#activate-console") |> render_click()
+    assert PtcManager.OperationalMode.mode() == :active
+    assert render(view) =~ "active again"
+    refute has_element?(view, "#operational-mode")
+
+    assert %{actor: "andreas", details: %{"previous" => "canary", "next" => "active"}} =
+             PtcManager.OperationalMode.Audit.last_transition()
+  end
+
   test "shows that a newer default-branch revision is available", %{conn: conn} do
     previous_source = Application.get_env(:ptc_manager, :deployment_revision_source)
     previous_sha = Application.get_env(:ptc_manager, :deployed_sha)

@@ -51,6 +51,20 @@ defmodule PtcManager.DeploymentCanaryTest do
     assert OperationalMode.mode() == :active
   end
 
+  test "a canary that is not admitted is refused without changing the mode" do
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    repository = repository_fixture()
+    issue_fixture(repository)
+    worker_fixture(%{status: "online"})
+
+    assert {:error, :canary_already_admitted} =
+             DeploymentCanary.run("release-stray", adapter: PassingAdapter)
+
+    assert OperationalMode.mode() == :active
+    assert is_nil(PtcManager.OperationalMode.Audit.last_transition())
+    refute Repo.get_by(AgentRun, external_key: "deployment-canary:release-stray")
+  end
+
   test "fails closed and retains a visible failed run" do
     repository = repository_fixture()
     issue_fixture(repository)
@@ -60,6 +74,9 @@ defmodule PtcManager.DeploymentCanaryTest do
              DeploymentCanary.run("release-456", adapter: FailingAdapter)
 
     assert OperationalMode.mode() == :maintenance
+
+    assert %{actor: "canary", details: %{"previous" => "canary", "next" => "maintenance"}} =
+             PtcManager.OperationalMode.Audit.last_transition()
 
     run = Repo.get_by!(AgentRun, external_key: "deployment-canary:release-456")
     assert run.state == "failed"

@@ -25,14 +25,29 @@ defmodule PtcManager.DeploymentCanary do
     end
   end
 
+  @doc """
+  Runs the canary under `invocation_id` for `opts[:actor]` (default `canary`).
+
+  Admission is decided first and on its own: a console that is not in
+  maintenance refuses the canary without changing its mode, so a stray call
+  cannot pause production. Only a canary that was admitted and then failed
+  puts the console into maintenance.
+  """
   def run(invocation_id, opts \\ []) when is_binary(invocation_id) do
+    actor = Keyword.get(opts, :actor, "canary")
+
+    case OperationalMode.admit_canary(invocation_id, actor) do
+      :ok -> run_admitted(invocation_id, actor, Keyword.get(opts, :adapter, Adapter))
+      {:error, _reason} = refused -> refused
+    end
+  end
+
+  defp run_admitted(invocation_id, actor, adapter) do
     Process.put({__MODULE__, :run}, nil)
-    adapter = Keyword.get(opts, :adapter, Adapter)
 
     try do
       result =
-        with :ok <- OperationalMode.admit_canary(invocation_id),
-             :ok <- OperationalMode.claim_canary(invocation_id),
+        with :ok <- OperationalMode.claim_canary(invocation_id),
              %Issue{} = issue <- canary_issue(),
              %Worker{} = worker <- canary_worker(),
              {:ok, run} <- start_run(worker, issue, invocation_id),
@@ -54,22 +69,24 @@ defmodule PtcManager.DeploymentCanary do
 
         {:error, reason} = error ->
           fail_remembered_run(reason)
-          OperationalMode.enter_maintenance()
+          OperationalMode.enter_maintenance(actor)
           error
       end
     rescue
       exception ->
-        fail_closed({:exception, exception.__struct__})
+        fail_closed({:exception, exception.__struct__}, actor)
     catch
       kind, reason ->
-        fail_closed({kind, reason})
+        fail_closed({kind, reason}, actor)
     after
       Process.delete({__MODULE__, :run})
     end
   end
 
+  @doc "Activates ordinary work after a passed canary, for `opts[:actor]` (default `canary`)."
   def activate(invocation_id, opts \\ []) when is_binary(invocation_id) do
-    OperationalMode.activate_canary(invocation_id, opts)
+    {actor, opts} = Keyword.pop(opts, :actor, "canary")
+    OperationalMode.activate_canary(invocation_id, actor, opts)
   end
 
   defp canary_issue do
@@ -122,9 +139,9 @@ defmodule PtcManager.DeploymentCanary do
     end
   end
 
-  defp fail_closed(reason) do
+  defp fail_closed(reason, actor) do
     fail_remembered_run(reason)
-    OperationalMode.enter_maintenance()
+    OperationalMode.enter_maintenance(actor)
     {:error, reason}
   end
 

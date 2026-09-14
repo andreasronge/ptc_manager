@@ -599,7 +599,7 @@ detectors are silent while the console is not active or the repository is
 disabled, because nothing reconciles then. A review round or continuation
 counts as snoozing on a restricted mode only when its own record last changed
 more than five minutes ago, because a canary and a drain restrict the mode by
-design and the mode itself carries no timestamp yet. The thresholds, half an
+design. The thresholds, half an
 hour without progress, five minutes without a heartbeat or recovery, and the
 five-minute review grace, are the application settings
 `:stall_run_no_progress_ms`, `:stall_operation_recovery_ms`, and
@@ -1370,6 +1370,23 @@ existed, a pre-effect rollback restores it byte-for-byte.
 Steady state relies on the application's `active` default; do not add
 `PTC_OPERATIONAL_MODE` to the base environment file because systemd gives
 environment-file values precedence over the maintenance override.
+
+Every change of operational mode writes an audit event
+(`operational_mode.changed`) naming the previous mode, the new mode, and the
+actor that asked for it: `deployments` for the drain around a deployment,
+`canary` for a canary's own failure, `broker_recovery` for an expensive
+operation whose recovery failed, `deploy` for the deployment script, and the
+signed-in maintainer for the **Activate** button. A canary that is not
+admitted, because the console is not in maintenance, is refused without
+changing the mode. The Deployments page shows the current mode with its last
+transition whenever the console is not active, and offers **Activate**, which
+runs the read-only canary and resumes ordinary work, only while the mode is
+maintenance, no deployment is in flight, and the last transition was not the
+deployment script's, since a direct deployment owns its maintenance window
+until its own canary has run. The dashboard's **Needs attention** section
+raises an alarm when the console was stopped by a failed recovery, and when it
+has been restricted for over a minute with no deployment in flight and no
+deployment script behind it.
 
 The task discovers the coordinator's active systemd environment files and
 checks the configured manual Herdr session. If the optional
