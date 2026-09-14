@@ -589,11 +589,16 @@ operation with no heartbeat and no recovery, a dispatch rejection nothing
 retried, a green member pull request of a run with automatic merging that has
 no merge action, and an agent out of contact or waiting for a person. Each row
 says what is wrong and what answers it, and **Open** leads to the page with
-that button. `PtcManager.Stalls` computes the list on every refresh and every
-minute; nothing is stored, so the section is empty exactly when the records
-show nothing stalled. The two thresholds, half an hour without progress and
-five minutes without a heartbeat or recovery, are the application settings
-`:stall_run_no_progress_ms` and `:stall_operation_recovery_ms`.
+that button. `PtcManager.Stalls` computes the list when the page loads, once a
+minute, and after any change that is not a Herdr sync; nothing is stored, so
+the section is empty exactly when the records show nothing stalled. The run
+detectors are silent while the console is not active, because nothing
+reconciles then, and a review waits five minutes on a restricted mode before
+it counts as snoozing, because a canary and a drain restrict the mode by
+design. The thresholds, half an hour without progress, five minutes without a
+heartbeat or recovery, and the five-minute mode grace, are the application
+settings `:stall_run_no_progress_ms`, `:stall_operation_recovery_ms`, and
+`:stall_mode_grace_ms`.
 
 Planning groups the open backlog by what the maintainer can do next, instead of
 by GitHub's update time. The groups, in order, are **Ready to start**, **Needs

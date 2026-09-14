@@ -487,8 +487,15 @@ defmodule PtcManagerWeb.DashboardLive do
   def handle_info(:tick, socket) do
     Process.send_after(self(), :tick, 60_000)
     now = DateTime.utc_now()
-    {:noreply, socket |> assign(:now, now) |> assign_stalls(now)}
+
+    {:noreply, socket |> assign(:now, now) |> assign_stalls(now, socket.assigns.repositories)}
   end
+
+  # A Herdr sync broadcasts every few seconds; the stalls it could change are
+  # time-based and the minute tick recomputes them. Every other change is a
+  # mutation a person or a worker made, which may have answered a stall.
+  def handle_info({:operations_changed, PtcManager.Herdr.Sync}, socket),
+    do: {:noreply, load_dashboard(socket, stalls: false)}
 
   def handle_info({:operations_changed, _source}, socket),
     do: {:noreply, load_dashboard(socket)}
@@ -904,7 +911,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
   defp dependency_completed?(_dependency), do: false
 
-  defp load_dashboard(socket) do
+  defp load_dashboard(socket, opts \\ []) do
     repositories = Operations.list_repositories()
     selected_repository = socket.assigns.selected_repository
 
@@ -917,7 +924,11 @@ defmodule PtcManagerWeb.DashboardLive do
       |> filter_repository(selected_repository, & &1.repository)
 
     socket
-    |> assign_stalls(socket.assigns.now)
+    |> then(fn socket ->
+      if Keyword.get(opts, :stalls, true),
+        do: assign_stalls(socket, socket.assigns.now, repositories),
+        else: socket
+    end)
     |> assign(
       repositories: repositories,
       execution_profiles: PtcManager.ExecutionProfiles.list(),
@@ -937,9 +948,7 @@ defmodule PtcManagerWeb.DashboardLive do
 
   # Stalls carry a repository id rather than a struct, so the repository filter
   # resolves it against the repositories the page already lists.
-  defp assign_stalls(socket, now) do
-    repositories = Operations.list_repositories()
-
+  defp assign_stalls(socket, now, repositories) do
     stalls =
       Stalls.detect(now)
       |> filter_repository(socket.assigns.selected_repository, fn stall ->
@@ -960,11 +969,12 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  # A cancelled job has no board card; the answer is the approve form on Planning.
+  def stall_path(%{kind: :dispatch_rejected} = stall, repositories),
+    do: stall_path(%{stall | target_type: "collection_run"}, repositories)
+
   def stall_path(%{target_type: type}, _repositories) when type in ["job", "pr_publication"],
     do: ~p"/board"
-
-  def stall_path(%{target_type: "resource_operation"}, _repositories),
-    do: ~p"/operations/performance"
 
   def stall_path(_stall, _repositories), do: ~p"/operations"
 

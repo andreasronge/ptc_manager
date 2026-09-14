@@ -123,9 +123,10 @@ defmodule PtcManager.Operations.AgentHealth do
   defp state_since(%AgentRun{state_changed_at: %DateTime{} = at}), do: at
   defp state_since(%AgentRun{started_at: at}), do: at
 
-  defp elapsed_ms(nil, _now), do: 0
+  @doc "Milliseconds from `at` to `now`, never negative; nil counts as no time."
+  def elapsed_ms(nil, _now), do: 0
 
-  defp elapsed_ms(%DateTime{} = at, now),
+  def elapsed_ms(%DateTime{} = at, now),
     do: now |> DateTime.diff(at, :millisecond) |> max(0)
 
   @doc "A duration in milliseconds as a short label such as `4m` or `2h 10m`."

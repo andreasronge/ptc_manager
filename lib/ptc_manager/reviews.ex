@@ -17,6 +17,9 @@ defmodule PtcManager.Reviews do
 
   @blocking ~w(high medium)
 
+  @doc "Finding severities that block publication; lower ones travel to the pull request."
+  def blocking_severities, do: @blocking
+
   @doc """
   The single verdict of one assessment.
 

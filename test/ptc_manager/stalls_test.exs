@@ -62,6 +62,17 @@ defmodule PtcManager.StallsTest do
       run |> Run.changeset(%{state: "completed"}) |> Repo.update!()
       assert Stalls.run_flapping(@now) == []
     end
+
+    test "a resume answered by a pause on another member is not a flap", %{
+      repository: repository
+    } do
+      {run, _members} = run_fixture(repository, [11, 12])
+      audit!(run, "collection_run.paused", 400)
+      audit!(run, "collection_run.resumed", 200)
+      audit!(run, "collection_run.paused", 190)
+      audit!(run, "collection_run.resumed", 100)
+      assert Stalls.run_flapping(@now) == []
+    end
   end
 
   describe "run_idle_complete/1" do
@@ -81,6 +92,29 @@ defmodule PtcManager.StallsTest do
       assert detail =~ "delivered"
 
       step!(run, "closeout", "1", 30)
+      assert Stalls.run_idle_complete(@now) == []
+    end
+
+    test "a close-out in flight or a restricted mode explains the missing step", %{
+      repository: repository
+    } do
+      {run, members} =
+        run_fixture(repository, [23, 24], states: %{23 => "closed", 24 => "closed"})
+
+      Enum.each(members, &close_completed!/1)
+      age!(run, 600)
+
+      closeout =
+        action!(repository, "collection_closeout", "issue", run.issue_id, "running", nil,
+          actor: "system:collection"
+        )
+
+      assert Stalls.run_idle_complete(@now) == []
+
+      closeout |> Ecto.Changeset.change(state: "done") |> Repo.update!()
+      assert [_stall] = Stalls.run_idle_complete(@now)
+
+      Application.put_env(:ptc_manager, :operational_mode, :maintenance)
       assert Stalls.run_idle_complete(@now) == []
     end
 
@@ -120,6 +154,15 @@ defmodule PtcManager.StallsTest do
       age!(run, 7_200)
       Repo.delete_all(Step)
       action!(repository, "prepare_issue", "issue", member.id, "queued", nil)
+      assert Stalls.run_no_progress(@now) == []
+
+      Repo.delete_all(AgentAction)
+      assert [_stall] = Stalls.run_no_progress(@now)
+
+      action!(repository, "collection_handoff", "issue", run.issue_id, "queued", nil,
+        actor: "system:collection"
+      )
+
       assert Stalls.run_no_progress(@now) == []
     end
   end
@@ -183,17 +226,23 @@ defmodule PtcManager.StallsTest do
     test "a queued round in maintenance mode is an alarm", %{repository: repository} do
       issue = issue_fixture(repository, %{number: 61, workflow_label: "ptc:ready"})
       job = job!(issue, %{state: "working", review_state: "running"})
-      round!(job, 1, "queued", nil)
+      round = round!(job, 1, "queued", nil)
 
       assert Stalls.review_snoozing(@now) == []
 
       Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+      assert Stalls.review_snoozing(@now) == [], "a fresh restriction is within the grace period"
+
+      backdate!(Round, round.id, 600)
 
       assert [%{kind: :review_snoozing, severity: :alarm, target_id: job_id, detail: detail}] =
                Stalls.review_snoozing(@now)
 
       assert job_id == job.id
       assert detail =~ "maintenance mode"
+
+      job |> Job.changeset(%{state: "failed"}) |> Repo.update!()
+      assert Stalls.review_snoozing(@now) == []
     end
 
     test "a queued round runs in a drain, but a pending continuation does not", %{
@@ -201,11 +250,13 @@ defmodule PtcManager.StallsTest do
     } do
       issue = issue_fixture(repository, %{number: 62, workflow_label: "ptc:ready"})
       job = job!(issue, %{state: "working", review_state: "running"})
-      round!(job, 1, "queued", nil)
+      round = round!(job, 1, "queued", nil)
+      backdate!(Round, round.id, 600)
       Application.put_env(:ptc_manager, :operational_mode, :draining)
       assert Stalls.review_snoozing(@now) == []
 
       job |> Job.changeset(%{review_state: "resume_pending"}) |> Repo.update!()
+      backdate!(Job, job.id, 600)
       assert [%{kind: :review_snoozing, detail: detail}] = Stalls.review_snoozing(@now)
       assert detail =~ "continuation"
     end
@@ -235,7 +286,13 @@ defmodule PtcManager.StallsTest do
       round!(job, 2, "completed", ["Second"])
       assert Stalls.review_repeated_finding(@now) == []
 
-      round!(job, 3, "completed", ["Second"])
+      round!(job, 3, "completed", [{"low", "Second"}])
+
+      assert Stalls.review_repeated_finding(@now) == [],
+             "an advisory finding may travel to the pull request round after round"
+
+      round!(job, 4, "completed", ["Third"])
+      round!(job, 5, "completed", ["Third"])
       assert [_repeat] = Stalls.review_repeated_finding(@now)
 
       job |> Job.changeset(%{review_state: "passed"}) |> Repo.update!()
@@ -260,22 +317,23 @@ defmodule PtcManager.StallsTest do
       repository: repository
     } do
       operation!(repository, "running", 30)
-      completed = operation!(repository, "completed", 600)
+      operation!(repository, "completed", 600)
+      marked = operation!(repository, "running", 20)
       assert Stalls.operation_slot_orphaned(@now) == []
 
-      Repo.update_all(from(o in ResourceOperation, where: o.id == ^completed.id),
+      Repo.update_all(from(o in ResourceOperation, where: o.id == ^marked.id),
         set: [state: "recovery_pending", updated_at: seconds_ago(900)]
       )
 
       assert [%{target_id: id}] = Stalls.operation_slot_orphaned(@now)
-      assert id == completed.id
+      assert id == marked.id
     end
   end
 
   describe "dispatch_rejected/1" do
     test "a non-terminal rejection with no newer job needs attention", %{repository: repository} do
       issue = issue_fixture(repository, %{number: 81, workflow_label: "ptc:ready"})
-      job = job!(issue, %{state: "cancelled"})
+      job = job!(issue, %{state: "cancelled", ended_at: seconds_ago(120)})
       audit_job!(job, "job.dispatch_rejected", %{"reason" => "worktree_changed"}, 120)
 
       assert [
@@ -290,16 +348,19 @@ defmodule PtcManager.StallsTest do
 
       assert job_id == job.id
       assert detail =~ "worktree_changed"
+
+      issue |> Issue.changeset(%{state: "closed"}) |> Repo.update!()
+      assert Stalls.dispatch_rejected(@now) == []
     end
 
     test "a closed issue or a newer job settles the rejection", %{repository: repository} do
       issue = issue_fixture(repository, %{number: 82, workflow_label: "ptc:ready"})
-      closed = job!(issue, %{state: "cancelled"})
+      closed = job!(issue, %{state: "cancelled", ended_at: seconds_ago(120)})
       audit_job!(closed, "job.dispatch_rejected", %{"reason" => "issue_closed"}, 120)
       assert Stalls.dispatch_rejected(@now) == []
 
       other = issue_fixture(repository, %{number: 83, workflow_label: "ptc:ready"})
-      rejected = job!(other, %{state: "cancelled"})
+      rejected = job!(other, %{state: "cancelled", ended_at: seconds_ago(60)})
       audit_job!(rejected, "job.dispatch_rejected", %{"reason" => "issue_claimed"}, 60)
       assert [_stall] = Stalls.dispatch_rejected(@now)
 
@@ -339,6 +400,27 @@ defmodule PtcManager.StallsTest do
       assert Stalls.publication_stuck_green(@now) == []
 
       Repo.delete_all(AgentAction)
+
+      action!(
+        repository,
+        "merge_reviewed_pr",
+        "pull_request",
+        publication.id + 1000,
+        "running",
+        nil
+      )
+
+      assert Stalls.publication_stuck_green(@now) == [], "the repository's merge lock is held"
+
+      Repo.delete_all(AgentAction)
+
+      action!(repository, "collection_handoff", "issue", run.issue_id, "running", nil,
+        actor: "system:collection"
+      )
+
+      assert Stalls.publication_stuck_green(@now) == [], "a handoff is in flight"
+
+      Repo.delete_all(AgentAction)
       run |> Run.changeset(%{auto_merge: false}) |> Repo.update!()
       assert Stalls.publication_stuck_green(@now) == []
     end
@@ -368,8 +450,17 @@ defmodule PtcManager.StallsTest do
       assert id == run.id
       assert detail =~ "#101"
 
-      {:ok, _run} = Operations.update_agent_run(run, %{last_heartbeat_at: seconds_ago(5)})
+      {:ok, run} = Operations.update_agent_run(run, %{last_heartbeat_at: seconds_ago(5)})
       assert Stalls.agent_out_of_contact(@now) == []
+
+      {:ok, _retained} =
+        Operations.update_agent_run(run, %{
+          state: "waiting",
+          last_heartbeat_at: seconds_ago(1_200)
+        })
+
+      assert [%{kind: :agent_out_of_contact, since: since}] = Stalls.agent_out_of_contact(@now)
+      assert since == seconds_ago(1_200)
     end
   end
 
@@ -506,7 +597,7 @@ defmodule PtcManager.StallsTest do
     })
   end
 
-  defp action!(repository, key, target_type, target_id, state, error) do
+  defp action!(repository, key, target_type, target_id, state, error, opts \\ []) do
     now = seconds_ago(0)
 
     %AgentAction{}
@@ -520,7 +611,7 @@ defmodule PtcManager.StallsTest do
       prompt: "test",
       baseline_issue_numbers: %{"numbers" => []},
       target_snapshot: %{},
-      actor: "andreas",
+      actor: Keyword.get(opts, :actor, "andreas"),
       state: state,
       attempt_count: 1,
       requested_at: now,
@@ -548,7 +639,14 @@ defmodule PtcManager.StallsTest do
         findings &&
           %{
             "summary" => "reviewed",
-            "findings" => Enum.map(findings, &%{"severity" => "medium", "description" => &1})
+            "findings" =>
+              Enum.map(findings, fn
+                {severity, description} ->
+                  %{"severity" => severity, "description" => description}
+
+                description ->
+                  %{"severity" => "medium", "description" => description}
+              end)
           }
     })
     |> Repo.insert!()
@@ -622,6 +720,12 @@ defmodule PtcManager.StallsTest do
       checks_state: "success"
     })
     |> Repo.insert!()
+  end
+
+  defp backdate!(schema, id, seconds) do
+    Repo.update_all(from(row in schema, where: row.id == ^id),
+      set: [updated_at: seconds_ago(seconds)]
+    )
   end
 
   defp seconds_ago(seconds), do: DateTime.add(@now, -seconds, :second)
