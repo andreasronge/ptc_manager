@@ -63,6 +63,12 @@ defmodule Mix.Tasks.Ptc.Demo.ResetTest do
              )
   end
 
+  # Runs mix in the dev environment, because config/runtime.exs already forces
+  # every effectful flag off under `config_env() == :test`, which would make
+  # the assertions below vacuous there. CI has no dev build, so this compiles
+  # the whole project on a single scheduler (about 25 s); it runs nightly and
+  # in a plain `mix test`, like the other process tests.
+  @tag :nightly
   test "demo mode overrides ambient effectful integration settings" do
     expression = """
     keys = [:demo_mode, :dispatch_enabled, :agent_actions_enabled, :daily_digest_enabled,

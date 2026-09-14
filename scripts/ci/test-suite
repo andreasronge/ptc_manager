@@ -48,12 +48,32 @@ started_at=$(date +%s)
 pids=""
 partition=$first_partition
 
+script_dir=$(cd "$(dirname "$0")" && pwd -P)
+
+# Module timings for scripts/ci/test-weights come from a run with this set.
+# It is off by default because --slowest-modules also turns on trace mode,
+# which serialises async tests and disables ExUnit's per-test timeout.
+slowest_modules=""
+case "${PTC_TEST_SLOWEST_MODULES:-}" in
+  '') ;;
+  *[!0-9]* | 0) echo "PTC_TEST_SLOWEST_MODULES must be a positive integer" >&2; exit 2 ;;
+  *) slowest_modules="--slowest-modules $PTC_TEST_SLOWEST_MODULES" ;;
+esac
+
 while [ "$partition" -le "$last_partition" ]; do
   log_path="$output_root/partition-$partition.log"
   partition_tmp="$output_root/partition-$partition"
   mkdir "$partition_tmp"
+  # Files are dealt by measured cost rather than by Mix's round-robin, so no
+  # partition can collect the heaviest modules by accident; see test-partition.
+  files=$("$script_dir/test-partition" "$partition" "$partitions")
+  if [ -z "$files" ]; then
+    echo "Test partition $partition/$partitions received no files" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC2086
   "$timeout_binary" --signal=TERM --kill-after=2s "${partition_budget}s" \
-    env TMPDIR="$partition_tmp" MIX_TEST_PARTITION="$partition" mix test --partitions "$partitions" --exclude nightly \
+    env TMPDIR="$partition_tmp" MIX_TEST_PARTITION="$partition" mix test --exclude nightly $slowest_modules $files \
     >"$log_path" 2>&1 &
   pids="$pids $!"
   partition=$((partition + 1))
