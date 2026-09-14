@@ -30,8 +30,10 @@ defmodule PtcManagerWeb.Auth do
 
   def authenticated?(conn), do: get_session(conn, :authenticated) == true
 
-  defp secure_match?(left, right) when byte_size(left) == byte_size(right),
-    do: Plug.Crypto.secure_compare(left, right)
+  @doc "Constant-time equality for a presented credential against the configured one."
+  def secure_match?(left, right)
+      when is_binary(left) and is_binary(right) and byte_size(left) == byte_size(right),
+      do: Plug.Crypto.secure_compare(left, right)
 
-  defp secure_match?(_left, _right), do: false
+  def secure_match?(_left, _right), do: false
 end

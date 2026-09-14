@@ -14,6 +14,11 @@ defmodule PtcManagerWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :operator_api do
+    plug :accepts, ["json"]
+    plug PtcManagerWeb.OperatorAuth
+  end
+
   scope "/", PtcManagerWeb do
     pipe_through :browser
 
@@ -25,6 +30,13 @@ defmodule PtcManagerWeb.Router do
     pipe_through :api
 
     get "/health", HealthController, :show
+  end
+
+  scope "/api/operator", PtcManagerWeb do
+    pipe_through :operator_api
+
+    get "/state", OperatorController, :state
+    get "/stalls", OperatorController, :stalls
   end
 
   scope "/", PtcManagerWeb do
