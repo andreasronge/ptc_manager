@@ -116,6 +116,10 @@ defmodule PtcManager.StallsTest do
 
       Application.put_env(:ptc_manager, :operational_mode, :maintenance)
       assert Stalls.run_idle_complete(@now) == []
+
+      Application.put_env(:ptc_manager, :operational_mode, :active)
+      {:ok, _repository} = Operations.set_repository_enabled(repository.id, false, "andreas")
+      assert Stalls.run_idle_complete(@now) == []
     end
 
     test "a run with an open member is not idle complete", %{repository: repository} do
@@ -421,6 +425,10 @@ defmodule PtcManager.StallsTest do
       assert Stalls.publication_stuck_green(@now) == [], "a handoff is in flight"
 
       Repo.delete_all(AgentAction)
+      {:ok, _repository} = Operations.set_repository_enabled(repository.id, false, "andreas")
+      assert Stalls.publication_stuck_green(@now) == [], "a disabled repository is not reconciled"
+
+      {:ok, _repository} = Operations.set_repository_enabled(repository.id, true, "andreas")
       run |> Run.changeset(%{auto_merge: false}) |> Repo.update!()
       assert Stalls.publication_stuck_green(@now) == []
     end

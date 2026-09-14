@@ -227,6 +227,42 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     refute has_element?(view, "#needs-attention")
   end
 
+  test "stall links lead to the page with the answering button" do
+    repository = repository_fixture(%{github_owner: "andreas", github_name: "links"})
+    planning = "/?repo=andreas/links#issue-9"
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{kind: :review_snoozing, target_type: "job", target_id: 5, issue_id: 9},
+             [repository]
+           ) == "/jobs/5/reviews"
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{
+               kind: :dispatch_rejected,
+               target_type: "job",
+               target_id: 5,
+               issue_id: 9,
+               repository_id: repository.id
+             },
+             [repository]
+           ) == planning
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{
+               kind: :action_repeating_failure,
+               target_type: "agent_action",
+               target_id: 5,
+               issue_id: nil
+             },
+             [repository]
+           ) == "/board"
+
+    assert PtcManagerWeb.DashboardLive.stall_path(
+             %{kind: :operation_slot_orphaned, target_type: "resource_operation", target_id: 5},
+             [repository]
+           ) == "/operations"
+  end
+
   test "preserves the browser-managed technical evidence state across ticks", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)

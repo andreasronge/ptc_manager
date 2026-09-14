@@ -969,12 +969,19 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
-  # A cancelled job has no board card; the answer is the approve form on Planning.
-  def stall_path(%{kind: :dispatch_rejected} = stall, repositories),
-    do: stall_path(%{stall | target_type: "collection_run"}, repositories)
+  # A cancelled job has no board card, and a failed issue action is rerun from
+  # the issue's card: both answers are on Planning.
+  def stall_path(%{kind: kind, issue_id: issue_id} = stall, repositories)
+      when kind in [:dispatch_rejected, :action_repeating_failure] and is_integer(issue_id),
+      do: stall_path(%{stall | target_type: "collection_run"}, repositories)
 
-  def stall_path(%{target_type: type}, _repositories) when type in ["job", "pr_publication"],
-    do: ~p"/board"
+  def stall_path(%{kind: kind, target_id: job_id}, _repositories)
+      when kind in [:review_snoozing, :review_repeated_finding],
+      do: ~p"/jobs/#{job_id}/reviews"
+
+  def stall_path(%{target_type: type}, _repositories)
+      when type in ["job", "pr_publication", "agent_action"],
+      do: ~p"/board"
 
   def stall_path(_stall, _repositories), do: ~p"/operations"
 

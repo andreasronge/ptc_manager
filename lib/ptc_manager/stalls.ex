@@ -14,9 +14,9 @@ defmodule PtcManager.Stalls do
   decision. Each stall names a target the console has a page for, and
   `detail` says in words what is wrong and what answers it.
 
-  The run detectors are gated on the operational mode the way the reconciler
-  is: while the console is not active nothing reconciles, so a run that goes
-  quiet is not a stall of the run. The mode itself is a separate concern.
+  The run detectors are gated the way the reconciler is: while the console is
+  not active, or the repository is disabled, nothing reconciles, so a run that
+  goes quiet is not a stall of the run. The mode itself is a separate concern.
   """
 
   import Ecto.Query
@@ -99,9 +99,10 @@ defmodule PtcManager.Stalls do
     do: Application.get_env(:ptc_manager, :stall_operation_recovery_ms, 300_000)
 
   @doc """
-  Milliseconds a review may wait on a restricted operational mode before it
-  counts as snoozing. A deployment's canary and drain restrict the mode for
-  minutes by design.
+  Milliseconds since a review round or continuation last changed before it
+  counts as snoozing on a restricted operational mode. The mode itself carries
+  no timestamp yet, so the grace is measured from the review's own record; a
+  deployment's canary and drain restrict the mode for minutes by design.
   """
   def mode_grace_ms, do: Application.get_env(:ptc_manager, :stall_mode_grace_ms, 300_000)
 
@@ -253,10 +254,10 @@ defmodule PtcManager.Stalls do
   end
 
   @doc """
-  A review that has waited on the console's operational mode for longer than
-  `mode_grace_ms/0`: the prepare and review workers snooze unless
-  reconciliation is allowed, and the resume worker snoozes unless the mode is
-  active.
+  A review round or continuation that last changed more than `mode_grace_ms/0`
+  ago while the console's operational mode keeps it from running: the prepare
+  and review workers snooze unless reconciliation is allowed, and the resume
+  worker snoozes unless the mode is active.
   """
   def review_snoozing(now) do
     mode = OperationalMode.mode()
@@ -466,8 +467,10 @@ defmodule PtcManager.Stalls do
           on: member.issue_id == job.issue_id,
           join: run in Run,
           on: run.id == member.run_id,
+          join: repository in assoc(run, :repository),
           where:
-            run.state == "active" and run.auto_merge and publication.state == "published" and
+            repository.enabled and run.state == "active" and run.auto_merge and
+              publication.state == "published" and
               publication.pr_state == "open" and publication.mergeability == "mergeable" and
               publication.checks_state in ["success", "none"] and
               publication.head_sha == publication.remote_head_sha and
@@ -583,10 +586,13 @@ defmodule PtcManager.Stalls do
 
   defp of_kind(stalls, kind), do: Enum.filter(stalls, &(&1.kind == kind))
 
+  # A disabled repository is skipped by the reconciler, so its runs are not
+  # stalled; they wait for the repository.
   defp active_runs do
     Repo.all(
       from run in Run,
-        where: run.state == "active",
+        join: repository in assoc(run, :repository),
+        where: run.state == "active" and repository.enabled,
         preload: [:issue, :steps, :members]
     )
   end

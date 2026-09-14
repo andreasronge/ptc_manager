@@ -592,12 +592,14 @@ says what is wrong and what answers it, and **Open** leads to the page with
 that button. `PtcManager.Stalls` computes the list when the page loads, once a
 minute, and after any change that is not a Herdr sync; nothing is stored, so
 the section is empty exactly when the records show nothing stalled. The run
-detectors are silent while the console is not active, because nothing
-reconciles then, and a review waits five minutes on a restricted mode before
-it counts as snoozing, because a canary and a drain restrict the mode by
-design. The thresholds, half an hour without progress, five minutes without a
-heartbeat or recovery, and the five-minute mode grace, are the application
-settings `:stall_run_no_progress_ms`, `:stall_operation_recovery_ms`, and
+detectors are silent while the console is not active or the repository is
+disabled, because nothing reconciles then. A review round or continuation
+counts as snoozing on a restricted mode only when its own record last changed
+more than five minutes ago, because a canary and a drain restrict the mode by
+design and the mode itself carries no timestamp yet. The thresholds, half an
+hour without progress, five minutes without a heartbeat or recovery, and the
+five-minute review grace, are the application settings
+`:stall_run_no_progress_ms`, `:stall_operation_recovery_ms`, and
 `:stall_mode_grace_ms`.
 
 Planning groups the open backlog by what the maintainer can do next, instead of
