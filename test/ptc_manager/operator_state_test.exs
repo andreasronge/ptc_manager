@@ -173,6 +173,93 @@ defmodule PtcManager.OperatorStateTest do
     assert Enum.all?(snapshot.audit_events, &is_map(&1.untrusted.details))
   end
 
+  test "projects deployments, slot-holding operations, workers, and agent runs with their health" do
+    repository = repository_fixture()
+    worker = worker_fixture(%{status: "online"})
+    issue = issue_fixture(repository, %{number: 31, workflow_label: "ptc:ready"})
+    {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "working",
+        status_text: "agent status text",
+        started_at: DateTime.add(@now, -1_800, :second),
+        last_heartbeat_at: DateTime.add(@now, -1_200, :second)
+      })
+
+    %PtcManager.Operations.ResourceOperation{}
+    |> PtcManager.Operations.ResourceOperation.changeset(%{
+      worker_id: worker.id,
+      repository_id: repository.id,
+      agent_run_id: run.id,
+      job_id: job.id,
+      invocation_id: "op-1",
+      label: "test",
+      priority: 100,
+      state: "running",
+      slot_number: 1,
+      queued_at: @now,
+      started_at: @now,
+      last_heartbeat_at: @now,
+      wrapper_pid: 4242,
+      last_error: "wrapper said something"
+    })
+    |> Repo.insert!()
+
+    %PtcManager.Deployments.Deployment{}
+    |> PtcManager.Deployments.Deployment.changeset(%{
+      repository_id: repository.id,
+      requested_sha: String.duplicate("f", 40),
+      state: "queued",
+      requested_by: "andreas",
+      requested_at: @now,
+      status_text: "waiting for agents",
+      deployment_command: "deploy/remote-deploy-herdr",
+      deployment_timeout_minutes: 20
+    })
+    |> Repo.insert!()
+
+    snapshot = OperatorState.snapshot(@now)
+
+    assert [
+             %{
+               state: "queued",
+               requested_by: "andreas",
+               untrusted: %{status_text: "waiting for agents"}
+             }
+           ] =
+             snapshot.deployments
+
+    assert [
+             %{
+               slot_number: 1,
+               state: "running",
+               untrusted: %{last_error: "wrapper said something"}
+             }
+           ] =
+             snapshot.resource_operations
+
+    assert [%{id: worker_id, status: "online", online: online?}] = snapshot.workers
+    assert worker_id == worker.id
+    assert is_boolean(online?)
+
+    assert [
+             %{
+               state: "working",
+               health: %{status: :attention, label: "Out of contact"},
+               untrusted: run_untrusted
+             }
+           ] =
+             snapshot.agent_runs
+
+    assert run_untrusted.status_text == "agent status text"
+    assert snapshot.capacity.operations_in_use == 1
+    assert Jason.encode!(snapshot)
+  end
+
   test "review rounds appear only for jobs whose review is open" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 21, workflow_label: "ptc:ready"})

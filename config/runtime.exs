@@ -36,16 +36,15 @@ demo_mode = System.get_env("PTC_DEMO_MODE") == "true"
 # The operator read surface is off unless a token is configured. The token is
 # a maintainer credential next to PTC_MANAGER_PASSWORD and is held to a longer
 # minimum because it is presented by programs, never typed.
-case System.get_env("PTC_OPERATOR_TOKEN") do
-  nil ->
+case System.get_env("PTC_OPERATOR_TOKEN", "") |> String.trim() do
+  "" ->
     :ok
 
-  operator_token ->
-    if byte_size(String.trim(operator_token)) >= 32 do
-      config :ptc_manager, :operator_token, operator_token
-    else
-      raise "environment variable PTC_OPERATOR_TOKEN must contain at least 32 nonblank characters when set"
-    end
+  operator_token when byte_size(operator_token) >= 32 ->
+    config :ptc_manager, :operator_token, operator_token
+
+  _short ->
+    raise "environment variable PTC_OPERATOR_TOKEN must contain at least 32 nonblank characters when set"
 end
 
 if demo_mode do

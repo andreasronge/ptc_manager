@@ -30,8 +30,6 @@ defmodule PtcManager.OperatorState do
   @recent_ms 86_400_000
   @recent_steps 5
   @recent_audit_events 50
-  @pending_action_states ~w(queued running sync_pending)
-  @open_review_states ~w(running paused manual changes_requested resume_pending)
 
   @doc "The whole projection, per enabled repository plus the console-wide sections."
   def snapshot(now \\ DateTime.utc_now()) do
@@ -147,7 +145,9 @@ defmodule PtcManager.OperatorState do
   defp recent_audit_events do
     Repo.all(
       from event in AuditEvent,
-        order_by: [desc: event.inserted_at, desc: event.id],
+        # Newest by row id, which insert order makes newest by time too, without
+        # sorting an append-only table that has no index on time.
+        order_by: [desc: event.id],
         limit: @recent_audit_events
     )
   end
@@ -266,7 +266,8 @@ defmodule PtcManager.OperatorState do
   defp pending_actions(repository) do
     Repo.all(
       from action in AgentAction,
-        where: action.repository_id == ^repository.id and action.state in @pending_action_states,
+        where:
+          action.repository_id == ^repository.id and action.state in ^AgentAction.pending_states(),
         order_by: [asc: action.id]
     )
   end
@@ -282,7 +283,11 @@ defmodule PtcManager.OperatorState do
       attempt_count: action.attempt_count,
       requested_at: action.requested_at,
       started_at: action.started_at,
-      untrusted: %{target_label: action.target_label, last_error: action.last_error}
+      untrusted: %{
+        target_label: action.target_label,
+        last_error: action.last_error,
+        result_summary: action.result_summary
+      }
     }
   end
 
@@ -291,7 +296,7 @@ defmodule PtcManager.OperatorState do
       Repo.all(
         from job in Job,
           where:
-            job.repository_id == ^repository.id and job.review_state in @open_review_states and
+            job.repository_id == ^repository.id and job.review_state in ^Reviews.open_states() and
               job.state in ^Reviews.active_states(),
           select: job.id
       )
@@ -338,7 +343,9 @@ defmodule PtcManager.OperatorState do
       mergeability: publication.mergeability,
       head_sha: publication.head_sha,
       remote_head_sha: publication.remote_head_sha,
-      head_drifted: publication.head_sha != publication.remote_head_sha,
+      head_drifted:
+        is_binary(publication.head_sha) and is_binary(publication.remote_head_sha) and
+          publication.head_sha != publication.remote_head_sha,
       pr_checked_at: publication.pr_checked_at,
       untrusted: %{title: publication.title, last_error: publication.last_error}
     }

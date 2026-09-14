@@ -54,8 +54,6 @@ defmodule PtcManager.Stalls do
   @day_ms 86_400_000
   @terminal_rejections ["issue_closed"]
   @collection_actor "system:collection"
-  @pending_action_states ~w(queued running sync_pending)
-  @open_review_states ~w(running paused manual changes_requested resume_pending)
 
   @doc "Every stall the console can compute right now, alarms first, oldest first."
   @spec detect(DateTime.t()) :: [t()]
@@ -208,7 +206,7 @@ defmodule PtcManager.Stalls do
 
     Repo.all(
       from action in AgentAction,
-        where: action.ended_at >= ^lookback or action.state in @pending_action_states,
+        where: action.ended_at >= ^lookback or action.state in ^AgentAction.pending_states(),
         order_by: [desc: action.id],
         select:
           map(action, [
@@ -337,7 +335,7 @@ defmodule PtcManager.Stalls do
       Repo.all(
         from job in Job,
           where:
-            job.review_state in @open_review_states and job.state in ^Reviews.active_states(),
+            job.review_state in ^Reviews.open_states() and job.state in ^Reviews.active_states(),
           preload: [:issue]
       )
 
@@ -639,7 +637,7 @@ defmodule PtcManager.Stalls do
     Repo.exists?(
       from action in AgentAction,
         where:
-          action.state in @pending_action_states and
+          action.state in ^AgentAction.pending_states() and
             ((action.target_type == "issue" and action.target_id in ^issue_ids) or
                (action.target_type == "pull_request" and action.target_id in ^publication_ids))
     )
@@ -653,7 +651,7 @@ defmodule PtcManager.Stalls do
       from action in AgentAction,
         where:
           action.repository_id == ^run.repository_id and action.actor == @collection_actor and
-            action.state in @pending_action_states
+            action.state in ^AgentAction.pending_states()
     )
   end
 

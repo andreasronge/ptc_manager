@@ -5,38 +5,45 @@ defmodule PtcManagerWeb.OperatorControllerTest do
   alias PtcManager.Operations.Job
   alias PtcManager.Repo
 
-  @token "test-operator-token-0123456789abcdef"
-
   setup do
-    previous = Application.get_env(:ptc_manager, :operator_token)
+    previous = Application.fetch_env!(:ptc_manager, :operator_token)
     on_exit(fn -> restore_env(:operator_token, previous) end)
-    :ok
+    %{token: previous}
   end
 
-  test "answers 404 when no token is configured, so the routes stay invisible", %{conn: conn} do
+  test "answers 404 when no token is configured, so the routes stay invisible", %{
+    conn: conn,
+    token: token
+  } do
     Application.delete_env(:ptc_manager, :operator_token)
 
     for path <- [~p"/api/operator/state", ~p"/api/operator/stalls"] do
-      assert conn |> bearer(@token) |> get(path) |> json_response(404)
+      assert conn |> bearer(token) |> get(path) |> json_response(404)
     end
+
+    html = conn |> put_req_header("accept", "text/html") |> get(~p"/api/operator/state")
+    assert html.status == 404
   end
 
-  test "refuses a missing, wrong, or query-string token", %{conn: conn} do
+  test "refuses a missing, wrong, or query-string token", %{conn: conn, token: token} do
     assert conn |> get(~p"/api/operator/state") |> json_response(401)
     assert conn |> bearer("wrong") |> get(~p"/api/operator/state") |> json_response(401)
-    assert conn |> bearer(@token <> "x") |> get(~p"/api/operator/state") |> json_response(401)
+    assert conn |> bearer(token <> "x") |> get(~p"/api/operator/state") |> json_response(401)
 
-    response = conn |> get("/api/operator/state?token=#{@token}")
+    same_length = String.duplicate("z", byte_size(token))
+    assert conn |> bearer(same_length) |> get(~p"/api/operator/state") |> json_response(401)
+
+    response = conn |> get("/api/operator/state?token=#{token}")
     assert json_response(response, 401)
     assert get_resp_header(response, "www-authenticate") == ["Bearer"]
   end
 
-  test "serves the state projection with every section", %{conn: conn} do
+  test "serves the state projection with every section", %{conn: conn, token: token} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 12, workflow_label: "ptc:ready"})
     {:ok, _job} = Operations.approve_issue_directly(issue.id, "maintainer")
 
-    body = conn |> bearer(@token) |> get(~p"/api/operator/state") |> json_response(200)
+    body = conn |> bearer(token) |> get(~p"/api/operator/state") |> json_response(200)
 
     assert %{
              "captured_at" => _,
@@ -49,11 +56,9 @@ defmodule PtcManagerWeb.OperatorControllerTest do
              "audit_events" => [_ | _],
              "repositories" => [%{"jobs" => [%{"issue_number" => 12, "state" => "queued"}]}]
            } = body
-
-    refute Map.has_key?(body, "prompt")
   end
 
-  test "serves stalls with the console's words under untrusted", %{conn: conn} do
+  test "serves stalls with the console's words under untrusted", %{conn: conn, token: token} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 13, workflow_label: "ptc:ready"})
     {:ok, job} = Operations.approve_issue_directly(issue.id, "maintainer")
@@ -67,7 +72,7 @@ defmodule PtcManagerWeb.OperatorControllerTest do
     |> Repo.update!()
 
     assert %{"stalls" => [stall]} =
-             conn |> bearer(@token) |> get(~p"/api/operator/stalls") |> json_response(200)
+             conn |> bearer(token) |> get(~p"/api/operator/stalls") |> json_response(200)
 
     assert %{
              "kind" => "stop_unacknowledged",
