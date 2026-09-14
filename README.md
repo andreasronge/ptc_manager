@@ -591,10 +591,9 @@ no merge action, and an agent out of contact or waiting for a person. Each row
 says what is wrong and what answers it, and **Open** leads to the page with
 that button. `PtcManager.Stalls` computes the list on every refresh and every
 minute; nothing is stored, so the section is empty exactly when the records
-show nothing stalled. `PTC_STALL_RUN_NO_PROGRESS_MS` and
-`PTC_STALL_OPERATION_RECOVERY_MS` are not read; the two thresholds are
-application configuration (`:stall_run_no_progress_ms`,
-`:stall_operation_recovery_ms`) with defaults of thirty and five minutes.
+show nothing stalled. The two thresholds, half an hour without progress and
+five minutes without a heartbeat or recovery, are the application settings
+`:stall_run_no_progress_ms` and `:stall_operation_recovery_ms`.
 
 Planning groups the open backlog by what the maintainer can do next, instead of
 by GitHub's update time. The groups, in order, are **Ready to start**, **Needs
