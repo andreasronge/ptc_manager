@@ -128,7 +128,8 @@ defmodule PtcManager.Operations.AgentHealth do
   defp elapsed_ms(%DateTime{} = at, now),
     do: now |> DateTime.diff(at, :millisecond) |> max(0)
 
-  defp humanize(milliseconds) do
+  @doc "A duration in milliseconds as a short label such as `4m` or `2h 10m`."
+  def humanize(milliseconds) do
     seconds = div(milliseconds, 1_000)
 
     cond do

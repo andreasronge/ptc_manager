@@ -11,7 +11,8 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.MaintainerActions
   alias PtcManager.MaintainerActions.Catalog, as: ActionCatalog
   alias PtcManager.MaintainerActions.Poller, as: MaintainerActionPoller
-  alias PtcManager.Operations
+  alias PtcManager.{Operations, Stalls}
+  alias PtcManager.Operations.AgentHealth
   alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PlanningGroup
   alias PtcManager.Repository.MaintainerLabels
@@ -485,7 +486,8 @@ defmodule PtcManagerWeb.DashboardLive do
   @impl true
   def handle_info(:tick, socket) do
     Process.send_after(self(), :tick, 60_000)
-    {:noreply, assign(socket, :now, DateTime.utc_now())}
+    now = DateTime.utc_now()
+    {:noreply, socket |> assign(:now, now) |> assign_stalls(now)}
   end
 
   def handle_info({:operations_changed, _source}, socket),
@@ -914,7 +916,9 @@ defmodule PtcManagerWeb.DashboardLive do
       Operations.follow_up_items()
       |> filter_repository(selected_repository, & &1.repository)
 
-    assign(socket,
+    socket
+    |> assign_stalls(socket.assigns.now)
+    |> assign(
       repositories: repositories,
       execution_profiles: PtcManager.ExecutionProfiles.list(),
       issues: issues,
@@ -930,6 +934,39 @@ defmodule PtcManagerWeb.DashboardLive do
       publication_enabled: Application.get_env(:ptc_manager, :publication_enabled, false)
     )
   end
+
+  # Stalls carry a repository id rather than a struct, so the repository filter
+  # resolves it against the repositories the page already lists.
+  defp assign_stalls(socket, now) do
+    repositories = Operations.list_repositories()
+
+    stalls =
+      Stalls.detect(now)
+      |> filter_repository(socket.assigns.selected_repository, fn stall ->
+        Enum.find(repositories, &(&1.id == stall.repository_id))
+      end)
+
+    assign(socket, :stalls, stalls)
+  end
+
+  @doc false
+  def stall_path(
+        %{target_type: "collection_run", repository_id: id, issue_id: issue_id},
+        repositories
+      ) do
+    case Enum.find(repositories, &(&1.id == id)) do
+      nil -> ~p"/"
+      repository -> "/?repo=#{repository_key(repository)}#issue-#{issue_id}"
+    end
+  end
+
+  def stall_path(%{target_type: type}, _repositories) when type in ["job", "pr_publication"],
+    do: ~p"/board"
+
+  def stall_path(%{target_type: "resource_operation"}, _repositories),
+    do: ~p"/operations/performance"
+
+  def stall_path(_stall, _repositories), do: ~p"/operations"
 
   defp group_issues(issues, follow_ups, now) do
     grouped =
