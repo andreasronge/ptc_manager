@@ -502,6 +502,16 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert wrapper =~ "script is outside the worktree"
   end
 
+  test "Herdr observation runs as the managed session owner" do
+    unit = File.read!(Path.join(@project_root, "deploy/ptc_manager-herdr-observer.service"))
+
+    assert unit =~ "User=ptc-manager-worker"
+    assert unit =~ "Group=ptc-manager-worker"
+    assert unit =~ "ExecStartPre=+/bin/sh"
+    assert unit =~ "/bin/chown ptc-manager-worker:ptc-manager-output"
+    refute unit =~ "User=agent"
+  end
+
   test "remote deployment installs a forced-command bridge for the worker Herdr session" do
     script = File.read!(@remote_script)
     sudoers = File.read!(@sudoers)
@@ -529,7 +539,10 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert bridge =~ "run_worker client-status"
     refute bridge =~ ~s|exec "$herdr" status client|
     canary = File.read!(@herdr_bridge_canary)
-    assert canary =~ "machine add"
+
+    assert canary =~
+             ~s|"$herdr" machine add "$target" --label "Deployment canary" --remote-session "$expected_session"|
+
     assert canary =~ "exec /usr/local/bin/herdr remote-client-bridge </dev/null"
     refute bridge =~ ~r/^\s*eval\s/m
 

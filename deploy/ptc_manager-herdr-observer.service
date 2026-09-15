@@ -5,10 +5,11 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=agent
-Group=agent
+User=ptc-manager-worker
+Group=ptc-manager-worker
 SupplementaryGroups=ptc-manager-output
 EnvironmentFile=/etc/ptc_manager/herdr-observer.env
+ExecStartPre=+/bin/sh -c 'path=$${HERDR_SNAPSHOT_PATH:-/var/lib/ptc_manager-output/herdr-agents.json}; if [ -e "$$path" ]; then /bin/chown ptc-manager-worker:ptc-manager-output "$$path"; fi'
 ExecStart=/usr/local/bin/ptc-manager-herdr-snapshot-write
 PrivateTmp=true
 ProtectSystem=strict
