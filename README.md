@@ -968,11 +968,14 @@ the canonical `Blocked by #<number>` marker into the dependent issue and apply
 dependency rows for display and safety checks. An unresolved or unknown blocker
 prevents approval; if it appears after approval, dispatch cancels that stale job
 before starting an agent. An approval freezes the issue's title and body as the
-maintainer saw them: a comment, a label, or an assignment after the approval
-re-freezes the approval to the current issue at dispatch, so a decision comment
-or a retry after an agent stopped does not cancel the job, while a changed
-title or body cancels it and asks for a fresh approval. The cancelled card says
-which in words. Closing every blocker does not auto-start the dependent
+maintainer saw them: a comment or the console's own assignment after the
+approval re-freezes the approval to the current issue at dispatch, so a
+decision comment or a retry after an agent stopped does not cancel the job,
+while a changed title or body cancels it and asks for a fresh approval, and a
+label that no longer says ready, an assignment to someone else, or new
+sub-issues refuse dispatch as they refuse approval. The dashboard's card for
+the cancelled job says which in words. Closing every blocker does not
+auto-start the dependent
 issue: the dashboard asks the maintainer to run **Prepare issue** again and make
 a fresh approval decision. At most 100 dependency rows are projected per issue,
 and one repository sync performs at most 100 lookups for blockers that are not

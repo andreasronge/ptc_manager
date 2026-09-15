@@ -905,6 +905,26 @@ defmodule PtcManager.OperationsTest do
       assert Repo.get_by!(AuditEvent, action: "job.retried_after_stop")
     end
 
+    test "a retry passes the gates a fresh approval passes" do
+      assert {:ok, stopped} = stop_job()
+      issue = Repo.get!(Issue, stopped.issue_id)
+
+      issue |> Ecto.Changeset.change(workflow_label: "ptc:blocked") |> Repo.update!()
+
+      assert {:error, :issue_workflow_not_ready} =
+               Operations.retry_stopped_job(stopped.id, "andreas")
+
+      Repo.get!(Issue, issue.id)
+      |> Ecto.Changeset.change(
+        workflow_label: "ptc:ready",
+        github_assignees: %{"logins" => ["someone-else"]}
+      )
+      |> Repo.update!()
+
+      assert {:error, :issue_claimed} = Operations.retry_stopped_job(stopped.id, "andreas")
+      assert is_nil(Repo.get!(Job, stopped.id).stop_acknowledged_at)
+    end
+
     test "a job that never stopped cannot be retried or set aside" do
       %{job: job} = running_job_fixture("working")
 
