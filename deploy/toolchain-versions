@@ -22,10 +22,13 @@ cursor_agent=2026.09.02-c22c1a3
 # sha256 differs, and a version bump comes with a new digest.
 cursor_agent_sha256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c
 
-# Herdr publishes each release and its digest at https://herdr.dev/latest.json,
-# and mise publishes SHASUMS256.txt beside each release. The deployment refuses
-# a download whose sha256 is not exactly the one named here.
+# Herdr publishes each release and its digest at https://herdr.dev/latest.json.
+# Its remote protocol pin is checked by the deployment bridge canary, so a
+# version bump must verify and update both values. Mise publishes SHASUMS256.txt
+# beside each release. The deployment refuses a download whose sha256 is not
+# exactly the one named here.
 herdr=0.9.0
+herdr_protocol=22
 herdr_sha256=4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f
 mise=2026.8.14
 mise_sha256=7cd12d6002d5b3c83a89cad79023712faf2a36f9e8b2ee2061dac5135b3de0ed

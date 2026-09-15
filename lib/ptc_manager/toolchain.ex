@@ -75,7 +75,7 @@ defmodule PtcManager.Toolchain do
   # release that compiled without one of them would only fail on the machine,
   # halfway through a deployment, so require the whole set here.
   @required Enum.map(@programs, & &1.pin) ++
-              ~w(cursor_agent_sha256 herdr_sha256 mise_sha256 hex rebar3_sha512)
+              ~w(cursor_agent_sha256 herdr_protocol herdr_sha256 mise_sha256 hex rebar3_sha512)
 
   @unpinned Enum.reject(@required, &Map.has_key?(@pinned, &1))
 

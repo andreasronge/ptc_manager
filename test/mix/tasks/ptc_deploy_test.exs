@@ -9,6 +9,8 @@ defmodule Mix.Tasks.PtcDeployTest do
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
   @herdr_ssh_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-ssh-bridge")
+  @herdr_worker_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-worker-bridge")
+  @herdr_bridge_canary Path.join(@project_root, "deploy/ptc-manager-herdr-bridge-canary")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
   @gh_label Path.join(@project_root, "deploy/ptc-manager-worker-gh-label")
@@ -34,6 +36,8 @@ defmodule Mix.Tasks.PtcDeployTest do
           @worker_git,
           @worker_bootstrap,
           @herdr_ssh_bridge,
+          @herdr_worker_bridge,
+          @herdr_bridge_canary,
           @claude_trust,
           @codex_arm,
           @gh_label,
@@ -505,13 +509,24 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "/usr/local/bin/ptc-manager-herdr-ssh-bridge"
 
     assert sudoers =~
-             "agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr --session default remote-client-bridge"
+             "agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-herdr-worker-bridge"
 
-    assert sudoers =~
-             "agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr --session default status server --json"
+    assert script =~ "deploy/ptc-manager-herdr-worker-bridge"
+    assert script =~ "deploy/ptc-manager-herdr-bridge-canary"
+    assert script =~ ~s|read_environment_setting HERDR_SESSION "$worker_environment_file"|
+    assert script =~ ~s|"$active_herdr_version" "$herdr_protocol" "$worker_session"|
 
     assert bridge =~ ~s(original=${SSH_ORIGINAL_COMMAND:-})
-    assert bridge =~ ~s|exec /usr/bin/sudo -n -H -u ptc-manager-worker -- "$herdr"|
+
+    assert bridge =~
+             ~s|exec /usr/bin/sudo -n -H -u ptc-manager-worker -- "$worker_bridge" "$1"|
+
+    worker_bridge = File.read!(@herdr_worker_bridge)
+    assert worker_bridge =~ "/etc/ptc_manager/herdr-bridge-session"
+    assert worker_bridge =~ ~s|exec "$herdr" --session "$session"|
+    canary = File.read!(@herdr_bridge_canary)
+    assert canary =~ "machine add"
+    assert canary =~ "exec /usr/local/bin/herdr remote-client-bridge </dev/null"
     refute bridge =~ ~r/^\s*eval\s/m
 
     assert {"/usr/local/bin/herdr\n", 0} =
@@ -527,6 +542,42 @@ defmodule Mix.Tasks.PtcDeployTest do
              )
 
     assert output =~ "unsupported SSH command"
+  end
+
+  test "worker bridge reads the deployed session and rejects every other operation" do
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-herdr-worker-bridge-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+    session_file = Path.join(directory, "session")
+    fake_herdr = Path.join(directory, "herdr")
+    bridge = Path.join(directory, "bridge")
+    File.write!(session_file, "managed-session\n")
+    File.write!(fake_herdr, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n")
+
+    source =
+      @herdr_worker_bridge
+      |> File.read!()
+      |> String.replace("/etc/ptc_manager/herdr-bridge-session", session_file)
+      |> String.replace("/usr/local/bin/herdr", fake_herdr)
+
+    File.write!(bridge, source)
+    File.chmod!(fake_herdr, 0o700)
+    File.chmod!(bridge, 0o700)
+
+    assert {"--session managed-session status server --json\n", 0} =
+             System.cmd(bridge, ["status"])
+
+    assert {"--session managed-session remote-client-bridge\n", 0} =
+             System.cmd(bridge, ["stream"])
+
+    assert {_output, 126} = System.cmd(bridge, ["shell"])
+    File.write!(session_file, "managed session\n")
+    assert {_output, 126} = System.cmd(bridge, ["status"])
   end
 
   test "remote deployment installs the out-of-process self-deploy bridge" do

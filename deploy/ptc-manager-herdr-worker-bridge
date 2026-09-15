@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+herdr=/usr/local/bin/herdr
+session_file=/etc/ptc_manager/herdr-bridge-session
+
+[ "$#" -eq 1 ] || exit 126
+[ -r "$session_file" ] || exit 126
+IFS= read -r session <"$session_file" || exit 126
+case "$session" in
+  ''|*[!A-Za-z0-9_.-]*) exit 126 ;;
+esac
+
+case "$1" in
+  status)
+    exec "$herdr" --session "$session" status server --json
+    ;;
+  stream)
+    exec "$herdr" --session "$session" remote-client-bridge
+    ;;
+  *)
+    exit 126
+    ;;
+esac
