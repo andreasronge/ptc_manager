@@ -943,11 +943,12 @@ defmodule PtcManager.Publications do
               insert_status_audit!(publication, "pr_publication.base_changed", result, now)
               load(publication.id)
 
-            # While an action for this pull request is queued, running, or
-            # syncing, a head it pushed is verified by that action, not fenced
-            # by the poller; the status still moves so the board stays current.
+            # While an action that pushes to this pull request is queued,
+            # running, or syncing, a head it pushed is verified by that action,
+            # not fenced by the poller; the status still moves so the board
+            # stays current.
             result.state == "open" and result.head_sha != publication.remote_head_sha and
-                action_in_flight?(publication.id) ->
+                pushing_action_in_flight?(publication.id) ->
               publication
               |> PrPublication.changeset(
                 Map.merge(
@@ -1650,7 +1651,22 @@ defmodule PtcManager.Publications do
     |> where(
       [action],
       action.target_type == "pull_request" and action.target_id == ^publication_id and
-        action.state in ["queued", "running", "sync_pending"]
+        action.state in ^AgentAction.pending_states()
+    )
+    |> Repo.exists?()
+  end
+
+  @pushing_action_keys ~w(repair_pr repair_and_merge_pr merge_reviewed_pr)
+
+  # Only an action that may push owns the head the poller sees; an analysis or
+  # a retrospective never pushes, so a foreign push during one is still fenced.
+  defp pushing_action_in_flight?(publication_id) do
+    AgentAction
+    |> where(
+      [action],
+      action.target_type == "pull_request" and action.target_id == ^publication_id and
+        action.action_key in @pushing_action_keys and
+        action.state in ^AgentAction.pending_states()
     )
     |> Repo.exists?()
   end

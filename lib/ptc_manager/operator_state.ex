@@ -343,6 +343,7 @@ defmodule PtcManager.OperatorState do
       mergeability: publication.mergeability,
       head_sha: publication.head_sha,
       remote_head_sha: publication.remote_head_sha,
+      observed_head_sha: publication.observed_head_sha,
       head_drifted:
         is_binary(publication.head_sha) and is_binary(publication.remote_head_sha) and
           publication.head_sha != publication.remote_head_sha,

@@ -1224,7 +1224,7 @@ defmodule PtcManager.PublisherTest do
     assert {:ok, observed} = PublicationStatusReconciler.run_once(client: FakeBroker)
     assert observed.state == "published"
     assert observed.checks_state == "pending"
-    assert observed.remote_head_sha != String.duplicate("e", 40)
+    assert observed.remote_head_sha == publication.remote_head_sha
     assert Repo.get!(Job, job.id).state == "pr_open"
     assert head_changed_count(publication.id) == 0
   end

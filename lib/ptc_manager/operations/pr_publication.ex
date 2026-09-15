@@ -137,6 +137,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_format(:base_sha, @sha)
     |> validate_format(:head_sha, @sha)
     |> validate_format(:remote_head_sha, @sha)
+    |> validate_format(:observed_head_sha, @sha)
     |> validate_format(:remote_base_sha, @sha)
     |> validate_format(:diff_digest, ~r/\A[0-9a-f]{64}\z/)
     |> unique_constraint(:job_id)

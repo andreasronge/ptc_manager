@@ -751,7 +751,12 @@ catalog contains:
   and merges that exact PR with the authenticated `gh` CLI. PtcManager verifies
   the resulting GitHub state and retains the session until the PR is merged or
   closed. A head PtcManager has not verified blocks the publication, and that
-  verification is what clears it again; **Fix and merge** stays available on a
+  verification is what clears it again, unless an action that may push to that
+  pull request is queued, running, or syncing: that action verifies the head it
+  pushes itself, and the poller only records the status it sees. A block
+  announces itself once per observed head, parking the job and marking the
+  worktree on the first poll, and later polls only keep the pull request's
+  checks and mergeability current; **Fix and merge** stays available on a
   pull request blocked that way, so an action that stopped before its work was
   verified leaves a branch that can be repaired rather than stranded. Imported PRs can still
   be reviewed and repaired, but do not receive a generated implementation
