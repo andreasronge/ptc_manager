@@ -1,6 +1,7 @@
 """Offline contract checks for the installed reviewer bridge; no provider calls."""
 import hashlib
 import json
+import io
 import os
 from pathlib import Path
 import runpy
@@ -120,6 +121,22 @@ class ReviewerContract(unittest.TestCase):
                 note.write_text('x' * 20_001)
                 self.assertEqual(main(), 75)
                 self.assertEqual(len(calls), 1)
+
+    def test_operation_wrapper_names_the_missing_review_inside_a_repair(self):
+        main = runpy.run_path(str(ROOT / 'deploy/ptc-operation'))['main']
+        with tempfile.TemporaryDirectory() as directory:
+            context_file = Path(directory, 'context.json')
+            context_file.write_text('{}')
+            def broker(context, fields):
+                raise RuntimeError(':review_unavailable_in_action')
+            captured = io.StringIO()
+            with patch.dict(os.environ, PTC_MANAGED_OPERATION_CONTEXT=str(context_file)), \
+                 patch.object(sys, 'argv', ['ptc-operation', 'review']), \
+                 patch.dict(main.__globals__, broker_request_with_retry=broker), \
+                 patch.object(sys, 'stderr', captured):
+                self.assertEqual(main(), 76)
+            self.assertIn("CI is the gate", captured.getvalue())
+            self.assertNotIn('check the console', captured.getvalue())
 
     def test_codex_resumes_only_the_supplied_reviewer_session(self):
         request = self.request()

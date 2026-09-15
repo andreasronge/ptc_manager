@@ -1705,6 +1705,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert queued.state == "queued"
     assert queued.prompt =~ ~s(merge_authorized="true")
+    assert queued.prompt =~ ~s(review_policy="ci_is_the_gate")
 
     clean_status =
       publication
