@@ -11,6 +11,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @herdr_ssh_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-ssh-bridge")
   @herdr_worker_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-worker-bridge")
   @herdr_bridge_canary Path.join(@project_root, "deploy/ptc-manager-herdr-bridge-canary")
+  @ssh_firewall Path.join(@project_root, "deploy/ptc-manager-ssh-firewall")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
   @gh_label Path.join(@project_root, "deploy/ptc-manager-worker-gh-label")
@@ -38,6 +39,7 @@ defmodule Mix.Tasks.PtcDeployTest do
           @herdr_ssh_bridge,
           @herdr_worker_bridge,
           @herdr_bridge_canary,
+          @ssh_firewall,
           @claude_trust,
           @codex_arm,
           @gh_label,
@@ -578,6 +580,22 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert {_output, 126} = System.cmd(bridge, ["shell"])
     File.write!(session_file, "managed session\n")
     assert {_output, 126} = System.cmd(bridge, ["status"])
+  end
+
+  test "remote deployment installs the Tailscale-only SSH firewall operator" do
+    script = File.read!(@remote_script)
+    firewall = File.read!(@ssh_firewall)
+
+    assert script =~ "deploy/ptc-manager-ssh-firewall"
+    assert script =~ "/usr/local/bin/ptc-manager-ssh-firewall"
+    assert firewall =~ "allow in on tailscale0"
+    assert firewall =~ "insert 1 allow in on tailscale0"
+    assert firewall =~ "insert 2 deny in proto tcp to any port 22"
+    assert firewall =~ "--force delete allow 22/tcp"
+    assert firewall =~ "the public IPv4 SSH deny does not immediately follow"
+    assert firewall =~ "open-recovery"
+    assert firewall =~ "close-recovery"
+    assert firewall =~ "recovery source must be one IPv4 address"
   end
 
   test "remote deployment installs the out-of-process self-deploy bridge" do

@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+ufw=/usr/sbin/ufw
+ip=/usr/sbin/ip
+
+[ "$(/usr/bin/id -u)" -eq 0 ] || { echo "run this command as root" >&2; exit 1; }
+[ "$#" -ge 1 ] || { echo "usage: ptc-manager-ssh-firewall enforce|open-recovery IP|close-recovery IP|status" >&2; exit 2; }
+"$ufw" status | grep -q '^Status: active$' || { echo "UFW must already be active" >&2; exit 1; }
+
+valid_ipv4() {
+  /usr/bin/python3 -I -c 'import ipaddress,sys; value=ipaddress.ip_address(sys.argv[1]); assert value.version == 4' "$1" 2>/dev/null
+}
+
+case "$1" in
+  enforce)
+    [ "$#" -eq 1 ] || exit 2
+    "$ip" link show tailscale0 >/dev/null 2>&1 || { echo "tailscale0 is unavailable" >&2; exit 1; }
+    # Rule order is the invariant: Tailscale is accepted first and every other
+    # interface is denied before any older rule (including OpenSSH aliases,
+    # public-interface rules, or port ranges) can match.
+    while "$ufw" --force delete allow in on tailscale0 proto tcp to any port 22 >/dev/null 2>&1; do :; done
+    while "$ufw" --force delete deny in proto tcp to any port 22 >/dev/null 2>&1; do :; done
+    "$ufw" insert 1 allow in on tailscale0 proto tcp to any port 22 comment 'PtcManager SSH over Tailscale'
+    "$ufw" insert 2 deny in proto tcp to any port 22 comment 'PtcManager public SSH blocked'
+    # Remove the common legacy spelling too; other older permits are inert
+    # behind the explicit deny but remain visible for an operator to clean up.
+    if "$ufw" status | grep -Eq '^22/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere'; then
+      "$ufw" --force delete allow 22/tcp
+    fi
+    status=$("$ufw" status numbered)
+    printf '%s\n' "$status" | grep -Eq '^\[[[:space:]]*1\][[:space:]]+22/tcp on tailscale0[[:space:]]+ALLOW IN' || {
+      echo "the first IPv4 SSH rule is not the Tailscale allow" >&2
+      exit 1
+    }
+    printf '%s\n' "$status" | grep -Eq '^\[[[:space:]]*2\][[:space:]]+22/tcp[[:space:]]+DENY IN' || {
+      echo "the public IPv4 SSH deny does not immediately follow the Tailscale allow" >&2
+      exit 1
+    }
+    ;;
+  open-recovery)
+    [ "$#" -eq 2 ] || exit 2
+    valid_ipv4 "$2" || { echo "recovery source must be one IPv4 address" >&2; exit 2; }
+    if "$ufw" status | grep -E '^22/tcp[[:space:]]+ALLOW IN' | grep -Fq "$2"; then
+      "$ufw" --force delete allow from "$2" proto tcp to any port 22
+    fi
+    "$ufw" insert 2 allow from "$2" proto tcp to any port 22 comment 'TEMPORARY PtcManager SSH recovery'
+    ;;
+  close-recovery)
+    [ "$#" -eq 2 ] || exit 2
+    valid_ipv4 "$2" || { echo "recovery source must be one IPv4 address" >&2; exit 2; }
+    if "$ufw" status | grep -E '^22/tcp[[:space:]]+ALLOW IN' | grep -Fq "$2"; then
+      "$ufw" --force delete allow from "$2" proto tcp to any port 22
+    fi
+    ;;
+  status)
+    [ "$#" -eq 1 ] || exit 2
+    "$ufw" status verbose
+    ;;
+  *)
+    echo "usage: ptc-manager-ssh-firewall enforce|open-recovery IP|close-recovery IP|status" >&2
+    exit 2
+    ;;
+esac

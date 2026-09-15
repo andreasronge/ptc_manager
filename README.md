@@ -1382,6 +1382,49 @@ The target defaults to the `herdr-box` SSH host from the local SSH config. Use
 `mix ptc.deploy --dry-run` to show the resolved commit and release identifier
 without running checks or changing either machine.
 
+`herdr-box` should resolve to the server's Tailscale address, not its public IP,
+so routine operator SSH and deployments are unreachable from the public
+internet. Keep a visibly named `herdr-box-recovery` alias for the public address,
+but expect it to be blocked during normal operation:
+
+```sshconfig
+Host herdr-box
+  HostName TAILSCALE_IP
+  User agent
+  IdentityFile ~/.ssh/id_rsa
+  IdentitiesOnly yes
+
+Host herdr-box-recovery
+  HostName PUBLIC_IP
+  User agent
+  IdentityFile ~/.ssh/id_rsa
+  IdentitiesOnly yes
+```
+
+Verify the effective route with `ssh -G herdr-box | grep '^hostname '` and then
+`ssh herdr-box 'tailscale ip -4'`. After a deployment has installed the helper,
+run `ssh -t herdr-box sudo /usr/local/bin/ptc-manager-ssh-firewall enforce`.
+It puts the `tailscale0` allow first and a public TCP 22 deny immediately
+behind it, before any older UFW permit can match; it also removes UFW's common
+broad `22/tcp` rule. Also remove public port 22 from the provider firewall when
+one is attached.
+Confirm a new `herdr-box` connection succeeds and the public address no longer
+accepts TCP port 22 before closing the existing session.
+
+The recovery path is deliberately manual. From the provider's authenticated
+console, temporarily permit TCP 22 only from the maintainer's current public
+IPv4 address (and do the same at the provider firewall if needed):
+
+```sh
+sudo /usr/local/bin/ptc-manager-ssh-firewall open-recovery CURRENT_PUBLIC_IPV4
+# Test: ssh herdr-box-recovery
+sudo /usr/local/bin/ptc-manager-ssh-firewall close-recovery CURRENT_PUBLIC_IPV4
+```
+
+Never restore an `Anywhere` SSH rule. Close the temporary rule immediately after
+repairing Tailscale and verify `sudo ptc-manager-ssh-firewall status` over
+`herdr-box`.
+
 The task runs the checked-in bootstrap and pre-publication scripts locally,
 uploads a Git archive rather than uncommitted files, and builds the production
 release on the server with its mise-managed
