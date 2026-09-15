@@ -27,7 +27,11 @@ def git(path, args, env=None, text=True):
 
 
 def owned_directory(path, shared=False):
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    # The shared artifact root is a write-only drop box (1730): workers may
+    # create their own staging directory but may not list retained artifacts.
+    # O_PATH validates the directory itself without requiring read permission.
+    access = os.O_PATH if shared and hasattr(os, "O_PATH") else os.O_RDONLY
+    descriptor = os.open(path, access | os.O_DIRECTORY | os.O_NOFOLLOW)
     status = os.fstat(descriptor)
     private = status.st_uid == os.geteuid() and not status.st_mode & 0o022
     sticky_shared = (

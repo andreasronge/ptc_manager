@@ -44,6 +44,31 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
       job: %{branch_name: branch}
     }
 
+    if match?({:unix, :linux}, :os.type()) do
+      # Production uses a group-writable drop box that deliberately cannot be
+      # listed. The worker must validate and write it without read permission.
+      File.chmod!(artifacts, 0o300)
+      token = String.duplicate("d", 24)
+      script = Application.app_dir(:ptc_manager, "priv/worktree_preserve.py")
+
+      {output, status} =
+        System.cmd("/usr/bin/python3", [
+          "-I",
+          script,
+          root,
+          path,
+          artifacts,
+          "7",
+          token,
+          branch
+        ])
+
+      assert status == 0, output
+      File.chmod!(artifacts, 0o700)
+      File.rm_rf!(Path.join(artifacts, "allocation-7-#{token}"))
+      File.chmod!(artifacts, 0o1700)
+    end
+
     assert {:ok, result} = WorktreePreserver.preserve(allocation, String.duplicate("x", 24))
     assert File.dir?(result.preserved_artifact_path)
     assert before == git!(path, ["status", "--porcelain=v1"])
