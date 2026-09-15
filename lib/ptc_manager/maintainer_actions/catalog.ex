@@ -836,7 +836,10 @@ defmodule PtcManager.MaintainerActions.Catalog do
     merge_authorized? = Keyword.get(opts, :merge_authorized?, false)
 
     """
-    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" draft_pull_request="#{if merge_authorized?, do: "mark ready for review before merging", else: "leave as is"}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
+    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" draft_pull_request="#{if merge_authorized?, do: "mark ready for review before merging", else: "leave as is"}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" review_policy="ci_is_the_gate" push_authorized="true" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
+    <repair_policy>
+    The managed review is not available inside this action: `$PTC_OPERATION_WRAPPER review` answers review_unavailable_in_action. That is not an outage. The rule from your implementation task that a passed managed review must precede a push does not apply to this repair. Validate the repair with the repository's own checks, commit it, and push the existing branch; the pull request's CI is the gate for a repair. Do not stop to wait for a review that cannot come.
+    </repair_policy>
     <pull_request_data>
     PR: ##{publication.pr_number}
     Branch: #{publication.branch_name}
