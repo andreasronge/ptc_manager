@@ -952,6 +952,100 @@ defmodule PtcManager.HerdrSyncTest do
     refute Operations.worktree_consumes_execution_slot?(failed_allocation)
   end
 
+  test "a repair resumed in a retained session follows the pane it shares with the job's run" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    worker = worker_fixture(%{worker_key: "herdr:shared-pane"})
+    now = now()
+    earlier = DateTime.add(now, -900, :second)
+
+    job
+    |> Job.changeset(%{state: "pr_open", fencing_token: 1, lease_owner: worker.worker_key})
+    |> Repo.update!()
+
+    {:ok, job_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "waiting",
+        agent_name: "impl_j#{job.id}_f1",
+        herdr_workspace: "shared-workspace",
+        herdr_pane: "w4:p1",
+        herdr_session: "shared-pane",
+        started_at: earlier,
+        last_heartbeat_at: earlier,
+        external_key: "shared-pane:agent-shared",
+        fencing_token: 1
+      })
+
+    action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository.id,
+        action_key: "repair_pr",
+        target_type: "pull_request",
+        target_id: 1,
+        target_label: "example/repo#1",
+        prompt_version: 1,
+        prompt: "Repair PR 1",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "maintainer",
+        state: "running",
+        attempt_count: 1,
+        requested_at: earlier,
+        started_at: earlier
+      })
+      |> Repo.insert!()
+
+    # What RetainedHerdrAdapter.mark_resumed/2 leaves behind: the action's run
+    # carries the retained session's identity and has not moved since.
+    {:ok, action_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "starting",
+        agent_name: "impl_j#{job.id}_f1",
+        herdr_workspace: "shared-workspace",
+        herdr_pane: "w4:p1",
+        herdr_session: "shared-pane",
+        started_at: earlier,
+        last_heartbeat_at: earlier,
+        fencing_token: 1
+      })
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "impl_j#{job.id}_f1",
+           "agent_status" => "working",
+           "pane_id" => "w4:p1",
+           "workspace_id" => "shared-workspace",
+           "agent_session" => %{"value" => "agent-shared"}
+         }
+       ]}
+    )
+
+    assert {:ok, %{lost_count: 0}} = Sync.sync(client: FakeClient, session: "shared-pane")
+
+    refreshed_job_run = Repo.get!(AgentRun, job_run.id)
+    assert refreshed_job_run.state == "working"
+
+    refreshed_action_run = Repo.get!(AgentRun, action_run.id)
+    assert refreshed_action_run.state == "working"
+    assert DateTime.compare(refreshed_action_run.last_heartbeat_at, earlier) == :gt
+    assert Repo.get!(AgentAction, action.id).state == "running"
+
+    assert %{status: :healthy} =
+             PtcManager.Operations.AgentHealth.assess(refreshed_action_run, now())
+  end
+
   test "a snapshot started before repair resumption cannot overwrite the resumed slot" do
     Application.put_env(:ptc_manager, :paused_herdr_test_pid, self())
     on_exit(fn -> Application.delete_env(:ptc_manager, :paused_herdr_test_pid) end)

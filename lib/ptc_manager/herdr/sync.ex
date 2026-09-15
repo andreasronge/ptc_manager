@@ -18,6 +18,7 @@ defmodule PtcManager.Herdr.Sync do
 
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
+  @shared_pane_states ~w(starting working idle blocked waiting)
   @terminal_states ~w(done failed lost)
   @active_agent_states ~w(queued starting working blocked)
   @touch_interval_ms 60_000
@@ -202,9 +203,10 @@ defmodule PtcManager.Herdr.Sync do
         if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
           run = upsert_agent_run(worker, existing_run, attrs)
           superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
+          shared_ids = refresh_shared_pane_runs(worker, run, attrs, agent_now)
           reconcile_worktree_identity(run, attrs, agent_now)
           reconcile_job(run, attrs.state, agent_now, lease_now)
-          [run.id | superseded_ids]
+          [run.id | superseded_ids ++ shared_ids]
         else
           [existing_run.id]
         end
@@ -1106,6 +1108,35 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp supersede_duplicate_action_runs(_worker, _run, _attrs, _now), do: []
+
+  # A retained repair resumes the job's implementation session, so its action
+  # run carries the same agent name as the job's run while Herdr reports the
+  # pane once, under the job's name. Every live run bound to that pane follows
+  # the observation: its heartbeat moves, and a run still waiting to start
+  # takes the state the pane reports. Without this the action run froze in
+  # `starting` and read as out of contact while its agent was working.
+  defp refresh_shared_pane_runs(worker, %AgentRun{agent_name: name} = run, attrs, now)
+       when is_binary(name) do
+    AgentRun
+    |> where(
+      [other],
+      other.worker_id == ^worker.id and other.id != ^run.id and other.agent_name == ^name and
+        not is_nil(other.agent_action_id) and other.state in ^@shared_pane_states
+    )
+    |> Repo.all()
+    |> Enum.map(fn other ->
+      changes =
+        if other.state == "starting" and attrs.state in @shared_pane_states do
+          %{state: attrs.state, state_changed_at: now, last_heartbeat_at: now}
+        else
+          %{last_heartbeat_at: now}
+        end
+
+      other |> AgentRun.changeset(changes) |> Repo.update!() |> Map.fetch!(:id)
+    end)
+  end
+
+  defp refresh_shared_pane_runs(_worker, _run, _attrs, _now), do: []
 
   defp mark_managed_run_uncertain(
          run,
