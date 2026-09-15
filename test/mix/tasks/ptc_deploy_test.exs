@@ -529,7 +529,10 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert bridge =~ "run_worker client-status"
     refute bridge =~ ~s|exec "$herdr" status client|
     canary = File.read!(@herdr_bridge_canary)
-    assert canary =~ "machine add"
+
+    assert canary =~
+             ~s|"$herdr" machine add "$target" --label "Deployment canary" --remote-session "$expected_session"|
+
     assert canary =~ "exec /usr/local/bin/herdr remote-client-bridge </dev/null"
     refute bridge =~ ~r/^\s*eval\s/m
 

@@ -44,8 +44,8 @@ cleanup() { rm -rf -- "$home"; }
 trap cleanup EXIT HUP INT TERM
 install -d -m 0700 "$home/.config"
 config_path="$home/config.toml"
-HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path "$herdr" machine add \
-  --label "Deployment canary" --remote-session "$expected_session" "$target" >/dev/null
+HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
+  "$herdr" machine add "$target" --label "Deployment canary" --remote-session "$expected_session" >/dev/null
 listing=$(HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
   "$herdr" machine list --json)
 printf '%s' "$listing" | /usr/bin/python3 -I -c '
