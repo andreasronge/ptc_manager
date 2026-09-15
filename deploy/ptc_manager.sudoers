@@ -17,5 +17,7 @@ ptc-manager ALL=(root) NOPASSWD: /bin/systemctl start --no-block ptc-manager-pro
 ptc-manager ALL=(root) NOPASSWD: /usr/local/bin/ptc-manager-operation-recover *
 
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-worktree-cleanup
+ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-worktree-preserve
+ptc-manager ALL=(root) NOPASSWD: /usr/local/bin/ptc-manager-worker-worktree-seal
 
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-review

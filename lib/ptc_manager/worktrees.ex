@@ -8,7 +8,7 @@ defmodule PtcManager.Worktrees do
   alias PtcManager.ExternalPrSessions
   alias PtcManager.Dispatch.HerdrAdapter
   alias PtcManager.Gateway
-  alias PtcManager.Repository.GitProbe
+  alias PtcManager.Repository.{GitProbe, WorktreePreserver}
   alias PtcManager.WorktreeSecurity
 
   @missing_worktree_reason "Removed automatically: the worktree no longer existed on disk."
@@ -74,6 +74,8 @@ defmodule PtcManager.Worktrees do
   branch. Everything else waits for a maintainer's explicit discard.
   """
   def cleanup_abandoned_once(adapter \\ configured_adapter(), probe \\ GitProbe) do
+    :ok = Operations.recover_expired_worktree_preservations()
+
     candidate =
       Operations.list_workers_with_worktrees()
       |> Enum.flat_map(& &1.worktree_allocations)
@@ -98,6 +100,30 @@ defmodule PtcManager.Worktrees do
     end
   end
 
+  @doc "Preserves one retained worktree as a bundle and patch, then removes it."
+  def preserve_attention(
+        allocation_id,
+        actor,
+        adapter \\ configured_adapter(),
+        preserver \\ configured_preserver()
+      )
+      when is_integer(allocation_id) and is_binary(actor) and actor != "" do
+    case Operations.get_worktree_allocation(allocation_id) do
+      nil ->
+        {:error, :worktree_allocation_missing}
+
+      %WorktreeAllocation{state: "attention"} = allocation ->
+        if discardable?(allocation) do
+          preserve_and_remove(allocation, actor, adapter, preserver)
+        else
+          {:error, :worktree_in_use}
+        end
+
+      %WorktreeAllocation{} ->
+        {:error, :worktree_not_retained}
+    end
+  end
+
   @doc "Force-removes one retained `attention` worktree on a maintainer's explicit instruction."
   def discard_attention(allocation_id, actor, adapter \\ configured_adapter())
       when is_integer(allocation_id) and is_binary(actor) and actor != "" do
@@ -106,20 +132,66 @@ defmodule PtcManager.Worktrees do
         {:error, :worktree_allocation_missing}
 
       %WorktreeAllocation{state: "attention"} = allocation ->
-        if (PtcManager.Reviews.held?(allocation.job) and
-              not cancelled_agent_stopped?(allocation.job)) or
-             Operations.worktree_consumes_execution_slot?(allocation) do
-          {:error, :worktree_in_use}
-        else
+        if discardable?(allocation) do
           remove_retained(allocation, adapter, :discard_worktree, %{
             actor: actor,
             reason: "Discarded by the maintainer; uncommitted work was not kept."
           })
+        else
+          {:error, :worktree_in_use}
         end
 
       %WorktreeAllocation{} ->
         {:error, :worktree_not_retained}
     end
+  end
+
+  defp preserve_and_remove(allocation, actor, adapter, preserver) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    with {:ok, claimed, token} <-
+           Operations.claim_worktree_cleanup(allocation.id, now,
+             from: ["attention"],
+             purpose: "preservation"
+           ),
+         {:ok, preservation} <- preserver.preserve(claimed, token),
+         {:ok, preserved} <-
+           Operations.record_worktree_preservation(claimed.id, token, preservation),
+         :ok <-
+           remove_claimed(preserved, adapter, token, :discard_worktree, %{
+             actor: actor,
+             reason: "Preserved as #{preservation.preserved_artifact_path} before removal."
+           }) do
+      :ok
+    else
+      {:error, :worktree_cleanup_already_claimed} = error ->
+        error
+
+      {:error, reason, claimed, token} ->
+        _ = Operations.fail_worktree_cleanup(claimed.id, token, reason)
+        {:error, {:worktree_cleanup_failed, reason}}
+
+      {:error, reason} ->
+        fail_preservation_claim(allocation.id, reason)
+    end
+  end
+
+  defp fail_preservation_claim(allocation_id, reason) do
+    case Operations.get_worktree_allocation(allocation_id) do
+      %{state: "cleaning", cleanup_token: token} ->
+        _ = Operations.fail_worktree_cleanup(allocation_id, token, reason)
+
+      _allocation ->
+        :ok
+    end
+
+    {:error, {:worktree_preservation_failed, reason}}
+  end
+
+  defp discardable?(allocation) do
+    not ((PtcManager.Reviews.held?(allocation.job) and
+            not cancelled_agent_stopped?(allocation.job)) or
+           Operations.worktree_consumes_execution_slot?(allocation))
   end
 
   # Synchronization still holds cancelled jobs; only an explicit discard may
@@ -151,7 +223,7 @@ defmodule PtcManager.Worktrees do
       not File.exists?(allocation.path) -> {:ok, @missing_worktree_reason}
       not real_directory?(allocation.path) -> :keep
       empty_worktree?(allocation, probe) -> {:ok, @empty_worktree_reason}
-      true -> :keep
+      true -> observe_retained_work(allocation, probe)
     end
   end
 
@@ -181,6 +253,26 @@ defmodule PtcManager.Worktrees do
   end
 
   defp empty_worktree?(_allocation, _probe), do: false
+
+  defp observe_retained_work(
+         %{path: path, job: %{repository: %{default_branch: branch}}} = allocation,
+         probe
+       )
+       when is_binary(branch) do
+    if function_exported?(probe, :retained_work, 2) do
+      case probe.retained_work(path, branch) do
+        {:ok, observation} ->
+          Operations.record_retained_work_observation(allocation.id, observation)
+
+        {:error, _reason} ->
+          :ok
+      end
+    end
+
+    :keep
+  end
+
+  defp observe_retained_work(_allocation, _probe), do: :keep
 
   defp remove_retained(allocation, adapter, function, audit) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -218,7 +310,9 @@ defmodule PtcManager.Worktrees do
       |> Enum.flat_map(& &1.worktree_allocations)
       |> Enum.filter(fn allocation ->
         allocation.state == "terminal" or
-          ((allocation.state == "cleaning" and allocation.cleanup_expires_at) &&
+          ((allocation.state == "cleaning" and
+              (is_nil(allocation.cleanup_purpose) or allocation.cleanup_purpose != "preservation") and
+              allocation.cleanup_expires_at) &&
              DateTime.compare(allocation.cleanup_expires_at, now) != :gt)
       end)
       |> Enum.min_by(&{&1.last_used_at, &1.id}, fn -> nil end)
@@ -356,4 +450,7 @@ defmodule PtcManager.Worktrees do
 
   defp configured_external_adapter,
     do: Application.get_env(:ptc_manager, :pull_request_herdr_adapter, HerdrAdapter)
+
+  defp configured_preserver,
+    do: Application.get_env(:ptc_manager, :worktree_preserver, WorktreePreserver)
 end

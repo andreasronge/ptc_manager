@@ -373,6 +373,10 @@ if worktree_root = System.get_env("PTC_WORKTREE_ROOT") do
   config :ptc_manager, :worktree_root, worktree_root
 end
 
+if retained_artifact_root = System.get_env("PTC_RETAINED_ARTIFACT_ROOT") do
+  config :ptc_manager, :retained_artifact_root, retained_artifact_root
+end
+
 if deployed_sha = System.get_env("PTC_DEPLOYED_SHA") do
   config :ptc_manager, :deployed_sha, deployed_sha
 end

@@ -127,6 +127,8 @@ environment_file_parser="/tmp/ptc-manager-environment-files-${release_id}.awk"
 worker_git_candidate="/tmp/ptc-manager-worker-git-${release_id}"
 worker_review_candidate="/tmp/ptc-manager-worker-review-${release_id}"
 worktree_cleanup_candidate="/tmp/ptc-manager-worktree-cleanup-${release_id}"
+worktree_preserve_candidate="/tmp/ptc-manager-worktree-preserve-${release_id}"
+worktree_seal_candidate="/tmp/ptc-manager-worktree-seal-${release_id}"
 worker_bootstrap_candidate="/tmp/ptc-manager-worker-bootstrap-${release_id}"
 claude_trust_candidate="/tmp/ptc-manager-worker-claude-trust-${release_id}"
 codex_arm_candidate="/tmp/ptc-manager-worker-codex-arm-${release_id}"
@@ -162,7 +164,7 @@ cleanup_remote() {
   "$manager_access_dropin" "$worker_access_dropin" "$access_dropin_check" \
   "$provision_runner_candidate" "$provision_service_candidate" \
   "$environment_file_parser" \
-    "$worker_git_candidate" "$worker_review_candidate" "$worktree_cleanup_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
+    "$worker_git_candidate" "$worker_review_candidate" "$worktree_cleanup_candidate" "$worktree_preserve_candidate" "$worktree_seal_candidate" "$worker_bootstrap_candidate" "$claude_trust_candidate" \
     "$codex_arm_candidate" "$agent_login_candidate" "$gh_label_candidate" \
     "$operation_wrapper_candidate" \
     "$operation_recovery_candidate" \
@@ -1392,6 +1394,8 @@ tar -xOf "$source_archive" deploy/systemd-environment-file-paths.awk >"$environm
 tar -xOf "$source_archive" deploy/ptc-manager-worker-git >"$worker_git_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-review >"$worker_review_candidate"
 tar -xOf "$source_archive" priv/worktree_cleanup.py >"$worktree_cleanup_candidate"
+tar -xOf "$source_archive" priv/worktree_preserve.py >"$worktree_preserve_candidate"
+tar -xOf "$source_archive" priv/worktree_seal.py >"$worktree_seal_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-bootstrap >"$worker_bootstrap_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-claude-trust >"$claude_trust_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-worker-codex-arm >"$codex_arm_candidate"
@@ -1414,6 +1418,8 @@ tar -xOf "$source_archive" deploy/ptc_manager-health-snapshot.timer >"$health_sn
 tar -xOf "$source_archive" deploy/toolchain-versions >"$toolchain_manifest"
 tar -xOf "$source_archive" deploy/ptc-manager-toolchain-version >"$toolchain_reader"
 chmod 0755 "$worker_git_candidate"
+chmod 0755 "$worktree_preserve_candidate"
+chmod 0755 "$worktree_seal_candidate"
 chmod 0755 "$worker_bootstrap_candidate"
 chmod 0755 "$claude_trust_candidate"
 chmod 0755 "$codex_arm_candidate"
@@ -1611,6 +1617,8 @@ sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   /var/lib/ptc_manager-output/planning-snapshots
 sudo chown ptc-manager-worker:ptc-manager-output /var/lib/ptc_manager-worker
 sudo chmod 0710 /var/lib/ptc_manager-worker
+sudo install -d -o root -g ptc-manager-output -m 1730 \
+  /var/lib/ptc_manager-worker/retained
 sudo install -d -o ptc-manager -g ptc-manager-output -m 3770 "$agent_result_dir"
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   "$agent_result_dir/operation-contexts"
@@ -1652,6 +1660,10 @@ sudo install -o root -g root -m 0755 "$worker_review_candidate" \
   /usr/local/bin/ptc-manager-worker-review
 sudo install -o root -g root -m 0755 "$worktree_cleanup_candidate" \
   /usr/local/bin/ptc-manager-worker-worktree-cleanup
+sudo install -o root -g root -m 0755 "$worktree_preserve_candidate" \
+  /usr/local/bin/ptc-manager-worker-worktree-preserve
+sudo install -o root -g root -m 0755 "$worktree_seal_candidate" \
+  /usr/local/bin/ptc-manager-worker-worktree-seal
 sudo install -o root -g root -m 0755 "$worker_bootstrap_candidate" \
   /usr/local/bin/ptc-manager-worker-bootstrap
 sudo install -o root -g root -m 0755 "$claude_trust_candidate" \

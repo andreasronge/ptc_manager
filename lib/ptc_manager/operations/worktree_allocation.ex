@@ -17,7 +17,18 @@ defmodule PtcManager.Operations.WorktreeAllocation do
     field :removed_at, :utc_datetime_usec
     field :cleanup_token, :string
     field :cleanup_expires_at, :utc_datetime_usec
+    field :cleanup_purpose, :string
     field :last_error, :string
+    field :preserved_artifact_path, :string
+    field :preserved_bundle_sha256, :string
+    field :preserved_patch_sha256, :string
+    field :preserved_head_sha, :string
+    field :preserved_tree_sha, :string
+    field :preserved_at, :utc_datetime_usec
+    field :retained_dirty, :boolean
+    field :retained_local_commits, :integer
+    field :retained_unpushed_commits, :integer
+    field :retained_observed_at, :utc_datetime_usec
     field :worktree_created_duration_ms, :integer
     field :workspace_setup_state, :string
     field :workspace_setup_script, :string
@@ -53,7 +64,18 @@ defmodule PtcManager.Operations.WorktreeAllocation do
       :removed_at,
       :cleanup_token,
       :cleanup_expires_at,
+      :cleanup_purpose,
       :last_error,
+      :preserved_artifact_path,
+      :preserved_bundle_sha256,
+      :preserved_patch_sha256,
+      :preserved_head_sha,
+      :preserved_tree_sha,
+      :preserved_at,
+      :retained_dirty,
+      :retained_local_commits,
+      :retained_unpushed_commits,
+      :retained_observed_at,
       :worktree_created_duration_ms,
       :workspace_setup_state,
       :workspace_setup_script,
@@ -76,6 +98,14 @@ defmodule PtcManager.Operations.WorktreeAllocation do
     |> validate_length(:agent_kind, max: 80)
     |> validate_length(:pr_url, max: 1_024)
     |> validate_length(:last_error, max: 500)
+    |> validate_inclusion(:cleanup_purpose, ["cleanup", "preservation"])
+    |> validate_length(:preserved_artifact_path, max: 1_024)
+    |> validate_format(:preserved_bundle_sha256, @sha)
+    |> validate_format(:preserved_patch_sha256, @sha)
+    |> validate_format(:preserved_head_sha, @sha)
+    |> validate_format(:preserved_tree_sha, @sha)
+    |> validate_number(:retained_local_commits, greater_than_or_equal_to: 0)
+    |> validate_number(:retained_unpushed_commits, greater_than_or_equal_to: 0)
     |> validate_inclusion(:workspace_setup_state, ["passed", "failed"])
     |> validate_inclusion(:workspace_setup_cache_state, ["hit", "miss", "disabled"])
     |> validate_number(:worktree_created_duration_ms, greater_than_or_equal_to: 0)

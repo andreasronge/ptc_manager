@@ -742,8 +742,16 @@ catalog contains:
   the deterministic phases that follow an agent — reconciliation, verification,
   and publication — because PtcManager, not an agent, owns those. If the pane
   cannot be closed, the console says so and the job stays cancelled. Managed
-  jobs retry the stop durably until it is confirmed; their worktree can then
-  be explicitly discarded from retained worktrees;
+  jobs retry the stop durably until it is confirmed. Retained worktrees show
+  whether the checkout is dirty, how many commits it has beyond the default
+  branch, and—when it has an upstream—how many commits are unpushed. **Preserve and close** first writes a Git bundle, a binary patch, and
+  checksum metadata under the retained-artifact directory, seals it as root-owned
+  read-only data that later agents cannot change, records that location in
+  PtcManager's audit data, and only then removes the worktree.
+  Preservation failures keep the worktree. These recovery artifacts are retained
+  indefinitely; an operator deletes one only after a maintainer confirms its
+  work was recovered. **Discard worktree** remains the explicit destructive
+  alternative;
 - **Approve and merge**, which has the highest heavy-work queue priority.
   PtcManager prevents new writing agents from starting in that repository while
   the action is queued, running, or awaiting GitHub confirmation. The Herdr

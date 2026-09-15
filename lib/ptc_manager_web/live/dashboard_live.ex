@@ -310,6 +310,41 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  def handle_event("preserve-worktree", %{"allocation-id" => allocation_id}, socket) do
+    with {allocation_id, ""} <- Integer.parse(allocation_id),
+         :ok <- Worktrees.preserve_attention(allocation_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Worktree preserved and closed.")
+       |> load_dashboard()}
+    else
+      {:error, :worktree_in_use} ->
+        {:noreply, put_flash(socket, :error, "That worktree still belongs to an active agent.")}
+
+      {:error, :worktree_not_retained} ->
+        {:noreply, put_flash(socket, :error, "That worktree is no longer waiting for attention.")}
+
+      {:error, {:worktree_preservation_failed, reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The worktree was kept because preservation failed: #{inspect(reason)}"
+         )}
+
+      {:error, {:worktree_cleanup_failed, reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The preserved worktree could not be removed: #{inspect(reason)}"
+         )}
+
+      _error ->
+        {:noreply, put_flash(socket, :error, "That worktree could not be preserved.")}
+    end
+  end
+
   def handle_event("discard-worktree", %{"allocation-id" => allocation_id}, socket) do
     with {allocation_id, ""} <- Integer.parse(allocation_id),
          :ok <- Worktrees.discard_attention(allocation_id, socket.assigns.actor) do

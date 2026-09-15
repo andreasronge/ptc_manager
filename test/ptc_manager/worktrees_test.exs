@@ -21,6 +21,30 @@ defmodule PtcManager.WorktreesTest do
   defmodule FakeProbe do
     def reclaimable(_path, _branch, _head), do: Process.get(:worktree_probe_result, :ok)
     def empty_worktree(_path, _branch), do: Process.get(:worktree_empty_result, :ok)
+
+    def retained_work(_path, _branch) do
+      Process.get(
+        :worktree_retained_result,
+        {:ok, %{dirty: true, local_commits: 1, unpushed_commits: nil}}
+      )
+    end
+  end
+
+  defmodule FakePreserver do
+    def preserve(allocation, token) do
+      send(Process.get(:worktree_test_pid), {:preserve_worktree, allocation.id, token})
+
+      Process.get(:worktree_preserve_result, {
+        :ok,
+        %{
+          preserved_artifact_path: "/var/lib/ptc_manager-worker/retained/allocation-1-test",
+          preserved_bundle_sha256: String.duplicate("a", 64),
+          preserved_patch_sha256: String.duplicate("b", 64),
+          preserved_head_sha: String.duplicate("c", 40),
+          preserved_tree_sha: String.duplicate("d", 40)
+        }
+      })
+    end
   end
 
   setup do
@@ -39,6 +63,8 @@ defmodule PtcManager.WorktreesTest do
     Process.put(:worktree_remove_result, :ok)
     Process.put(:worktree_probe_result, :ok)
     Process.put(:worktree_empty_result, :ok)
+    Process.delete(:worktree_retained_result)
+    Process.delete(:worktree_preserve_result)
     :ok
   end
 
@@ -84,7 +110,12 @@ defmodule PtcManager.WorktreesTest do
       assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
 
       refute_receive {:remove_worktree, _allocation_id}
-      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+      retained = Repo.get!(WorktreeAllocation, allocation.id)
+      assert retained.state == "attention"
+      assert retained.retained_dirty
+      assert retained.retained_local_commits == 1
+      refute retained.retained_unpushed_commits
+      assert retained.retained_observed_at
     end
 
     test "a retained worktree outside the managed root is never touched automatically" do
@@ -105,6 +136,66 @@ defmodule PtcManager.WorktreesTest do
 
       assert {:error, :worktree_in_use} =
                Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+    end
+
+    test "an expired preservation claim returns to attention instead of being reaped" do
+      allocation = attention_allocation!(existing_path())
+      expired = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      allocation
+      |> WorktreeAllocation.changeset(%{
+        state: "cleaning",
+        cleanup_token: "interrupted-token",
+        cleanup_expires_at: expired,
+        cleanup_purpose: "preservation"
+      })
+      |> Repo.update!()
+
+      assert {:ok, :empty} = Worktrees.cleanup_terminal_once(FakeAdapter, FakeProbe)
+      refute_receive {:remove_worktree, _allocation_id}
+
+      Process.put(:worktree_empty_result, {:error, :worktree_has_changes})
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+      kept = Repo.get!(WorktreeAllocation, allocation.id)
+      assert kept.state == "attention"
+      assert kept.last_error =~ "Preservation was interrupted"
+    end
+
+    test "a maintainer preserves a retained worktree before removing it" do
+      allocation = attention_allocation!(existing_path())
+
+      assert :ok =
+               Worktrees.preserve_attention(allocation.id, "andreas", FakeAdapter, FakePreserver)
+
+      assert_receive {:preserve_worktree, allocation_id, token}
+      assert allocation_id == allocation.id
+      assert is_binary(token)
+      assert_receive {:discard_worktree, ^allocation_id}
+
+      removed = Repo.get!(WorktreeAllocation, allocation.id)
+      assert removed.state == "removed"
+      assert removed.preserved_at
+      assert removed.preserved_artifact_path =~ "/retained/"
+      assert removed.preserved_bundle_sha256 == String.duplicate("a", 64)
+
+      assert %{actor: "andreas", details: %{"reason" => reason}} =
+               Repo.get_by!(AuditEvent, action: "worktree.removed", target_id: allocation.id)
+
+      assert reason =~ removed.preserved_artifact_path
+    end
+
+    test "a preservation failure keeps the retained worktree" do
+      allocation = attention_allocation!(existing_path())
+      Process.put(:worktree_preserve_result, {:error, :disk_full})
+
+      assert {:error, {:worktree_preservation_failed, :disk_full}} =
+               Worktrees.preserve_attention(allocation.id, "andreas", FakeAdapter, FakePreserver)
+
+      refute_receive {:discard_worktree, _allocation_id}
+      kept = Repo.get!(WorktreeAllocation, allocation.id)
+      assert kept.state == "attention"
+      assert kept.last_error =~ "disk_full"
+      refute kept.preserved_at
     end
 
     test "a maintainer discard force-removes a dirty retained worktree and is audited" do

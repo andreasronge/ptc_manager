@@ -221,9 +221,12 @@ defmodule Mix.Tasks.PtcDeployTest do
     |> Enum.uniq()
     |> Enum.each(fn wrapper ->
       source =
-        if wrapper == "ptc-manager-worker-worktree-cleanup",
-          do: "priv/worktree_cleanup.py",
-          else: "deploy/#{wrapper}"
+        case wrapper do
+          "ptc-manager-worker-worktree-cleanup" -> "priv/worktree_cleanup.py"
+          "ptc-manager-worker-worktree-preserve" -> "priv/worktree_preserve.py"
+          "ptc-manager-worker-worktree-seal" -> "priv/worktree_seal.py"
+          _wrapper -> "deploy/#{wrapper}"
+        end
 
       assert File.regular?(Path.join(@project_root, source))
 
