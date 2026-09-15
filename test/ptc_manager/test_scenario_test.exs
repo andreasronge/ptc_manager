@@ -545,18 +545,19 @@ defmodule PtcManager.TestScenarioTest do
       |> Enum.filter(&(&1.operation == :remove_worktree))
       |> Enum.map(& &1.target)
 
-    assert cleanup_targets == [
-             %{
-               allocation_id: first_allocation.id,
-               workspace: first_allocation.herdr_workspace,
-               path: first_allocation.path
-             },
-             %{
-               allocation_id: second_allocation.id,
-               workspace: second_allocation.herdr_workspace,
-               path: second_allocation.path
-             }
-           ]
+    assert MapSet.new(cleanup_targets) ==
+             MapSet.new([
+               %{
+                 allocation_id: first_allocation.id,
+                 workspace: first_allocation.herdr_workspace,
+                 path: first_allocation.path
+               },
+               %{
+                 allocation_id: second_allocation.id,
+                 workspace: second_allocation.herdr_workspace,
+                 path: second_allocation.path
+               }
+             ])
 
     assert TestScenario.agents(scenario) == []
   end

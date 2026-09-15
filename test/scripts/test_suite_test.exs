@@ -30,11 +30,28 @@ defmodule PtcManager.Scripts.TestSuiteTest do
     assert output =~ "Test suite passed"
   end
 
+  test "defaults to four partitions so the measured suite retains budget headroom", %{bin: bin} do
+    fake_mix!(bin, "printf 'partition=%s\n' \"$MIX_TEST_PARTITION\"\n")
+
+    assert {output, 0} = run_suite(bin, "10", nil, nil)
+    assert output =~ "partition=4"
+  end
+
   test "fails when a partition exceeds the test budget", %{bin: bin} do
     fake_mix!(bin, "sleep 10\n")
 
     assert {output, 1} = run_suite(bin, "2")
     assert output =~ "failed or exceeded its 2s budget"
+  end
+
+  test "does not begin a partial VM teardown when a partition exceeds its budget", %{bin: bin} do
+    fake_mix!(
+      bin,
+      "trap 'echo partial-vm-teardown; sleep 10' TERM\nwhile :; do sleep 1; done\n"
+    )
+
+    assert {output, 1} = run_suite(bin, "2")
+    refute output =~ "partial-vm-teardown"
   end
 
   test "runs only the selected CI partition", %{bin: bin} do
@@ -60,12 +77,12 @@ defmodule PtcManager.Scripts.TestSuiteTest do
     File.chmod!(path, 0o755)
   end
 
-  defp run_suite(bin, budget, partition \\ nil) do
+  defp run_suite(bin, budget, partition \\ nil, partitions \\ "3") do
     System.cmd(@suite, [],
       env: [
         {"PATH", bin <> ":" <> System.fetch_env!("PATH")},
         {"PTC_TEST_BUDGET_SECONDS", budget},
-        {"PTC_TEST_PARTITIONS", "3"},
+        {"PTC_TEST_PARTITIONS", partitions},
         {"PTC_TEST_PARTITION_ONLY", partition}
       ],
       stderr_to_stdout: true

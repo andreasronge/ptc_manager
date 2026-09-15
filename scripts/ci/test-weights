@@ -3,7 +3,7 @@
 # the lightest partition; a file missing here counts as 300 ms.
 #
 # Each number is the larger of the file's cost on a CI runner (pinned to one
-# scheduler, five partitions) and on a development machine (three partitions
+# scheduler, five partitions) and on a development machine (four partitions
 # in parallel), so both splits stay balanced; the two differ by up to six
 # times for files that spawn processes. Take the numbers from the "slowest
 # modules" block each partition prints when the suite runs with
