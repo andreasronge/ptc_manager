@@ -18,6 +18,8 @@ defmodule PtcManager.Herdr.Sync do
 
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
+  @shared_pane_states ~w(starting working idle blocked waiting unknown)
+  @executing_pane_states ~w(working blocked)
   @terminal_states ~w(done failed lost)
   @active_agent_states ~w(queued starting working blocked)
   @touch_interval_ms 60_000
@@ -202,9 +204,10 @@ defmodule PtcManager.Herdr.Sync do
         if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
           run = upsert_agent_run(worker, existing_run, attrs)
           superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
+          shared_ids = refresh_shared_pane_runs(worker, run, attrs, agent_now)
           reconcile_worktree_identity(run, attrs, agent_now)
           reconcile_job(run, attrs.state, agent_now, lease_now)
-          [run.id | superseded_ids]
+          [run.id | superseded_ids ++ shared_ids]
         else
           [existing_run.id]
         end
@@ -1106,6 +1109,41 @@ defmodule PtcManager.Herdr.Sync do
   end
 
   defp supersede_duplicate_action_runs(_worker, _run, _attrs, _now), do: []
+
+  # A retained repair resumes the job's implementation session, so its action
+  # run carries the same agent name as the job's run while Herdr reports the
+  # pane once, under the job's name. Every live action run bound to that pane
+  # follows the observation on every tick: while the pane executes, the run
+  # takes that state, which also recovers a run an outage marked unknown; a
+  # pane that is idle or parked leaves the run alone, because the action's
+  # adapter is what finishes it. The ids join the observed set, so the shared
+  # heartbeat statement keeps them fresh without a write of their own. Without
+  # this the action run froze in `starting` and read as out of contact while
+  # its agent was working.
+  defp refresh_shared_pane_runs(
+         worker,
+         %AgentRun{agent_name: name, job_id: job_id} = run,
+         attrs,
+         _now
+       )
+       when is_binary(name) and is_integer(job_id) do
+    AgentRun
+    |> where(
+      [other],
+      other.worker_id == ^worker.id and other.id != ^run.id and other.agent_name == ^name and
+        not is_nil(other.agent_action_id) and other.state in ^@shared_pane_states
+    )
+    |> Repo.all()
+    |> Enum.map(fn other ->
+      if other.state != attrs.state and attrs.state in @executing_pane_states do
+        other |> AgentRun.changeset(%{state: attrs.state}) |> Repo.update!()
+      end
+
+      other.id
+    end)
+  end
+
+  defp refresh_shared_pane_runs(_worker, _run, _attrs, _now), do: []
 
   defp mark_managed_run_uncertain(
          run,
