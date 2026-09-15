@@ -1,7 +1,8 @@
 defmodule PtcManagerWeb.DeploymentsLive do
   use PtcManagerWeb, :live_view
 
-  alias PtcManager.{Deployments, Toolchain}
+  alias PtcManager.{DeploymentCanary, Deployments, OperationalMode, Toolchain}
+  alias PtcManager.OperationalMode.Audit
   alias PtcManagerWeb.TimeFormat
 
   @impl true
@@ -47,6 +48,30 @@ defmodule PtcManagerWeb.DeploymentsLive do
     end
   end
 
+  # The rescue the maintainer's agent performed by hand through the release
+  # RPC: run the read-only canary and activate ordinary work. It is offered
+  # only while nothing else owns the restricted mode (see `activation/0`) and
+  # judged again at the click. The canary runs in a task linked to this view,
+  # so a tab closed halfway leaves an abandoned canary; the page then offers
+  # to replace it.
+  def handle_event("activate", _params, socket) do
+    actor = socket.assigns.actor
+
+    case activation() do
+      %{available?: true, stale_canary?: stale?} = activation ->
+        {:noreply,
+         socket
+         |> assign(:activation, activation)
+         |> start_async(:activate, fn -> activate(actor, stale?) end)}
+
+      %{available?: false} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The console cannot be activated from here right now.")
+         |> load()}
+    end
+  end
+
   def handle_event("cancel-deployment", %{"id" => id}, socket) do
     with {deployment_id, ""} <- Integer.parse(id),
          {:ok, _deployment} <- Deployments.cancel(deployment_id, socket.assigns.actor) do
@@ -77,6 +102,27 @@ defmodule PtcManagerWeb.DeploymentsLive do
   end
 
   @impl true
+  def handle_async(:activate, {:ok, :ok}, socket) do
+    {:noreply,
+     socket
+     |> put_flash(:info, "The canary passed and the console is active again.")
+     |> load()}
+  end
+
+  def handle_async(:activate, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> put_flash(:error, "The canary did not pass: #{reason_text(reason)}")
+     |> load()}
+  end
+
+  def handle_async(:activate, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> put_flash(:error, "The canary was interrupted: #{reason_text(reason)}")
+     |> load()}
+  end
+
   def handle_async({:latest_revision, repository_id}, {:ok, {:ok, sha}}, socket) do
     {:noreply,
      socket
@@ -107,6 +153,8 @@ defmodule PtcManagerWeb.DeploymentsLive do
       |> assign(:repositories, repositories)
       |> assign(:recent_deployments, Deployments.list_recent())
       |> assign(:toolchain, Toolchain.report())
+      |> assign(:mode, OperationalMode.mode())
+      |> assign(:activation, activation())
       |> assign_statuses()
 
     if connected?(socket) do
@@ -125,6 +173,66 @@ defmodule PtcManagerWeb.DeploymentsLive do
     else
       socket
     end
+  end
+
+  # A stale canary is replaced under the mode lock first, so two maintainers
+  # cannot clobber a live canary; the new canary is then admitted like any
+  # other.
+  defp activate(actor, stale_canary?) do
+    invocation_id = "console-#{System.os_time(:second)}-#{System.unique_integer([:positive])}"
+
+    with :ok <- replace_if_stale(actor, stale_canary?),
+         {:ok, _summary} <- DeploymentCanary.run(invocation_id, actor: actor) do
+      DeploymentCanary.activate(invocation_id, actor: actor)
+    end
+  end
+
+  defp replace_if_stale(_actor, false), do: :ok
+
+  defp replace_if_stale(actor, true) do
+    case DeploymentCanary.replace_stale(actor) do
+      {:ok, _invocation_id} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Activation is offered in maintenance, or for a canary whose process is
+  # gone, with no deployment in flight and while the deployment script does
+  # not own the window: a direct deployment boots the release in maintenance
+  # and runs its own canary inside `Audit.deploy_window_ms/0`, which a second
+  # admission would break.
+  defp activation do
+    last = Audit.last_transition()
+    mode = OperationalMode.mode()
+    stale_canary? = OperationalMode.stale_canary?()
+    recoverable? = mode == :maintenance or stale_canary?
+
+    reason =
+      cond do
+        mode == :active ->
+          nil
+
+        not recoverable? ->
+          "The console is in #{OperationalMode.label(mode)}; only maintenance or an " <>
+            "abandoned canary can be activated from here."
+
+        Deployments.active() != [] ->
+          "A deployment is in flight; it activates the console when it finishes."
+
+        Audit.deploy_owned?() ->
+          "The deployment script owns this maintenance window for up to " <>
+            "#{div(Audit.deploy_window_ms(), 60_000)} minutes after its last transition."
+
+        true ->
+          nil
+      end
+
+    %{
+      available?: recoverable? and is_nil(reason),
+      stale_canary?: stale_canary?,
+      reason: reason,
+      last_transition: last
+    }
   end
 
   defp assign_statuses(socket) do

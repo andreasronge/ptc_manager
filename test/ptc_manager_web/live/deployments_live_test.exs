@@ -1,11 +1,86 @@
 defmodule PtcManagerWeb.DeploymentsLiveTest do
   use PtcManagerWeb.ConnCase, async: false
 
+  import Ecto.Query
+
   alias PtcManager.Deployments.Deployment
   alias PtcManager.Repo
 
   defmodule RevisionSource do
     def latest(_repository), do: {:ok, String.duplicate("b", 40)}
+  end
+
+  test "offers Activate only when nothing else owns the maintenance window", %{conn: conn} do
+    previous = Application.get_env(:ptc_manager, :operational_mode)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous) end)
+    repository = repository_fixture()
+    issue_fixture(repository)
+    worker_fixture(%{status: "online"})
+
+    :ok = PtcManager.OperationalMode.enter_maintenance("deploy")
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#operational-mode", "deployment script owns")
+    refute has_element?(view, "#activate-console")
+
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    :ok = PtcManager.OperationalMode.enter_maintenance("broker_recovery")
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#operational-mode", "by broker_recovery")
+    assert has_element?(view, "#activate-console")
+
+    view |> element("#activate-console") |> render_click()
+    html = render_async(view)
+    assert PtcManager.OperationalMode.mode() == :active
+    assert html =~ "active again"
+    refute has_element?(view, "#operational-mode")
+
+    assert %{actor: "andreas", details: %{"previous" => "canary", "next" => "active"}} =
+             PtcManager.OperationalMode.Audit.last_transition()
+  end
+
+  test "the deployment script's window expires, and an abandoned canary can be replaced", %{
+    conn: conn
+  } do
+    previous = Application.get_env(:ptc_manager, :operational_mode)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous) end)
+    repository = repository_fixture()
+    issue_fixture(repository)
+    worker_fixture(%{status: "online"})
+
+    Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+    :ok = PtcManager.OperationalMode.record_boot()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    refute has_element?(view, "#activate-console")
+
+    event = PtcManager.OperationalMode.Audit.last_transition()
+
+    expired =
+      DateTime.add(
+        DateTime.utc_now(),
+        -PtcManager.OperationalMode.Audit.deploy_window_ms() - 1_000,
+        :millisecond
+      )
+
+    Repo.update_all(
+      from(e in PtcManager.Operations.AuditEvent, where: e.id == ^event.id),
+      set: [inserted_at: expired]
+    )
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#activate-console")
+
+    dead = spawn(fn -> :ok end)
+    ref = Process.monitor(dead)
+    assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+
+    Application.put_env(:ptc_manager, :operational_mode, {:canary, "abandoned", {:claimed, dead}})
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#operational-mode", "Canary")
+    assert has_element?(view, "#activate-console")
+
+    view |> element("#activate-console") |> render_click()
+    render_async(view)
+    assert PtcManager.OperationalMode.mode() == :active
   end
 
   test "shows that a newer default-branch revision is available", %{conn: conn} do

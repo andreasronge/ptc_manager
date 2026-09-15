@@ -8,9 +8,14 @@ defmodule PtcManager.OperationalMode do
   identifier; activation succeeds only after that exact claim is marked passed.
   """
 
+  alias PtcManager.OperationalMode.Audit
+
   @type mode :: :active | :draining | :maintenance | {:canary, String.t()}
 
-  @mode_lock {__MODULE__, :mode}
+  # `:global.trans/2` takes `{resource, requester}`; the requester must be the
+  # calling process, or every caller counts as the same requester and the lock
+  # excludes nobody.
+  @mode_resource {__MODULE__, :mode}
 
   @spec mode() :: mode()
   def mode do
@@ -70,44 +75,102 @@ defmodule PtcManager.OperationalMode do
     end
   end
 
-  def enter_draining do
-    :global.trans(@mode_lock, fn ->
-      case mode() do
-        :active ->
-          Application.put_env(:ptc_manager, :operational_mode, :draining)
-          :ok
-
-        :draining ->
-          :ok
-
-        _restricted ->
-          {:error, :operational_mode_restricted}
-      end
+  @doc "Pauses new work for a deployment; `actor` names who asked, for the audit trail."
+  def enter_draining(actor) when is_binary(actor) do
+    transition(actor, fn
+      :active -> {:ok, :draining}
+      :draining -> {:ok, :draining}
+      _restricted -> {:error, :operational_mode_restricted}
     end)
   end
 
-  def leave_draining do
+  @doc "Ends a deployment drain and wakes the pollers."
+  def leave_draining(actor) when is_binary(actor) do
     result =
-      :global.trans(@mode_lock, fn ->
-        case mode() do
-          :draining ->
-            Application.put_env(:ptc_manager, :operational_mode, :active)
-            :ok
-
-          _mode ->
-            {:error, :not_draining}
-        end
+      transition(actor, fn
+        :draining -> {:ok, :active}
+        _mode -> {:error, :not_draining}
       end)
 
     if result == :ok, do: wake_after_draining()
     result
   end
 
+  # Every coarse transition goes through here so that a change of mode, and
+  # only a change, is recorded with the actor that asked for it. The audit is
+  # written inside the lock so the records keep the order of the transitions;
+  # it never fails the transition.
+  defp transition(actor, decide) do
+    :global.trans({@mode_resource, self()}, fn ->
+      previous = mode()
+
+      case decide.(previous) do
+        {:ok, next} ->
+          Application.put_env(:ptc_manager, :operational_mode, next)
+          if previous != next, do: Audit.record(actor, previous, next)
+          :ok
+
+        {:error, _reason} = error ->
+          error
+      end
+    end)
+  end
+
+  @doc """
+  Records a release that started restricted. The deployment script installs a
+  systemd override that boots the new release in maintenance and writes no
+  event of its own, so the boot is recorded as the script's transition; the
+  Deployments page and the stall detectors then know who owns the window.
+  """
+  def record_boot do
+    case mode() do
+      :active -> :ok
+      restricted -> Audit.record("deploy", :boot, restricted)
+    end
+  end
+
+  @doc """
+  Whether the mode is a canary whose process is gone: admitted but never
+  claimed, or claimed by a process that no longer runs. Such a canary can only
+  be replaced, never finished. Pids are local: the console is one node, and the
+  deployment script's `rpc` evaluates on it.
+  """
+  def stale_canary?, do: stale_canary?(Application.get_env(:ptc_manager, :operational_mode))
+
+  defp stale_canary?({:canary, _invocation_id, :unclaimed}), do: true
+
+  defp stale_canary?({:canary, _invocation_id, {_step, owner}}) when is_pid(owner),
+    do: not Process.alive?(owner)
+
+  defp stale_canary?(_mode), do: false
+
+  @doc """
+  Moves a stale canary back to maintenance so a new one can be admitted, and
+  returns the abandoned invocation id. Staleness is judged again under the
+  lock, so two maintainers replacing the same canary cannot clobber the live
+  one the first of them admitted.
+  """
+  def replace_stale_canary(actor) when is_binary(actor) do
+    :global.trans({@mode_resource, self()}, fn ->
+      raw = Application.get_env(:ptc_manager, :operational_mode)
+
+      if stale_canary?(raw) do
+        {:canary, invocation_id, _state} = raw
+        previous = mode()
+        Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+        Audit.record(actor, previous, :maintenance)
+        {:ok, invocation_id}
+      else
+        {:error, :canary_not_stale}
+      end
+    end)
+  end
+
   @spec authorize_canary(String.t()) :: :ok | {:error, :canary_not_admitted}
   def authorize_canary(invocation_id) when is_binary(invocation_id) do
     owner = self()
 
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       case Application.get_env(:ptc_manager, :operational_mode) do
         {:canary, ^invocation_id, {:claimed, ^owner}} ->
           Application.put_env(
@@ -124,38 +187,25 @@ defmodule PtcManager.OperationalMode do
     end)
   end
 
-  def enter_maintenance do
-    :global.trans(@mode_lock, fn ->
-      Application.put_env(:ptc_manager, :operational_mode, :maintenance)
-      :ok
+  @doc "Stops all ordinary work; `actor` names who asked, for the audit trail."
+  def enter_maintenance(actor) when is_binary(actor),
+    do: transition(actor, fn _mode -> {:ok, :maintenance} end)
+
+  @doc "Admits exactly one canary invocation from maintenance mode; refused from any other mode."
+  def admit_canary(invocation_id, actor)
+      when is_binary(invocation_id) and byte_size(invocation_id) in 1..160 and is_binary(actor) do
+    transition(actor, fn
+      :maintenance -> {:ok, {:canary, invocation_id, :unclaimed}}
+      _mode -> {:error, :canary_already_admitted}
     end)
   end
 
-  def admit_canary(invocation_id)
-      when is_binary(invocation_id) and byte_size(invocation_id) in 1..160 do
-    :global.trans(@mode_lock, fn ->
-      case mode() do
-        :maintenance ->
-          Application.put_env(
-            :ptc_manager,
-            :operational_mode,
-            {:canary, invocation_id, :unclaimed}
-          )
-
-          :ok
-
-        _mode ->
-          {:error, :canary_already_admitted}
-      end
-    end)
-  end
-
-  def admit_canary(_invocation_id), do: {:error, :invalid_canary_id}
+  def admit_canary(_invocation_id, actor) when is_binary(actor), do: {:error, :invalid_canary_id}
 
   def claim_canary(invocation_id) when is_binary(invocation_id) do
     owner = self()
 
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       case Application.get_env(:ptc_manager, :operational_mode) do
         {:canary, ^invocation_id, :unclaimed} ->
           Application.put_env(
@@ -176,7 +226,7 @@ defmodule PtcManager.OperationalMode do
   def mark_canary_passed(invocation_id) when is_binary(invocation_id) do
     owner = self()
 
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       case Application.get_env(:ptc_manager, :operational_mode) do
         {:canary, ^invocation_id, {:consumed, ^owner}} ->
           Application.put_env(
@@ -193,18 +243,16 @@ defmodule PtcManager.OperationalMode do
     end)
   end
 
-  @spec activate_canary(String.t(), keyword()) :: :ok | {:error, :canary_not_admitted}
-  def activate_canary(invocation_id, opts \\ []) when is_binary(invocation_id) do
+  @spec activate_canary(String.t(), String.t(), keyword()) :: :ok | {:error, :canary_not_admitted}
+  def activate_canary(invocation_id, actor, opts \\ [])
+      when is_binary(invocation_id) and is_binary(actor) do
     result =
-      :global.trans(@mode_lock, fn ->
-        case Application.get_env(:ptc_manager, :operational_mode) do
-          {:canary, ^invocation_id, {:passed, _owner}} ->
-            Application.put_env(:ptc_manager, :operational_mode, :active)
-            :ok
-
-          _mode ->
-            {:error, :canary_not_admitted}
-        end
+      transition(actor, fn
+        _mode ->
+          case Application.get_env(:ptc_manager, :operational_mode) do
+            {:canary, ^invocation_id, {:passed, _owner}} -> {:ok, :active}
+            _mode -> {:error, :canary_not_admitted}
+          end
       end)
 
     if result == :ok, do: Keyword.get(opts, :wake, &wake_pollers/0).()

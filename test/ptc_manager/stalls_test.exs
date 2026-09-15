@@ -472,6 +472,57 @@ defmodule PtcManager.StallsTest do
     end
   end
 
+  describe "mode stalls" do
+    test "maintenance entered by a failed recovery is an alarm until the console is active", %{
+      repository: _repository
+    } do
+      assert Stalls.mode_entered_by_recovery(@now) == []
+
+      :ok = PtcManager.OperationalMode.enter_maintenance("broker_recovery")
+
+      assert [
+               %{
+                 kind: :mode_entered_by_recovery,
+                 severity: :alarm,
+                 target_type: "operational_mode"
+               }
+             ] =
+               Stalls.mode_entered_by_recovery(@now)
+
+      assert Stalls.mode_not_active(DateTime.add(DateTime.utc_now(), 600, :second)) == [],
+             "the recovery stall already names the cause"
+
+      Application.put_env(:ptc_manager, :operational_mode, :active)
+      assert Stalls.mode_entered_by_recovery(@now) == []
+    end
+
+    test "a restricted console with no deployment and no deploy transition is an alarm after a minute" do
+      :ok = PtcManager.OperationalMode.enter_maintenance("test")
+      assert Stalls.mode_not_active(DateTime.add(DateTime.utc_now(), 30, :second)) == []
+
+      later = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      assert [%{kind: :mode_not_active, severity: :alarm, detail: detail}] =
+               Stalls.mode_not_active(later)
+
+      assert detail =~ "made by test"
+
+      Application.put_env(:ptc_manager, :operational_mode, :active)
+      :ok = PtcManager.OperationalMode.enter_maintenance("deploy")
+      assert Stalls.mode_not_active(later) == [], "the deployment script owns the window"
+
+      after_window =
+        DateTime.add(
+          DateTime.utc_now(),
+          PtcManager.OperationalMode.Audit.deploy_window_ms() + 1_000,
+          :millisecond
+        )
+
+      assert [%{kind: :mode_not_active, detail: expired}] = Stalls.mode_not_active(after_window)
+      assert expired =~ "made by deploy"
+    end
+  end
+
   describe "detect/1" do
     test "lists alarms before attention items and oldest first", %{repository: repository} do
       issue = issue_fixture(repository, %{number: 111, workflow_label: "ptc:ready"})

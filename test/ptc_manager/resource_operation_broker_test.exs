@@ -303,6 +303,9 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     assert escalated.state == "recovery_pending"
     assert escalated.last_error =~ "exceeded its retry bound"
     assert PtcManager.OperationalMode.mode() == :maintenance
+
+    assert %{actor: "broker_recovery", details: %{"next" => "maintenance"}} =
+             PtcManager.OperationalMode.Audit.last_transition()
   end
 
   test "a recovery evaluation error is surfaced immediately" do

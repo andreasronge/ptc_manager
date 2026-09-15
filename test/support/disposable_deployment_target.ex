@@ -99,7 +99,7 @@ defmodule PtcManager.DisposableDeploymentTarget do
         restore_pre_effect!(target)
 
       "preserve_current" ->
-        :ok = PtcManager.OperationalMode.enter_maintenance()
+        :ok = PtcManager.OperationalMode.enter_maintenance("deploy")
         restart_post_effect!(target)
 
       action ->

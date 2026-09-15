@@ -180,13 +180,15 @@ by a per-repository policy table keyed on what the decision touches
 
 ## 5. Work items, in order
 
-1. `run_events` and the mode-transition audit (§2.1 S6, S8). Everything else
-   is blind without them.
+1. `run_events` (§2.1 S8). The mode-transition audit half of this item (S6)
+   is done under `docs/plans/operator-surface.md` item 3.4.
 2. Dispatch rejections requeue after resync; stale approvals re-freeze; the
-   card names the reason (§2.1 S5, §2.3 R1).
+   card names the reason (§2.1 S5, §2.3 R1); `docs/plans/operator-surface.md`
+   item 3.6.
 3. `resume_from_worktree/2` (§2.3 R2). Removes the bundle-and-helper-branch
-   rescue entirely.
-4. Fix actions that can review, or the CI-is-the-gate waiver (§2.3 R3, #100).
+   rescue entirely; `docs/plans/operator-surface.md` item 3.6.
+4. Fix actions that can review, or the CI-is-the-gate waiver (§2.3 R3, #100);
+   `docs/plans/operator-surface.md` item 3.6.
 5. Review budget by diff size and the automatic lower-effort retry (§2.4 V1).
 6. Decision journal and issue-body amendment (§2.2 A2, A5).
 7. `file_prerequisite/2` with member adoption (§2.2 A3).

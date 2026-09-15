@@ -21,7 +21,8 @@ defmodule PtcManager.Stalls do
 
   import Ecto.Query
 
-  alias PtcManager.{Collections, OperationalMode, Repo, Reviews}
+  alias PtcManager.{Collections, Deployments, OperationalMode, Repo, Reviews}
+  alias PtcManager.OperationalMode.Audit
   alias PtcManager.Collections.{Member, Run}
   alias PtcManager.Operations
 
@@ -68,7 +69,9 @@ defmodule PtcManager.Stalls do
       &operation_slot_orphaned/1,
       &dispatch_rejected/1,
       &publication_stuck_green/1,
-      &agent_out_of_contact/1
+      &agent_out_of_contact/1,
+      &mode_entered_by_recovery/1,
+      &mode_not_active/1
     ]
     |> Enum.flat_map(& &1.(now))
     |> Enum.sort_by(&{severity_rank(&1.severity), since_rank(&1.since)})
@@ -87,6 +90,8 @@ defmodule PtcManager.Stalls do
   def label(:publication_stuck_green), do: "Green member pull request not merged"
   def label(:agent_out_of_contact), do: "Agent out of contact"
   def label(:agent_needs_attention), do: "Agent needs a person"
+  def label(:mode_entered_by_recovery), do: "Console stopped by a failed operation recovery"
+  def label(:mode_not_active), do: "Console not active with no deployment in flight"
 
   @doc "Milliseconds an active run may go without a job, action, or step before it counts as stalled."
   def run_no_progress_ms,
@@ -98,9 +103,9 @@ defmodule PtcManager.Stalls do
 
   @doc """
   Milliseconds since a review round or continuation last changed before it
-  counts as snoozing on a restricted operational mode. The mode itself carries
-  no timestamp yet, so the grace is measured from the review's own record; a
-  deployment's canary and drain restrict the mode for minutes by design.
+  counts as snoozing on a restricted operational mode. The grace is measured
+  from the review's own record; a deployment's canary and drain restrict the
+  mode for minutes by design.
   """
   def mode_grace_ms, do: Application.get_env(:ptc_manager, :stall_mode_grace_ms, 300_000)
 
@@ -527,6 +532,78 @@ defmodule PtcManager.Stalls do
         detail: "#{agent_run_words(run)}: #{assessment.detail}"
       }
     end
+  end
+
+  @doc """
+  The console is in maintenance because an expensive operation's recovery
+  failed. The broker enters maintenance after a recovery error and logs it
+  once; the audit event is the only durable trace, and a person has to look
+  at the operation before activating the console.
+  """
+  def mode_entered_by_recovery(_now) do
+    with :maintenance <- OperationalMode.mode(),
+         %{actor: "broker_recovery"} = event <- Audit.last_transition() do
+      [
+        mode_stall(
+          :mode_entered_by_recovery,
+          event.inserted_at,
+          "The console entered maintenance mode when the recovery of an expensive operation " <>
+            "failed. Find the operation the broker could not release, then activate the " <>
+            "console from the Deployments page."
+        )
+      ]
+    else
+      _other -> []
+    end
+  end
+
+  @doc """
+  The console has not been active for longer than a reconcile, no deployment
+  is in flight, and the deployment script does not own the window: a direct
+  deployment boots the release restricted and runs its own canary within
+  `Audit.deploy_window_ms/0`. Anything else that leaves the console restricted,
+  including a script that left it so for longer, is a stall.
+  """
+  def mode_not_active(now) do
+    mode = OperationalMode.mode()
+
+    with false <- mode == :active,
+         [] <- Deployments.active(),
+         false <- Audit.deploy_owned?(now),
+         %{actor: actor} = event when actor != "broker_recovery" <- Audit.last_transition(),
+         true <- elapsed_ms(event.inserted_at, now) > @reconcile_interval_ms do
+      [
+        mode_stall(
+          :mode_not_active,
+          event.inserted_at,
+          "The console has been in #{mode_words(mode)} for " <>
+            "#{humanize(elapsed_ms(event.inserted_at, now))} with no deployment in flight; " <>
+            "the last transition was made by #{actor}. #{mode_advice(mode)}"
+        )
+      ]
+    else
+      _other -> []
+    end
+  end
+
+  defp mode_advice(:maintenance), do: "Activate it from the Deployments page."
+
+  defp mode_advice({:canary, _id}),
+    do: "If the canary's process is gone, the Deployments page offers to replace it."
+
+  defp mode_advice(_mode), do: "See the Deployments page."
+
+  defp mode_stall(kind, since, detail) do
+    %{
+      kind: kind,
+      severity: :alarm,
+      target_type: "operational_mode",
+      target_id: 0,
+      repository_id: nil,
+      issue_id: nil,
+      since: since,
+      detail: detail
+    }
   end
 
   ## Runs

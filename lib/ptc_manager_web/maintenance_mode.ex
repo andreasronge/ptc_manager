@@ -6,6 +6,10 @@ defmodule PtcManagerWeb.MaintenanceMode do
   alias PtcManager.OperationalMode
 
   @read_only_events ["close_agent"]
+  # The one mutation a restricted console must accept: the Deployments page's
+  # Activate, which runs the canary and ends the restriction. Its handler
+  # decides on its own whether activation is available.
+  @recovery_events ["activate"]
 
   def on_mount(:default, _params, _session, socket) do
     {:cont, attach_hook(socket, :maintenance_mode, :handle_event, &handle_event/3)}
@@ -13,6 +17,10 @@ defmodule PtcManagerWeb.MaintenanceMode do
 
   defp handle_event(event, _params, socket) when event in @read_only_events,
     do: {:cont, socket}
+
+  defp handle_event(event, _params, %{view: PtcManagerWeb.DeploymentsLive} = socket)
+       when event in @recovery_events,
+       do: {:cont, socket}
 
   defp handle_event(_event, _params, socket) do
     case OperationalMode.authorize_ordinary_work() do

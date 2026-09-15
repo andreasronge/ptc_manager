@@ -12,6 +12,8 @@ defmodule PtcManager.Deployments do
   @driving_run_states ~w(queued starting working)
   @attention_run_states ~w(blocked unknown)
   @active_action_states PtcManager.Operations.AgentAction.pending_states()
+  # The actor the mode audit shows for the drain around a deployment.
+  @actor "deployments"
   @driven_job_states ~w(starting working idle blocked reconciling)
   @active_deployment_states ~w(queued draining starting running)
   @finished_deployment_states ~w(completed failed cancelled)
@@ -219,7 +221,7 @@ defmodule PtcManager.Deployments do
 
   defp advance(%Deployment{state: state} = deployment, opts)
        when state in ~w(queued draining) do
-    _ = OperationalMode.enter_draining()
+    _ = OperationalMode.enter_draining(@actor)
 
     with :ok <- ensure_head_unchanged(deployment, Keyword.get(opts, :check_head?, false)) do
       case drain_blockers() do
@@ -415,7 +417,7 @@ defmodule PtcManager.Deployments do
   end
 
   defp enter_drain_or_fail(deployment) do
-    case OperationalMode.enter_draining() do
+    case OperationalMode.enter_draining(@actor) do
       :ok -> :ok
       {:error, reason} -> fail(deployment, reason)
     end
@@ -459,12 +461,12 @@ defmodule PtcManager.Deployments do
 
   defp ensure_active_deployment_drains do
     if active() != [] and OperationalMode.mode() != :draining do
-      _ = OperationalMode.enter_draining()
+      _ = OperationalMode.enter_draining(@actor)
     end
   end
 
   defp leave_deployment_drain do
-    if OperationalMode.mode() == :draining, do: OperationalMode.leave_draining()
+    if OperationalMode.mode() == :draining, do: OperationalMode.leave_draining(@actor)
   end
 
   defp expire_stalled_deployments do

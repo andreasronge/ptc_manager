@@ -317,7 +317,7 @@ restore_preexisting_maintenance_override() {
 
 pause_new_release() {
   sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
-    'PtcManager.OperationalMode.enter_maintenance()' >/dev/null
+    'PtcManager.OperationalMode.enter_maintenance("deploy")' >/dev/null
 }
 
 read_process_setting() {
@@ -1778,15 +1778,15 @@ echo "Maintenance health passed. Latest database migration: $migration_version"
 echo "Running one allowlisted read-only deployment canary..."
 deployment_phase=post_effect
 sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
-  "case PtcManager.DeploymentCanary.run(\"deploy-${release_id}\") do {:ok, result} -> result; {:error, reason} -> raise \"deployment canary failed: #{inspect(reason)}\" end"
+  "case PtcManager.DeploymentCanary.run(\"deploy-${release_id}\", actor: \"deploy\") do {:ok, result} -> result; {:error, reason} -> raise \"deployment canary failed: #{inspect(reason)}\" end"
 health_check canary
 remove_maintenance_override
 
 sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
-  "case PtcManager.DeploymentCanary.activate(\"deploy-${release_id}\") do :ok -> :ok; {:error, reason} -> raise \"deployment activation failed: #{inspect(reason)}\" end"
+  "case PtcManager.DeploymentCanary.activate(\"deploy-${release_id}\", actor: \"deploy\") do :ok -> :ok; {:error, reason} -> raise \"deployment activation failed: #{inspect(reason)}\" end"
 if [ "$activation_owner" = managed ]; then
   sudo -u ptc-manager -H "$application_dir/bin/ptc_manager" rpc \
-    'PtcManager.OperationalMode.enter_draining()' >/dev/null
+    'PtcManager.OperationalMode.enter_draining("deploy")' >/dev/null
   echo "Service is healthy. Ordinary work remains drained until the host runner records completion."
 else
   echo "Service is healthy and ordinary work is active after direct deployment."

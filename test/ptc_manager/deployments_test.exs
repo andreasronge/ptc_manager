@@ -85,7 +85,7 @@ defmodule PtcManager.DeploymentsTest do
       end)
 
       Application.delete_env(:ptc_manager, :deployment_test_pid)
-      if OperationalMode.mode() == :draining, do: OperationalMode.leave_draining()
+      if OperationalMode.mode() == :draining, do: OperationalMode.leave_draining("test")
       File.rm_rf!(spool)
     end)
 
@@ -282,7 +282,7 @@ defmodule PtcManager.DeploymentsTest do
     assert :ok = Deployments.advance()
     assert_receive {:deployment_started, _, _}
 
-    assert :ok = OperationalMode.leave_draining()
+    assert :ok = OperationalMode.leave_draining("test")
     assert OperationalMode.mode() == :active
     assert :ok = Deployments.advance()
     assert OperationalMode.mode() == :draining
