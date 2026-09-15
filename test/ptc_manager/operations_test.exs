@@ -40,6 +40,8 @@ defmodule PtcManager.OperationsTest do
       do: Application.fetch_env!(:ptc_manager, :operations_label_remote_issue)
   end
 
+  import Ecto.Query
+
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.GitHub.IssueLabels
@@ -1623,6 +1625,72 @@ defmodule PtcManager.OperationsTest do
       })
 
     %{job: job, run: run, allocation: allocation, worker: worker}
+  end
+
+  describe "resume_from_worktree/2" do
+    test "approves afresh and hands a failed job to the retained continuation" do
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("failed")
+
+      run
+      |> Ecto.Changeset.change(agent_name: "impl_j#{job.id}_f1", state: "failed")
+      |> Repo.update!()
+
+      job
+      |> Job.changeset(%{ended_at: DateTime.utc_now(), last_error: "verification failed"})
+      |> Repo.update!()
+
+      assert Operations.resumable_from_worktree?(Repo.get!(Job, job.id))
+      assert {:ok, resumed} = Operations.resume_from_worktree(job.id, "andreas")
+
+      assert resumed.state == "blocked"
+      assert resumed.review_state == "resume_pending"
+      assert resumed.review_resume_mode == "implementation"
+      assert resumed.review_generation == job.review_generation + 1
+      assert resumed.approval_id != job.approval_id
+      assert is_nil(resumed.ended_at) and is_nil(resumed.last_error)
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
+
+      assert Repo.exists?(
+               from o in Oban.Job,
+                 where:
+                   o.worker == "PtcManager.Reviews.ResumeWorker" and
+                     o.state in ["available", "scheduled"]
+             )
+
+      assert %{details: %{"previous_state" => "failed"}} =
+               Repo.get_by!(AuditEvent, action: "job.resumed_from_worktree", target_id: job.id)
+
+      refute Operations.resumable_from_worktree?(Repo.get!(Job, job.id))
+    end
+
+    test "refuses a job without a retained worktree, a session, or with a newer job" do
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("failed")
+      refute Operations.resumable_from_worktree?(job), "the run has no agent name to continue"
+
+      assert {:error, :no_session_to_continue} =
+               Operations.resume_from_worktree(job.id, "andreas")
+
+      run |> Ecto.Changeset.change(agent_name: "impl_j#{job.id}_f1") |> Repo.update!()
+      allocation |> Ecto.Changeset.change(state: "removed") |> Repo.update!()
+      assert {:error, :worktree_not_retained} = Operations.resume_from_worktree(job.id, "andreas")
+
+      allocation |> Ecto.Changeset.change(state: "attention") |> Repo.update!()
+
+      %Job{}
+      |> Job.changeset(%{
+        repository_id: job.repository_id,
+        issue_id: job.issue_id,
+        approval_id: job.approval_id,
+        kind: job.kind,
+        state: "queued"
+      })
+      |> Repo.insert!()
+
+      assert {:error, :newer_job_exists} = Operations.resume_from_worktree(job.id, "andreas")
+
+      %{job: working} = running_job_fixture("working")
+      assert {:error, :job_not_resumable} = Operations.resume_from_worktree(working.id, "andreas")
+    end
   end
 
   defp dependency_fixture(issue, blocker, repository) do

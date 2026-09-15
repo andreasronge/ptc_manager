@@ -301,6 +301,16 @@
             >
               <.icon name="hero-check-mini" class="size-3.5" /> Approve and merge
             </button>
+            <button
+              :if={resumable?(item)}
+              id={"resume-worktree-#{item.active_job.id}"}
+              phx-click="resume-from-worktree"
+              phx-value-job-id={item.active_job.id}
+              title="Approve afresh and continue in the worktree this job left behind"
+              class="inline-flex items-center gap-1.5 rounded-lg bg-teal-400 px-3 py-2 font-semibold text-slate-950 hover:bg-teal-300"
+            >
+              <.icon name="hero-play-mini" class="size-3.5" /> Resume
+            </button>
             <%= if report = stop_report(item) do %>
               <button
                 :if={recovery_offered?(report, :retry)}

@@ -554,6 +554,55 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 
+  test "a stopped job with a retained worktree offers Resume", %{conn: conn} do
+    failed =
+      stop_job("Verify the retained branch", %{
+        "reason_code" => "environment_broken",
+        "summary" => "The test database was locked.",
+        "detail" =>
+          "Two commits are on the branch; the last test run could not open the database.",
+        "progress" => "partial"
+      })
+
+    worker = worker_fixture(%{worker_key: "herdr:resume-#{System.unique_integer([:positive])}"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %PtcManager.Operations.WorktreeAllocation{}
+    |> PtcManager.Operations.WorktreeAllocation.changeset(%{
+      worker_id: worker.id,
+      job_id: failed.id,
+      state: "attention",
+      path: "/tmp/resume-board-worktree",
+      last_used_at: now
+    })
+    |> Repo.insert!()
+
+    {:ok, _run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: failed.id,
+        role: "implementer",
+        state: "failed",
+        agent_name: "impl_j#{failed.id}_f#{failed.fencing_token}",
+        herdr_pane: "w8:p1",
+        started_at: now,
+        last_heartbeat_at: now,
+        ended_at: now,
+        fencing_token: failed.fencing_token
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+    assert has_element?(view, "#resume-worktree-#{failed.id}")
+
+    view |> element("#resume-worktree-#{failed.id}") |> render_click()
+    assert render(view) =~ "Resuming on the retained worktree"
+
+    resumed = Repo.get!(Job, failed.id)
+    assert resumed.state == "blocked"
+    assert resumed.review_state == "resume_pending"
+    refute has_element?(view, "#resume-worktree-#{failed.id}")
+  end
+
   test "an ambiguity is offered to the issue first, not retried", %{conn: conn} do
     stopped =
       stop_job("Decide the export shape", %{
