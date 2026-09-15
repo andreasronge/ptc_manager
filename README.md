@@ -1915,7 +1915,7 @@ access.
 
 For an observation-only trial, an existing session can instead be exported as
 a JSON snapshot. Install `ptc_manager-herdr-observer.service` and its timer as
-the session owner, and configure the coordinator with
+the managed `ptc-manager-worker` session owner, and configure the coordinator with
 `PTC_HERDR_BINARY=/usr/local/bin/ptc-manager-herdr-snapshot-read` and no
 `PTC_HERDR_RUN_AS_USER`. The coordinator can then list agent status but has no
 socket or CLI path with which to prompt or control the observed session. Keep

@@ -5,8 +5,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=agent
-Group=agent
+User=ptc-manager-worker
+Group=ptc-manager-worker
 SupplementaryGroups=ptc-manager-output
 EnvironmentFile=/etc/ptc_manager/herdr-observer.env
 ExecStart=/usr/local/bin/ptc-manager-herdr-snapshot-write

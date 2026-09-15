@@ -502,6 +502,14 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert wrapper =~ "script is outside the worktree"
   end
 
+  test "Herdr observation runs as the managed session owner" do
+    unit = File.read!(Path.join(@project_root, "deploy/ptc_manager-herdr-observer.service"))
+
+    assert unit =~ "User=ptc-manager-worker"
+    assert unit =~ "Group=ptc-manager-worker"
+    refute unit =~ "User=agent"
+  end
+
   test "remote deployment installs a forced-command bridge for the worker Herdr session" do
     script = File.read!(@remote_script)
     sudoers = File.read!(@sudoers)
