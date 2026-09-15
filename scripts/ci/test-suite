@@ -2,7 +2,7 @@
 set -eu
 
 budget_seconds=${PTC_TEST_BUDGET_SECONDS:-60}
-partitions=${PTC_TEST_PARTITIONS:-3}
+partitions=${PTC_TEST_PARTITIONS:-4}
 
 case "$budget_seconds:$partitions" in
   *[!0-9:]* | *:0 | 0:* | 1:*)
@@ -72,7 +72,12 @@ while [ "$partition" -le "$last_partition" ]; do
     exit 2
   fi
   # shellcheck disable=SC2086
-  "$timeout_binary" --signal=TERM --kill-after=2s "${partition_budget}s" \
+  # A BEAM SIGTERM starts VM shutdown underneath live ExUnit tests. Their
+  # on_exit callbacks then race ExUnit and Mix ETS teardown and print spurious
+  # crashes. The expired partition cannot clean up reliably either way, so kill
+  # its timeout-owned process group atomically and let the next run use the
+  # isolated temporary directory.
+  "$timeout_binary" --verbose --signal=KILL "${partition_budget}s" \
     env TMPDIR="$partition_tmp" MIX_TEST_PARTITION="$partition" mix test --exclude nightly $slowest_modules $files \
     >"$log_path" 2>&1 &
   pids="$pids $!"

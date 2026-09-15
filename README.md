@@ -1246,7 +1246,7 @@ mix precommit
 ```
 
 This formats the project, compiles with warnings treated as errors, and runs
-the deployment-critical suite across three isolated SQLite partitions. Each
+the deployment-critical suite across four isolated SQLite partitions. Each
 partition gets its own temporary directory, removed with the suite's staging
 files, so fixture names cannot collide across partitions or repeated runs. The
 test phase has a hard wall-clock budget of less than 60 seconds; a failed,
@@ -1258,12 +1258,12 @@ be started manually. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
 only for local diagnosis—the checked-in defaults are the publication and
 deployment contract. CI runs five partitions on separate runners using
 `PTC_TEST_PARTITION_ONLY` with `PTC_TEST_PARTITIONS`; every matrix job is
-required and retains the same 60-second budget. Local precommit runs three
+required and retains the same 60-second budget. Local precommit runs four
 partitions together on one machine, where the budget covers their combined
 wall clock; a CI runner measures one partition alone and is pinned to a single
-scheduler, so it needs smaller partitions to hold the same budget. Splitting
-further does not make the suite faster: roughly five sixths of its time is
-synchronous, because the SQLite-backed data cases cannot run `async: true`.
+scheduler, so it needs smaller partitions to hold the same budget. The fourth
+local partition keeps growth in synchronous SQLite-backed cases from consuming
+the deadline's safety margin without changing the 60-second contract.
 
 Files are dealt to partitions by `scripts/ci/test-partition` rather than by
 Mix's `--partitions` option, which deals the sorted file list round-robin and
