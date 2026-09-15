@@ -507,6 +507,8 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     assert unit =~ "User=ptc-manager-worker"
     assert unit =~ "Group=ptc-manager-worker"
+    assert unit =~ "ExecStartPre=+/bin/sh"
+    assert unit =~ "/bin/chown ptc-manager-worker:ptc-manager-output"
     refute unit =~ "User=agent"
   end
 
