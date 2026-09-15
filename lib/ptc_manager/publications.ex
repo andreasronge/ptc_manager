@@ -1656,10 +1656,11 @@ defmodule PtcManager.Publications do
     |> Repo.exists?()
   end
 
-  @pushing_action_keys ~w(repair_pr repair_and_merge_pr merge_reviewed_pr)
+  @pushing_action_keys ~w(repair_pr repair_and_merge_pr)
 
-  # Only an action that may push owns the head the poller sees; an analysis or
-  # a retrospective never pushes, so a foreign push during one is still fenced.
+  # Only an action that may push owns the head the poller sees. An analysis, a
+  # retrospective, and the collection merge (which is forbidden to change the
+  # branch) never push, so a foreign push during one of them is still fenced.
   defp pushing_action_in_flight?(publication_id) do
     AgentAction
     |> where(

@@ -1229,6 +1229,45 @@ defmodule PtcManager.PublisherTest do
     assert head_changed_count(publication.id) == 0
   end
 
+  test "an action that never pushes does not lift the fence" do
+    {job, publication, _result} = published_publication_fixture()
+
+    %PtcManager.Operations.AgentAction{}
+    |> PtcManager.Operations.AgentAction.changeset(%{
+      repository_id: job.repository_id,
+      action_key: "pr_retrospective",
+      target_type: "pull_request",
+      target_id: publication.id,
+      target_label: "owner/repo#73",
+      prompt_version: 1,
+      prompt: "retrospective",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "running",
+      attempt_count: 1,
+      requested_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.insert!()
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "open",
+        pr_url: publication.pr_url,
+        head_sha: String.duplicate("e", 40),
+        base_sha: String.duplicate("a", 40),
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, blocked} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert blocked.state == "blocked"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+    assert head_changed_count(publication.id) == 1
+  end
+
   test "a head-blocked PR remains observable and leaves attention after GitHub merges it" do
     {job, publication, _result} = published_publication_fixture()
     repaired_head = String.duplicate("e", 40)
