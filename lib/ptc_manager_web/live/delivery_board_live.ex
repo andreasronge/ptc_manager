@@ -586,6 +586,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
     if publication do
       [
+        if(not item.managed?, do: {"CI is the review gate", :muted}),
         checks_badge(publication.checks_state),
         merge_badge(publication.mergeability),
         if(publication.draft, do: {"Draft", :muted})
@@ -698,6 +699,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
         "The last delivery step needs maintainer attention."
     end
   end
+
+  defp phase_next_step(%{managed?: false}, :ready),
+    do:
+      "This imported pull request has no managed review. CI is the review gate; when it is green and the branch is mergeable, approve an agent to merge it."
 
   defp phase_next_step(_item, :ready),
     do: "All observed gates are clean. Approve an agent to merge this pull request."

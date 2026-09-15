@@ -1893,7 +1893,10 @@ head.
 
 External PRs participate in the same CI and conflict lanes, but they do not
 create fake issues or jobs. Private merge review is omitted because there is no
-original retained implementation context. Repair actions create a named Herdr
+original retained implementation context. The Delivery board states that CI is
+the review gate on every imported PR card, including when CI is pending or
+failing, so a maintainer does not mistake a green imported head for a managed
+review. Repair actions create a named Herdr
 agent in a fresh isolated worktree rooted at the exact observed PR head. **Fix**
 authorizes that agent to repair and push the existing branch. **Fix and merge**
 also authorizes that same agent to watch and repair CI until green and merge only
