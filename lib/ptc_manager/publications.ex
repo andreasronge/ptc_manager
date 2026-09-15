@@ -943,26 +943,57 @@ defmodule PtcManager.Publications do
               insert_status_audit!(publication, "pr_publication.base_changed", result, now)
               load(publication.id)
 
+            # While an action for this pull request is queued, running, or
+            # syncing, a head it pushed is verified by that action, not fenced
+            # by the poller; the status still moves so the board stays current.
+            result.state == "open" and result.head_sha != publication.remote_head_sha and
+                action_in_flight?(publication.id) ->
+              publication
+              |> PrPublication.changeset(
+                Map.merge(
+                  %{pr_state: "open", remote_base_sha: result.base_sha, pr_checked_at: now},
+                  remote_status_attrs(result)
+                )
+              )
+              |> Repo.update!()
+
+              load(publication.id)
+
+            # A head the console never verified blocks the lineage once per
+            # head: the first poll announces it and parks the job and worktree,
+            # later polls only keep checks and mergeability current.
             result.state == "open" and result.head_sha != publication.remote_head_sha ->
               message = "GitHub reports a different pull-request head commit."
 
+              announced? =
+                publication.state == "blocked" and
+                  publication.observed_head_sha == result.head_sha
+
               publication
-              |> PrPublication.changeset(%{
-                state: "blocked",
-                pr_state: result.state,
-                remote_base_sha: result.base_sha,
-                pr_checked_at: now,
-                last_error: message
-              })
+              |> PrPublication.changeset(
+                Map.merge(
+                  %{
+                    state: "blocked",
+                    pr_state: result.state,
+                    remote_base_sha: result.base_sha,
+                    observed_head_sha: result.head_sha,
+                    pr_checked_at: now,
+                    last_error: message
+                  },
+                  remote_status_attrs(result)
+                )
+              )
               |> Repo.update!()
 
-              job
-              |> Job.changeset(%{state: "publish_blocked", last_error: message})
-              |> Repo.update!()
+              unless announced? do
+                job
+                |> Job.changeset(%{state: "publish_blocked", last_error: message})
+                |> Repo.update!()
 
-              mark_worktree_attention(job.id, message, now)
+                mark_worktree_attention(job.id, message, now)
+                insert_status_audit!(publication, "pr_publication.head_changed", result, now)
+              end
 
-              insert_status_audit!(publication, "pr_publication.head_changed", result, now)
               load(publication.id)
 
             result.state == "open" ->
@@ -972,6 +1003,7 @@ defmodule PtcManager.Publications do
                   %{
                     pr_state: "open",
                     remote_base_sha: result.base_sha,
+                    observed_head_sha: nil,
                     pr_checked_at: now,
                     pr_url: result.pr_url,
                     last_error: nil
@@ -1101,6 +1133,7 @@ defmodule PtcManager.Publications do
                     head_sha: verified.head_sha,
                     diff_digest: verified.diff_digest,
                     remote_head_sha: result.head_sha,
+                    observed_head_sha: nil,
                     remote_base_sha: result.base_sha,
                     pr_state: "open",
                     pr_checked_at: now,
@@ -1576,7 +1609,7 @@ defmodule PtcManager.Publications do
       is_nil(duplicate) or duplicate.id == publication.id ->
         publication
 
-      matching_external_identity?(duplicate, result) and active_external_action?(duplicate.id) ->
+      matching_external_identity?(duplicate, result) and action_in_flight?(duplicate.id) ->
         defer_agent_adoption!(publication, duplicate, now)
 
       matching_external_identity?(duplicate, result) ->
@@ -1612,7 +1645,7 @@ defmodule PtcManager.Publications do
         String.downcase(result.head_repository)
   end
 
-  defp active_external_action?(publication_id) do
+  defp action_in_flight?(publication_id) do
     AgentAction
     |> where(
       [action],
