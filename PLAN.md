@@ -71,8 +71,9 @@ Available actions in the first product release:
 - **Open on GitHub** leaves PtcManager for the canonical issue.
 
 An approval records the issue number, repository, issue `updated_at`, content
-digest, proposal digest, approver, and time. If the issue changes before the job
-starts, the approval becomes stale and must be renewed. Dispatch does not trust
+digest, proposal digest, approver, and time. If the issue's title or body
+changes before the job starts, the approval is invalid and must be renewed; if
+only its activity moved, dispatch re-freezes the version it holds. Dispatch does not trust
 the last periodic snapshot: immediately before leasing or starting work, the
 coordinator fetches the issue directly from GitHub, recomputes the digest, and
 fails closed when freshness cannot be established.
@@ -300,7 +301,8 @@ the worker protocol or UI concepts.
 - At most one active implementation job exists for a repository issue. SQLite
   enforces this with a partial unique index over active states; approval, job,
   and audit-event creation occur in one transaction.
-- Every job has one immutable approval and proposal origin.
+- Every job has one approval and proposal origin; a retry or a resume is a
+  fresh approval, recorded as such.
 - A worker lease expires unless renewed by heartbeat, and every attempt carries
   a monotonically increasing fencing token.
 - An expired lease never immediately starts duplicate work; reconciliation

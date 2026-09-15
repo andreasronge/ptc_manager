@@ -95,7 +95,7 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
       {:noreply,
        socket
-       |> put_flash(:info, "Queued a fresh attempt with the same approval and review count.")
+       |> put_flash(:info, "Queued a fresh attempt, approved afresh with the same review count.")
        |> load_board()}
     else
       {:error, :issue_not_open} ->
@@ -111,6 +111,15 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       {:error, :job_not_stopped} ->
         {:noreply,
          socket |> put_flash(:info, "That attempt was already handled.") |> load_board()}
+
+      {:error, reason}
+      when reason in [
+             :issue_changed,
+             :issue_claimed,
+             :issue_workflow_not_ready,
+             :issue_is_collection
+           ] ->
+        {:noreply, put_flash(socket, :error, Operations.rejection_words(reason))}
 
       _error ->
         {:noreply, put_flash(socket, :error, "A fresh attempt could not be queued.")}

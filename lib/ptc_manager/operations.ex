@@ -936,12 +936,16 @@ defmodule PtcManager.Operations do
         issue = Repo.get!(Issue, stopped.issue_id)
         unless issue.state == "open", do: Repo.rollback(:issue_not_open)
 
-        # The same gates a fresh approval passes; a retry is one.
+        # The same gates a fresh approval passes; a retry is one. The retry
+        # runs on the stopped job's frozen title and body, so a changed issue
+        # needs a fresh approval rather than a retry.
         with :ok <- issue_unclaimed(issue, Repo.get!(Repository, issue.repository_id)),
              :ok <- issue_workflow_allows_implementation(issue),
-             :ok <- issue_not_collection(issue) do
+             :ok <- issue_not_collection(issue),
+             false <- requirement_changed?(issue, stopped) do
           :ok
         else
+          true -> Repo.rollback(:issue_changed)
           {:error, reason} -> Repo.rollback(reason)
         end
 
@@ -3701,6 +3705,12 @@ defmodule PtcManager.Operations do
   # is not judged.
   defp remote_issue_still_approvable(remote, repository) do
     cond do
+      Map.get(remote, :state, "open") != "open" ->
+        {:error, :issue_closed}
+
+      Map.get(remote, :structure_projected, true) == false ->
+        {:error, :issue_structure_unknown}
+
       Map.get(remote, :workflow_label_conflict, false) or
           Map.get(remote, :workflow_label) not in [nil, "ptc:ready"] ->
         {:error, :issue_workflow_not_ready}
@@ -4907,48 +4917,47 @@ defmodule PtcManager.Operations do
   defp rejection_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp rejection_error(reason), do: bounded_error(reason)
 
-  # The card shows the maintainer why dispatch refused; the audit keeps the
-  # value.
-  defp rejection_words(:issue_closed), do: "The issue was closed before the job could start."
+  @doc "Why dispatch, or a retry, refused an issue, in words for a card or a flash."
+  def rejection_words(:issue_closed), do: "The issue was closed before the job could start."
 
-  defp rejection_words(:issue_changed),
+  def rejection_words(:issue_changed),
     do: "The issue's title or body changed after it was approved. Approve it again."
 
-  defp rejection_words(:worktree_changed),
+  def rejection_words(:worktree_changed),
     do:
       "The prepared worktree was not clean after the repository's bootstrap command ran, " <>
         "so the agent could not start from a known state."
 
-  defp rejection_words(:issue_claimed),
+  def rejection_words(:issue_claimed),
     do: "The issue is assigned to someone else on GitHub."
 
-  defp rejection_words(:issue_has_pull_request),
+  def rejection_words(:issue_has_pull_request),
     do: "A pull request already references the issue."
 
-  defp rejection_words(:issue_workflow_not_ready),
+  def rejection_words(:issue_workflow_not_ready),
     do: "The issue no longer carries the ready label."
 
-  defp rejection_words(:auto_fix_disabled),
+  def rejection_words(:auto_fix_disabled),
     do: "Automatic implementation is disabled for the repository."
 
-  defp rejection_words(:no_active_collection_run),
+  def rejection_words(:no_active_collection_run),
     do: "The collection run that approved the issue is no longer active."
 
-  defp rejection_words(:repository_disabled), do: "The repository is disabled."
+  def rejection_words(:repository_disabled), do: "The repository is disabled."
 
-  defp rejection_words(:issue_dependencies_unresolved),
+  def rejection_words(:issue_dependencies_unresolved),
     do: "The issue is blocked by another issue that is not resolved."
 
-  defp rejection_words(:issue_structure_unknown),
+  def rejection_words(:issue_structure_unknown),
     do: "GitHub has not yet reported whether the issue has sub-issues."
 
-  defp rejection_words(:issue_is_collection),
+  def rejection_words(:issue_is_collection),
     do: "The issue has sub-issues, so it is a collection and its members are implemented instead."
 
-  defp rejection_words(:worktree_root_unavailable),
+  def rejection_words(:worktree_root_unavailable),
     do: "The worktree root on the worker is not configured or not usable."
 
-  defp rejection_words(reason), do: rejection_error(reason)
+  def rejection_words(reason), do: rejection_error(reason)
   defp setup_error(%{state: "passed"}), do: nil
   defp setup_error(%{error: reason}), do: bounded_error(reason)
   defp setup_error(_report), do: "workspace_setup_failed"

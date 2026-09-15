@@ -923,6 +923,17 @@ defmodule PtcManager.OperationsTest do
 
       assert {:error, :issue_claimed} = Operations.retry_stopped_job(stopped.id, "andreas")
       assert is_nil(Repo.get!(Job, stopped.id).stop_acknowledged_at)
+
+      Repo.get!(Issue, issue.id)
+      |> Ecto.Changeset.change(
+        github_assignees: %{"logins" => []},
+        title: "Rewritten while stopped",
+        content_digest: String.duplicate("9", 64)
+      )
+      |> Repo.update!()
+
+      assert {:error, :issue_changed} = Operations.retry_stopped_job(stopped.id, "andreas"),
+             "the retry would run on the frozen text, not the rewritten issue"
     end
 
     test "a job that never stopped cannot be retried or set aside" do
