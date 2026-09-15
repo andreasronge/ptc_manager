@@ -144,6 +144,7 @@ herdr_launch_candidate="/tmp/ptc-manager-herdr-launch-${release_id}"
 herdr_ssh_bridge_candidate="/tmp/ptc-manager-herdr-ssh-bridge-${release_id}"
 herdr_worker_bridge_candidate="/tmp/ptc-manager-herdr-worker-bridge-${release_id}"
 herdr_bridge_canary_candidate="/tmp/ptc-manager-herdr-bridge-canary-${release_id}"
+ssh_firewall_candidate="/tmp/ptc-manager-ssh-firewall-${release_id}"
 sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 self_deploy_runner_candidate="/tmp/ptc-manager-self-deploy-runner-${release_id}"
 self_deploy_service_candidate="/tmp/ptc-manager-self-deploy-service-${release_id}"
@@ -178,7 +179,7 @@ cleanup_remote() {
     "$needrestart_candidate" \
     "$resources_dropin_candidate" \
     "$agent_context_candidate" "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" \
-    "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate" "$sudoers_candidate" \
+    "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate" "$ssh_firewall_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
     "$self_deploy_access_candidate" "$health_snapshot_candidate" \
     "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate" \
@@ -1422,6 +1423,7 @@ tar -xOf "$source_archive" deploy/ptc-manager-herdr-launch >"$herdr_launch_candi
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-ssh-bridge >"$herdr_ssh_bridge_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-worker-bridge >"$herdr_worker_bridge_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-bridge-canary >"$herdr_bridge_canary_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-ssh-firewall >"$ssh_firewall_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-self-deploy-runner >"$self_deploy_runner_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy.service >"$self_deploy_service_candidate"
@@ -1446,7 +1448,7 @@ chmod 0755 "$operation_wrapper_candidate"
 chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
 chmod 0755 "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" \
-  "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate"
+  "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate" "$ssh_firewall_candidate"
 chmod 0440 "$sudoers_candidate"
 chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
@@ -1727,6 +1729,8 @@ sudo install -o root -g root -m 0755 "$herdr_worker_bridge_candidate" \
   /usr/local/bin/ptc-manager-herdr-worker-bridge
 sudo install -o root -g root -m 0755 "$herdr_bridge_canary_candidate" \
   /usr/local/bin/ptc-manager-herdr-bridge-canary
+sudo install -o root -g root -m 0755 "$ssh_firewall_candidate" \
+  /usr/local/bin/ptc-manager-ssh-firewall
 printf '%s\n' "$worker_session" | sudo tee "$herdr_bridge_session_file" >/dev/null
 sudo chown root:root "$herdr_bridge_session_file"
 sudo chmod 0644 "$herdr_bridge_session_file"
