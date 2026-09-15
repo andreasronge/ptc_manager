@@ -360,6 +360,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
 
     assert has_element?(view, "#lane-stuck #board-pr-#{failing.id}", "Imported from GitHub")
+    assert has_element?(view, "#board-pr-#{failing.id}", "CI is the review gate")
 
     assert has_element?(
              view,
@@ -373,8 +374,10 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     assert has_element?(
              view,
              "#lane-ready #board-pr-#{clean.id}",
-             "Approve an agent to merge this pull request"
+             "This imported pull request has no managed review. CI is the review gate"
            )
+
+    assert has_element?(view, "#board-pr-#{clean.id}", "CI is the review gate")
 
     refute has_element?(view, "#retro-pr-#{clean.id}")
     refute has_element?(view, "#review-for-merge-#{clean.id}")
