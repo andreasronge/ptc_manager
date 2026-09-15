@@ -141,7 +141,38 @@ defmodule PtcManager.OperationalModeTest do
     )
 
     assert OperationalMode.stale_canary?()
-    assert :ok = OperationalMode.enter_maintenance("test")
+    assert {:ok, "release-stale"} = OperationalMode.replace_stale_canary("test")
+    assert OperationalMode.mode() == :maintenance
+
+    assert %AuditEvent{actor: "test", details: %{"previous" => "canary", "next" => "maintenance"}} =
+             Audit.last_transition()
+
+    assert :ok = OperationalMode.admit_canary("release-live", "test")
+    assert :ok = OperationalMode.claim_canary("release-live")
+    assert {:error, :canary_not_stale} = OperationalMode.replace_stale_canary("test")
+    assert OperationalMode.mode() == {:canary, "release-live"}
+  end
+
+  test "the mode lock excludes other processes" do
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    parent = self()
+
+    holder =
+      spawn_link(fn ->
+        :global.trans({{OperationalMode, :mode}, self()}, fn ->
+          send(parent, :holding)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :holding
+    task = Task.async(fn -> OperationalMode.enter_maintenance("test") end)
+    refute_receive {_ref, :ok}, 200, "the transition ran while another process held the lock"
+    send(holder, :release)
+    assert :ok = Task.await(task)
     assert OperationalMode.mode() == :maintenance
   end
 

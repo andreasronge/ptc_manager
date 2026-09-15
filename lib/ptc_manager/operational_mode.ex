@@ -12,7 +12,10 @@ defmodule PtcManager.OperationalMode do
 
   @type mode :: :active | :draining | :maintenance | {:canary, String.t()}
 
-  @mode_lock {__MODULE__, :mode}
+  # `:global.trans/2` takes `{resource, requester}`; the requester must be the
+  # calling process, or every caller counts as the same requester and the lock
+  # excludes nobody.
+  @mode_resource {__MODULE__, :mode}
 
   @spec mode() :: mode()
   def mode do
@@ -98,7 +101,7 @@ defmodule PtcManager.OperationalMode do
   # written inside the lock so the records keep the order of the transitions;
   # it never fails the transition.
   defp transition(actor, decide) do
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       previous = mode()
 
       case decide.(previous) do
@@ -129,21 +132,45 @@ defmodule PtcManager.OperationalMode do
   @doc """
   Whether the mode is a canary whose process is gone: admitted but never
   claimed, or claimed by a process that no longer runs. Such a canary can only
-  be replaced, never finished.
+  be replaced, never finished. Pids are local: the console is one node, and the
+  deployment script's `rpc` evaluates on it.
   """
-  def stale_canary? do
-    case Application.get_env(:ptc_manager, :operational_mode) do
-      {:canary, _invocation_id, :unclaimed} -> true
-      {:canary, _invocation_id, {_step, owner}} when is_pid(owner) -> not Process.alive?(owner)
-      _mode -> false
-    end
+  def stale_canary?, do: stale_canary?(Application.get_env(:ptc_manager, :operational_mode))
+
+  defp stale_canary?({:canary, _invocation_id, :unclaimed}), do: true
+
+  defp stale_canary?({:canary, _invocation_id, {_step, owner}}) when is_pid(owner),
+    do: not Process.alive?(owner)
+
+  defp stale_canary?(_mode), do: false
+
+  @doc """
+  Moves a stale canary back to maintenance so a new one can be admitted, and
+  returns the abandoned invocation id. Staleness is judged again under the
+  lock, so two maintainers replacing the same canary cannot clobber the live
+  one the first of them admitted.
+  """
+  def replace_stale_canary(actor) when is_binary(actor) do
+    :global.trans({@mode_resource, self()}, fn ->
+      raw = Application.get_env(:ptc_manager, :operational_mode)
+
+      if stale_canary?(raw) do
+        {:canary, invocation_id, _state} = raw
+        previous = mode()
+        Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+        Audit.record(actor, previous, :maintenance)
+        {:ok, invocation_id}
+      else
+        {:error, :canary_not_stale}
+      end
+    end)
   end
 
   @spec authorize_canary(String.t()) :: :ok | {:error, :canary_not_admitted}
   def authorize_canary(invocation_id) when is_binary(invocation_id) do
     owner = self()
 
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       case Application.get_env(:ptc_manager, :operational_mode) do
         {:canary, ^invocation_id, {:claimed, ^owner}} ->
           Application.put_env(
@@ -178,7 +205,7 @@ defmodule PtcManager.OperationalMode do
   def claim_canary(invocation_id) when is_binary(invocation_id) do
     owner = self()
 
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       case Application.get_env(:ptc_manager, :operational_mode) do
         {:canary, ^invocation_id, :unclaimed} ->
           Application.put_env(
@@ -199,7 +226,7 @@ defmodule PtcManager.OperationalMode do
   def mark_canary_passed(invocation_id) when is_binary(invocation_id) do
     owner = self()
 
-    :global.trans(@mode_lock, fn ->
+    :global.trans({@mode_resource, self()}, fn ->
       case Application.get_env(:ptc_manager, :operational_mode) do
         {:canary, ^invocation_id, {:consumed, ^owner}} ->
           Application.put_env(

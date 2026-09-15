@@ -83,6 +83,26 @@ defmodule PtcManager.DeploymentCanary do
     end
   end
 
+  @doc """
+  Replaces a canary whose process is gone: the mode returns to maintenance and
+  the abandoned canary's run is closed as failed, so the next canary starts
+  clean. Refused when the canary is alive.
+  """
+  def replace_stale(actor) when is_binary(actor) do
+    with {:ok, invocation_id} <- OperationalMode.replace_stale_canary(actor) do
+      AgentRun
+      |> where(
+        [run],
+        run.external_key == ^"deployment-canary:#{invocation_id}" and
+          run.state in ["starting", "working"]
+      )
+      |> Repo.all()
+      |> Enum.each(&finish_run(&1, "failed", "Read-only deployment canary was abandoned."))
+
+      {:ok, invocation_id}
+    end
+  end
+
   @doc "Activates ordinary work after a passed canary, for `opts[:actor]` (default `canary`)."
   def activate(invocation_id, opts \\ []) when is_binary(invocation_id) do
     {actor, opts} = Keyword.pop(opts, :actor, "canary")

@@ -50,9 +50,10 @@ defmodule PtcManagerWeb.DeploymentsLive do
 
   # The rescue the maintainer's agent performed by hand through the release
   # RPC: run the read-only canary and activate ordinary work. It is offered
-  # only while nothing else owns the restricted mode (see `activation/0`),
-  # judged again at the click, and it runs outside the view's process so a
-  # closed browser tab cannot kill it halfway.
+  # only while nothing else owns the restricted mode (see `activation/0`) and
+  # judged again at the click. The canary runs in a task linked to this view,
+  # so a tab closed halfway leaves an abandoned canary; the page then offers
+  # to replace it.
   def handle_event("activate", _params, socket) do
     actor = socket.assigns.actor
 
@@ -174,14 +175,24 @@ defmodule PtcManagerWeb.DeploymentsLive do
     end
   end
 
-  # A stale canary is replaced by moving back to maintenance first; the new
-  # canary is then admitted like any other.
+  # A stale canary is replaced under the mode lock first, so two maintainers
+  # cannot clobber a live canary; the new canary is then admitted like any
+  # other.
   defp activate(actor, stale_canary?) do
     invocation_id = "console-#{System.os_time(:second)}-#{System.unique_integer([:positive])}"
 
-    with :ok <- if(stale_canary?, do: OperationalMode.enter_maintenance(actor), else: :ok),
+    with :ok <- replace_if_stale(actor, stale_canary?),
          {:ok, _summary} <- DeploymentCanary.run(invocation_id, actor: actor) do
       DeploymentCanary.activate(invocation_id, actor: actor)
+    end
+  end
+
+  defp replace_if_stale(_actor, false), do: :ok
+
+  defp replace_if_stale(actor, true) do
+    case DeploymentCanary.replace_stale(actor) do
+      {:ok, _invocation_id} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 

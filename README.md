@@ -1389,7 +1389,10 @@ maintenance or an abandoned canary, no deployment is in flight, and the
 deployment script does not own the window: a direct deployment runs its own
 canary within thirty minutes of its last transition (`:mode_deploy_window_ms`),
 and a second admission inside that window would abort it. After the window a
-console the script left restricted can be activated from the page. The
+console the script left restricted can be activated from the page; a script
+that was killed leaves its maintenance override under `/etc/systemd/system`,
+so every later restart boots restricted again and starts a new window until
+that override is removed. The
 dashboard's **Needs attention** section raises an alarm when the console was
 stopped by a failed recovery, and when it has been restricted for over a
 minute with no deployment in flight and no deployment script behind it.
