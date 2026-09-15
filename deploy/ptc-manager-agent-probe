@@ -16,6 +16,8 @@ set -eu
 # Output is one tab-separated record per line, for the Mix task to render:
 #
 #   agent<TAB>codex<TAB>reported<TAB>login<TAB>link target
+#   herdr_installation<TAB>managed<TAB>reported<TAB>owner<TAB>session<TAB>link target
+#   herdr_installation<TAB>interactive<TAB>state<TAB>owner<TAB>session<TAB>path
 #   herdr<TAB>live_agents<TAB>count
 #   herdr<TAB>live_runs<TAB>count
 #   env<TAB>owner/name<TAB>NAME,NAME
@@ -24,11 +26,18 @@ set -eu
 # missing answer cannot be mistaken for an empty one.
 
 database_path=${PTC_DATABASE_PATH:-/var/lib/ptc_manager/ptc_manager.db}
-herdr_session=${PTC_HERDR_SESSION:-default}
+herdr_session_file=/etc/ptc_manager/herdr-bridge-session
+herdr_session=unknown
+if [ -r "$herdr_session_file" ]; then
+  IFS= read -r herdr_session <"$herdr_session_file" || herdr_session=unknown
+fi
+case "$herdr_session" in
+  ''|*[!A-Za-z0-9_.-]*) herdr_session=unknown ;;
+esac
 worker=ptc-manager-worker
 
 emit() {
-  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "${6:-}"
 }
 
 # One line, no tabs, never empty: the record format depends on it, and a command
@@ -87,9 +96,20 @@ probe_agent claude_code claude \
   auth status
 probe_agent cursor_agent cursor-agent - status
 
+managed_herdr_version=$(as_worker herdr --version | head -n 1 | one_line)
+emit herdr_installation managed "$managed_herdr_version" "$worker" "$herdr_session" \
+  "$(link_target herdr | one_line)"
+if [ -e /home/agent/.local/bin/herdr ] || [ -L /home/agent/.local/bin/herdr ] ||
+  [ -e /home/agent/.config/herdr ] || [ -L /home/agent/.config/herdr ] ||
+  [ -e /home/agent/.local/state/herdr ] || [ -L /home/agent/.local/state/herdr ]; then
+  emit herdr_installation interactive present agent unknown /home/agent/.local/bin/herdr
+else
+  emit herdr_installation interactive absent agent none /home/agent/.local/bin/herdr
+fi
+
 # The pair that decides whether a deployment may move Herdr's link. A retained
 # agent holds it back, and nothing else on the machine says so in one place.
-if [ -x /usr/local/bin/herdr ]; then
+if [ -e /usr/local/bin/herdr ]; then
   live_agents=$(
     as_worker herdr --session "$herdr_session" agent list |
       jq '[.result.agents[]? | select(.agent_status != "done")] | length' 2>/dev/null || true

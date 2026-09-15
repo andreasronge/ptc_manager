@@ -12,6 +12,9 @@ case "$session" in
 esac
 
 case "$1" in
+  client-status)
+    exec "$herdr" status client --json
+    ;;
   status)
     exec "$herdr" --session "$session" status server --json
     ;;

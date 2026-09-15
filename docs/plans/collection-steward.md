@@ -35,10 +35,10 @@ signal that something had stalled was not on any page.
 | S2 | Every green publication's merge was deferred forever because the publication was loaded without its repository; the deferral was logged at info and never reached the journal. | Fixed, #97 | An effect the run refuses must become a run step (`refused`, with reason) that the card shows. Info-level logging of a refused effect is a stall. |
 | S3 | No second close-out after a close-out created members. | Fixed, #99 | Same rule: a run that is active with every member delivered and no pending step is an alarm. |
 | S4 | The blocker report (`report_collection_blocker`) failed 8 times in a row on a schema description; the comment still landed on GitHub, the console never captured the options. | Fixed, #91 | Validate every action's output schema against the adapter's rules in the test suite (done); alarm on any action key failing twice with the same error. |
-| S5 | Dispatch rejections cancel the job silently: an issue assigned by the console's own agent counted as claimed (`issue_claimed`), a stale approval digest, a dirty bootstrap (`worktree_changed`). The maintainer saw a cancelled card with a bare atom. | Claim fixed, #95; the rest open (#94 text, ptc_runner #1953 for the bootstrap cause) | A dispatch rejection should requeue after the next issue sync unless the reason is terminal (`issue_closed`). A stale approval should be re-frozen from the current digest, not cancelled. The card must name the reason in words. |
-| S6 | Two silent flips into maintenance mode, both after bursts of `database is locked`; reviews snooze forever in that mode with no card and no log line. | Open, #93 | Audit every mode transition with the caller; alarm when mode is not active for more than a minute with no deployment in flight; make `Reviews.*Worker` refuse loudly rather than snooze silently. |
-| S7 | A lost resource operation held the single expensive-operation slot for five and a half hours before recovery ran. | Open (untracked) | Bound recovery latency to minutes; an operation with a slot and no wrapper PID is lost after one heartbeat interval. |
-| S8 | `reconcile/1` rescues exceptions and logs at warning; the merge deferral logs at info; `apply_action` swallows `{:error, _}` from the transaction. Three different silences in one pass. | Open | One `run_events` table written by every branch of a reconcile pass that did not do what it set out to do, shown on the run page and consumed by the steward. |
+| S5 | Dispatch rejections cancel the job silently: an issue assigned by the console's own agent counted as claimed (`issue_claimed`), a stale approval digest, a dirty bootstrap (`worktree_changed`). The maintainer saw a cancelled card with a bare atom. | Fixed, #95, #105, #112; bootstrap cause fixed in ptc_runner #1953 | Dispatch now accepts the console's claim, re-freezes activity-only drift, approves retries afresh, and surfaces an unanswered rejection as a stall. |
+| S6 | Two silent flips into maintenance mode, both after bursts of `database is locked`; reviews snooze forever in that mode with no card and no log line. | Fixed, #105, #108 | Every mode transition is audited with its actor, and a review left snoozing in restricted mode is surfaced as a stall. |
+| S7 | A lost resource operation held the single expensive-operation slot for five and a half hours before recovery ran. | Fixed, #88, #105 | Recovery is bounded and retains diagnostics; a lost operation holding a slot is surfaced as a stall. |
+| S8 | `reconcile/1` rescues exceptions and logs at warning; the merge deferral logs at info; `apply_action` swallows `{:error, _}` from the transaction. Three different silences in one pass. | Partly fixed, #105; `run_events` remains open | Existing-table stall detection exposes known refusal shapes, but a durable event for every refused reconcile branch is not implemented. |
 
 ### 2.2 Agent stops that needed a person
 
@@ -50,15 +50,15 @@ signal that something had stalled was not on any page.
 | A4 | Plan-derived issues stopped three times on public-signature questions that the plan left open (#1956), even after two codex reviews of the plan. | Open | A "contract completion" pass before the first implementation job: an agent lists every public signature, option, and closed code the plan or issue leaves unnamed and answers them in the issue body. Also let an implementer proceed on a reversible API choice under a recorded assumption instead of stopping. |
 | A5 | Decisions were recorded as comments; the issue body still said the old thing, so the next agent had to reconcile them. | Open | The steward amends the issue body (a `## Decisions` section) rather than commenting; comments are for humans. |
 | A6 | Auto-fix refuses any issue that already had a job (`already_attempted`), so every restart after a stop was manual. | Open | The steward owns restarts; auto-fix stays first-attempt only. |
-| A7 | Re-approval binds the issue digest, so after every decision comment the operator must wait for the poller before approving, or the job is cancelled as stale. | Open | Either approve-with-resync (sync the issue inside the approval transaction) or webhook-driven sync. |
+| A7 | Re-approval binds the issue digest, so after every decision comment the operator must wait for the poller before approving, or the job is cancelled as stale. | Fixed, #112 | Dispatch re-freezes an approval when only issue activity changed and still refuses title or body changes. |
 
 ### 2.3 Resuming work that already exists
 
 | # | Friction | Status | Proposal |
 | --- | --- | --- | --- |
-| R1 | `retry_stopped_job` creates a fresh job with the stopped job's approval; after an agent has assigned or commented, the digest has moved and dispatch cancels it as stale. Three such retries were dead on arrival. | Open (#94 text) | Retry re-freezes the approval from the current issue. |
-| R2 | `Reviews.decide/5` refuses `continue` for a failed job whose review never started, and for any job in `pr_open`. The work sat in the worktree; the only way out was a hand-made commit and a git bundle. | Open | "Resume from retained worktree" as one operation for any failed job: new approval from the current digest, same worktree, same branch. |
-| R3 | A Fix action cannot request a managed review; the retained agent then refuses to push, and only pushes while an action is live. Three Fix actions for one repair. | Open, #100 | Either the Fix action can request a review of the retained commit, or the repair prompt states that CI is the gate and the retained policy permits the push. |
+| R1 | `retry_stopped_job` creates a fresh job with the stopped job's approval; after an agent has assigned or commented, the digest has moved and dispatch cancels it as stale. Three such retries were dead on arrival. | Fixed, #112 | A retry receives a fresh approval after the current issue passes the same gates. |
+| R2 | `Reviews.decide/5` refuses `continue` for a failed job whose review never started, and for any job in `pr_open`. The work sat in the worktree; the only way out was a hand-made commit and a git bundle. | Fixed, #114, #115 | **Resume in its worktree** handles failed and lost jobs on the same branch and worktree; PR-open repairs use the retained implementer with pull-request CI as their gate. |
+| R3 | A Fix action cannot request a managed review; the retained agent then refuses to push, and only pushes while an action is live. Three Fix actions for one repair. | Fixed, #114 | Repair actions explicitly use pull-request CI as their gate and authorize the retained implementer to push. |
 | R4 | Retained agents park at a prompt nobody answers; Herdr reports the pane as done; the console sees `no_commits`. | Partly handled (`unreconciled?`) | The steward reads the pane tail (`herdr pane read`) when a job reports done with no commits and decides. |
 
 ### 2.4 Reviews
@@ -123,7 +123,7 @@ actions with structured outputs (the `report_issue_blocker` /
 | Review findings repeating | the same finding text or location in two consecutive rounds | Pause for the maintainer with the repeated finding quoted. |
 | Review budget exhausted, findings still changing | rounds == budget, last two differ | Add two rounds, once. |
 | Publication green | checks success, mergeable, head unchanged | Merge through the console's action; on GitHub 5xx, retry with backoff. |
-| Publication red | checks failure | Queue Fix; if the agent reports "cannot review", apply the CI-is-the-gate waiver (once #100 lands) and re-queue. |
+| Publication red | checks failure | Queue Fix; the repair action authorizes the retained implementer to push and uses pull-request CI as its gate (#114). |
 | Close-out created members | close-out outcome `completed` | Nothing; the run adopts and continues (#99). |
 | Close-out says done, parent open | close-out `needs-decision` with all criteria met | Close the parent as completed (tier 1). |
 | Run active, all members delivered, no step | `member_statuses` all `closed_completed`, last step older than one poll | Alarm; queue a close-out. |
@@ -136,7 +136,7 @@ actions with structured outputs (the `report_issue_blocker` /
 All through existing public functions, in order of preference:
 
 - `Operations.acknowledge_job_stop/2`, `Operations.approve_issue_directly/2`,
-  `Operations.retry_stopped_job/2` (only after R1 is fixed),
+  `Operations.retry_stopped_job/2`, `Operations.resume_from_worktree/2`,
   `Reviews.decide/5` (`continue`, `retry_review`, with profile and
   instructions), `MaintainerActions.enqueue/3` (`repair_pr`,
   `merge_reviewed_pr`, `report_issue_blocker`, `resolve_issue_decision`),
@@ -147,9 +147,10 @@ All through existing public functions, in order of preference:
   actions: issue body amendment (new), prerequisite creation (new, via a
   `file_prerequisite` action with the same schema as `create_retrospective_issue`),
   `Blocked by` lines and native sub-issue relations.
-- New operations this plan needs: `resume_from_worktree/2` (§2.3 R2),
-  `file_prerequisite/2` with adoption (§2.2 A3), `amend_issue_decisions/3`
-  (§2.2 A5), `run_events` (§2.1 S8), a mode-transition audit (§2.1 S6).
+- New operations this plan still needs: `file_prerequisite/2` with adoption
+  (§2.2 A3), `amend_issue_decisions/3` (§2.2 A5), and `run_events` (§2.1 S8).
+  `resume_from_worktree/2` and the mode-transition audit have landed (#115,
+  #108).
 
 ### 3.4 Loop
 
@@ -180,15 +181,14 @@ by a per-repository policy table keyed on what the decision touches
 
 ## 5. Work items, in order
 
-1. `run_events` (§2.1 S8). The mode-transition audit half of this item (S6)
-   is done under `docs/plans/operator-surface.md` item 3.4.
-2. Dispatch rejections requeue after resync; stale approvals re-freeze; the
-   card names the reason (§2.1 S5, §2.3 R1); `docs/plans/operator-surface.md`
-   item 3.6.
-3. `resume_from_worktree/2` (§2.3 R2). Removes the bundle-and-helper-branch
-   rescue entirely; `docs/plans/operator-surface.md` item 3.6.
-4. Fix actions that can review, or the CI-is-the-gate waiver (§2.3 R3, #100);
-   `docs/plans/operator-surface.md` item 3.6.
+1. `run_events` (§2.1 S8). The mode-transition audit is done by #108 and
+   existing-table stall detection by #105; durable refused-effect events remain.
+2. **Done, #95, #105, #112:** dispatch claims and activity-only approval drift
+   are handled, retries are approved afresh, and unanswered rejections surface.
+3. **Done, #115:** `resume_from_worktree/2` resumes a failed or lost job in its
+   retained branch and worktree. Preservation remains the recovery fallback.
+4. **Done, #114:** repair actions state that pull-request CI is the gate and
+   authorize the retained implementer to push.
 5. Review budget by diff size and the automatic lower-effort retry (§2.4 V1).
 6. Decision journal and issue-body amendment (§2.2 A2, A5).
 7. `file_prerequisite/2` with member adoption (§2.2 A3).

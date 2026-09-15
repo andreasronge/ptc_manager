@@ -526,6 +526,8 @@ defmodule Mix.Tasks.PtcDeployTest do
     worker_bridge = File.read!(@herdr_worker_bridge)
     assert worker_bridge =~ "/etc/ptc_manager/herdr-bridge-session"
     assert worker_bridge =~ ~s|exec "$herdr" --session "$session"|
+    assert bridge =~ "run_worker client-status"
+    refute bridge =~ ~s|exec "$herdr" status client|
     canary = File.read!(@herdr_bridge_canary)
     assert canary =~ "machine add"
     assert canary =~ "exec /usr/local/bin/herdr remote-client-bridge </dev/null"
@@ -570,6 +572,8 @@ defmodule Mix.Tasks.PtcDeployTest do
     File.write!(bridge, source)
     File.chmod!(fake_herdr, 0o700)
     File.chmod!(bridge, 0o700)
+
+    assert {"status client --json\n", 0} = System.cmd(bridge, ["client-status"])
 
     assert {"--session managed-session status server --json\n", 0} =
              System.cmd(bridge, ["status"])
@@ -774,6 +778,22 @@ defmodule Mix.Tasks.PtcDeployTest do
     refute script =~ "Restart it when none is retained"
 
     assert String.split(script, ~s|"$worker_herdr_dir/herdr" "$worker_herdr"|) |> length() == 2
+  end
+
+  test "remote deployment removes an inactive agent-owned Herdr installation" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "legacy_herdr=/home/agent/.local/bin/herdr"
+    assert script =~ "legacy_herdr_config=/home/agent/.config/herdr"
+    assert script =~ "legacy_herdr_state=/home/agent/.local/state/herdr"
+    assert script =~ "refusing to remove the interactive Herdr installation"
+    assert script =~ "select(.running == true)"
+    assert script =~ ~s|sudo env HOME=/home/agent "$worker_herdr" session list --json|
+    assert script =~ ~s|rm -f -- "$legacy_herdr"|
+    assert script =~ ~s|rm -rf -- "$legacy_herdr_config" "$legacy_herdr_state"|
+    assert script =~ ~s|sudo chown root:ptc-manager-worker "$worker_herdr_dir/herdr"|
+    assert script =~ ~s|sudo chmod 0750 "$worker_herdr_dir/herdr"|
+    refute script =~ "herdr update"
   end
 
   test "remote deployment exposes mise for repository-owned worker setup" do

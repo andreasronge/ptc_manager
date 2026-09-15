@@ -138,6 +138,15 @@ defmodule PtcManager.ToolchainTest do
     assert %{status: :drifted} = program(report, :herdr)
   end
 
+  test "worker-group-executable Herdr is a match", context do
+    install_pinned_programs(context)
+
+    herdr = Path.join(context.install_root, "ptc-manager-herdr-#{pinned("herdr")}/herdr")
+    File.chmod!(herdr, 0o750)
+
+    assert %{status: :matched} = Toolchain.report() |> program(:herdr)
+  end
+
   # Every other executable in a pinned tree sits under the same versioned
   # directory, so the version in a link target does not say which program the
   # link actually reaches.
