@@ -14,8 +14,10 @@ defmodule Mix.Tasks.Ptc.Agents do
   matches the manifest can still be signed out, and a signed-out agent stalls on
   its login prompt rather than failing.
 
-  It also prints the pair that decides whether the next deployment may move
-  Herdr's link, and the repository variables an implementation agent is given.
+  It distinguishes the deployment-managed worker Herdr from the unsupported
+  agent-owned interactive path, prints the pair that decides whether the next
+  deployment may move Herdr's link, and lists the repository variables an
+  implementation agent is given.
   Nothing it does changes the machine, so it needs no deployment of its own.
   """
 
@@ -96,8 +98,40 @@ defmodule Mix.Tasks.Ptc.Agents do
   defp render_herdr(records) do
     agents = single(records, "herdr", "live_agents")
     runs = single(records, "herdr", "live_runs")
+    pinned = Map.fetch!(Toolchain.pinned(), "herdr")
 
-    Mix.shell().info("\nHerdr")
+    Mix.shell().info("\nHerdr installations")
+
+    case find(records, "herdr_installation", "managed") do
+      [reported, owner, session, target | _rest] ->
+        Mix.shell().info("  Managed (supported)")
+        Mix.shell().info("    pinned    #{pinned} #{verdict(reported, pinned)}")
+        Mix.shell().info("    reports   #{reported}")
+        Mix.shell().info("    owner     #{owner}")
+        Mix.shell().info("    session   #{session}")
+        Mix.shell().info("    link      #{target}")
+
+      _missing ->
+        Mix.shell().info("  Managed (supported)\n    reports   not reported")
+    end
+
+    case find(records, "herdr_installation", "interactive") do
+      ["absent", owner, "none", path | _rest] ->
+        Mix.shell().info("  Interactive (unsupported)\n    state     removed (expected)")
+        Mix.shell().info("    owner     #{owner}")
+        Mix.shell().info("    path      #{path}")
+
+      [state, owner, session, path | _rest] ->
+        Mix.shell().info("  Interactive (unsupported)\n    state     #{state} (REMOVE)")
+        Mix.shell().info("    owner     #{owner}")
+        Mix.shell().info("    session   #{session}")
+        Mix.shell().info("    path      #{path}")
+
+      _missing ->
+        Mix.shell().info("  Interactive (unsupported)\n    state     not reported")
+    end
+
+    Mix.shell().info("\nManaged Herdr activity")
     Mix.shell().info("  live agents  #{agents}")
     Mix.shell().info("  live runs    #{runs}")
 

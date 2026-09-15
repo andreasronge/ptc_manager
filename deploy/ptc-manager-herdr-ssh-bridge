@@ -41,7 +41,7 @@ uname -m")
         printf '%s\n' "$herdr"
         ;;
       "test -x /usr/local/bin/herdr && /usr/local/bin/herdr status client --json")
-        exec "$herdr" status client --json
+        run_worker client-status
         ;;
       "/usr/local/bin/herdr status server --json")
         run_worker status

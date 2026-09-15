@@ -114,7 +114,9 @@ gate_erlang_dir=
 gate_elixir_dir=
 gate_mix_home=/opt/ptc-manager-gate-mix
 gate_tool_home=
-manual_herdr=/home/agent/.local/bin/herdr
+legacy_herdr=/home/agent/.local/bin/herdr
+legacy_herdr_config=/home/agent/.config/herdr
+legacy_herdr_state=/home/agent/.local/state/herdr
 worker_herdr=/usr/local/bin/herdr
 agent_filter="/tmp/ptc-manager-agent-filter-${release_id}.jq"
 active_runs_query="/tmp/ptc-manager-active-runs-${release_id}.sql"
@@ -520,18 +522,21 @@ busy_agent_count() {
 }
 
 ensure_no_busy_herdr_agents() {
-  manual_session_running=$(
-    "$manual_herdr" session list --json |
-      jq --arg session "$coordinator_session" \
-        '[.sessions[]? | select(.name == $session and .running == true)] | length'
-  )
-
-  if [ "$manual_session_running" -gt 0 ]; then
-    manual_busy=$(
-      "$manual_herdr" --session "$coordinator_session" agent list | busy_agent_count
+  if [ -e "$legacy_herdr_config" ]; then
+    if [ -x "$legacy_herdr" ]; then
+      legacy_sessions=$("$legacy_herdr" session list --json)
+    else
+      legacy_sessions=$(sudo env HOME=/home/agent "$worker_herdr" session list --json)
+    fi
+    legacy_running=$(
+      printf '%s\n' "$legacy_sessions" |
+        jq '[.sessions[]? | select(.running == true)] | length'
     )
-  else
-    manual_busy=0
+
+    if [ "$legacy_running" -ne 0 ]; then
+      echo "refusing to remove the interactive Herdr installation while $legacy_running agent-owned session(s) are running; inspect and stop them first" >&2
+      return 1
+    fi
   fi
 
   if [ -n "$worker_session" ]; then
@@ -543,11 +548,19 @@ ensure_no_busy_herdr_agents() {
     worker_busy=0
   fi
 
-  busy_total=$((manual_busy + worker_busy))
-
-  if [ "$busy_total" -ne 0 ]; then
-    echo "refusing to deploy while $busy_total Herdr agent(s) are not idle" >&2
+  if [ "$worker_busy" -ne 0 ]; then
+    echo "refusing to deploy while $worker_busy managed Herdr agent(s) are not idle" >&2
     return 1
+  fi
+}
+
+remove_legacy_interactive_herdr() {
+  if [ -e "$legacy_herdr" ] || [ -L "$legacy_herdr" ] ||
+    [ -e "$legacy_herdr_config" ] || [ -L "$legacy_herdr_config" ] ||
+    [ -e "$legacy_herdr_state" ] || [ -L "$legacy_herdr_state" ]; then
+    echo "Removing the unsupported agent-owned Herdr installation and stopped session data"
+    rm -f -- "$legacy_herdr"
+    rm -rf -- "$legacy_herdr_config" "$legacy_herdr_state"
   fi
 }
 
@@ -835,10 +848,15 @@ install_worker_herdr() {
     fi
 
     sudo install -d -o root -g root -m 0755 "$worker_herdr_dir"
-    sudo install -o root -g root -m 0755 "$worker_tool_staging/herdr" "$worker_herdr_dir/herdr"
+    sudo install -o root -g ptc-manager-worker -m 0750 "$worker_tool_staging/herdr" "$worker_herdr_dir/herdr"
     rm -rf -- "$worker_tool_staging"
     worker_tool_staging=
   fi
+
+  # Keep the managed binary unavailable to the interactive login even when this
+  # is an idempotent deployment of a directory installed by an older revision.
+  sudo chown root:ptc-manager-worker "$worker_herdr_dir/herdr"
+  sudo chmod 0750 "$worker_herdr_dir/herdr"
 
   # Whatever stands at the pinned path is what a later restart links onto the
   # PATH, including a file an interrupted deployment left there, so prove it on
@@ -853,13 +871,6 @@ install_worker_herdr() {
     return 1
   fi
 
-  # The interactive client belongs to the person, not to this deployment, so
-  # say when it has drifted rather than change it.
-  manual_herdr_version=$("$manual_herdr" --version 2>/dev/null || true)
-
-  if [ "$manual_herdr_version" != "herdr $herdr_version" ]; then
-    echo "Note: the interactive Herdr client at $manual_herdr reports \"$manual_herdr_version\" while this revision pins $herdr_version. Run \`herdr update\` as the agent user when convenient."
-  fi
 }
 
 install_worker_node() {
@@ -1390,8 +1401,7 @@ command -v jq >/dev/null
 command -v python3 >/dev/null
 command -v nsenter >/dev/null
 [ -x "$failure_policy" ]
-[ -x "$manual_herdr" ]
-[ -x "$worker_herdr" ]
+sudo -u ptc-manager-worker -H test -x "$worker_herdr"
 [ -f "$source_archive" ]
 [ -d "$application_dir" ]
 [ ! -e "$build_dir" ]
@@ -1850,13 +1860,14 @@ printf '%s\n' "$source_commit_sha" >"$new_release/RELEASE_SHA"
 
 [ -x "$new_release/bin/ptc_manager" ]
 ensure_no_busy_herdr_agents
+remove_legacy_interactive_herdr
 
 echo "Stopping service and backing up SQLite..."
 deployment_phase=service_stopped
 sudo systemctl stop "$service_name"
 ensure_no_managed_runs
 restart_worker_when_nothing_retained
-active_herdr_version=$(/usr/local/bin/herdr --version | awk '{print $NF}')
+active_herdr_version=$(sudo -u ptc-manager-worker -H /usr/local/bin/herdr --version | awk '{print $NF}')
 echo "Running the managed Herdr SSH bridge canary..."
 sudo /usr/local/bin/ptc-manager-herdr-bridge-canary \
   "$active_herdr_version" "$herdr_protocol" "$worker_session"

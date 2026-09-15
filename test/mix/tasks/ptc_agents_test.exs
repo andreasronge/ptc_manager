@@ -16,6 +16,14 @@ defmodule Mix.Tasks.Ptc.AgentsTest do
     end
   end
 
+  test "probe tests the worker-only Herdr link without requiring deploy-user execute access" do
+    probe = File.read!(@probe)
+
+    assert probe =~ "herdr_session_file=/etc/ptc_manager/herdr-bridge-session"
+    assert probe =~ "if [ -e /usr/local/bin/herdr ]; then"
+    refute probe =~ "if [ -x /usr/local/bin/herdr ]; then"
+  end
+
   # Asking for help is not a failure. `mix ptc.deploy` already prints its usage
   # on stdout and succeeds, and a Mix task that raises over `--help` reports the
   # answer as an error.
@@ -67,6 +75,35 @@ defmodule Mix.Tasks.Ptc.AgentsTest do
 
     assert output =~ "not reported"
     refute output =~ "(matches)"
+  end
+
+  test "distinguishes the supported managed Herdr from the removed interactive one" do
+    pinned = Map.fetch!(Toolchain.pinned(), "herdr")
+
+    output =
+      render([
+        {"herdr_installation", "managed",
+         ["herdr #{pinned}", "ptc-manager-worker", "managed-session", "/opt/herdr"]},
+        {"herdr_installation", "interactive",
+         ["absent", "agent", "none", "/home/agent/.local/bin/herdr"]}
+      ])
+
+    assert output =~ "Managed (supported)"
+    assert output =~ "owner     ptc-manager-worker"
+    assert output =~ "session   managed-session"
+    assert output =~ "#{pinned} (matches)"
+    assert output =~ "Interactive (unsupported)"
+    assert output =~ "removed (expected)"
+  end
+
+  test "warns when the unsupported interactive Herdr returns" do
+    output =
+      render([
+        {"herdr_installation", "interactive",
+         ["present", "agent", "unknown", "/home/agent/.local/bin/herdr"]}
+      ])
+
+    assert output =~ "present (REMOVE)"
   end
 
   # The pair that decides whether the next deployment may move Herdr's link. A

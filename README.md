@@ -1429,8 +1429,10 @@ The task runs the checked-in bootstrap and pre-publication scripts locally,
 uploads a Git archive rather than uncommitted files, and builds the production
 release on the server with its mise-managed
 Elixir, Erlang, and Node toolchain. Before replacing `/opt/ptc_manager`, it
-checks both managed runs and the manual and worker Herdr sessions. Non-idle
-agents make deployment stop safely, and a retained agent session keeps
+checks managed runs and the worker Herdr session. A legacy agent-owned Herdr
+session makes deployment stop until an operator inspects and stops it; the
+same deployment then removes its binary, configuration, and state. Non-idle
+managed agents make deployment stop safely, and a retained agent session keeps
 `ptc_manager-herdr` running even when it is idle. When no run and no agent is
 retained there is nothing to lose, so the deployment restarts it, which is also
 the moment a pinned Herdr takes effect. Immediately before the release swap, the task stops the
@@ -1690,9 +1692,10 @@ PtcManager also depends on the exact control-command and JSON snapshot semantics
 of its pinned build. The deployment therefore installs that build but moves
 `/usr/local/bin/herdr` only where it already restarts `ptc_manager-herdr`
 because nothing is retained. Until that restart happens the pinned build sits
-installed beside the running one. The interactive client in the `agent` account
-belongs to the person rather than to the deployment, which reports when it has
-drifted instead of replacing it.
+installed beside the running one. Herdr is executable only by root and the
+`ptc-manager-worker` group. Deployment refuses to erase a running legacy
+`agent`-owned session, then removes any inactive interactive installation and
+session data so there is only one supported owner and session.
 
 The Deployments page reads link targets and never runs the programs it reports
 on. To ask the machine what its agent CLIs actually are, run
@@ -1706,11 +1709,20 @@ which prints, for each agent CLI, the version this release pins beside the
 version the program reports when `ptc-manager-worker` runs it, and whether that
 identity is still signed in — a linked binary matching the manifest can be
 signed out, and a signed-out agent stalls on its login prompt rather than
-failing. It also prints the live agent and live run counts that decide whether
-the next deployment may move Herdr's link, and the repository variables an
-implementation agent is given, by name. The report is read-only and pipes its
-probe over SSH rather than installing it, so it needs no deployment of its own
-and always runs the revision checked out locally.
+failing. It separately identifies the supported `/usr/local/bin/herdr` link,
+its `ptc-manager-worker` owner and configured session, and confirms that the
+unsupported `/home/agent/.local/bin/herdr` installation is absent. It also
+prints the live agent and live run counts that decide whether the next
+deployment may move Herdr's link, and the repository variables an implementation
+agent is given, by name. The report is read-only and pipes its probe over SSH
+rather than installing it, so it needs no deployment of its own and always runs
+the revision checked out locally.
+
+There is no separately updated interactive Herdr on the server. Operators use
+the deployment-pinned binary through the Tailscale saved-machine bridge. To
+upgrade Herdr, change `herdr`, `herdr_protocol`, and `herdr_sha256` together in
+`deploy/toolchain-versions`, run the repository checks, and deploy normally;
+never run `herdr update` as `agent` or `ptc-manager-worker`.
 
 PtcManager refuses to start a pane with an agent kind whose worker identity is
 signed out, rather than letting the CLI print its login prompt and wait for

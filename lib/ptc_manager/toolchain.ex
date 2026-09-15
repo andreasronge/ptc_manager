@@ -146,7 +146,7 @@ defmodule PtcManager.Toolchain do
       # A link is not a program: File.read_link/1 reads the text a symlink
       # holds without following it, so a link naming the pinned version can
       # still point at nothing, at a directory, or at something nobody can run.
-      runnable?: entry_point?(target, program.link),
+      runnable?: entry_point?(target, program),
       deferred?: Map.get(program, :deferred, false)
     }
 
@@ -185,22 +185,24 @@ defmodule PtcManager.Toolchain do
   # deployment has not vouched for the console's own process. The name has to
   # match too, because every other executable in a pinned tree sits under the
   # same versioned directory and would otherwise pass for the one that is linked.
-  defp entry_point?(nil, _command), do: false
+  defp entry_point?(nil, _program), do: false
 
-  defp entry_point?(target, command) do
+  defp entry_point?(target, program) do
     case File.stat(target) do
-      # The deployment installs every program root-owned and world-executable,
-      # so a mode only root can run is not a program the worker reaches.
+      # Agent CLIs are world-executable. Herdr is deliberately executable only
+      # by its root owner and ptc-manager-worker group so the interactive login
+      # cannot create a second server session with the managed binary.
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        Bitwise.band(mode, 0o001) != 0 and Path.basename(target) == command
+        executable_bit = if program.key == :herdr, do: 0o010, else: 0o001
+        Bitwise.band(mode, executable_bit) != 0 and Path.basename(target) == program.link
 
       _unreadable ->
         false
     end
   end
 
-  defp stageable?(%{deferred: true, entry: entry, link: link}, directory),
-    do: entry_point?(Path.join(directory, entry), link)
+  defp stageable?(%{deferred: true, entry: entry} = program, directory),
+    do: entry_point?(Path.join(directory, entry), program)
 
   defp stageable?(_program, _directory), do: false
 
