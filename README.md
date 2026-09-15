@@ -1809,8 +1809,29 @@ provide a remote-worker protocol. Machine selection is client-side, and pane,
 workspace, and agent identifiers remain scoped to one Herdr server. An ordinary
 SSH attach as `agent` also reaches that account's session, not the managed
 session owned by `ptc-manager-worker`. Do not grant an interactive worker login
-only to expose that session in the TUI; provision any operator bridge as a
-separate, deliberately constrained access path.
+only to expose that session in the TUI. The deployment installs
+`ptc-manager-herdr-ssh-bridge` for a dedicated SSH key instead. The key must be
+restricted in the SSH account's `authorized_keys` to that forced command and to
+the maintainer's Tailscale address:
+
+```text
+from="TAILSCALE_CLIENT_IP",restrict,command="/usr/local/bin/ptc-manager-herdr-ssh-bridge" ssh-ed25519 PUBLIC_KEY ptc-manager-herdr-bridge
+```
+
+Give the local SSH alias only that key, point its host name at the server's
+Tailscale address, and keep other wildcard `IdentityFile` entries from applying
+to the alias. Confirm `ssh -G ALIAS` lists no unrestricted key before adding it:
+
+```sh
+herdr machine add ALIAS --label "PtcManager worker" --remote-session default
+```
+
+The forced command answers Herdr's bounded platform and binary probes without
+evaluating their shell input, then delegates only server status and the remote
+client byte stream as `ptc-manager-worker`. Arbitrary SSH commands are rejected.
+The resulting TUI connection is nevertheless privileged: input sent to a worker
+pane runs with that pane's authority, so protect the key like administrative
+access.
 
 For an observation-only trial, an existing session can instead be exported as
 a JSON snapshot. Install `ptc_manager-herdr-observer.service` and its timer as

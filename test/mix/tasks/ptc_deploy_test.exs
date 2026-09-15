@@ -8,6 +8,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @remote_script Path.join(@project_root, "deploy/remote-deploy-herdr")
   @worker_git Path.join(@project_root, "deploy/ptc-manager-worker-git")
   @worker_bootstrap Path.join(@project_root, "deploy/ptc-manager-worker-bootstrap")
+  @herdr_ssh_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-ssh-bridge")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
   @gh_label Path.join(@project_root, "deploy/ptc-manager-worker-gh-label")
@@ -32,6 +33,7 @@ defmodule Mix.Tasks.PtcDeployTest do
           @remote_script,
           @worker_git,
           @worker_bootstrap,
+          @herdr_ssh_bridge,
           @claude_trust,
           @codex_arm,
           @gh_label,
@@ -489,6 +491,39 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert wrapper =~ "worktree_root=/srv/ptc_manager-worktrees"
     assert wrapper =~ "worktree is outside the managed root"
     assert wrapper =~ "script is outside the worktree"
+  end
+
+  test "remote deployment installs a forced-command bridge for the worker Herdr session" do
+    script = File.read!(@remote_script)
+    sudoers = File.read!(@sudoers)
+    bridge = File.read!(@herdr_ssh_bridge)
+
+    assert script =~ "deploy/ptc-manager-herdr-ssh-bridge"
+    assert script =~ "/usr/local/bin/ptc-manager-herdr-ssh-bridge"
+
+    assert sudoers =~
+             "agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr --session default remote-client-bridge"
+
+    assert sudoers =~
+             "agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr --session default status server --json"
+
+    assert bridge =~ ~s(original=${SSH_ORIGINAL_COMMAND:-})
+    assert bridge =~ ~s|exec /usr/bin/sudo -n -H -u ptc-manager-worker -- "$herdr"|
+    refute bridge =~ ~r/^\s*eval\s/m
+
+    assert {"/usr/local/bin/herdr\n", 0} =
+             System.cmd(@herdr_ssh_bridge, [],
+               env: [{"SSH_ORIGINAL_COMMAND", "command -v herdr"}],
+               stderr_to_stdout: true
+             )
+
+    assert {output, 126} =
+             System.cmd(@herdr_ssh_bridge, [],
+               env: [{"SSH_ORIGINAL_COMMAND", "id"}],
+               stderr_to_stdout: true
+             )
+
+    assert output =~ "unsupported SSH command"
   end
 
   test "remote deployment installs the out-of-process self-deploy bridge" do

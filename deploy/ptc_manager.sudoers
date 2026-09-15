@@ -1,4 +1,6 @@
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr
+agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr --session default remote-client-bridge
+agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr --session default status server --json
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-git
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-bootstrap
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-claude-trust

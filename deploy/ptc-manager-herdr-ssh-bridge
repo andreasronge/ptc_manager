@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+# ForcedCommand bridge for a dedicated SSH key. It never evaluates the command
+# or scripts supplied by SSH: it answers Herdr's discovery probes itself and
+# delegates only the managed server status and byte-stream operations.
+herdr=/usr/local/bin/herdr
+session=default
+original=${SSH_ORIGINAL_COMMAND:-}
+
+run_worker() {
+  exec /usr/bin/sudo -n -H -u ptc-manager-worker -- "$herdr" --session "$session" "$@"
+}
+
+reject() {
+  echo "ptc-manager-herdr-ssh-bridge: unsupported SSH command" >&2
+  exit 126
+}
+
+case "$original" in
+  "command -v herdr")
+    printf '%s\n' "$herdr"
+    ;;
+  "exec /usr/local/bin/herdr remote-client-bridge")
+    run_worker remote-client-bridge
+    ;;
+  "/bin/sh -s")
+    script=$(dd bs=32769 count=1 2>/dev/null)
+    [ "$(printf %s "$script" | wc -c | tr -d ' ')" -le 32768 ] || reject
+
+    case "$script" in
+      "uname -s
+uname -m")
+        uname -s
+        uname -m
+        ;;
+      "command -v herdr")
+        printf '%s\n' "$herdr"
+        ;;
+      home=*'emit()'*'/nix/var/nix/profiles/default/bin/herdr'*)
+        printf '%s\n' "$herdr"
+        ;;
+      "test -x /usr/local/bin/herdr && /usr/local/bin/herdr status client --json")
+        exec "$herdr" status client --json
+        ;;
+      "/usr/local/bin/herdr status server --json")
+        run_worker status server --json
+        ;;
+      "exec /usr/local/bin/herdr remote-client-bridge </dev/null")
+        run_worker remote-client-bridge </dev/null
+        ;;
+      *)
+        reject
+        ;;
+    esac
+    ;;
+  *)
+    reject
+    ;;
+esac
