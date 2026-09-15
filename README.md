@@ -1633,9 +1633,10 @@ Rebar by the sha512 of the script Hex's CDN serves, hashed after installation
 because `mix local.rebar` accepts a mismatched `--sha512` once `--force` is
 given.
 
-Herdr is the one program that does not take effect at once. A client whose
-protocol does not match the running server breaks the coordinator's view of
-every agent, so the deployment installs the pinned build but moves
+Herdr is the one program that does not take effect at once. Herdr 0.9 can
+negotiate compatible endpoint generations for interactive clients, but
+PtcManager also depends on the exact control-command and JSON snapshot semantics
+of its pinned build. The deployment therefore installs that build but moves
 `/usr/local/bin/herdr` only where it already restarts `ptc_manager-herdr`
 because nothing is retained. Until that restart happens the pinned build sits
 installed beside the running one. The interactive client in the `agent` account
@@ -1801,6 +1802,15 @@ switching OS identity, so it does not depend on `sudo` preserving environment
 variables. An existing Herdr session owned by `root`, `agent`,
 or another login account is deliberately not used by automated dispatch;
 recreate it under `ptc-manager-worker` before enabling dispatch.
+
+Herdr 0.9's saved SSH machines can combine several servers in one maintainer
+TUI, but they do not turn PtcManager's local CLI calls into remote calls or
+provide a remote-worker protocol. Machine selection is client-side, and pane,
+workspace, and agent identifiers remain scoped to one Herdr server. An ordinary
+SSH attach as `agent` also reaches that account's session, not the managed
+session owned by `ptc-manager-worker`. Do not grant an interactive worker login
+only to expose that session in the TUI; provision any operator bridge as a
+separate, deliberately constrained access path.
 
 For an observation-only trial, an existing session can instead be exported as
 a JSON snapshot. Install `ptc_manager-herdr-observer.service` and its timer as
