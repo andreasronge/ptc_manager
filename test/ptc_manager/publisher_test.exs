@@ -1145,6 +1145,129 @@ defmodule PtcManager.PublisherTest do
     assert Repo.get!(Job, job.id).state == "publish_blocked"
   end
 
+  test "a head block announces itself once and keeps checks and mergeability current" do
+    {job, publication, _result} = published_publication_fixture()
+
+    remote = %{
+      state: "open",
+      pr_url: publication.pr_url,
+      head_sha: String.duplicate("e", 40),
+      base_sha: String.duplicate("a", 40),
+      base_ref: "main",
+      base_repository: base_repository(job),
+      mergeability: "conflicting",
+      checks_state: "pending"
+    }
+
+    Process.put(:publisher_status_result, {:ok, remote})
+    assert {:ok, blocked} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert blocked.state == "blocked"
+    assert blocked.observed_head_sha == remote.head_sha
+    assert blocked.mergeability == "conflicting"
+
+    Repo.get!(Job, job.id) |> Job.changeset(%{last_error: nil}) |> Repo.update!()
+
+    Process.put(
+      :publisher_status_result,
+      {:ok, %{remote | mergeability: "mergeable", checks_state: "success"}}
+    )
+
+    assert {:ok, still_blocked} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert still_blocked.state == "blocked"
+    assert still_blocked.mergeability == "mergeable"
+    assert still_blocked.checks_state == "success"
+    assert Repo.get!(Job, job.id).last_error == nil, "the second poll re-ran no side effect"
+    assert head_changed_count(publication.id) == 1
+
+    Process.put(:publisher_status_result, {:ok, %{remote | head_sha: String.duplicate("f", 40)}})
+    assert {:ok, moved_again} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert moved_again.observed_head_sha == String.duplicate("f", 40)
+    assert Repo.get!(Job, job.id).last_error =~ "head commit"
+    assert head_changed_count(publication.id) == 2
+  end
+
+  test "an action in flight owns the head it pushes instead of being fenced by the poller" do
+    {job, publication, _result} = published_publication_fixture()
+
+    %PtcManager.Operations.AgentAction{}
+    |> PtcManager.Operations.AgentAction.changeset(%{
+      repository_id: job.repository_id,
+      action_key: "repair_pr",
+      target_type: "pull_request",
+      target_id: publication.id,
+      target_label: "owner/repo#73",
+      prompt_version: 1,
+      prompt: "repair",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "running",
+      attempt_count: 1,
+      requested_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.insert!()
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "open",
+        pr_url: publication.pr_url,
+        head_sha: String.duplicate("e", 40),
+        base_sha: String.duplicate("a", 40),
+        base_ref: "main",
+        base_repository: base_repository(job),
+        mergeability: "mergeable",
+        checks_state: "pending"
+      }
+    })
+
+    assert {:ok, observed} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert observed.state == "published"
+    assert observed.checks_state == "pending"
+    assert observed.remote_head_sha == publication.remote_head_sha
+    assert Repo.get!(Job, job.id).state == "pr_open"
+    assert head_changed_count(publication.id) == 0
+  end
+
+  test "an action that never pushes does not lift the fence" do
+    {job, publication, _result} = published_publication_fixture()
+
+    %PtcManager.Operations.AgentAction{}
+    |> PtcManager.Operations.AgentAction.changeset(%{
+      repository_id: job.repository_id,
+      action_key: "pr_retrospective",
+      target_type: "pull_request",
+      target_id: publication.id,
+      target_label: "owner/repo#73",
+      prompt_version: 1,
+      prompt: "retrospective",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "running",
+      attempt_count: 1,
+      requested_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.insert!()
+
+    Process.put(:publisher_status_result, {
+      :ok,
+      %{
+        state: "open",
+        pr_url: publication.pr_url,
+        head_sha: String.duplicate("e", 40),
+        base_sha: String.duplicate("a", 40),
+        base_ref: "main",
+        base_repository: base_repository(job)
+      }
+    })
+
+    assert {:ok, blocked} = PublicationStatusReconciler.run_once(client: FakeBroker)
+    assert blocked.state == "blocked"
+    assert Repo.get!(Job, job.id).state == "publish_blocked"
+    assert head_changed_count(publication.id) == 1
+  end
+
   test "a head-blocked PR remains observable and leaves attention after GitHub merges it" do
     {job, publication, _result} = published_publication_fixture()
     repaired_head = String.duplicate("e", 40)
@@ -1638,6 +1761,15 @@ defmodule PtcManager.PublisherTest do
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
   defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
+
+  defp head_changed_count(publication_id) do
+    Repo.aggregate(
+      from(e in PtcManager.Operations.AuditEvent,
+        where: e.action == "pr_publication.head_changed" and e.target_id == ^publication_id
+      ),
+      :count
+    )
+  end
 
   defp base_repository(job) do
     repository = Repo.get!(Repository, job.repository_id)

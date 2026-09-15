@@ -24,6 +24,7 @@ defmodule PtcManager.Operations.PrPublication do
     field :pr_number, :integer
     field :pr_url, :string
     field :remote_head_sha, :string
+    field :observed_head_sha, :string
     field :remote_base_sha, :string
     field :published_at, :utc_datetime_usec
     field :pr_state, :string
@@ -73,6 +74,7 @@ defmodule PtcManager.Operations.PrPublication do
       :pr_number,
       :pr_url,
       :remote_head_sha,
+      :observed_head_sha,
       :remote_base_sha,
       :published_at,
       :pr_state,
@@ -135,6 +137,7 @@ defmodule PtcManager.Operations.PrPublication do
     |> validate_format(:base_sha, @sha)
     |> validate_format(:head_sha, @sha)
     |> validate_format(:remote_head_sha, @sha)
+    |> validate_format(:observed_head_sha, @sha)
     |> validate_format(:remote_base_sha, @sha)
     |> validate_format(:diff_digest, ~r/\A[0-9a-f]{64}\z/)
     |> unique_constraint(:job_id)
