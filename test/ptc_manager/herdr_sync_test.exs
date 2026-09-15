@@ -965,12 +965,15 @@ defmodule PtcManager.HerdrSyncTest do
     |> Job.changeset(%{state: "pr_open", fencing_token: 1, lease_owner: worker.worker_key})
     |> Repo.update!()
 
+    # What RetainedHerdrAdapter.mark_resumed/2 leaves behind: the job's run
+    # is working again, and the action's run carries the retained session's
+    # identity in starting, with a heartbeat that has not moved since.
     {:ok, job_run} =
       Operations.create_agent_run(%{
         worker_id: worker.id,
         job_id: job.id,
         role: "implementer",
-        state: "waiting",
+        state: "working",
         agent_name: "impl_j#{job.id}_f1",
         herdr_workspace: "shared-workspace",
         herdr_pane: "w4:p1",
@@ -1001,8 +1004,6 @@ defmodule PtcManager.HerdrSyncTest do
       })
       |> Repo.insert!()
 
-    # What RetainedHerdrAdapter.mark_resumed/2 leaves behind: the action's run
-    # carries the retained session's identity and has not moved since.
     {:ok, action_run} =
       Operations.create_agent_run(%{
         worker_id: worker.id,
@@ -1018,32 +1019,39 @@ defmodule PtcManager.HerdrSyncTest do
         fencing_token: 1
       })
 
-    Process.put(
-      :herdr_result,
-      {:ok,
-       [
-         %{
-           "agent" => "impl_j#{job.id}_f1",
-           "agent_status" => "working",
-           "pane_id" => "w4:p1",
-           "workspace_id" => "shared-workspace",
-           "agent_session" => %{"value" => "agent-shared"}
-         }
-       ]}
-    )
+    pane = %{
+      "agent" => "impl_j#{job.id}_f1",
+      "agent_status" => "idle",
+      "pane_id" => "w4:p1",
+      "workspace_id" => "shared-workspace",
+      "agent_session" => %{"value" => "agent-shared"}
+    }
 
+    # The prompt has not been picked up yet: the retained pane is still idle,
+    # which the job's pr_open state reads as waiting. The action's run is not
+    # parked; it keeps its heartbeat and waits for the pane to execute.
+    Process.put(:herdr_result, {:ok, [pane]})
+    assert {:ok, %{lost_count: 0}} = Sync.sync(client: FakeClient, session: "shared-pane")
+    idle_action_run = Repo.get!(AgentRun, action_run.id)
+    assert idle_action_run.state == "starting"
+    assert DateTime.compare(idle_action_run.last_heartbeat_at, earlier) == :gt
+
+    Process.put(:herdr_result, {:ok, [%{pane | "agent_status" => "working"}]})
     assert {:ok, %{lost_count: 0}} = Sync.sync(client: FakeClient, session: "shared-pane")
 
-    refreshed_job_run = Repo.get!(AgentRun, job_run.id)
-    assert refreshed_job_run.state == "working"
-
+    assert Repo.get!(AgentRun, job_run.id).state == "working"
     refreshed_action_run = Repo.get!(AgentRun, action_run.id)
     assert refreshed_action_run.state == "working"
-    assert DateTime.compare(refreshed_action_run.last_heartbeat_at, earlier) == :gt
     assert Repo.get!(AgentAction, action.id).state == "running"
 
     assert %{status: :healthy} =
              PtcManager.Operations.AgentHealth.assess(refreshed_action_run, now())
+
+    # An outage marked the action's run unknown; the next observation of the
+    # executing pane recovers it, as it does the job's run.
+    action_run |> AgentRun.changeset(%{state: "unknown"}) |> Repo.update!()
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "shared-pane")
+    assert Repo.get!(AgentRun, action_run.id).state == "working"
   end
 
   test "a snapshot started before repair resumption cannot overwrite the resumed slot" do

@@ -18,7 +18,8 @@ defmodule PtcManager.Herdr.Sync do
 
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
-  @shared_pane_states ~w(starting working idle blocked waiting)
+  @shared_pane_states ~w(starting working idle blocked waiting unknown)
+  @executing_pane_states ~w(working blocked)
   @terminal_states ~w(done failed lost)
   @active_agent_states ~w(queued starting working blocked)
   @touch_interval_ms 60_000
@@ -1111,12 +1112,21 @@ defmodule PtcManager.Herdr.Sync do
 
   # A retained repair resumes the job's implementation session, so its action
   # run carries the same agent name as the job's run while Herdr reports the
-  # pane once, under the job's name. Every live run bound to that pane follows
-  # the observation: its heartbeat moves, and a run still waiting to start
-  # takes the state the pane reports. Without this the action run froze in
-  # `starting` and read as out of contact while its agent was working.
-  defp refresh_shared_pane_runs(worker, %AgentRun{agent_name: name} = run, attrs, now)
-       when is_binary(name) do
+  # pane once, under the job's name. Every live action run bound to that pane
+  # follows the observation on every tick: while the pane executes, the run
+  # takes that state, which also recovers a run an outage marked unknown; a
+  # pane that is idle or parked leaves the run alone, because the action's
+  # adapter is what finishes it. The ids join the observed set, so the shared
+  # heartbeat statement keeps them fresh without a write of their own. Without
+  # this the action run froze in `starting` and read as out of contact while
+  # its agent was working.
+  defp refresh_shared_pane_runs(
+         worker,
+         %AgentRun{agent_name: name, job_id: job_id} = run,
+         attrs,
+         _now
+       )
+       when is_binary(name) and is_integer(job_id) do
     AgentRun
     |> where(
       [other],
@@ -1125,14 +1135,11 @@ defmodule PtcManager.Herdr.Sync do
     )
     |> Repo.all()
     |> Enum.map(fn other ->
-      changes =
-        if other.state == "starting" and attrs.state in @shared_pane_states do
-          %{state: attrs.state, state_changed_at: now, last_heartbeat_at: now}
-        else
-          %{last_heartbeat_at: now}
-        end
+      if other.state != attrs.state and attrs.state in @executing_pane_states do
+        other |> AgentRun.changeset(%{state: attrs.state}) |> Repo.update!()
+      end
 
-      other |> AgentRun.changeset(changes) |> Repo.update!() |> Map.fetch!(:id)
+      other.id
     end)
   end
 
