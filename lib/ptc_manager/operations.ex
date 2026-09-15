@@ -971,21 +971,7 @@ defmodule PtcManager.Operations do
         # has usually commented since. The retry is approved afresh from the
         # issue as the console knows it now, so dispatch does not refuse it as
         # stale before it can start.
-        issue = Repo.get!(Issue, stopped.issue_id)
-        stopped_approval = Repo.get!(Approval, stopped.approval_id)
-
-        approval =
-          %Approval{}
-          |> Approval.changeset(%{
-            proposal_id: stopped_approval.proposal_id,
-            decision: stopped_approval.decision,
-            actor: actor,
-            source_updated_at: issue.github_updated_at,
-            source_digest: issue.content_digest,
-            proposal_digest: stopped_approval.proposal_digest,
-            approved_at: now
-          })
-          |> Repo.insert!()
+        approval = approve_afresh!(stopped, actor, now)
 
         retry =
           %Job{}
@@ -1016,12 +1002,146 @@ defmodule PtcManager.Operations do
             "stopped_job_id" => stopped.id,
             "issue_id" => stopped.issue_id,
             "approval_id" => approval.id,
-            "source_digest" => issue.content_digest,
+            "source_digest" => approval.source_digest,
             "reason_code" => get_in(stopped.stop_report || %{}, ["reason_code"])
           }
         })
 
         retry
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A new approval with the stopped job's decision and proposal, frozen on the
+  # issue as the console knows it now.
+  defp approve_afresh!(%Job{} = job, actor, now) do
+    issue = Repo.get!(Issue, job.issue_id)
+    previous = Repo.get!(Approval, job.approval_id)
+
+    %Approval{}
+    |> Approval.changeset(%{
+      proposal_id: previous.proposal_id,
+      decision: previous.decision,
+      actor: actor,
+      source_updated_at: issue.github_updated_at,
+      source_digest: issue.content_digest,
+      proposal_digest: previous.proposal_digest,
+      approved_at: now
+    })
+    |> Repo.insert!()
+  end
+
+  @resumable_job_states ~w(failed lost)
+  @retained_worktree_states ~w(active awaiting_pr warm waiting reclaimable attention)
+
+  @doc """
+  Whether a job's work can be resumed where it stopped: the job ended without
+  finishing, its worktree is still on the worker, and the agent that worked
+  there left a session identity to continue from.
+  """
+  def resumable_from_worktree?(%Job{state: state} = job) when state in @resumable_job_states do
+    job = Repo.preload(job, [:worktree_allocation, :agent_runs])
+
+    is_map(job.execution_settings) and retained_worktree?(job) and
+      continuable_run?(job) and
+      not Repo.exists?(
+        from newer in Job, where: newer.issue_id == ^job.issue_id and newer.id > ^job.id
+      )
+  end
+
+  def resumable_from_worktree?(_job), do: false
+
+  defp retained_worktree?(%Job{worktree_allocation: %WorktreeAllocation{state: state}}),
+    do: state in @retained_worktree_states
+
+  defp retained_worktree?(_job), do: false
+
+  defp continuable_run?(%Job{agent_runs: runs, fencing_token: fence}) when is_list(runs) do
+    Enum.any?(runs, fn run ->
+      run.role == "implementer" and run.fencing_token == fence and is_binary(run.agent_name) and
+        is_binary(run.herdr_pane)
+    end)
+  end
+
+  defp continuable_run?(_job), do: false
+
+  @doc """
+  Resumes a failed job on the worktree it left behind.
+
+  A job that failed after real work (a stop with partial progress, a branch
+  that could not be verified, a lost agent) keeps its worktree for attention,
+  and until now the only way back was a fresh job from scratch or a hand-made
+  bundle. This approves the issue afresh, as a retry does, and hands the job
+  to the same continuation the review page uses: the retained session is
+  confirmed stopped, then a new implementer attempt starts in the same
+  worktree on the same branch, with the stop report machinery re-armed.
+  """
+  def resume_from_worktree(job_id, actor)
+      when is_integer(job_id) and is_binary(actor) and actor != "" do
+    now = utc_now()
+
+    outcome =
+      RepoTransaction.immediate(fn ->
+        job = Job |> preload([:worktree_allocation, :agent_runs]) |> Repo.get!(job_id)
+
+        unless job.state in @resumable_job_states and is_map(job.execution_settings),
+          do: Repo.rollback(:job_not_resumable)
+
+        unless retained_worktree?(job), do: Repo.rollback(:worktree_not_retained)
+        unless continuable_run?(job), do: Repo.rollback(:no_session_to_continue)
+        unless Repo.get!(Issue, job.issue_id).state == "open", do: Repo.rollback(:issue_not_open)
+        unless is_nil(job.review_recovery_expires_at), do: Repo.rollback(:recovery_busy)
+
+        if Repo.exists?(
+             from newer in Job, where: newer.issue_id == ^job.issue_id and newer.id > ^job.id
+           ),
+           do: Repo.rollback(:newer_job_exists)
+
+        approval = approve_afresh!(job, actor, now)
+
+        resumed =
+          job
+          |> Job.changeset(%{
+            approval_id: approval.id,
+            state: "blocked",
+            ended_at: nil,
+            last_error: nil,
+            reconciling_at: nil,
+            absence_observed_at: nil,
+            review_state: "resume_pending",
+            review_resume_mode: "implementation",
+            review_generation: job.review_generation + 1,
+            review_recovery_expires_at: nil,
+            review_resume_expires_at: nil,
+            reviewed_head_sha: nil,
+            stop_acknowledged_at:
+              if(job.stop_reported_at, do: now, else: job.stop_acknowledged_at),
+            stop_report_token: StopReport.new_token()
+          })
+          |> Repo.update!()
+
+        %{job_id: job.id, generation: resumed.review_generation}
+        |> PtcManager.Reviews.ResumeWorker.new()
+        |> Oban.insert!()
+
+        insert_audit!(%{
+          actor: actor,
+          action: "job.resumed_from_worktree",
+          target_type: "job",
+          target_id: job.id,
+          details: %{
+            "approval_id" => approval.id,
+            "worktree_allocation_id" => job.worktree_allocation.id,
+            "previous_state" => job.state,
+            "review_generation" => resumed.review_generation
+          }
+        })
+
+        resumed
       end)
 
     case outcome do

@@ -263,6 +263,57 @@ defmodule PtcManagerWeb.DashboardLiveTest do
            ) == "/operations"
   end
 
+  test "offers to resume a failed job in its retained worktree", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{number: 88, title: "Left work in a worktree"})
+    {:ok, job} = Operations.approve_issue_directly(issue.id, "maintainer")
+    worker = worker_fixture(%{status: "online"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    job =
+      job
+      |> Job.changeset(%{
+        state: "failed",
+        fencing_token: 1,
+        ended_at: now,
+        last_error: "Branch verification failed: the build did not pass."
+      })
+      |> Repo.update!()
+
+    %WorktreeAllocation{}
+    |> WorktreeAllocation.changeset(%{
+      worker_id: worker.id,
+      job_id: job.id,
+      state: "attention",
+      path: "/tmp/dashboard-resume-worktree",
+      last_used_at: now
+    })
+    |> Repo.insert!()
+
+    {:ok, _run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "failed",
+        agent_name: "impl_j#{job.id}_f1",
+        herdr_pane: "w9:p2",
+        started_at: now,
+        last_heartbeat_at: now,
+        ended_at: now,
+        fencing_token: 1
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    open_issue(view, issue)
+    assert has_element?(view, "#resume-worktree-#{job.id}", "Resume in its worktree")
+
+    view |> element("#resume-worktree-#{job.id}") |> render_click()
+    assert render(view) =~ "Resuming on the retained worktree"
+    assert Repo.get!(Job, job.id).review_state == "resume_pending"
+    refute has_element?(view, "#resume-worktree-#{job.id}")
+  end
+
   test "preserves the browser-managed technical evidence state across ticks", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)

@@ -54,6 +54,25 @@ defmodule PtcManagerWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("resume-from-worktree", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.resume_from_worktree(job_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Resuming on the retained worktree with a fresh approval.")
+       |> load_dashboard()}
+    else
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The job cannot be resumed: #{inspect(reason)}")
+         |> load_dashboard()}
+
+      _invalid ->
+        {:noreply, put_flash(socket, :error, "The job is no longer available.")}
+    end
+  end
+
   def handle_event("sync-github", _params, %{assigns: %{github_syncing: false}} = socket) do
     {:noreply,
      socket
@@ -986,6 +1005,13 @@ defmodule PtcManagerWeb.DashboardLive do
   def stall_path(%{target_type: "operational_mode"}, _repositories), do: ~p"/deployments"
 
   def stall_path(_stall, _repositories), do: ~p"/operations"
+
+  # Only a job that ended without finishing can have a worktree to resume;
+  # the check itself reads the allocation and runs, so it is asked last.
+  def resumable_job?(%Operations.Job{state: state} = job) when state in ["failed", "lost"],
+    do: Operations.resumable_from_worktree?(job)
+
+  def resumable_job?(_job), do: false
 
   defp group_issues(issues, follow_ups, now) do
     grouped =

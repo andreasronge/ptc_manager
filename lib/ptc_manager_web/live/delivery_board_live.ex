@@ -88,6 +88,25 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      |> load_board()}
   end
 
+  def handle_event("resume-from-worktree", %{"job-id" => job_id}, socket) do
+    with {job_id, ""} <- Integer.parse(job_id),
+         {:ok, _job} <- Operations.resume_from_worktree(job_id, socket.assigns.actor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Resuming on the retained worktree with a fresh approval.")
+       |> load_board()}
+    else
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The job cannot be resumed: #{resume_refusal(reason)}")
+         |> load_board()}
+
+      _invalid ->
+        {:noreply, put_flash(socket, :error, "The job is no longer available.")}
+    end
+  end
+
   def handle_event("retry-stopped-job", %{"job-id" => job_id}, socket) do
     with {job_id, ""} <- Integer.parse(job_id),
          {:ok, _job} <- Operations.retry_stopped_job(job_id, socket.assigns.actor) do
@@ -298,6 +317,19 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       do: not verification_running?(item) and not published?(item)
 
   def abandonable?(_item), do: false
+
+  defp resume_refusal(:worktree_not_retained), do: "its worktree is gone."
+  defp resume_refusal(:no_session_to_continue), do: "no agent session is left to continue."
+  defp resume_refusal(:newer_job_exists), do: "a newer job exists for the issue."
+  defp resume_refusal(:issue_not_open), do: "the issue is closed."
+  defp resume_refusal(:recovery_busy), do: "a recovery is already running."
+  defp resume_refusal(reason), do: inspect(reason)
+
+  @doc "Whether a failed job's card offers Resume: its worktree and agent session are still there."
+  def resumable?(%{managed?: true, active_job: %Operations.Job{} = job}),
+    do: Operations.resumable_from_worktree?(job)
+
+  def resumable?(_item), do: false
 
   # A blocked publication normally has a row with no pull request yet; only an
   # actual PR number means there is something abandoning would orphan.

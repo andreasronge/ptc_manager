@@ -868,6 +868,14 @@ technical branch error, until you answer it with one of three buttons:
 - **Stop** sets the card aside. The worktree stays on Operations until you
   discard it.
 
+A fourth button, **Resume**, appears on any failed or lost job whose worktree
+is still on the worker and whose agent left a session to continue from,
+whether or not it wrote a stop report: a branch that could not be verified or
+an agent that was lost keeps its work too. Resume approves the issue afresh,
+as **Try again** does, and continues in the same worktree on the same branch
+through the continuation the review page uses, so nothing has to be bundled
+and carried by hand.
+
 `reason_code` decides which of those PtcManager offers: a missing prerequisite
 or broken environment defaults to **Try again**, an ambiguous requirement to
 **Ask on the issue**, and an agent that judged something **unsafe** is offered
