@@ -1305,6 +1305,10 @@ defmodule PtcManagerWeb.DashboardLiveTest do
         path: "/tmp/retained-dashboard-worktree",
         herdr_workspace: "w1P",
         last_error: "Herdr confirmed that the retained managed agent is no longer present.",
+        retained_dirty: true,
+        retained_local_commits: 2,
+        retained_unpushed_commits: 1,
+        retained_observed_at: now,
         last_used_at: now
       })
       |> Repo.insert!()
@@ -1320,6 +1324,10 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/")
     assert html =~ "Cleanup requires attention"
+    assert html =~ "Uncommitted changes"
+    assert html =~ "2 local"
+    assert html =~ "1 unpushed"
+    assert html =~ "Preserve and close"
     assert html =~ "Discard worktree"
 
     view

@@ -287,6 +287,28 @@ defmodule PtcManager.Repository.GitProbe do
 
   def empty_worktree(_path, _default_branch), do: {:error, :invalid_worktree_identity}
 
+  @doc "Reports the dirty checkout and local commit count for retained-work review."
+  def retained_work(path, default_branch)
+      when is_binary(path) and is_binary(default_branch) do
+    with true <- Path.type(path) == :absolute and File.dir?(path),
+         {:ok, status} <- git(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+         {:ok, head_sha} <- revision(path, "HEAD^{commit}"),
+         {:ok, base_ref} <- base_ref(path, default_branch),
+         {:ok, commits} <- commit_count(path, base_ref, head_sha) do
+      {:ok,
+       %{
+         dirty: status != "",
+         local_commits: commits,
+         unpushed_commits: unpushed_commit_count(path, head_sha)
+       }}
+    else
+      false -> {:error, :worktree_path_unavailable}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def retained_work(_path, _default_branch), do: {:error, :invalid_worktree_identity}
+
   @doc "Proves that a repaired head preserves the already-published PR history."
   def descendant?(path, ancestor, head)
       when is_binary(path) and is_binary(ancestor) and is_binary(head) do
@@ -431,6 +453,15 @@ defmodule PtcManager.Repository.GitProbe do
 
       {:error, _reason} ->
         {:error, :branch_missing}
+    end
+  end
+
+  defp unpushed_commit_count(path, head_sha) do
+    with {:ok, upstream} <- revision(path, "@{upstream}^{commit}"),
+         {:ok, count} <- commit_count(path, upstream, head_sha) do
+      count
+    else
+      {:error, _reason} -> nil
     end
   end
 

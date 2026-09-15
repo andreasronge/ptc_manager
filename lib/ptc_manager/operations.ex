@@ -3389,6 +3389,7 @@ defmodule PtcManager.Operations do
     token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
     expires_at = DateTime.add(now, 300, :second)
     claimable_states = Keyword.get(opts, :from, ["terminal", "reclaimable"])
+    purpose = Keyword.get(opts, :purpose, "cleanup")
 
     {updated, _rows} =
       WorktreeAllocation
@@ -3396,13 +3397,16 @@ defmodule PtcManager.Operations do
         [allocation],
         allocation.id == ^allocation_id and
           (allocation.state in ^claimable_states or
-             (allocation.state == "cleaning" and allocation.cleanup_expires_at <= ^now))
+             (allocation.state == "cleaning" and allocation.cleanup_expires_at <= ^now and
+                (is_nil(allocation.cleanup_purpose) or
+                   allocation.cleanup_purpose != "preservation")))
       )
       |> Repo.update_all(
         set: [
           state: "cleaning",
           cleanup_token: token,
           cleanup_expires_at: expires_at,
+          cleanup_purpose: purpose,
           last_error: nil,
           updated_at: now
         ]
@@ -3419,6 +3423,79 @@ defmodule PtcManager.Operations do
       {:ok, claimed, token}
     else
       {:error, :worktree_cleanup_already_claimed}
+    end
+  end
+
+  def recover_expired_worktree_preservations(now \\ utc_now()) do
+    {count, _rows} =
+      WorktreeAllocation
+      |> where(
+        [allocation],
+        allocation.state == "cleaning" and allocation.cleanup_purpose == "preservation" and
+          allocation.cleanup_expires_at <= ^now
+      )
+      |> Repo.update_all(
+        set: [
+          state: "attention",
+          cleanup_token: nil,
+          cleanup_expires_at: nil,
+          cleanup_purpose: nil,
+          last_error: "Preservation was interrupted; the worktree was kept for another attempt.",
+          updated_at: now
+        ]
+      )
+
+    if count > 0, do: notify_changed(__MODULE__)
+    :ok
+  end
+
+  def record_retained_work_observation(
+        allocation_id,
+        %{dirty: dirty, local_commits: commits, unpushed_commits: unpushed}
+      )
+      when is_integer(allocation_id) and is_boolean(dirty) and is_integer(commits) and
+             commits >= 0 and
+             (is_nil(unpushed) or (is_integer(unpushed) and unpushed >= 0)) do
+    now = utc_now()
+
+    WorktreeAllocation
+    |> where([allocation], allocation.id == ^allocation_id and allocation.state == "attention")
+    |> Repo.update_all(
+      set: [
+        retained_dirty: dirty,
+        retained_local_commits: commits,
+        retained_unpushed_commits: unpushed,
+        retained_observed_at: now,
+        updated_at: now
+      ]
+    )
+
+    :ok
+  end
+
+  def record_worktree_preservation(allocation_id, token, attrs)
+      when is_integer(allocation_id) and is_binary(token) and is_map(attrs) do
+    now = utc_now()
+
+    changes =
+      Map.merge(attrs, %{
+        preserved_at: now,
+        updated_at: now
+      })
+
+    {count, _rows} =
+      WorktreeAllocation
+      |> where(
+        [allocation],
+        allocation.id == ^allocation_id and allocation.state == "cleaning" and
+          allocation.cleanup_token == ^token
+      )
+      |> Repo.update_all(set: Map.to_list(changes))
+
+    if count == 1 do
+      {:ok, Repo.get!(WorktreeAllocation, allocation_id)}
+    else
+      {:error, :stale_worktree_cleanup_claim}
     end
   end
 
@@ -4882,6 +4959,7 @@ defmodule PtcManager.Operations do
           removed_at: if(state == "removed", do: now),
           cleanup_token: nil,
           cleanup_expires_at: nil,
+          cleanup_purpose: nil,
           updated_at: now
         ]
       )
