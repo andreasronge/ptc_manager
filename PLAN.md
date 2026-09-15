@@ -71,8 +71,9 @@ Available actions in the first product release:
 - **Open on GitHub** leaves PtcManager for the canonical issue.
 
 An approval records the issue number, repository, issue `updated_at`, content
-digest, proposal digest, approver, and time. If the issue changes before the job
-starts, the approval becomes stale and must be renewed. Dispatch does not trust
+digest, proposal digest, approver, and time. If the issue's title or body
+changes before the job starts, the approval is invalid and must be renewed; if
+only its activity moved, dispatch re-freezes the version it holds. Dispatch does not trust
 the last periodic snapshot: immediately before leasing or starting work, the
 coordinator fetches the issue directly from GitHub, recomputes the digest, and
 fails closed when freshness cannot be established.
@@ -276,7 +277,9 @@ The initial SQLite database contains:
 - `issues`: latest canonical issue snapshot and content digest;
 - `pull_requests`: latest canonical PR snapshot, head SHA, and checks summary;
 - `proposals`: immutable manager analyses and private simplified summaries;
-- `approvals`: immutable decisions bound to a proposal and source version;
+- `approvals`: decisions bound to a proposal and to the issue's title and body;
+  the source version they freeze is re-frozen by the coordinator at dispatch
+  when only the issue's activity moved;
 - `jobs`: durable requested work and state transitions;
 - `pr_publications`: durable exact-SHA broker claims, retry state, and PR identity;
 - `pr_analyses`: private PR summaries bound to the head SHA, reviewed base SHA,
@@ -298,14 +301,18 @@ the worker protocol or UI concepts.
 - At most one active implementation job exists for a repository issue. SQLite
   enforces this with a partial unique index over active states; approval, job,
   and audit-event creation occur in one transaction.
-- Every job has one immutable approval and proposal origin.
+- Every job has one approval and proposal origin; a retry or a resume is a
+  fresh approval, recorded as such.
 - A worker lease expires unless renewed by heartbeat, and every attempt carries
   a monotonically increasing fencing token.
 - An expired lease never immediately starts duplicate work; reconciliation
   first fences the previous attempt, then checks the worker, Herdr, the branch,
   and GitHub.
-- An issue approval is invalid after the issue content/version changes. A
-  synchronous GitHub read immediately before dispatch must prove freshness.
+- An issue approval is invalid after the issue's title or body changes, and
+  dispatch re-checks the label, the claim, and the structure the approval
+  required. A synchronous GitHub read immediately before dispatch must prove
+  that; a comment, a label the approval still allows, or the console's own
+  assignment re-freezes the approval's source version instead.
 - A merge approval is invalid after the PR head SHA, base repository/ref,
   reviewed base SHA, or diff digest changes.
 - Agent status never proves that work succeeded; GitHub branch, PR, review, and

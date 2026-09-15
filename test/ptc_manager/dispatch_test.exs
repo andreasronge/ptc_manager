@@ -1,6 +1,8 @@
 defmodule PtcManager.DispatchTest do
   use PtcManager.DataCase, async: false
 
+  import Ecto.Query
+
   alias PtcManager.Dispatch
   alias PtcManager.GitHub.IssueSnapshot
   alias PtcManager.Operations
@@ -319,26 +321,92 @@ defmodule PtcManager.DispatchTest do
     refute "job.dispatch_uncertain" in actions
   end
 
-  test "a changed GitHub issue cancels the stale approval before dispatch" do
+  test "a changed GitHub issue cancels the approval before dispatch, in words" do
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
     changed = Map.put(remote, "title", "Changed after approval")
     Process.put(:dispatch_github_result, {:ok, changed})
 
-    assert {:error, :stale_approval} =
+    assert {:error, :issue_changed} =
              Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
 
     refute_receive {:dispatch_context, _context}
     rejected = Repo.get!(Job, job.id)
     assert rejected.state == "cancelled"
     assert rejected.fencing_token == 0
-    assert rejected.last_error == "stale_approval"
+    assert rejected.last_error =~ "title or body changed"
+
+    assert %{details: %{"reason" => "issue_changed"}} =
+             Repo.get_by!(AuditEvent, action: "job.dispatch_rejected", target_id: job.id)
+  end
+
+  test "a comment after approval re-freezes the approval instead of cancelling the job" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    commented = Map.put(remote, "updated_at", "2026-08-29T10:30:00Z")
+    Process.put(:dispatch_github_result, {:ok, commented})
+
+    assert {:ok, _summary} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    assert_receive {:dispatch_context, _context}
+
+    leased = Repo.get!(Job, job.id) |> Repo.preload(:approval)
+    assert leased.state in ["starting", "working"]
+    assert leased.approval.source_updated_at == ~U[2026-08-29 10:30:00.000000Z]
+
+    assert %{details: %{"approval_id" => approval_id}} =
+             Repo.get_by!(AuditEvent, action: "approval.refrozen", target_id: job.id)
+
+    assert approval_id == leased.approval.id
+  end
+
+  test "a changed body refuses dispatch in words" do
+    refuse_dispatch!(
+      %{"body" => "Rewritten requirement."},
+      :issue_changed,
+      "title or body changed"
+    )
+  end
+
+  test "a label that no longer says ready refuses dispatch" do
+    refuse_dispatch!(
+      %{"labels" => [%{"name" => "ptc:blocked"}]},
+      :issue_workflow_not_ready,
+      "no longer carries the ready label"
+    )
+  end
+
+  test "an assignment to someone else refuses dispatch" do
+    refuse_dispatch!(
+      %{"assignees" => [%{"login" => "someone-else"}]},
+      :issue_claimed,
+      "assigned to someone else"
+    )
+  end
+
+  test "sub-issues that make the issue a collection refuse dispatch" do
+    refuse_dispatch!(
+      %{"sub_issues" => %{"nodes" => [%{"number" => 999, "state" => "open"}], "total" => 1}},
+      :issue_is_collection,
+      "sub-issues"
+    )
+  end
+
+  test "a job approved without a snapshot keeps the strict rule" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Repo.update_all(from(j in Job, where: j.id == ^job.id), set: [execution_settings: nil])
+
+    Process.put(
+      :dispatch_github_result,
+      {:ok, Map.put(remote, "updated_at", "2026-08-29T10:30:00Z")}
+    )
+
+    assert {:error, :issue_changed} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    assert Repo.get!(Job, job.id).state == "cancelled"
   end
 
   test "rechecks approval after a source fetch that overlaps an issue edit" do
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
     Process.put(:dispatch_github_result, {:ok, remote})
 
-    assert {:error, :stale_approval} =
+    assert {:error, :issue_changed} =
              Dispatch.run_once(
                github: FakeGitHub,
                adapter: FakeAdapter,
@@ -917,6 +985,17 @@ defmodule PtcManager.DispatchTest do
     proposal = proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
     {repository, issue, proposal, job, remote}
+  end
+
+  defp refuse_dispatch!(change, reason, words) do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Process.put(:dispatch_github_result, {:ok, Map.merge(remote, change)})
+
+    assert {:error, ^reason} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    refute_receive {:dispatch_context, _context}
+    rejected = Repo.get!(Job, job.id)
+    assert rejected.state == "cancelled"
+    assert rejected.last_error =~ words
   end
 
   defp remote_issue(number) do

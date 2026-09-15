@@ -933,8 +933,21 @@ defmodule PtcManager.Operations do
           Repo.rollback(:job_not_stopped)
         end
 
-        unless Repo.get!(Issue, stopped.issue_id).state == "open",
-          do: Repo.rollback(:issue_not_open)
+        issue = Repo.get!(Issue, stopped.issue_id)
+        unless issue.state == "open", do: Repo.rollback(:issue_not_open)
+
+        # The same gates a fresh approval passes; a retry is one. The retry
+        # runs on the stopped job's frozen title and body, so a changed issue
+        # needs a fresh approval rather than a retry.
+        with :ok <- issue_unclaimed(issue, Repo.get!(Repository, issue.repository_id)),
+             :ok <- issue_workflow_allows_implementation(issue),
+             :ok <- issue_not_collection(issue),
+             false <- requirement_changed?(issue, stopped) do
+          :ok
+        else
+          true -> Repo.rollback(:issue_changed)
+          {:error, reason} -> Repo.rollback(reason)
+        end
 
         if Repo.exists?(
              from j in Job, where: j.issue_id == ^stopped.issue_id and j.id > ^stopped.id
@@ -954,12 +967,32 @@ defmodule PtcManager.Operations do
 
         if updated != 1, do: Repo.rollback(:job_not_stopped)
 
+        # The stopped job's approval froze the issue as it was then; the agent
+        # has usually commented since. The retry is approved afresh from the
+        # issue as the console knows it now, so dispatch does not refuse it as
+        # stale before it can start.
+        issue = Repo.get!(Issue, stopped.issue_id)
+        stopped_approval = Repo.get!(Approval, stopped.approval_id)
+
+        approval =
+          %Approval{}
+          |> Approval.changeset(%{
+            proposal_id: stopped_approval.proposal_id,
+            decision: stopped_approval.decision,
+            actor: actor,
+            source_updated_at: issue.github_updated_at,
+            source_digest: issue.content_digest,
+            proposal_digest: stopped_approval.proposal_digest,
+            approved_at: now
+          })
+          |> Repo.insert!()
+
         retry =
           %Job{}
           |> Job.changeset(%{
             repository_id: stopped.repository_id,
             issue_id: stopped.issue_id,
-            approval_id: stopped.approval_id,
+            approval_id: approval.id,
             automation_definition_version_id: stopped.automation_definition_version_id,
             prompt_instructions: stopped.prompt_instructions,
             kind: stopped.kind,
@@ -982,6 +1015,8 @@ defmodule PtcManager.Operations do
           details: %{
             "stopped_job_id" => stopped.id,
             "issue_id" => stopped.issue_id,
+            "approval_id" => approval.id,
+            "source_digest" => issue.content_digest,
             "reason_code" => get_in(stopped.stop_report || %{}, ["reason_code"])
           }
         })
@@ -1771,7 +1806,8 @@ defmodule PtcManager.Operations do
              {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, lifecycle_now),
              :ok <- dispatch_capacity_available(Repo, worker, capacity, lifecycle_now),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
-             :ok <- remote_issue_matches_approval(remote_issue, job.approval) do
+             :ok <- remote_issue_still_approvable(remote_issue, job.repository),
+             {:ok, freshness} <- approval_freshness(remote_issue, job) do
           fencing_token = job.fencing_token + 1
           branch_name = "ptc-manager/issue-#{job.issue.number}-job-#{job.id}"
           lease_expires_at = DateTime.add(lease_now, lease_ms, :millisecond)
@@ -1798,6 +1834,8 @@ defmodule PtcManager.Operations do
             )
 
           if updated == 1 do
+            if freshness == :refreeze, do: refreeze_approval!(job, remote_issue, lifecycle_now)
+
             %WorktreeAllocation{}
             |> WorktreeAllocation.changeset(%{
               worker_id: worker.id,
@@ -3417,6 +3455,7 @@ defmodule PtcManager.Operations do
           Map.merge(execution.settings, %{
             "issue_title" => issue.title,
             "issue_body" => String.slice(issue.body || "", 0, 20_000),
+            "issue_body_digest" => issue.body_digest,
             "issue_comment_count_at_submission" => issue.github_comment_count,
             "issue_comments_observed_at_submission" =>
               if(issue.comments_checked_at, do: DateTime.to_iso8601(issue.comments_checked_at))
@@ -3658,24 +3697,101 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp remote_issue_matches_approval(remote, approval) do
+  # The gates an approval passed are checked again against the issue GitHub
+  # reports now, for every kind of approval: a label that no longer says
+  # ready, an assignment to someone else, or sub-issues that make the issue a
+  # collection all refuse dispatch, as the frozen digest used to. A snapshot
+  # from GitHub always carries these fields; a field a caller did not report
+  # is not judged.
+  defp remote_issue_still_approvable(remote, repository) do
     cond do
-      remote.state != "open" ->
+      Map.get(remote, :state, "open") != "open" ->
         {:error, :issue_closed}
 
-      remote.content_digest != approval.source_digest ->
-        {:error, :stale_approval}
+      Map.get(remote, :structure_projected, true) == false ->
+        {:error, :issue_structure_unknown}
 
-      DateTime.compare(remote.github_updated_at, approval.source_updated_at) != :eq ->
-        {:error, :stale_approval}
+      Map.get(remote, :workflow_label_conflict, false) or
+          Map.get(remote, :workflow_label) not in [nil, "ptc:ready"] ->
+        {:error, :issue_workflow_not_ready}
+
+      Map.has_key?(remote, :github_assignees) and Issue.claimed_by_other?(remote, repository) ->
+        {:error, :issue_claimed}
+
+      Issue.collection?(remote) ->
+        {:error, :issue_is_collection}
 
       true ->
         :ok
     end
   end
 
+  # An approval freezes the issue as the maintainer saw it. The digest it
+  # freezes covers comments, labels, and assignees as well as the text, so a
+  # decision comment or the console's own assignment used to make every later
+  # dispatch stale. What the maintainer approved is the title and body, which
+  # the job snapshot carries: while those are unchanged the approval is
+  # re-frozen to the current issue; a changed title or body is a changed
+  # requirement and needs a fresh approval. A job without a snapshot keeps
+  # the strict rule.
+  defp approval_freshness(remote, %Job{approval: approval} = job) do
+    cond do
+      remote.state != "open" ->
+        {:error, :issue_closed}
+
+      remote.content_digest == approval.source_digest and
+          DateTime.compare(remote.github_updated_at, approval.source_updated_at) == :eq ->
+        {:ok, :current}
+
+      requirement_changed?(remote, job) ->
+        {:error, :issue_changed}
+
+      true ->
+        {:ok, :refreeze}
+    end
+  end
+
+  defp requirement_changed?(remote, %Job{
+         execution_settings: %{"issue_title" => title, "issue_body_digest" => body_digest}
+       }) do
+    remote.title != title or remote.body_digest != body_digest
+  end
+
+  # A job approved before the body digest was frozen compares the stored body,
+  # which is bounded to 20,000 characters.
+  defp requirement_changed?(remote, %Job{execution_settings: %{"issue_title" => title} = settings}) do
+    remote.title != title or
+      String.slice(remote.body || "", 0, 20_000) != Map.get(settings, "issue_body", "")
+  end
+
+  defp requirement_changed?(_remote, _job), do: true
+
+  defp refreeze_approval!(%Job{approval: %Approval{} = approval} = job, remote, now) do
+    approval
+    |> Approval.changeset(%{
+      source_updated_at: remote.github_updated_at,
+      source_digest: remote.content_digest
+    })
+    |> Repo.update!()
+
+    insert_audit!(%{
+      actor: "coordinator",
+      action: "approval.refrozen",
+      target_type: "job",
+      target_id: job.id,
+      details: %{
+        "approval_id" => approval.id,
+        "previous_source_digest" => approval.source_digest,
+        "source_digest" => remote.content_digest,
+        "previous_source_updated_at" => DateTime.to_iso8601(approval.source_updated_at),
+        "source_updated_at" => DateTime.to_iso8601(remote.github_updated_at),
+        "refrozen_at" => DateTime.to_iso8601(now)
+      }
+    })
+  end
+
   defp reject_job!(job, reason, now) do
-    message = rejection_error(reason)
+    message = rejection_words(reason)
 
     {updated, _rows} =
       Job
@@ -3694,7 +3810,7 @@ defmodule PtcManager.Operations do
         action: "job.dispatch_rejected",
         target_type: "job",
         target_id: job.id,
-        details: %{"reason" => message}
+        details: %{"reason" => rejection_error(reason), "message" => message}
       })
 
       Repo.get!(Job, job.id)
@@ -4800,6 +4916,48 @@ defmodule PtcManager.Operations do
   defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
   defp rejection_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp rejection_error(reason), do: bounded_error(reason)
+
+  @doc "Why dispatch, or a retry, refused an issue, in words for a card or a flash."
+  def rejection_words(:issue_closed), do: "The issue was closed before the job could start."
+
+  def rejection_words(:issue_changed),
+    do: "The issue's title or body changed after it was approved. Approve it again."
+
+  def rejection_words(:worktree_changed),
+    do:
+      "The prepared worktree was not clean after the repository's bootstrap command ran, " <>
+        "so the agent could not start from a known state."
+
+  def rejection_words(:issue_claimed),
+    do: "The issue is assigned to someone else on GitHub."
+
+  def rejection_words(:issue_has_pull_request),
+    do: "A pull request already references the issue."
+
+  def rejection_words(:issue_workflow_not_ready),
+    do: "The issue no longer carries the ready label."
+
+  def rejection_words(:auto_fix_disabled),
+    do: "Automatic implementation is disabled for the repository."
+
+  def rejection_words(:no_active_collection_run),
+    do: "The collection run that approved the issue is no longer active."
+
+  def rejection_words(:repository_disabled), do: "The repository is disabled."
+
+  def rejection_words(:issue_dependencies_unresolved),
+    do: "The issue is blocked by another issue that is not resolved."
+
+  def rejection_words(:issue_structure_unknown),
+    do: "GitHub has not yet reported whether the issue has sub-issues."
+
+  def rejection_words(:issue_is_collection),
+    do: "The issue has sub-issues, so it is a collection and its members are implemented instead."
+
+  def rejection_words(:worktree_root_unavailable),
+    do: "The worktree root on the worker is not configured or not usable."
+
+  def rejection_words(reason), do: rejection_error(reason)
   defp setup_error(%{state: "passed"}), do: nil
   defp setup_error(%{error: reason}), do: bounded_error(reason)
   defp setup_error(_report), do: "workspace_setup_failed"

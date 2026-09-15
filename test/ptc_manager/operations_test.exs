@@ -849,7 +849,7 @@ defmodule PtcManager.OperationsTest do
 
       assert id == failed.id
       assert {:ok, retry} = Operations.retry_stopped_job(failed.id, "andreas")
-      assert retry.approval_id == failed.approval_id
+      assert retry.approval_id != failed.approval_id, "a retry is approved afresh"
       assert retry.state == "queued"
     end
 
@@ -874,14 +874,28 @@ defmodule PtcManager.OperationsTest do
       assert is_nil(Repo.get!(Job, stopped.id).stop_acknowledged_at)
     end
 
-    test "trying again reuses the approval and cannot run twice" do
+    test "trying again approves the issue afresh and cannot run twice" do
       assert {:ok, stopped} = stop_job()
+
+      # The agent commented on the issue while stopped, as it does when it asks
+      # a question; the console synced that comment.
+      Repo.get!(Issue, stopped.issue_id)
+      |> Ecto.Changeset.change(github_updated_at: ~U[2026-09-01 12:00:00.000000Z])
+      |> Repo.update!()
 
       assert {:ok, retry} = Operations.retry_stopped_job(stopped.id, "andreas")
       assert retry.id != stopped.id
       assert retry.state == "queued"
-      assert retry.approval_id == stopped.approval_id
+      assert retry.approval_id != stopped.approval_id
       assert retry.issue_id == stopped.issue_id
+
+      stopped_approval = Repo.get!(PtcManager.Operations.Approval, stopped.approval_id)
+      approval = Repo.get!(PtcManager.Operations.Approval, retry.approval_id)
+      assert approval.decision == stopped_approval.decision
+      assert approval.proposal_id == stopped_approval.proposal_id
+      assert approval.actor == "andreas"
+      assert approval.source_updated_at == ~U[2026-09-01 12:00:00.000000Z]
+      assert approval.source_digest == Repo.get!(Issue, stopped.issue_id).content_digest
       assert retry.required_review_count == stopped.required_review_count
       assert retry.prompt_instructions == stopped.prompt_instructions
       assert retry.fencing_token == 0
@@ -889,6 +903,37 @@ defmodule PtcManager.OperationsTest do
       # The stopped card is answered, so pressing again cannot queue a second.
       assert {:error, :job_not_stopped} = Operations.retry_stopped_job(stopped.id, "andreas")
       assert Repo.get_by!(AuditEvent, action: "job.retried_after_stop")
+    end
+
+    test "a retry passes the gates a fresh approval passes" do
+      assert {:ok, stopped} = stop_job()
+      issue = Repo.get!(Issue, stopped.issue_id)
+
+      issue |> Ecto.Changeset.change(workflow_label: "ptc:blocked") |> Repo.update!()
+
+      assert {:error, :issue_workflow_not_ready} =
+               Operations.retry_stopped_job(stopped.id, "andreas")
+
+      Repo.get!(Issue, issue.id)
+      |> Ecto.Changeset.change(
+        workflow_label: "ptc:ready",
+        github_assignees: %{"logins" => ["someone-else"]}
+      )
+      |> Repo.update!()
+
+      assert {:error, :issue_claimed} = Operations.retry_stopped_job(stopped.id, "andreas")
+      assert is_nil(Repo.get!(Job, stopped.id).stop_acknowledged_at)
+
+      Repo.get!(Issue, issue.id)
+      |> Ecto.Changeset.change(
+        github_assignees: %{"logins" => []},
+        title: "Rewritten while stopped",
+        content_digest: String.duplicate("9", 64)
+      )
+      |> Repo.update!()
+
+      assert {:error, :issue_changed} = Operations.retry_stopped_job(stopped.id, "andreas"),
+             "the retry would run on the frozen text, not the rewritten issue"
     end
 
     test "a job that never stopped cannot be retried or set aside" do

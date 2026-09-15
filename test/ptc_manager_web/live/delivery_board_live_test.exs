@@ -550,7 +550,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert render(view) =~ "Queued a fresh attempt"
     retry = Repo.get_by!(Job, state: "queued", issue_id: stopped.issue_id)
-    assert retry.approval_id == stopped.approval_id
+    assert retry.approval_id != stopped.approval_id, "a retry is approved afresh"
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 
