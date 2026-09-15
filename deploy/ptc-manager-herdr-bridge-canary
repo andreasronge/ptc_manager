@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 3 ] || { echo "usage: ptc-manager-herdr-bridge-canary VERSION PROTOCOL SESSION" >&2; exit 2; }
+expected_version=$1
+expected_protocol=$2
+expected_session=$3
+target=ptc-manager-herdr-canary
+herdr=/usr/local/bin/herdr
+
+case "$expected_protocol" in
+  ''|*[!0-9]*) echo "invalid Herdr protocol contract" >&2; exit 1 ;;
+esac
+case "$expected_session" in
+  ''|*[!A-Za-z0-9_.-]*) echo "invalid managed Herdr session" >&2; exit 1 ;;
+esac
+
+if [ "$(/usr/bin/ssh -o BatchMode=yes "$target" 'command -v herdr')" != "$herdr" ]; then
+  echo "bridge discovery returned the wrong Herdr binary" >&2
+  exit 1
+fi
+
+status=$(printf '%s\n' '/usr/local/bin/herdr status server --json' |
+  /usr/bin/ssh -o BatchMode=yes "$target" /bin/sh -s)
+printf '%s' "$status" | /usr/bin/python3 -I -c '
+import json, sys
+value = json.load(sys.stdin)
+version, protocol = sys.argv[1], int(sys.argv[2])
+assert value.get("running") is True
+assert value.get("compatible") is True
+assert value.get("version") == version
+assert value.get("protocol") == protocol
+assert value.get("socket", "").startswith("/var/lib/ptc_manager-worker/")
+' "$expected_version" "$expected_protocol"
+
+# Exercise the exact streaming allowlist entry. With stdin closed, Herdr still
+# connects to the worker-owned client socket and checks its endpoint protocol
+# before both sides close the temporary attachment.
+printf '%s\n' 'exec /usr/local/bin/herdr remote-client-bridge </dev/null' |
+  /usr/bin/timeout 15 /usr/bin/ssh -o BatchMode=yes "$target" /bin/sh -s >/dev/null
+
+home=$(mktemp -d /tmp/ptc-manager-herdr-bridge-canary.XXXXXX)
+cleanup() { rm -rf -- "$home"; }
+trap cleanup EXIT HUP INT TERM
+install -d -m 0700 "$home/.config"
+config_path="$home/config.toml"
+HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path "$herdr" machine add \
+  --label "Deployment canary" --remote-session "$expected_session" "$target" >/dev/null
+listing=$(HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
+  "$herdr" machine list --json)
+printf '%s' "$listing" | /usr/bin/python3 -I -c '
+import json, sys
+machines = json.load(sys.stdin)
+session = sys.argv[1]
+assert len(machines) == 1
+assert machines[0]["target"] == "ptc-manager-herdr-canary"
+assert machines[0]["session"] == session
+assert machines[0]["enabled"] is True
+' "$expected_session"
+
+set +e
+/usr/bin/ssh -o BatchMode=yes "$target" id >/dev/null 2>&1
+rejected=$?
+set -e
+if [ "$rejected" -ne 126 ]; then
+  echo "bridge did not reject an arbitrary SSH command with status 126" >&2
+  exit 1
+fi
+
+echo "Herdr SSH bridge canary passed for session $expected_session"

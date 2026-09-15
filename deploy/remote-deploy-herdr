@@ -82,6 +82,7 @@ cursor_agent_version=
 cursor_agent_sha256=
 worker_cursor_agent_dir=
 herdr_version=
+herdr_protocol=
 herdr_sha256=
 worker_herdr_dir=
 mise_version=
@@ -141,6 +142,8 @@ resources_dropin_candidate="/tmp/ptc-manager-resources.conf-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
 herdr_launch_candidate="/tmp/ptc-manager-herdr-launch-${release_id}"
 herdr_ssh_bridge_candidate="/tmp/ptc-manager-herdr-ssh-bridge-${release_id}"
+herdr_worker_bridge_candidate="/tmp/ptc-manager-herdr-worker-bridge-${release_id}"
+herdr_bridge_canary_candidate="/tmp/ptc-manager-herdr-bridge-canary-${release_id}"
 sudoers_candidate="/tmp/ptc-manager-sudoers-${release_id}"
 self_deploy_runner_candidate="/tmp/ptc-manager-self-deploy-runner-${release_id}"
 self_deploy_service_candidate="/tmp/ptc-manager-self-deploy-service-${release_id}"
@@ -155,6 +158,10 @@ coordinator_environment_files=
 coordinator_session=
 worker_session=
 worker_service_pid=
+worker_environment_file=/etc/ptc_manager/herdr.env
+herdr_bridge_session_file=/etc/ptc_manager/herdr-bridge-session
+herdr_bridge_canary_key=/etc/ptc_manager/herdr-bridge-canary
+herdr_bridge_canary_ssh_config=/etc/ssh/ssh_config.d/90-ptc-manager-herdr-canary.conf
 worktree_root=
 remote_script=$0
 deployment_phase=pre_stop
@@ -170,7 +177,8 @@ cleanup_remote() {
     "$operation_recovery_candidate" \
     "$needrestart_candidate" \
     "$resources_dropin_candidate" \
-    "$agent_context_candidate" "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" "$sudoers_candidate" \
+    "$agent_context_candidate" "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" \
+    "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
     "$self_deploy_access_candidate" "$health_snapshot_candidate" \
     "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate" \
@@ -655,8 +663,12 @@ read_pinned_versions() {
   cursor_agent_sha256=$("$toolchain_reader" "$toolchain_manifest" cursor_agent_sha256)
   worker_cursor_agent_dir="/opt/ptc-manager-cursor-agent-${cursor_agent_version}"
   herdr_version=$("$toolchain_reader" "$toolchain_manifest" herdr)
+  herdr_protocol=$("$toolchain_reader" "$toolchain_manifest" herdr_protocol)
   herdr_sha256=$("$toolchain_reader" "$toolchain_manifest" herdr_sha256)
   worker_herdr_dir="/opt/ptc-manager-herdr-${herdr_version}"
+  case "$herdr_protocol" in
+    ''|*[!0-9]*) echo "the Herdr bridge protocol pin is invalid" >&2; return 1 ;;
+  esac
   mise_version=$("$toolchain_reader" "$toolchain_manifest" mise)
   mise_sha256=$("$toolchain_reader" "$toolchain_manifest" mise_sha256)
   worker_mise_dir="/opt/ptc-manager-mise-${mise_version}"
@@ -1408,6 +1420,8 @@ tar -xOf "$source_archive" deploy/ptc_manager-resources.conf >"$resources_dropin
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-launch >"$herdr_launch_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-ssh-bridge >"$herdr_ssh_bridge_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-herdr-worker-bridge >"$herdr_worker_bridge_candidate"
+tar -xOf "$source_archive" deploy/ptc-manager-herdr-bridge-canary >"$herdr_bridge_canary_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager.sudoers >"$sudoers_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-self-deploy-runner >"$self_deploy_runner_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-self-deploy.service >"$self_deploy_service_candidate"
@@ -1431,7 +1445,8 @@ chmod 0644 "$provision_service_candidate"
 chmod 0755 "$operation_wrapper_candidate"
 chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
-chmod 0755 "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate"
+chmod 0755 "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" \
+  "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate"
 chmod 0440 "$sudoers_candidate"
 chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
@@ -1517,6 +1532,19 @@ if [ "$running_database_path" != "$configured_database_path" ] ||
 fi
 
 coordinator_session=$configured_coordinator_session
+if ! sudo test -f "$worker_environment_file"; then
+  echo "configured worker environment file is missing: $worker_environment_file" >&2
+  exit 1
+fi
+configured_worker_session=$(read_environment_setting HERDR_SESSION "$worker_environment_file")
+configured_worker_session=${configured_worker_session:-default}
+case "$configured_worker_session" in
+  ''|*[!A-Za-z0-9_.-]*)
+    echo "configured worker Herdr session is invalid" >&2
+    exit 1
+    ;;
+esac
+worker_session=$configured_worker_session
 
 if sudo systemctl is-active --quiet ptc_manager-herdr; then
   worker_service_pid=$(sudo systemctl show -p MainPID --value ptc_manager-herdr)
@@ -1528,7 +1556,11 @@ if sudo systemctl is-active --quiet ptc_manager-herdr; then
       ;;
   esac
 
-  worker_session=$(read_process_setting "$worker_service_pid" HERDR_SESSION default)
+  running_worker_session=$(read_process_setting "$worker_service_pid" HERDR_SESSION default)
+  if [ "$running_worker_session" != "$configured_worker_session" ]; then
+    echo "worker Herdr environment differs from the running service; restart it before deploying" >&2
+    exit 1
+  fi
 fi
 
 database_path=$configured_database_path
@@ -1691,6 +1723,13 @@ sudo install -o root -g root -m 0755 "$herdr_launch_candidate" \
   /usr/local/bin/ptc-manager-herdr-launch
 sudo install -o root -g root -m 0755 "$herdr_ssh_bridge_candidate" \
   /usr/local/bin/ptc-manager-herdr-ssh-bridge
+sudo install -o root -g root -m 0755 "$herdr_worker_bridge_candidate" \
+  /usr/local/bin/ptc-manager-herdr-worker-bridge
+sudo install -o root -g root -m 0755 "$herdr_bridge_canary_candidate" \
+  /usr/local/bin/ptc-manager-herdr-bridge-canary
+printf '%s\n' "$worker_session" | sudo tee "$herdr_bridge_session_file" >/dev/null
+sudo chown root:root "$herdr_bridge_session_file"
+sudo chmod 0644 "$herdr_bridge_session_file"
 sudo install -o root -g root -m 0755 "$access_dropin_check" \
   /usr/local/bin/ptc-manager-check-access-dropin
 sudo install -o root -g root -m 0755 "$provision_runner_candidate" \
@@ -1701,6 +1740,56 @@ sudo install -o root -g root -m 0644 "$repositories_query" \
   /usr/local/libexec/ptc-manager-configured-repositories.sql
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
   /etc/sudoers.d/ptc_manager
+
+# Exercise the real SSH forced-command path during every deployment. The
+# loopback-only key can reach only the bridge and is unreadable outside root.
+if ! sudo test -f "$herdr_bridge_canary_key"; then
+  sudo ssh-keygen -q -t ed25519 -N '' -C ptc-manager-herdr-canary \
+    -f "$herdr_bridge_canary_key"
+fi
+sudo chown root:root "$herdr_bridge_canary_key" "$herdr_bridge_canary_key.pub"
+sudo chmod 0600 "$herdr_bridge_canary_key"
+sudo chmod 0644 "$herdr_bridge_canary_key.pub"
+bridge_canary_public_key=$(sudo cat "$herdr_bridge_canary_key.pub")
+case "$bridge_canary_public_key" in
+  'ssh-ed25519 '*" ptc-manager-herdr-canary") ;;
+  *) echo "invalid Herdr bridge canary public key" >&2; exit 1 ;;
+esac
+if sudo test -L /home/agent/.ssh || sudo test -L /home/agent/.ssh/authorized_keys; then
+  echo "agent SSH authorization paths must not be symlinks" >&2
+  exit 1
+fi
+sudo install -d -o agent -g agent -m 0700 /home/agent/.ssh
+authorized_keys_candidate=$(mktemp "/tmp/ptc-manager-authorized-keys-${release_id}.XXXXXX")
+if sudo test -f /home/agent/.ssh/authorized_keys; then
+  sudo grep -v ' ptc-manager-herdr-canary$' /home/agent/.ssh/authorized_keys >"$authorized_keys_candidate" || true
+fi
+printf '%s\n' \
+  "from=\"127.0.0.1\",restrict,command=\"/usr/local/bin/ptc-manager-herdr-ssh-bridge\" $bridge_canary_public_key" \
+  >>"$authorized_keys_candidate"
+sudo install -o agent -g agent -m 0600 "$authorized_keys_candidate" /home/agent/.ssh/authorized_keys
+rm -f -- "$authorized_keys_candidate"
+known_hosts_candidate=$(mktemp "/tmp/ptc-manager-known-hosts-${release_id}.XXXXXX")
+for host_key in /etc/ssh/ssh_host_*_key.pub; do
+  sudo awk '{print "ptc-manager-herdr-canary " $1 " " $2}' "$host_key" >>"$known_hosts_candidate"
+done
+sudo install -o root -g root -m 0644 "$known_hosts_candidate" /etc/ptc_manager/herdr-bridge-known-hosts
+rm -f -- "$known_hosts_candidate"
+sudo install -d -o root -g root -m 0755 /etc/ssh/ssh_config.d
+printf '%s\n' \
+  'Host ptc-manager-herdr-canary' \
+  '  HostName 127.0.0.1' \
+  '  User agent' \
+  "  IdentityFile $herdr_bridge_canary_key" \
+  '  IdentitiesOnly yes' \
+  '  BatchMode yes' \
+  '  StrictHostKeyChecking yes' \
+  '  HostKeyAlias ptc-manager-herdr-canary' \
+  '  UserKnownHostsFile /etc/ptc_manager/herdr-bridge-known-hosts' |
+  sudo tee "$herdr_bridge_canary_ssh_config" >/dev/null
+sudo chown root:root "$herdr_bridge_canary_ssh_config"
+sudo chmod 0644 "$herdr_bridge_canary_ssh_config"
+
 if ! getent group ptc-manager-deploy >/dev/null; then
   sudo groupadd --system ptc-manager-deploy
 fi
@@ -1763,6 +1852,10 @@ deployment_phase=service_stopped
 sudo systemctl stop "$service_name"
 ensure_no_managed_runs
 restart_worker_when_nothing_retained
+active_herdr_version=$(/usr/local/bin/herdr --version | awk '{print $NF}')
+echo "Running the managed Herdr SSH bridge canary..."
+sudo /usr/local/bin/ptc-manager-herdr-bridge-canary \
+  "$active_herdr_version" "$herdr_protocol" "$worker_session"
 sudo sqlite3 "$database_path" ".backup '$database_backup'"
 sudo chown ptc-manager:ptc-manager "$database_backup"
 sudo chmod 0600 "$database_backup"

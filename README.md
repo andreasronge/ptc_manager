@@ -1831,8 +1831,25 @@ Tailscale address, and keep other wildcard `IdentityFile` entries from applying
 to the alias. Confirm `ssh -G ALIAS` lists no unrestricted key before adding it:
 
 ```sh
-herdr machine add ALIAS --label "PtcManager worker" --remote-session default
+herdr machine add ALIAS --label "PtcManager worker" --remote-session SESSION
 ```
+
+Use the `HERDR_SESSION` value from `/etc/ptc_manager/herdr.env`; deployment
+writes that validated value to the bridge's root-owned session file and refuses
+a running worker with a different value. To rotate the maintainer key, generate
+a new key locally, add a second forced-command line with the same Tailscale
+source restriction, switch the alias and successfully reconnect the saved
+machine, then remove the old line. On a replacement server, restore only the
+public forced-command line and source restriction; never copy the old server's
+SSH host keys or the deployment canary private key. Reconfirm the new host key
+out of band before enabling the alias.
+
+Every deployment separately provisions a loopback-only forced key, pins it to
+the server's actual SSH host key, and runs `herdr machine add` in an isolated
+configuration. That canary verifies discovery, the worker-owned server socket,
+the pinned Herdr protocol, saved-machine streaming, and rejection of arbitrary
+commands before the PtcManager release is activated. A Herdr version bump must
+first add its protocol contract to the canary.
 
 The forced command answers Herdr's bounded platform and binary probes without
 evaluating their shell input, then delegates only server status and the remote
