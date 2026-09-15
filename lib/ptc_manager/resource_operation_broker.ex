@@ -134,6 +134,14 @@ defmodule PtcManager.ResourceOperationBroker do
     end
   end
 
+  # A repair or merge action resumes a retained implementer whose task policy
+  # asks for a managed review before it publishes, but reviews belong to
+  # implementation jobs; inside an action the pull request's own CI is the
+  # gate, and the answer says so instead of reading as an outage.
+  defp handle_request(%{"operation" => operation}, %{"owner_type" => owner})
+       when operation in ["review", "review_status"] and owner != "job",
+       do: error_response(:review_unavailable_in_action)
+
   defp handle_request(
          %{"operation" => "review_status", "round_id" => id},
          %{"owner_type" => "job"} = payload

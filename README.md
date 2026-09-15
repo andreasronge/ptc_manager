@@ -1893,6 +1893,15 @@ that exact PR. PtcManager keeps the action durable, reserves repository priority
 records the Herdr identity for read-only output, and independently confirms the
 GitHub result before releasing the repository and cleaning the worktree.
 
+A repair pushes without a managed review. The retained implementer's task
+policy asks for a passed review before it publishes, but reviews belong to
+implementation jobs and none can run inside an action, so the repair prompt
+and its runtime context say that the pull request's CI is the gate for a
+repair, and `$PTC_OPERATION_WRAPPER review` answers
+`review_unavailable_in_action` rather than reading as an outage. Without that
+the agent committed its repair, refused to push, and stopped, and the action
+waited for a head that never appeared.
+
 A managed pull request is normally repaired by resuming its retained
 implementation session. When Herdr no longer reports that session, the repair
 still runs: preflight falls back to the way an imported pull request is always

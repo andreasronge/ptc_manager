@@ -1432,6 +1432,8 @@ defmodule PtcManager.MaintainerActionsTest do
     assert queued.state == "queued"
     assert queued.prompt =~ "instructions captured when this repair was queued"
     assert queued.prompt =~ ~s(action="repair_pr")
+    assert queued.prompt =~ ~s(review_policy="ci_is_the_gate")
+    assert queued.prompt =~ "the pull request's CI is the gate for a repair"
     assert queued.prompt =~ ~s(retained_workspace="true")
 
     configure_automation(
@@ -1703,6 +1705,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
     assert queued.state == "queued"
     assert queued.prompt =~ ~s(merge_authorized="true")
+    assert queued.prompt =~ ~s(review_policy="ci_is_the_gate")
 
     clean_status =
       publication

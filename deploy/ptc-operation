@@ -424,6 +424,9 @@ def main():
             return 0 if response.get("state") in ("passed", "skipped") else 2
         except Exception as error:
             detail = str(error).replace("\n", " ")[-500:]
+            if "review_unavailable_in_action" in detail:
+                print("ptc-operation: no managed review exists inside a repair or merge action; the pull request's CI is the gate. Validate with the repository's own checks, commit, and push the existing branch.", file=sys.stderr)
+                return 76
             print(f"ptc-operation: review unavailable ({type(error).__name__}: {detail}); preserve your work and check the console.", file=sys.stderr)
             return 75
     if os.environ.get("PTC_OPERATION_ACTIVE"):

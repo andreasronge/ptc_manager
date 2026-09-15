@@ -203,7 +203,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 7_200,
       result_type: "pull_request_repair",
       prompt:
-        "Fix the pull request's failing CI or merge conflicts, validate and review the repair, then push the existing PR branch. Do not create another PR, merge, or force-push."
+        "Fix the pull request's failing CI or merge conflicts, validate the repair with the repository's own checks, then push the existing PR branch; the pull request's CI is the gate for a repair, because the managed review is not available in an action. Do not create another PR, merge, or force-push."
     },
     %{
       key: "repair_and_merge_pr",
@@ -218,7 +218,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 10_800,
       result_type: "pull_request_repair",
       prompt:
-        "Fix the pull request's failing CI or merge conflicts, validate and review the repair, push the existing branch, wait for required CI, and merge this PR when it is green and mergeable. Bring the branch up to date with the latest default branch and revalidate before you merge, so the result is proven against what it merges into. Do not force-push or work on another PR."
+        "Fix the pull request's failing CI or merge conflicts, validate the repair with the repository's own checks, push the existing branch, wait for required CI, and merge this PR when it is green and mergeable; the pull request's CI is the gate for a repair, because the managed review is not available in an action. Bring the branch up to date with the latest default branch and revalidate before you merge, so the result is proven against what it merges into. Do not force-push or work on another PR."
     },
     %{
       key: "merge_reviewed_pr",

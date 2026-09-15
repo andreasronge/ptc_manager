@@ -54,6 +54,42 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     assert Repo.aggregate(PtcManager.Operations.AgentRun, :count) == before
   end
 
+  test "a review inside a repair action is refused by name, not as an outage" do
+    context = managed_run_fixture()
+
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-review-action-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, issued} =
+      ManagedOperationContext.issue(
+        %{
+          owner_type: "agent_action",
+          owner_id: 4_242,
+          repository_id: context.repository.id,
+          worker_id: context.worker.id,
+          pane_id: "repair-pane",
+          fencing_token: 1
+        },
+        directory: directory
+      )
+
+    for operation <- ["review", "review_status"] do
+      response =
+        ResourceOperationBroker.dispatch(%{
+          "token" => issued.token,
+          "context_id" => issued.payload["context_id"],
+          "operation" => operation,
+          "request_id" => "repair-review",
+          "round_id" => 1
+        })
+
+      assert response["status"] == "error"
+      assert response["error"] =~ "review_unavailable_in_action"
+    end
+  end
+
   test "signed context drives the generic broker protocol without parsing agent output" do
     context = managed_run_fixture()
 
