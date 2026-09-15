@@ -849,7 +849,7 @@ defmodule PtcManager.OperationsTest do
 
       assert id == failed.id
       assert {:ok, retry} = Operations.retry_stopped_job(failed.id, "andreas")
-      assert retry.approval_id == failed.approval_id
+      assert retry.approval_id != failed.approval_id, "a retry is approved afresh"
       assert retry.state == "queued"
     end
 
@@ -874,14 +874,28 @@ defmodule PtcManager.OperationsTest do
       assert is_nil(Repo.get!(Job, stopped.id).stop_acknowledged_at)
     end
 
-    test "trying again reuses the approval and cannot run twice" do
+    test "trying again approves the issue afresh and cannot run twice" do
       assert {:ok, stopped} = stop_job()
+
+      # The agent commented on the issue while stopped, as it does when it asks
+      # a question; the console synced that comment.
+      Repo.get!(Issue, stopped.issue_id)
+      |> Ecto.Changeset.change(github_updated_at: ~U[2026-09-01 12:00:00.000000Z])
+      |> Repo.update!()
 
       assert {:ok, retry} = Operations.retry_stopped_job(stopped.id, "andreas")
       assert retry.id != stopped.id
       assert retry.state == "queued"
-      assert retry.approval_id == stopped.approval_id
+      assert retry.approval_id != stopped.approval_id
       assert retry.issue_id == stopped.issue_id
+
+      stopped_approval = Repo.get!(PtcManager.Operations.Approval, stopped.approval_id)
+      approval = Repo.get!(PtcManager.Operations.Approval, retry.approval_id)
+      assert approval.decision == stopped_approval.decision
+      assert approval.proposal_id == stopped_approval.proposal_id
+      assert approval.actor == "andreas"
+      assert approval.source_updated_at == ~U[2026-09-01 12:00:00.000000Z]
+      assert approval.source_digest == Repo.get!(Issue, stopped.issue_id).content_digest
       assert retry.required_review_count == stopped.required_review_count
       assert retry.prompt_instructions == stopped.prompt_instructions
       assert retry.fencing_token == 0
