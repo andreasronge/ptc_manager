@@ -245,6 +245,55 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
       do: number |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(40, "0")
   end
 
+  # Bodies that follow the repository's pull request convention and are far too
+  # large to keep whole, so the manifest must choose what to give up.
+  defmodule SectionedBodyClient do
+    def get_json(url) do
+      cond do
+        String.ends_with?(url, "/commits/main") ->
+          {:ok, %{"sha" => sha(999)}}
+
+        String.contains?(url, "/commits?") ->
+          {:ok, []}
+
+        String.contains?(url, "/pulls?") ->
+          {:ok, Enum.map(1..40, &pull_request(1_700 + &1))}
+
+        true ->
+          {:error, {:unexpected_url, url}}
+      end
+    end
+
+    defp pull_request(number) do
+      %{
+        "number" => number,
+        "title" => "Merged PR #{number}",
+        "body" => body(number),
+        "html_url" => "https://github.com/a/r/pull/#{number}",
+        "merged_at" => "2026-08-30T12:00:00Z",
+        "updated_at" => "2026-08-30T12:00:00Z",
+        "merge_commit_sha" => sha(number),
+        "base" => %{"ref" => "main"}
+      }
+    end
+
+    defp body(number) do
+      """
+      ## Summary
+      #{String.duplicate("Prose that a daily update can live without. ", 40)}
+
+      ## Validation
+      Recreated the #{number} reproduction and reran the suite.
+
+      ## Retrospective
+      - Untracked follow-up work: none.
+      """
+    end
+
+    defp sha(number),
+      do: number |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(40, "0")
+  end
+
   defmodule DisappearingPullRequestClient do
     def get_json(url) do
       cond do
@@ -435,5 +484,25 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     assert evidence["pull_request_numbers"] == [1730]
     assert evidence["change_count"] == 1
     assert Process.get(:stable_pull_scan) == 3
+  end
+
+  test "gives up general prose before validation and retrospective material" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, SectionedBodyClient)
+    repository = repository_fixture(%{github_owner: "a", github_name: "r"})
+
+    digest = %DailyDigest{
+      window_started_at: ~U[2026-08-29 22:00:00Z],
+      window_ended_at: ~U[2026-08-30 22:00:00Z]
+    }
+
+    assert {:ok, evidence} = Evidence.fetch(repository, digest)
+    assert evidence["evidence_truncated"]
+    assert evidence |> Jason.encode!() |> byte_size() <= 60_000
+
+    bodies = Enum.map(evidence["pull_requests"], & &1["body"])
+
+    assert Enum.all?(bodies, &(&1["validation"] =~ "reran the suite"))
+    assert Enum.all?(bodies, &(&1["retrospective"] =~ "Untracked follow-up work"))
+    refute Enum.any?(bodies, &Map.has_key?(&1, "summary"))
   end
 end
