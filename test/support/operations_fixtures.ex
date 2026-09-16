@@ -55,6 +55,16 @@ defmodule PtcManager.OperationsFixtures do
     version
   end
 
+  @doc "Enables a built-in automation whose production default is intentionally paused."
+  def enable_automation!(repository, key) do
+    :ok = PtcManager.Automations.ensure_defaults(repository)
+    definition = PtcManager.Automations.get_definition(repository, key)
+
+    definition
+    |> PtcManager.Automations.Definition.changeset(%{enabled: true})
+    |> Repo.update!()
+  end
+
   def issue_fixture(repository, attrs \\ %{}) do
     number = Map.get(attrs, :number, System.unique_integer([:positive]))
     title = Map.get(attrs, :title, "Issue #{number}")

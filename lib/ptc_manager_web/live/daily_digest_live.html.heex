@@ -14,7 +14,7 @@
         </p>
       </div>
       <div class="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 text-xs leading-5 text-slate-400">
-        {@schedule_label} · no historical backfill
+        Generation paused by default · history retained
       </div>
     </div>
   </section>
@@ -25,9 +25,9 @@
     class="rounded-3xl border border-dashed border-white/10 bg-slate-900/40 px-6 py-16 text-center"
   >
     <.icon name="hero-newspaper" class="mx-auto size-10 text-slate-600" />
-    <h2 class="mt-4 text-lg font-semibold">The first update arrives tomorrow morning</h2>
+    <h2 class="mt-4 text-lg font-semibold">Daily updates are paused by default</h2>
     <p class="mx-auto mt-2 max-w-lg text-sm leading-6 text-slate-500">
-      PtcManager will queue one read-only summary of today's merged pull requests and dated direct commits during the night. Older days are intentionally left alone.
+      The digest is awaiting a redesign. Generation settings are available on Automations. Published history remains available here.
     </p>
   </section>
 
@@ -58,7 +58,7 @@
               {short_date(digest.digest_date)} · {digest.repository.github_name}
             </p>
             <h2 class="mt-2 text-sm font-semibold leading-5 text-slate-100">
-              {digest.title || "Daily update is being prepared"}
+              {digest.title || status_label(digest)}
             </h2>
           </div>
           <span class={[
@@ -72,7 +72,7 @@
           {digest.summary}
         </p>
         <p :if={!digest.summary} class="mt-2 text-xs leading-5 text-slate-500">
-          The agent is waiting for the planning lane.
+          {status_detail(digest)}
         </p>
       </.link>
     </aside>
@@ -102,7 +102,7 @@
               {digest_date(@selected_digest.digest_date)}
             </p>
             <h2 class="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-              {@selected_digest.title || "Daily update is being prepared"}
+              {@selected_digest.title || status_label(@selected_digest)}
             </h2>
           </div>
           <span class={[
@@ -151,9 +151,7 @@
           <div>
             <h3 class="text-sm font-semibold">{status_label(@selected_digest)}</h3>
             <p class="mt-1 text-xs leading-5 text-slate-500">
-              {if status(@selected_digest) == "failed",
-                do: "The retained agent output can be inspected from Operations.",
-                else: "This page will update automatically when the agent has saved the Markdown."}
+              {status_detail(@selected_digest)}
             </p>
           </div>
         </div>

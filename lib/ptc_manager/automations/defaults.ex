@@ -179,6 +179,7 @@ defmodule PtcManager.Automations.Defaults do
       key: "daily_digest",
       name: "Daily update",
       description: "Create a private summary of repository changes for one calendar day.",
+      enabled: false,
       target_type: "repository",
       execution_profile: "generic_ephemeral",
       github_access: "read",
@@ -300,22 +301,20 @@ defmodule PtcManager.Automations.Defaults do
   def name(key) when is_binary(key),
     do: Enum.find_value(@definitions, &(&1.key == key && &1.name))
 
-  def triggers("daily_digest", repository) do
-    enabled = repository.github_name == "ptc_runner"
-
+  def triggers("daily_digest", _repository) do
     [
       %{
         trigger_type: "manual",
         surface: "automations",
         label: "Generate update now",
-        enabled: enabled,
+        enabled: false,
         configuration: %{}
       },
       %{
         trigger_type: "schedule",
         surface: "automations",
         label: "Daily at 02:00",
-        enabled: enabled,
+        enabled: false,
         configuration: %{},
         cron_expression: "0 2 * * *",
         time_zone: "Europe/Stockholm"

@@ -641,6 +641,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
   test "runs a daily update in the planning lane and stores its Markdown" do
     repository = repository_fixture(%{github_owner: "andreas", github_name: "runner"})
+    enable_automation!(repository, "daily_digest")
 
     assert {:ok, digest} =
              DailyDigests.enqueue(repository, %{
@@ -676,6 +677,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
   test "rejects model-asserted daily provenance that differs from GET-only evidence" do
     repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
     Process.put(:daily_digest_output_head, String.duplicate("9", 40))
 
     assert {:ok, digest} =
@@ -700,6 +702,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
   test "fails safely before execution when the complete daily prompt exceeds the byte limit" do
     repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
     Application.put_env(:ptc_manager, :planning_source_snapshot, OversizedPromptSourceSnapshot)
 
     assert {:ok, digest} =
@@ -731,6 +734,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
   test "fails a daily update when bounded evidence can never fit" do
     repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
     Process.put(:daily_digest_evidence_result, {:error, :daily_digest_evidence_too_large})
 
     assert {:ok, digest} =
@@ -757,6 +761,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
   test "defers a daily update when GitHub evidence transport is temporarily unavailable" do
     repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
 
     Process.put(
       :daily_digest_evidence_result,

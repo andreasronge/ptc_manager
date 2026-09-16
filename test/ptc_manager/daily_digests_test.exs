@@ -36,6 +36,7 @@ defmodule PtcManager.DailyDigestsTest do
 
   test "queues exactly the previous Stockholm day and is idempotent" do
     repository = repository_fixture(%{github_owner: "andreas", github_name: "runner"})
+    enable_automation!(repository, "daily_digest")
     now = ~U[2026-08-31 00:30:00Z]
 
     assert {:ok, [digest]} = DailyDigests.enqueue_due(now)
@@ -58,7 +59,8 @@ defmodule PtcManager.DailyDigestsTest do
   end
 
   test "does not queue before the configured local hour or backfill older days" do
-    repository_fixture()
+    repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
 
     assert {:ok, []} = DailyDigests.enqueue_due(~U[2026-08-30 23:30:00Z])
     assert Repo.aggregate(DailyDigest, :count) == 0
@@ -78,7 +80,8 @@ defmodule PtcManager.DailyDigestsTest do
   end
 
   test "uses local midnight boundaries across daylight-saving time" do
-    repository_fixture()
+    repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
 
     assert {:ok, [digest]} = DailyDigests.enqueue_due(~U[2026-03-30 00:30:00Z])
     assert digest.digest_date == ~D[2026-03-29]
@@ -88,7 +91,8 @@ defmodule PtcManager.DailyDigestsTest do
   end
 
   test "resolves a daylight-saving gap that begins at midnight" do
-    repository_fixture()
+    repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
     Application.put_env(:ptc_manager, :daily_digest_time_zone, "America/Santiago")
 
     assert {:ok, [digest]} = DailyDigests.enqueue_due(~U[2026-09-07 06:00:00Z])
@@ -99,7 +103,8 @@ defmodule PtcManager.DailyDigestsTest do
   end
 
   test "publishes only the matching action and exact requested window" do
-    repository_fixture()
+    repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
     assert {:ok, [digest]} = DailyDigests.enqueue_due(~U[2026-08-31 00:30:00Z])
 
     result = valid_result(digest)
