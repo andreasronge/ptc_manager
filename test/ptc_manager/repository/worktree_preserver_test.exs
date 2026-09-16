@@ -8,11 +8,13 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
     root = Path.join(base, "worktrees")
     path = Path.join(root, "job")
     artifacts = Path.join(base, "artifacts")
+    write_only_artifacts = Path.join(base, "write-only-artifacts")
     recovered = Path.join(base, "recovered")
     branch = "ptc-manager/issue-12-job-34"
 
     File.mkdir_p!(path)
     File.mkdir_p!(artifacts)
+    File.mkdir_p!(write_only_artifacts)
     File.chmod!(root, 0o700)
     {"", 0} = System.cmd("/bin/chmod", ["1700", artifacts])
     on_exit(fn -> File.rm_rf!(base) end)
@@ -47,7 +49,7 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
     if match?({:unix, :linux}, :os.type()) do
       # Production uses a group-writable drop box that deliberately cannot be
       # listed. The worker must validate and write it without read permission.
-      File.chmod!(artifacts, 0o300)
+      File.chmod!(write_only_artifacts, 0o300)
       token = String.duplicate("d", 24)
       script = Application.app_dir(:ptc_manager, "priv/worktree_preserve.py")
 
@@ -57,16 +59,14 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
           script,
           root,
           path,
-          artifacts,
+          write_only_artifacts,
           "7",
           token,
           branch
         ])
 
       assert status == 0, output
-      File.chmod!(artifacts, 0o700)
-      File.rm_rf!(Path.join(artifacts, "allocation-7-#{token}"))
-      File.chmod!(artifacts, 0o1700)
+      File.chmod!(write_only_artifacts, 0o700)
     end
 
     assert {:ok, result} = WorktreePreserver.preserve(allocation, String.duplicate("x", 24))
