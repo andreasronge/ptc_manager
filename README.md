@@ -933,10 +933,15 @@ independently. The two limits are persisted and editable under **Configuration
 `PTC_LIGHT_AGENT_CAPACITY` and `PTC_HEAVY_AGENT_CAPACITY` only provide the
 initial values for a new database.
 
-Daily updates reuse the planning lane. Oban Lite persists scheduled occurrences
-in the same SQLite database. After 02:00 in `Europe/Stockholm`, it idempotently
-queues one read-only update per enabled repository for the immediately preceding
-local calendar day. It deliberately does not scan or backfill older dates. The
+Daily updates are disabled pending a redesign. Deployments disable their
+definition and triggers and cancel queued legacy update actions, while retaining
+already-published history on the Updates page. Running actions may finish.
+Rolling the migration back re-enables definitions but leaves triggers paused
+and queued actions cancelled; rollback does not restart generation.
+Cancelled update entries remain as terminal history. The existing one-action-per-day
+contract does not regenerate an already recorded date when generation is re-enabled.
+When reintroduced, the existing coordinator can select one local calendar day
+without scanning or backfilling older dates. The
 coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
 commits by their committer timestamp for the exact timezone-aware window. Every
 commit query is pinned to one captured default-branch head. GitHub does not
@@ -948,21 +953,9 @@ SHA, included-change count, or PR numbers that differ from the coordinator manif
 stores the structured result and provenance in SQLite. The Updates page renders
 the Markdown through an HTML sanitizer before displaying it.
 
-The complete generation prompt and schedule are editable per repository on
-**Automations**. `ptc_runner` receives the daily trigger enabled by default;
-`ptc_manager` receives it disabled. Pausing a definition or trigger prevents
-future materialization without changing an already queued invocation.
-
-```sh
-PTC_DAILY_DIGEST_ENABLED=true
-PTC_DAILY_DIGEST_HOUR=2
-PTC_DAILY_DIGEST_TIME_ZONE=Europe/Stockholm
-PTC_DAILY_DIGEST_INTERVAL_MS=60000
-```
-
-The hour is interpreted in the configured time zone, including daylight-saving
-changes. Failed or waiting daily jobs remain visible in Operations and on the
-corresponding Updates entry.
+The dormant generation prompt remains visible on **Automations** for the future
+redesign. Its definition and both built-in triggers default to paused; an
+operator would have to explicitly re-enable them to enqueue work there.
 
 Before an issue-planning agent starts, PtcManager synchronizes the canonical
 GitHub issue, records its content digest, and captures the configured checkout's
@@ -1208,8 +1201,8 @@ configuration and synchronized database records. It never changes the GitHub
 repository or deletes server checkouts, worktrees, branches, pull requests, or
 issues. Existing configured repository paths are preserved during upgrades.
 
-`ptc_manager` intentionally receives daily updates and scheduled nightly checks
-disabled. Its checked-in pre-publication contract runs the same ExDNA
+`ptc_manager` intentionally receives scheduled nightly checks disabled. Its
+checked-in pre-publication contract runs the same ExDNA
 duplication ratchet policy used by `ptc_runner`: known clones live in
 `.duplication-baseline.json`, while `scripts/duplication_gate.sh check` rejects
 new duplication.

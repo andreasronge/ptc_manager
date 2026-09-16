@@ -8,7 +8,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
   alias PtcManager.DeploymentCanary
   alias PtcManager.DisposableDeploymentTarget
   alias PtcManager.OperationalMode
-  alias PtcManager.Operations.{AgentRun, Issue, Proposal, Repository}
+  alias PtcManager.Operations.{AgentAction, AgentRun, Issue, Proposal, Repository}
   alias PtcManager.Repo
 
   setup context do
@@ -421,8 +421,133 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
              """).rows
   end
 
+  @tag migration_opts: [to: 20_260_915_173_000]
+  test "daily update retirement disables triggers and cancels only queued legacy work", %{
+    target: target
+  } do
+    repository = repository_fixture(%{github_name: "ptc_runner"})
+    assert :ok = PtcManager.Automations.ensure_defaults(repository)
+    definition = PtcManager.Automations.get_definition(repository, "daily_digest")
+    schedule = Enum.find(definition.triggers, &(&1.trigger_type == "schedule"))
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    definition
+    |> PtcManager.Automations.Definition.changeset(%{enabled: true})
+    |> Repo.update!()
+
+    schedule
+    |> PtcManager.Automations.Trigger.changeset(%{enabled: true, next_run_at: now})
+    |> Repo.update!()
+
+    queued =
+      insert_action!(repository, definition.current_version, %{
+        action_key: "daily_digest",
+        target_type: "daily_digest",
+        target_id: 1,
+        state: "queued",
+        next_sync_attempt_at: now
+      })
+
+    digest =
+      %PtcManager.DailyDigests.DailyDigest{}
+      |> PtcManager.DailyDigests.DailyDigest.changeset(%{
+        repository_id: repository.id,
+        agent_action_id: queued.id,
+        digest_date: ~D[2026-09-15],
+        window_started_at: ~U[2026-09-14 22:00:00Z],
+        window_ended_at: ~U[2026-09-15 22:00:00Z],
+        time_zone: "Europe/Stockholm"
+      })
+      |> Repo.insert!()
+
+    completed =
+      insert_action!(repository, definition.current_version, %{
+        action_key: "daily_digest",
+        target_type: "daily_digest",
+        target_id: 2,
+        state: "done",
+        ended_at: now
+      })
+
+    running =
+      insert_action!(repository, definition.current_version, %{
+        action_key: "daily_digest",
+        target_type: "daily_digest",
+        target_id: 3,
+        state: "running"
+      })
+
+    other =
+      insert_action!(repository, definition.current_version, %{
+        action_key: "repository_health",
+        target_type: "repository",
+        target_id: repository.id,
+        state: "queued"
+      })
+
+    invocation =
+      %PtcManager.Automations.Invocation{}
+      |> PtcManager.Automations.Invocation.changeset(%{
+        repository_id: repository.id,
+        automation_definition_version_id: definition.current_version.id,
+        automation_trigger_id: schedule.id,
+        agent_action_id: queued.id,
+        trigger_type: "schedule",
+        trigger_context: %{},
+        occurrence_key: "legacy-daily-update",
+        state: "queued",
+        requested_by: "scheduler",
+        requested_at: now
+      })
+      |> Repo.insert!()
+
+    target = DisposableDeploymentTarget.migrate_remaining!(target)
+
+    retired = PtcManager.Automations.get_definition(repository, "daily_digest")
+    refute retired.enabled
+    refute Enum.any?(retired.triggers, & &1.enabled)
+    assert Enum.all?(retired.triggers, &is_nil(&1.next_run_at))
+
+    assert %{state: "cancelled", next_sync_attempt_at: nil, ended_at: %DateTime{}} =
+             Repo.get!(AgentAction, queued.id)
+
+    assert Repo.get!(AgentAction, completed.id).state == "done"
+    assert Repo.get!(AgentAction, running.id).state == "running"
+    assert Repo.get!(AgentAction, other.id).state == "queued"
+    assert Repo.get!(PtcManager.Automations.Invocation, invocation.id).state == "cancelled"
+
+    assert PtcManager.DailyDigests.status(PtcManager.DailyDigests.get_digest(digest.id)) ==
+             "cancelled"
+
+    _target = DisposableDeploymentTarget.rollback!(target, step: 1)
+    rolled_back = PtcManager.Automations.get_definition(repository, "daily_digest")
+    assert rolled_back.enabled
+    refute Enum.any?(rolled_back.triggers, & &1.enabled)
+    assert Repo.get!(AgentAction, queued.id).state == "cancelled"
+    assert Repo.get!(PtcManager.Automations.Invocation, invocation.id).state == "cancelled"
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)
   defp restore_env(key, value), do: Application.put_env(:ptc_manager, key, value)
+
+  defp insert_action!(repository, version, attrs) do
+    defaults = %{
+      repository_id: repository.id,
+      automation_definition_version_id: version.id,
+      target_label: "Legacy action",
+      prompt_version: version.version,
+      prompt: "Legacy prompt",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "fixture",
+      attempt_count: 0,
+      requested_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    }
+
+    %AgentAction{}
+    |> AgentAction.changeset(Map.merge(defaults, attrs))
+    |> Repo.insert!()
+  end
 
   defp publication_schema(repo) do
     Ecto.Adapters.SQL.query!(

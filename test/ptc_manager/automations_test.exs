@@ -1039,16 +1039,18 @@ defmodule PtcManager.AutomationsTest do
     ])
   end
 
-  test "repository defaults include disabled schedules where updates are not relevant" do
+  test "daily updates are disabled by default for every repository" do
     runner = repository_fixture(%{github_name: "ptc_runner"})
     manager = repository_fixture(%{github_name: "ptc_manager"})
 
     runner_digest = Automations.get_definition(runner, "daily_digest")
     manager_digest = Automations.get_definition(manager, "daily_digest")
 
-    assert Enum.any?(runner_digest.triggers, &(&1.trigger_type == "schedule" and &1.enabled))
+    refute runner_digest.enabled
+    refute manager_digest.enabled
+    refute Enum.any?(runner_digest.triggers, &(&1.trigger_type == "schedule" and &1.enabled))
     refute Enum.any?(manager_digest.triggers, &(&1.trigger_type == "schedule" and &1.enabled))
-    assert Enum.any?(runner_digest.triggers, &(&1.trigger_type == "manual" and &1.enabled))
+    refute Enum.any?(runner_digest.triggers, &(&1.trigger_type == "manual" and &1.enabled))
     refute Enum.any?(manager_digest.triggers, &(&1.trigger_type == "manual" and &1.enabled))
   end
 
@@ -1081,7 +1083,7 @@ defmodule PtcManager.AutomationsTest do
     assert {:ok, _deleted} = Automations.delete_trigger(extra)
 
     assert Automations.trigger_summary(Automations.get_definition(repository, "daily_digest")) ==
-             "Every day at 02:00 · Run now"
+             "Paused"
 
     assert Automations.slug_key(repository, "Daily digest") == "daily_digest_2"
     assert Automations.slug_key(repository, "2 Fast & Furious") == "automation_2_fast_furious"

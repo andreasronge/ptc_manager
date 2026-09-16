@@ -198,8 +198,11 @@ defmodule PtcManager.DailyDigests do
       ) ->
         digest.agent_action.state
 
-      match?(%AgentAction{state: "failed"}, digest.agent_action) ->
-        "failed"
+      match?(
+        %AgentAction{state: state} when state in ["failed", "cancelled"],
+        digest.agent_action
+      ) ->
+        digest.agent_action.state
 
       true ->
         "pending"

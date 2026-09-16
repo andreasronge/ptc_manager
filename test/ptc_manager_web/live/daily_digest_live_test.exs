@@ -10,23 +10,13 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
 
     assert html =~ "What changed"
     assert has_element?(view, "nav", "Updates")
-    assert has_element?(view, "#daily-digest-empty", "first update arrives tomorrow morning")
-    assert html =~ "no historical backfill"
+    assert has_element?(view, "#daily-digest-empty", "Daily updates are paused")
+    assert html =~ "Published history remains available"
   end
 
-  test "shows the configured local generation schedule", %{conn: conn} do
-    previous_hour = Application.get_env(:ptc_manager, :daily_digest_hour)
-    previous_zone = Application.get_env(:ptc_manager, :daily_digest_time_zone)
-    Application.put_env(:ptc_manager, :daily_digest_hour, 6)
-    Application.put_env(:ptc_manager, :daily_digest_time_zone, "Europe/Helsinki")
-
-    on_exit(fn ->
-      Application.put_env(:ptc_manager, :daily_digest_hour, previous_hour)
-      Application.put_env(:ptc_manager, :daily_digest_time_zone, previous_zone)
-    end)
-
+  test "shows that generation is paused while history is retained", %{conn: conn} do
     {:ok, _view, html} = conn |> authenticated_conn() |> live(~p"/updates")
-    assert html =~ "Generated after 06:00 Europe/Helsinki"
+    assert html =~ "Generation paused by default · history retained"
   end
 
   test "renders a published update and sanitizes model-generated Markdown", %{conn: conn} do
@@ -96,6 +86,8 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
   end
 
   defp digest_fixture(repository) do
+    enable_automation!(repository, "daily_digest")
+
     assert {:ok, digest} =
              DailyDigests.enqueue(repository, %{
                date: ~D[2026-08-30],
@@ -105,6 +97,23 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
              })
 
     digest
+  end
+
+  test "cancelled generation is terminal and does not promise a future report", %{conn: conn} do
+    digest = repository_fixture() |> digest_fixture()
+
+    digest.agent_action
+    |> AgentAction.changeset(%{
+      state: "cancelled",
+      last_error: "Daily updates are disabled pending redesign."
+    })
+    |> Repo.update!()
+
+    {:ok, view, html} = conn |> authenticated_conn() |> live(~p"/updates/#{digest.id}")
+    assert has_element?(view, "#daily-digest-detail", "Generation cancelled")
+    refute has_element?(view, "#daily-digest-detail [class*='animate-spin']")
+    refute html =~ "waiting for the planning lane"
+    refute html =~ "will update automatically"
   end
 
   defp authenticated_conn(conn),

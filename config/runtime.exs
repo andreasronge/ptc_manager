@@ -99,42 +99,6 @@ herdr_git_binary =
 dispatch_enabled = not demo_mode and System.get_env("PTC_DISPATCH_ENABLED") == "true"
 agent_actions_enabled = not demo_mode and System.get_env("PTC_AGENT_ACTIONS_ENABLED") == "true"
 
-daily_digest_enabled =
-  if demo_mode do
-    false
-  else
-    case System.get_env("PTC_DAILY_DIGEST_ENABLED") do
-      nil -> agent_actions_enabled
-      "true" -> true
-      "false" -> false
-      _value -> raise "PTC_DAILY_DIGEST_ENABLED must be true or false when set"
-    end
-  end
-
-if daily_digest_enabled and not agent_actions_enabled do
-  raise "PTC_DAILY_DIGEST_ENABLED requires PTC_AGENT_ACTIONS_ENABLED=true"
-end
-
-daily_digest_interval_ms =
-  if(demo_mode,
-    do: 60_000,
-    else: System.get_env("PTC_DAILY_DIGEST_INTERVAL_MS", "60000") |> String.to_integer()
-  )
-
-if daily_digest_interval_ms < 1_000 do
-  raise "PTC_DAILY_DIGEST_INTERVAL_MS must be at least 1000"
-end
-
-daily_digest_hour =
-  if(demo_mode,
-    do: 2,
-    else: System.get_env("PTC_DAILY_DIGEST_HOUR", "2") |> String.to_integer()
-  )
-
-if daily_digest_hour not in 0..23 do
-  raise "PTC_DAILY_DIGEST_HOUR must be between 0 and 23"
-end
-
 publication_enabled = not demo_mode and System.get_env("PTC_PUBLICATION_ENABLED") == "true"
 
 implementation_agent_publishes_pr =
@@ -262,10 +226,10 @@ config :ptc_manager,
       "PTC_PLANNING_SNAPSHOT_PERMISSION_CHECK",
       if(System.get_env("RELEASE_NAME"), do: "true", else: "false")
     ) == "true",
-  daily_digest_enabled: daily_digest_enabled,
-  daily_digest_interval_ms: daily_digest_interval_ms,
-  daily_digest_hour: daily_digest_hour,
-  daily_digest_time_zone: System.get_env("PTC_DAILY_DIGEST_TIME_ZONE", "Europe/Stockholm"),
+  daily_digest_enabled: false,
+  daily_digest_interval_ms: 60_000,
+  daily_digest_hour: 2,
+  daily_digest_time_zone: "Europe/Stockholm",
   external_pr_run_as_user: System.get_env("PTC_EXTERNAL_PR_RUN_AS_USER", "ptc-manager-external"),
   external_pr_group: System.get_env("PTC_EXTERNAL_PR_GROUP", "ptc-manager-external"),
   external_pr_worktree_root:

@@ -582,7 +582,7 @@ defmodule PtcManager.Automations do
         key: spec.key,
         name: spec.name,
         description: spec.description,
-        enabled: true
+        enabled: Map.get(spec, :enabled, true)
       })
     )
     |> Multi.insert(:version, fn %{definition: definition} ->

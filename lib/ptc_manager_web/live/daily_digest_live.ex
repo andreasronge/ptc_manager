@@ -13,7 +13,6 @@ defmodule PtcManagerWeb.DailyDigestLive do
      |> assign(:page_title, "Updates")
      |> assign(:selected_repository, nil)
      |> assign(:repositories, Operations.list_repositories())
-     |> assign(:schedule_label, schedule_label())
      |> assign(:selected_digest, nil)
      |> load_digests()}
   end
@@ -106,12 +105,22 @@ defmodule PtcManagerWeb.DailyDigestLive do
   def status_label(%{agent_action: %{state: "running"}}), do: "Writing now"
   def status_label(%{agent_action: %{state: "sync_pending"}}), do: "Saving"
   def status_label(%{agent_action: %{state: "failed"}}), do: "Generation failed"
+  def status_label(%{agent_action: %{state: "cancelled"}}), do: "Generation cancelled"
   def status_label(_digest), do: "Queued"
+
+  def status_detail(digest) do
+    case status(digest) do
+      "cancelled" -> "This update was cancelled. Its record is retained in Operations."
+      "failed" -> "The retained agent output can be inspected from Operations."
+      _ -> "This page will update automatically when the agent has saved the Markdown."
+    end
+  end
 
   def status_classes(digest) do
     case status(digest) do
       "published" -> "bg-teal-400/15 text-teal-300 ring-teal-400/20"
       "failed" -> "bg-rose-400/15 text-rose-300 ring-rose-400/20"
+      "cancelled" -> "bg-slate-400/15 text-slate-300 ring-slate-400/20"
       "running" -> "bg-sky-400/15 text-sky-300 ring-sky-400/20"
       "sync_pending" -> "bg-violet-400/15 text-violet-300 ring-violet-400/20"
       _state -> "bg-amber-400/15 text-amber-300 ring-amber-400/20"
@@ -135,10 +144,4 @@ defmodule PtcManagerWeb.DailyDigestLive do
   end
 
   defp repository_key(repository), do: "#{repository.github_owner}/#{repository.github_name}"
-
-  defp schedule_label do
-    hour = Application.get_env(:ptc_manager, :daily_digest_hour, 2)
-    time_zone = Application.get_env(:ptc_manager, :daily_digest_time_zone, "Europe/Stockholm")
-    "Generated after #{hour |> Integer.to_string() |> String.pad_leading(2, "0")}:00 #{time_zone}"
-  end
 end
