@@ -156,6 +156,33 @@ defmodule PtcManager.DailyDigests.PullRequestBodyTest do
       end
     end
 
+    test "only a matching fence of sufficient length closes a code block" do
+      for nested <- ["```", "~~~", "````not a closing fence"] do
+        body =
+          "## Summary\n````markdown\n#{nested}\n## Validation\nexample only\n````\n## Validation\nreal check"
+
+        sections = PullRequestBody.extract(body)
+        assert sections["summary"] =~ "## Validation\nexample only"
+        assert sections["validation"] == "real check"
+      end
+    end
+
+    test "section boundaries use the actual heading level" do
+      for level <- 1..5 do
+        heading = String.duplicate("#", level)
+        child = heading <> "#"
+
+        body =
+          "#{heading} Validation\nreal check\n#{child} Summary\nnested detail\n#{heading} Notes\nunrelated"
+
+        sections = PullRequestBody.extract(body)
+        assert sections["validation"] =~ "nested detail"
+        refute sections["validation"] =~ "unrelated"
+        refute Map.has_key?(sections, "summary")
+        assert sections["preamble"] =~ "unrelated"
+      end
+    end
+
     test "an unrecognised heading keeps its own title in the prose" do
       sections = PullRequestBody.extract("Top prose.\n\n## Notes\nsomething\n")
 

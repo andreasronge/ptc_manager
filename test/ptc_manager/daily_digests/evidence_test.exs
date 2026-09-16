@@ -295,21 +295,36 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
   defmodule LongBodyClient do
     def get_json(url) do
       cond do
-        String.ends_with?(url, "/commits/main") -> {:ok, %{"sha" => Fixture.sha(999)}}
-        String.contains?(url, "/commits?") -> {:ok, []}
-        String.contains?(url, "/pulls?") -> {:ok, Enum.map(1..20, &pull_request(1_780 + &1))}
-        true -> {:error, {:unexpected_url, url}}
+        String.ends_with?(url, "/commits/main") ->
+          {:ok, %{"sha" => Fixture.sha(999)}}
+
+        String.contains?(url, "/commits?") ->
+          {:ok, Process.get(:long_body_commits, [])}
+
+        String.contains?(url, "/commits/") ->
+          {:ok, []}
+
+        String.contains?(url, "/pulls?") ->
+          {:ok, Enum.map(1..Process.get(:long_body_count, 20), &pull_request(1_780 + &1))}
+
+        true ->
+          {:error, {:unexpected_url, url}}
       end
     end
 
     defp pull_request(number),
       do:
         Fixture.pull_request(number, %{
-          "body" => if(number == 1799, do: nil, else: body(number))
+          "body" =>
+            if(number == 1799,
+              do: nil,
+              else: Process.get(:long_body_plain) || body(number)
+            )
         })
 
     defp body(number) do
       """
+      #{Process.get(:long_body_preamble, "")}
       ## Summary
       #{String.duplicate("What #{number} changed, at length. ", 60)}
 
@@ -467,7 +482,8 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     assert evidence["change_count"] == 80
     assert length(evidence["pull_request_numbers"]) == 40
     assert evidence["evidence_truncated"]
-    assert Enum.all?(evidence["pull_requests"], &(not Map.has_key?(&1, "body")))
+    assert Enum.all?(evidence["pull_requests"], &(byte_size(&1["body"]["preamble"]) <= 400))
+    assert Enum.all?(evidence["pull_requests"], &(&1["body_coverage"] == "shortened"))
     assert evidence |> Jason.encode!() |> byte_size() <= 60_000
   end
 
@@ -563,5 +579,59 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     empty = Enum.find(evidence["pull_requests"], &(&1["number"] == 1799))
     assert empty["body_coverage"] == "none_written"
     refute Map.has_key?(empty, "body")
+  end
+
+  test "a busy day drops preambles before giving up shortened priority sections" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, LongBodyClient)
+    Process.put(:long_body_preamble, String.duplicate("Optional introductory prose. ", 30))
+    repository = repository_fixture(%{github_owner: "a", github_name: "r"})
+
+    digest = %DailyDigest{
+      window_started_at: ~U[2026-08-29 22:00:00Z],
+      window_ended_at: ~U[2026-08-30 22:00:00Z]
+    }
+
+    for {count, coverage} <- [{30, "shortened_priority"}, {40, "primary"}, {50, "primary"}] do
+      Process.put(:long_body_count, count)
+      assert {:ok, evidence} = Evidence.fetch(repository, digest)
+      assert evidence |> Jason.encode!() |> byte_size() <= 60_000
+      described = Enum.reject(evidence["pull_requests"], &(&1["body_coverage"] == "none_written"))
+      assert length(described) == count - 1
+      assert Enum.all?(described, &(&1["body"]["summary"] != nil))
+      assert Enum.all?(described, &(&1["body_coverage"] == coverage))
+    end
+  end
+
+  test "compaction preserves plain descriptions with a busy direct-commit feed" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, LongBodyClient)
+    Process.put(:long_body_count, 50)
+    Process.put(:long_body_plain, String.duplicate("Useful description of what changed. ", 30))
+
+    Process.put(
+      :long_body_commits,
+      Enum.map(1..20, fn number ->
+        %{
+          "sha" => Fixture.sha(number),
+          "html_url" => "https://github.com/a/r/commit/#{Fixture.sha(number)}",
+          "commit" => %{
+            "message" => String.duplicate("Direct change. ", 15),
+            "committer" => %{"date" => "2026-08-30T12:00:00Z"}
+          }
+        }
+      end)
+    )
+
+    repository = repository_fixture(%{github_owner: "a", github_name: "r"})
+
+    digest = %DailyDigest{
+      window_started_at: ~U[2026-08-29 22:00:00Z],
+      window_ended_at: ~U[2026-08-30 22:00:00Z]
+    }
+
+    assert {:ok, evidence} = Evidence.fetch(repository, digest)
+    assert evidence["evidence_truncated"]
+    assert evidence |> Jason.encode!() |> byte_size() <= 60_000
+    described = Enum.reject(evidence["pull_requests"], &(&1["body_coverage"] == "none_written"))
+    assert Enum.all?(described, &(&1["body"]["preamble"] != nil))
   end
 end

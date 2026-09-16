@@ -1,7 +1,7 @@
 {
   "clones": {
     "0323d1ae813b5dc5f2007d4cdb204a6ef5918269d84f66aa7daffd1604b0dc97": {
-      "describe": "type_i mass=44 test/ptc_manager/maintainer_actions_test.exs:1619 <-> test/ptc_manager/maintainer_actions_test.exs:1667",
+      "describe": "type_i mass=44 test/ptc_manager/maintainer_actions_test.exs:2020 <-> test/ptc_manager/maintainer_actions_test.exs:2068",
       "files": [
         "test/ptc_manager/maintainer_actions_test.exs"
       ],
@@ -14,24 +14,6 @@
         {
           "file": "test/ptc_manager/maintainer_actions_test.exs",
           "snippet": "d85fa11e7a4ece82fab60ffb5b62656f63b8d1d08101155f58d5f6fd55e000e7"
-        }
-      ],
-      "type": "type_i"
-    },
-    "1831cfe3194034d31bdf7a7aa21a29e76750bb84796083bb11b22b0ffd39edb3": {
-      "describe": "type_i mass=70 test/ptc_manager/daily_digests/evidence_test.exs:172 <-> test/ptc_manager/daily_digests/evidence_test.exs:230",
-      "files": [
-        "test/ptc_manager/daily_digests/evidence_test.exs"
-      ],
-      "mass": 70,
-      "occurrences": [
-        {
-          "file": "test/ptc_manager/daily_digests/evidence_test.exs",
-          "snippet": "efce1487e599df6328ba46815a5981852d3959ae90f78d245f5fafafd6d5506e"
-        },
-        {
-          "file": "test/ptc_manager/daily_digests/evidence_test.exs",
-          "snippet": "efce1487e599df6328ba46815a5981852d3959ae90f78d245f5fafafd6d5506e"
         }
       ],
       "type": "type_i"
@@ -56,7 +38,7 @@
       "type": "type_i"
     },
     "37b225a59d1e865ca4ba6418d8bc247bfea1942a544391f48a3bec5719f7186e": {
-      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:263 <-> lib/ptc_manager/publications.ex:696",
+      "describe": "type_ii mass=32 lib/ptc_manager/publications.ex:352 <-> lib/ptc_manager/publications.ex:799",
       "files": [
         "lib/ptc_manager/publications.ex"
       ],
@@ -74,7 +56,7 @@
       "type": "type_ii"
     },
     "783b496d5d795552c0ca880578926d416175869c26d3fcd820b3e399fc2b1cef": {
-      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:1546 <-> lib/ptc_manager/operations.ex:1647",
+      "describe": "type_i mass=32 lib/ptc_manager/operations.ex:2520 <-> lib/ptc_manager/operations.ex:2621",
       "files": [
         "lib/ptc_manager/operations.ex"
       ],
@@ -92,7 +74,7 @@
       "type": "type_i"
     },
     "fbc70885d4484ad6437957b435937ea1d958995333e2a602d5e0453a627d00c7": {
-      "describe": "type_i mass=93 test/ptc_manager/maintainer_actions_test.exs:951 <-> test/ptc_manager/maintainer_actions_test.exs:999",
+      "describe": "type_i mass=93 test/ptc_manager/maintainer_actions_test.exs:1134 <-> test/ptc_manager/maintainer_actions_test.exs:1182",
       "files": [
         "test/ptc_manager/maintainer_actions_test.exs"
       ],

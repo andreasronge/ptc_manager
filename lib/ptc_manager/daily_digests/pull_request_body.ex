@@ -34,9 +34,10 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
 
   @section_limit 1_500
   @preamble_limit 600
+  @shortened_section_bytes 400
 
   @heading ~r/\A\s{0,3}(?<hashes>[#]{1,6})\s+(?<title>.*?)\s*[#]*\s*\z/
-  @fence ~r/\A\s{0,3}(?:```|~~~)/
+  @fence ~r/\A[ ]{0,3}(?<marker>`{3,}|~{3,})(?<tail>.*)\z/
 
   @doc """
   Splits `body` into bounded sections keyed by `summary`, `validation`,
@@ -54,7 +55,7 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
 
     body
     |> String.split(["\r\n", "\n"])
-    |> Enum.reduce({@preamble, nil, %{}}, &collect_line/2)
+    |> Enum.reduce({{@preamble, nil}, nil, %{}}, &collect_line/2)
     |> elem(2)
     |> Enum.reduce(%{}, fn {key, lines}, sections ->
       limit = if key == @preamble, do: preamble_limit, else: section_limit
@@ -85,6 +86,29 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
 
   def priority_only(_sections), do: nil
 
+  @doc "Ordered body reductions shared by the manifest and its preview."
+  def compaction_steps do
+    [
+      {:priority, &preferred_sections/1},
+      {:shortened, &shorten(&1, @shortened_section_bytes)},
+      {:shortened_priority, &(&1 |> preferred_sections() |> shorten(@shortened_section_bytes))},
+      {:primary, &primary_section/1},
+      {:dropped, fn _sections -> nil end}
+    ]
+  end
+
+  # A plain description is the only account of a change when no headings exist.
+  # Priority compaction must not erase it before a shorter version can be tried.
+  defp preferred_sections(sections), do: priority_only(sections) || sections
+
+  defp primary_section(sections) when is_map(sections) do
+    Enum.find_value(@priority ++ [@preamble], fn key ->
+      if is_binary(sections[key]), do: shorten(%{key => sections[key]}, @shortened_section_bytes)
+    end)
+  end
+
+  defp primary_section(_sections), do: nil
+
   @doc """
   Shortens every section already extracted to `limit` bytes.
 
@@ -111,52 +135,58 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
   # A fenced block's contents are not Markdown structure. A shell comment inside
   # one looks exactly like an ATX heading, and treating it as a section boundary
   # cuts the block in half and strands the rest of the section in prose.
-  defp collect_line(line, {current, fence, collected}) do
-    cond do
-      Regex.match?(@fence, line) ->
-        {current, toggle_fence(fence, line), keep(collected, current, line)}
+  defp collect_line(line, {{key, _level} = current, fence, collected}) do
+    marker = Regex.named_captures(@fence, line)
 
-      is_binary(fence) ->
-        {current, fence, keep(collected, current, line)}
+    cond do
+      fence != nil ->
+        next_fence = if closes_fence?(marker, fence), do: nil, else: fence
+        {current, next_fence, keep(collected, key, line)}
+
+      opens_fence?(marker) ->
+        {current, marker["marker"], keep(collected, key, line)}
 
       true ->
         case heading(line, current) do
-          nil -> {current, fence, keep(collected, current, line)}
-          {key, nil} -> {key, fence, collected}
-          {key, text} -> {key, fence, keep(collected, key, text)}
+          nil -> {current, fence, keep(collected, key, line)}
+          {next, nil} -> {next, fence, collected}
+          {{next_key, _} = next, text} -> {next, fence, keep(collected, next_key, text)}
         end
     end
   end
 
-  defp toggle_fence(nil, line), do: line |> String.trim_leading() |> String.slice(0, 3)
-  defp toggle_fence(_open, _line), do: nil
+  defp opens_fence?(nil), do: false
+
+  defp opens_fence?(%{"marker" => marker, "tail" => tail}),
+    do: String.starts_with?(marker, "~") or not String.contains?(tail, "`")
+
+  defp closes_fence?(nil, _open), do: false
+
+  defp closes_fence?(%{"marker" => marker, "tail" => tail}, open),
+    do: String.starts_with?(marker, open) and String.trim(tail) == ""
 
   defp keep(collected, key, line), do: Map.update(collected, key, [line], &[line | &1])
 
   # A heading only closes a section at its own level or above. A `###` step
   # inside `## Validation` is part of that validation, not the end of it.
-  defp heading(line, current) do
+  defp heading(line, {current, current_level}) do
     case Regex.named_captures(@heading, line) do
       %{"hashes" => hashes, "title" => title} ->
         level = byte_size(hashes)
         key = Map.get(@known, normalize(title), @preamble)
 
         cond do
-          key != @preamble -> {key, nil}
-          current != @preamble and level > level_of(current) -> nil
+          current != @preamble and level > current_level -> nil
+          key != @preamble -> {{key, level}, nil}
           # An unrecognized heading becomes prose, keeping its own title so the
           # preamble reads as text rather than orphaned lines.
-          true -> {@preamble, title}
+          true -> {{@preamble, nil}, title}
         end
 
       nil ->
         nil
     end
   end
-
-  # Known sections are written at level two by every convention this reads, so
-  # a deeper heading inside one is a sub-heading rather than the next section.
-  defp level_of(_known_section), do: 2
 
   defp normalize(title) do
     title

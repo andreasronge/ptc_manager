@@ -48,12 +48,10 @@ defmodule Mix.Tasks.Ptc.Digest.Preview do
     shell.info("\nUnder manifest pressure, in the order they are given up:")
 
     Enum.each(
-      [
-        {"prose dropped", PullRequestBody.priority_only(sections)},
-        {"sections shortened",
-         sections |> PullRequestBody.priority_only() |> PullRequestBody.shorten(400)}
-      ],
-      fn {label, kept} ->
+      PullRequestBody.compaction_steps(),
+      fn {stage, reduce_body} ->
+        label = stage |> Atom.to_string() |> String.replace("_", " ")
+        kept = reduce_body.(sections)
         shell.info("\n  [#{label}]#{if kept, do: "", else: " nothing; the body is dropped"}")
         if kept, do: Enum.each(@order, &report_section(shell, kept, &1))
       end

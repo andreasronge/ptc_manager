@@ -11,7 +11,6 @@ defmodule PtcManager.DailyDigests.Evidence do
   @max_pull_requests 50
   @max_direct_commits 50
   @max_manifest_bytes 60_000
-  @shortened_section_bytes 400
 
   def fetch(%Repository{} = repository, %DailyDigest{} = digest) do
     client = Application.get_env(:ptc_manager, :daily_digest_github_client, Client)
@@ -223,14 +222,8 @@ defmodule PtcManager.DailyDigests.Evidence do
   # falls straight from whole bodies to none, which is less than the flat slice
   # this replaced would have kept.
   defp compact_manifest(manifest) do
-    ladder = [
-      {:priority, &PullRequestBody.priority_only/1},
-      {:shortened, &PullRequestBody.shorten(&1, @shortened_section_bytes)},
-      {:dropped, fn _sections -> nil end}
-    ]
-
     Enum.find_value(
-      ladder,
+      PullRequestBody.compaction_steps(),
       {:error, :daily_digest_evidence_too_large},
       fn {coverage, reduce_body} ->
         compact = compact_bodies(manifest, coverage, reduce_body)
