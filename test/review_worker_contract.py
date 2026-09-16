@@ -14,6 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 helper = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
 review = helper['review']
+regenerated_patch = helper['regenerated_patch']
 context = review.__globals__
 
 
@@ -236,6 +237,56 @@ class ReviewerContract(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'review_diff_digest_changed'):
                 review(request)
             self.assertEqual(len(calls), 1)
+
+    def test_large_patch_recovers_the_source_checkout_index_width(self):
+        request = self.request()
+        body = '+' + 'x' * 600_000 + '\n'
+        source_patch = ('diff --git a/other b/other\n'
+                        'index 987654321..fedcba987 100644\n+x\n'
+                        'diff --git a/schema b/schema\n'
+                        'index 123456789..abcdef012 100644\n' + body)
+        # The first header can have two long unique prefixes while a later one
+        # reveals the snapshot's shorter default on only one side.
+        snapshot_patch = source_patch.replace('123456789..abcdef012', '12345678..abcdef012')
+        request['evidence'] = {
+            'diff_on_disk': True,
+            'head_sha': 'a' * 40,
+            'base_sha': 'b' * 40,
+            'diff_digest': hashlib.sha256(source_patch.encode()).hexdigest(),
+        }
+        expected = {'summary': 'clear', 'findings': []}
+        git_calls = []
+
+        def fake_run(args, prompt=None, cwd=None, **kwargs):
+            if args[0] == '/usr/bin/git':
+                git_calls.append(args)
+                return source_patch if '--abbrev=9' in args else snapshot_patch
+            patch_path = prompt.split('The complete diff is available locally at ')[1]
+            self.assertEqual(Path(patch_path).read_text(), source_patch)
+            Path(args[args.index('-o') + 1]).write_text(json.dumps(expected))
+            return json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'})
+
+        with patch.dict(context, run=fake_run):
+            self.assertEqual(review(request)['result'], expected)
+        self.assertEqual(len(git_calls), 2)
+        self.assertIn('--abbrev=9', git_calls[1])
+
+    def test_patch_regeneration_retries_share_one_deadline(self):
+        snapshot_patch = ('diff --git a/schema b/schema\n'
+                          'index 12345678..abcdef01 100644\n+x\n')
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs['timeout']))
+            return snapshot_patch
+
+        with patch.dict(context, run=fake_run), \
+                patch.object(context['time'], 'monotonic', side_effect=[9.0, 10.0]):
+            with self.assertRaisesRegex(RuntimeError, 'review_timeout'):
+                regenerated_patch('/snapshot', 'b' * 40, 'a' * 40, '0' * 64, 10.0)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], 1.0)
 
     def test_each_provider_uses_selected_model_and_structured_result(self):
         expected = {'summary': 'clear', 'findings': []}

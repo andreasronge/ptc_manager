@@ -189,6 +189,40 @@ def review(request):
         return result
 
 
+def regenerated_patch(repository_path, base, head, expected_digest, deadline):
+    args = ["/usr/bin/git", "-c", "safe.directory=" + repository_path,
+            "-C", repository_path, "diff", "--binary", "--no-renames", "--no-ext-diff",
+            "--no-textconv", base + ".." + head]
+
+    def render(command):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("review_timeout")
+        return run(command, timeout=min(30, remaining), max_output=50_000_000)
+
+    patch = render(args)
+    if hashlib.sha256(patch.encode()).hexdigest() == expected_digest:
+        return patch
+
+    # Git chooses an index-header abbreviation from the number of objects in the
+    # repository. A source checkout and its exact-commit snapshot can therefore
+    # render identical changes with different index widths. Retry the nearby
+    # widths while still requiring the recorder's exact digest.
+    indexes = re.findall(r"(?m)^index ([a-f0-9]{4,64})\.\.([a-f0-9]{4,64})(?: |$)", patch)
+    if indexes:
+        width = min(len(object_id) for pair in indexes for object_id in pair)
+        widths = [candidate for distance in range(1, 9)
+                  for candidate in (width + distance, width - distance)
+                  if 4 <= candidate <= 64]
+        for candidate in dict.fromkeys(widths):
+            retry_args = args[:6] + ["--abbrev=" + str(candidate)] + args[6:]
+            candidate_patch = render(retry_args)
+            if hashlib.sha256(candidate_patch.encode()).hexdigest() == expected_digest:
+                return candidate_patch
+
+    raise RuntimeError("review_diff_digest_changed")
+
+
 def run_review(request, remaining=None):
     settings = request["settings"]
     timeout_ms = settings.get("review_timeout_ms", 900_000)
@@ -244,11 +278,8 @@ def run_review(request, remaining=None):
             head, base = request["evidence"]["head_sha"], request["evidence"]["base_sha"]
             if not all(re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", sha) for sha in (head, base)):
                 raise RuntimeError("invalid_review_commit")
-            patch = run(["/usr/bin/git", "-c", "safe.directory=" + repository_path,
-                         "-C", repository_path, "diff", "--binary", "--no-renames", "--no-ext-diff",
-                         "--no-textconv", base + ".." + head], timeout=min(30, timeout), max_output=50_000_000)
-            if hashlib.sha256(patch.encode()).hexdigest() != request["evidence"]["diff_digest"]:
-                raise RuntimeError("review_diff_digest_changed")
+            patch = regenerated_patch(repository_path, base, head,
+                                      request["evidence"]["diff_digest"], deadline)
             patch_path = os.path.join(directory, "review.patch")
             with open(patch_path, "x") as output:
                 output.write(patch)
