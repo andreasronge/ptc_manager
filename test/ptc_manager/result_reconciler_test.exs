@@ -379,6 +379,171 @@ defmodule PtcManager.ResultReconcilerTest do
     assert next_claimed.id == second_job.id
   end
 
+  test "a protocol v1 job is unaffected by an absent outcome report" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+    head = String.duplicate("b", 40)
+
+    Process.put(
+      :result_probe_result,
+      {:ok,
+       %{
+         base_sha: String.duplicate("a", 40),
+         head_sha: head,
+         diff_digest: String.duplicate("c", 64),
+         commit_count: 2
+       }}
+    )
+
+    assert {:ok, ready} =
+             ResultReconciler.run_job(job.id, probe: FakeProbe, contract_provider: FakeContract)
+
+    assert ready.result_head_sha == head
+    assert ready.result_completion == nil
+  end
+
+  describe "outcome protocol v2" do
+    @head String.duplicate("b", 40)
+
+    setup do
+      directory =
+        Path.join(System.tmp_dir!(), "ptc-outcome-v2-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(directory)
+      previous = Application.get_env(:ptc_manager, :agent_action_output_dir)
+      Application.put_env(:ptc_manager, :agent_action_output_dir, directory)
+
+      on_exit(fn ->
+        Application.put_env(:ptc_manager, :agent_action_output_dir, previous)
+        File.rm_rf(directory)
+      end)
+
+      {_repository, _issue, job} = awaiting_job_fixture()
+      job = protocol_v2_job(job)
+
+      Process.put(
+        :result_probe_result,
+        {:ok,
+         %{
+           base_sha: String.duplicate("a", 40),
+           head_sha: @head,
+           diff_digest: String.duplicate("c", 64),
+           commit_count: 2
+         }}
+      )
+
+      {:ok, job: job}
+    end
+
+    test "accepts completion material reported for the probed head", %{job: job} do
+      write_outcome!(job, completed_report(@head))
+
+      assert {:ok, ready} = run(job)
+      assert ready.result_head_sha == @head
+
+      completion = ready.result_completion
+      assert completion["outcome"] == "completed"
+      assert completion["head_sha"] == @head
+      assert completion["schema_version"] == 2
+      assert completion["report"]["validation"] =~ "ran the suite"
+    end
+
+    test "records a report naming another commit as unusable and still verifies", %{job: job} do
+      write_outcome!(job, completed_report(String.duplicate("d", 40)))
+
+      assert {:ok, ready} = run(job)
+      assert ready.result_head_sha == @head
+      assert ready.result_completion["outcome"] == "unusable"
+      assert ready.result_completion["failure"] == "outcome_report_head_mismatch"
+      refute Map.has_key?(ready.result_completion, "report")
+    end
+
+    test "takes the fenced failure transition for a stopped report", %{job: job} do
+      write_outcome!(
+        job,
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "outcome" => "stopped",
+          "reason_code" => "environment_broken",
+          "summary" => "No toolchain.",
+          "detail" => "mix was not on PATH.",
+          "progress" => "none"
+        })
+      )
+
+      assert {:error, {:agent_stopped, "environment_broken"}} = run(job)
+      refute_received {:probe, _repository_id, _job_id}
+    end
+
+    test "an invalid report can never be read as success", %{job: job} do
+      write_outcome!(job, "{\"schema_version\": 2, \"outcome\": \"completed\"}")
+
+      assert {:error, _reason} = run(job)
+      assert Repo.get!(Job, job.id).result_head_sha == nil
+      refute_received {:probe, _repository_id, _job_id}
+    end
+
+    test "a protocol v2 attempt owes a report, so an absent one fails", %{job: job} do
+      assert {:error, _reason} = run(job)
+      assert Repo.get!(Job, job.id).result_head_sha == nil
+      refute_received {:probe, _repository_id, _job_id}
+    end
+
+    defp run(job) do
+      ResultReconciler.run_job(job.id, probe: FakeProbe, contract_provider: FakeContract)
+    end
+
+    defp completed_report(head_sha) do
+      Jason.encode!(%{
+        "schema_version" => 2,
+        "outcome" => "completed",
+        "head_sha" => head_sha,
+        "summary" => "Split the body on its headings.",
+        "validation" => "ran the suite and the new preview task",
+        "retrospective" => "Untracked follow-up work: none."
+      })
+    end
+
+    defp write_outcome!(job, contents) do
+      job
+      |> PtcManager.Operations.OutcomeReport.path_for()
+      |> File.write!(contents)
+    end
+
+    defp protocol_v2_job(job) do
+      repository = Repo.get!(PtcManager.Operations.Repository, job.repository_id)
+
+      {:ok, definition} =
+        PtcManager.Automations.create_definition(
+          repository,
+          %{
+            key: "outcome_v2_probe",
+            name: "Outcome v2 probe",
+            description: "Fixture definition pinned to outcome protocol v2."
+          },
+          %{
+            target_type: "issue",
+            execution_profile: "generic_ephemeral",
+            github_access: "read",
+            queue_lane: "planning",
+            resource_class: "light",
+            lock_policy: %{"type" => "target"},
+            timeout_seconds: 300,
+            result_type: "none",
+            result_protocol_version: 2,
+            prompt: "fixture"
+          },
+          "test"
+        )
+
+      job
+      |> Job.changeset(%{
+        automation_definition_version_id: definition.current_version.id,
+        stop_report_token: String.duplicate("t", 20)
+      })
+      |> Repo.update!()
+    end
+  end
+
   defp awaiting_job_fixture do
     repository = repository_fixture(%{local_path: "/tmp/repository"})
     issue = issue_fixture(repository)

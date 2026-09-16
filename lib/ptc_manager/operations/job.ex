@@ -35,6 +35,7 @@ defmodule PtcManager.Operations.Job do
     field :result_diff_digest, :string
     field :result_commit_count, :integer
     field :result_verified_at, :utc_datetime_usec
+    field :result_completion, :map
     field :result_checked_at, :utc_datetime_usec
     field :result_attempt_token, :string
     field :result_attempt_expires_at, :utc_datetime_usec
@@ -104,6 +105,7 @@ defmodule PtcManager.Operations.Job do
       :result_diff_digest,
       :result_commit_count,
       :result_verified_at,
+      :result_completion,
       :result_checked_at,
       :result_attempt_token,
       :result_attempt_expires_at,

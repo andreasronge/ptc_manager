@@ -31,14 +31,13 @@ defmodule PtcManager.Operations.StopReport do
   """
 
   alias PtcManager.Operations.Job
+  alias PtcManager.Operations.ReportFile
 
   @reason_codes ~w(missing_prerequisite environment_broken ambiguous_requirement unsafe_to_proceed)
   @progress_values ~w(none partial)
   @max_summary 300
   @max_detail 2_000
   @max_prerequisite 120
-  @max_file_bytes 32_768
-  @read_timeout_ms 2_000
 
   @doc "Every reason an agent may give for stopping."
   def reason_codes, do: @reason_codes
@@ -50,7 +49,7 @@ defmodule PtcManager.Operations.StopReport do
   impractical to guess, but every agent shares one worker identity and can list
   the directory. See the note on the module.
   """
-  def new_token, do: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+  defdelegate new_token, to: ReportFile
 
   @doc """
   Where this job's agent writes its report, or nil before a token was issued.
@@ -59,7 +58,7 @@ defmodule PtcManager.Operations.StopReport do
   guess. It is not a secret: see the note on shared worker identity above.
   """
   def path_for(%Job{stop_report_token: token} = job) when is_binary(token) and token != "" do
-    if safe_token?(token),
+    if ReportFile.safe_token?(token),
       do: Path.join(directory(), "ptc-stop-#{job.id}-#{job.fencing_token}-#{token}.json"),
       else: nil
   end
@@ -104,63 +103,7 @@ defmodule PtcManager.Operations.StopReport do
   def read(%Job{} = job) do
     case path_for(job) do
       nil -> :none
-      path -> read_bounded(path)
-    end
-  end
-
-  # A model wrote this path's contents. The stat is only a cheap early reject:
-  # the path can be swapped between checking it and opening it, so the read
-  # itself has to be safe on its own. It is bounded, so a large or endless file
-  # cannot exhaust this process, and it runs under a deadline, so a FIFO that
-  # never yields cannot stall the single reconciliation task.
-  defp read_bounded(path) do
-    case File.lstat(path) do
-      {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_file_bytes ->
-        bounded_contents(path)
-
-      {:ok, %File.Stat{}} ->
-        {:error, :invalid_stop_report}
-
-      {:error, :enoent} ->
-        :none
-
-      {:error, _reason} ->
-        {:error, :invalid_stop_report}
-    end
-  end
-
-  defp bounded_contents(path) do
-    task = Task.async(fn -> read_head(path) end)
-
-    case Task.yield(task, @read_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:ok, body}} -> decode(body)
-      {:ok, :none} -> :none
-      {:ok, {:error, _reason}} -> {:error, :invalid_stop_report}
-      _timeout_or_crash -> {:error, :invalid_stop_report}
-    end
-  end
-
-  defp read_head(path) do
-    case File.open(path, [:read, :binary, :raw]) do
-      {:ok, handle} ->
-        try do
-          # One byte more than a report may be, so an oversized file is detected
-          # rather than truncated into something that happens to parse.
-          case :file.read(handle, @max_file_bytes + 1) do
-            {:ok, body} when byte_size(body) <= @max_file_bytes -> {:ok, body}
-            {:ok, _too_large} -> {:error, :too_large}
-            :eof -> {:error, :empty}
-            {:error, reason} -> {:error, reason}
-          end
-        after
-          File.close(handle)
-        end
-
-      {:error, :enoent} ->
-        :none
-
-      {:error, reason} ->
-        {:error, reason}
+      path -> path |> ReportFile.read_json(:invalid_stop_report) |> validate_decoded()
     end
   end
 
@@ -207,26 +150,27 @@ defmodule PtcManager.Operations.StopReport do
   def prerequisite(%{"prerequisite" => value}) when is_binary(value) and value != "", do: value
   def prerequisite(_report), do: nil
 
-  defp decode(body) do
-    case Jason.decode(body) do
-      {:ok, decoded} when is_map(decoded) -> validate(decoded)
-      {:ok, _other} -> {:error, :invalid_stop_report}
-      {:error, _reason} -> {:error, :invalid_stop_report}
-    end
-  end
+  defp validate_decoded({:ok, decoded}), do: validate_payload(decoded)
+  defp validate_decoded(other), do: other
 
+  @doc """
+  Checks the stopped-outcome fields, which protocol v2 carries unchanged.
+
+  Returns the accepted report with only the fields this contract defines, so a
+  caller cannot be handed anything the agent added on its own.
+  """
   # Validated here rather than by a schema library, matching how every other
   # agent result in this repository is checked.
-  defp validate(
-         %{
-           "reason_code" => reason_code,
-           "summary" => summary,
-           "detail" => detail,
-           "progress" => progress
-         } = report
-       )
-       when reason_code in @reason_codes and progress in @progress_values and
-              is_binary(summary) and is_binary(detail) do
+  def validate_payload(
+        %{
+          "reason_code" => reason_code,
+          "summary" => summary,
+          "detail" => detail,
+          "progress" => progress
+        } = report
+      )
+      when reason_code in @reason_codes and progress in @progress_values and
+             is_binary(summary) and is_binary(detail) do
     prerequisite = Map.get(report, "prerequisite")
 
     if summary != "" and String.length(summary) <= @max_summary and detail != "" and
@@ -244,7 +188,7 @@ defmodule PtcManager.Operations.StopReport do
     end
   end
 
-  defp validate(_report), do: {:error, :invalid_stop_report}
+  def validate_payload(_report), do: {:error, :invalid_stop_report}
 
   defp valid_prerequisite?(nil), do: true
 
@@ -252,9 +196,6 @@ defmodule PtcManager.Operations.StopReport do
     do: String.length(value) <= @max_prerequisite
 
   defp valid_prerequisite?(_value), do: false
-
-  # The token names a file, so it must never be able to leave the directory.
-  defp safe_token?(token), do: Regex.match?(~r/\A[A-Za-z0-9_-]{16,64}\z/, token)
 
   defp maybe_put_prerequisite(report, nil), do: report
   defp maybe_put_prerequisite(report, ""), do: report

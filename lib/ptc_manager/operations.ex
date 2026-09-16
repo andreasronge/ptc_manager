@@ -1841,6 +1841,23 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc """
+  The outcome-report protocol the job's frozen automation version defines.
+
+  The immutable version is the cutover marker: a job created under protocol v1
+  keeps the failure-only contract for its whole life, however the definition is
+  edited afterwards. Anything unreadable is treated as v1, because that is the
+  contract whose absence of a report is not itself a failure.
+  """
+  def result_protocol_version(%Job{automation_definition_version_id: nil}), do: 1
+
+  def result_protocol_version(%Job{} = job) do
+    case Repo.get(PtcManager.Automations.DefinitionVersion, job.automation_definition_version_id) do
+      %{result_protocol_version: version} when version in [1, 2] -> version
+      _missing_or_unknown -> 1
+    end
+  end
+
   def claim_next_result_job do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -2535,6 +2552,7 @@ defmodule PtcManager.Operations do
                   result_diff_digest: result.diff_digest,
                   result_commit_count: result.commit_count,
                   result_verified_at: now,
+                  result_completion: result[:completion],
                   result_attempt_expires_at: nil,
                   last_error: nil,
                   updated_at: now

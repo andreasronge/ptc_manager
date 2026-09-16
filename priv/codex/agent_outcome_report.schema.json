@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent outcome report",
+  "description": "Written once by an implementation agent for the attempt it currently holds. It reports what happened and is never itself authority: a completed report is attached to a result only when PtcManager's own Git probe finds the same head, and a stopped report is displayed to the maintainer rather than acted on automatically.",
+  "type": "object",
+  "required": ["schema_version", "outcome"],
+  "properties": {
+    "schema_version": {
+      "description": "The contract this report was written against.",
+      "type": "integer",
+      "const": 2
+    },
+    "outcome": {
+      "description": "What happened to this attempt. There is exactly one report path, so an attempt cannot claim both.",
+      "type": "string",
+      "enum": ["completed", "stopped"]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "outcome": { "const": "completed" },
+        "head_sha": {
+          "description": "The exact commit the agent believes it left on the branch. PtcManager accepts the report only when its own probe finds this head, so a wrong value discards the report rather than moving the job.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "summary": {
+          "description": "What changed, as the pull request body's Summary section. No secrets, no raw command output.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "validation": {
+          "description": "What was run beyond the repository's standard checks, and what it showed. No test counts, no raw output.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "retrospective": {
+          "description": "Untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or guessed at. Either may be 'none'.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      },
+      "required": ["head_sha", "summary", "validation", "retrospective"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "outcome": { "const": "stopped" },
+        "reason_code": {
+          "description": "Why the agent stopped. This decides which recovery PtcManager offers first.",
+          "type": "string",
+          "enum": [
+            "missing_prerequisite",
+            "environment_broken",
+            "ambiguous_requirement",
+            "unsafe_to_proceed"
+          ]
+        },
+        "summary": {
+          "description": "One plain sentence a maintainer can read on a card. No secrets, no command output.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "detail": {
+          "description": "What was attempted and what failed, in plain language. No secrets, no raw command output.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "prerequisite": {
+          "description": "The exact name of the one missing thing, when there is one: an environment variable, binary, or service.",
+          "type": "string",
+          "maxLength": 120
+        },
+        "progress": {
+          "description": "Whether anything was committed to the branch before stopping.",
+          "type": "string",
+          "enum": ["none", "partial"]
+        }
+      },
+      "required": ["reason_code", "summary", "detail", "progress"],
+      "additionalProperties": false
+    }
+  ]
+}

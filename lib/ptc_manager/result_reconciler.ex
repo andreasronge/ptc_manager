@@ -2,6 +2,7 @@ defmodule PtcManager.ResultReconciler do
   @moduledoc "Verifies committed implementation branches before GitHub write eligibility."
 
   alias PtcManager.Operations
+  alias PtcManager.Operations.OutcomeReport
   alias PtcManager.Operations.StopReport
   alias PtcManager.Repository.Contract
 
@@ -27,10 +28,34 @@ defmodule PtcManager.ResultReconciler do
     if PtcManager.Reviews.held?(job) do
       record_failure(job, :review_decision_required)
     else
-      case StopReport.read(job) do
-        {:ok, report} -> record_stop(job, report)
-        _no_usable_report -> verify_branch(job, opts)
-      end
+      job |> Operations.result_protocol_version() |> read_outcome(job, opts)
+    end
+  end
+
+  # Protocol v1 could only say "I could not continue", so anything other than a
+  # stop report means the branch decides. Protocol v2 owes exactly one report
+  # for the attempt, so an absent or unreadable one is a reconciliation failure
+  # rather than a silent fall through to the branch.
+  defp read_outcome(1, job, opts) do
+    case StopReport.read(job) do
+      {:ok, report} -> record_stop(job, report)
+      _no_usable_report -> verify_branch(job, opts)
+    end
+  end
+
+  defp read_outcome(2, job, opts) do
+    case OutcomeReport.read(job) do
+      {:ok, %{"outcome" => "stopped"} = report} ->
+        record_stop(job, report)
+
+      {:ok, %{"outcome" => "completed"} = report} ->
+        verify_branch(job, [{:report, report} | opts])
+
+      :none ->
+        record_failure(job, :outcome_report_missing)
+
+      {:error, _reason} ->
+        record_failure(job, :outcome_report_invalid)
     end
   end
 
@@ -47,7 +72,7 @@ defmodule PtcManager.ResultReconciler do
               job.id,
               job.fencing_token,
               job.result_attempt_token,
-              result,
+              with_completion(result, job, opts),
               contract
             )
 
@@ -76,6 +101,34 @@ defmodule PtcManager.ResultReconciler do
         reason = {:unexpected_probe_result, other}
 
         record_failure(job, reason)
+    end
+  end
+
+  # A completed report is attached only when PtcManager's own probe found the
+  # same head. The material stays reported evidence either way: it cannot make
+  # a result publishable, and a mismatch discards the report rather than the
+  # result.
+  defp with_completion(result, job, opts) do
+    case Keyword.fetch(opts, :report) do
+      {:ok, report} ->
+        accepted =
+          if OutcomeReport.completed_for?(report, result.head_sha),
+            do: {:ok, report},
+            else: {:error, :outcome_report_head_mismatch}
+
+        Map.put(
+          result,
+          :completion,
+          OutcomeReport.envelope(
+            accepted,
+            result.head_sha,
+            job.review_generation,
+            DateTime.utc_now()
+          )
+        )
+
+      :error ->
+        result
     end
   end
 
