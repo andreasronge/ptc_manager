@@ -11,6 +11,7 @@ defmodule PtcManager.DailyDigests.Evidence do
   @max_pull_requests 50
   @max_direct_commits 50
   @max_manifest_bytes 60_000
+  @shortened_section_bytes 400
 
   def fetch(%Repository{} = repository, %DailyDigest{} = digest) do
     client = Application.get_env(:ptc_manager, :daily_digest_github_client, Client)
@@ -186,24 +187,28 @@ defmodule PtcManager.DailyDigests.Evidence do
         }
       end) ++ direct_commits
 
-    manifest = %{
-      "source_head_sha" => head_sha,
-      "change_count" => length(commits),
-      "pull_request_numbers" => Enum.map(pull_requests, & &1["number"]),
-      "commits" => commits,
-      "pull_requests" => pull_requests,
-      "selection_rules" => %{
-        "pull_requests" => "merged_at in the requested half-open window",
-        "direct_commits" =>
-          "committer date in the requested half-open window; GitHub does not expose direct-push arrival time"
-      },
-      "evidence_limits" => %{
-        "pull_requests" => @max_pull_requests,
-        "direct_commits" => @max_direct_commits,
-        "serialized_bytes" => @max_manifest_bytes
-      },
-      "evidence_truncated" => false
-    }
+    manifest =
+      %{
+        "source_head_sha" => head_sha,
+        "change_count" => length(commits),
+        "pull_request_numbers" => Enum.map(pull_requests, & &1["number"]),
+        "commits" => commits,
+        "pull_requests" => pull_requests,
+        "selection_rules" => %{
+          "pull_requests" => "merged_at in the requested half-open window",
+          "direct_commits" =>
+            "committer date in the requested half-open window; GitHub does not expose direct-push arrival time"
+        },
+        "evidence_limits" => %{
+          "pull_requests" => @max_pull_requests,
+          "direct_commits" => @max_direct_commits,
+          "serialized_bytes" => @max_manifest_bytes
+        },
+        "evidence_truncated" => false
+      }
+      |> Map.update!("pull_requests", fn pulls ->
+        Enum.map(pulls, &Map.put(&1, "body_coverage", body_coverage(&1, :complete)))
+      end)
 
     encoded = Jason.encode!(manifest)
 
@@ -212,35 +217,57 @@ defmodule PtcManager.DailyDigests.Evidence do
       else: compact_manifest(manifest)
   end
 
-  # Bodies are given up in order of how much a daily update would miss them.
-  # General prose goes first, then validation and retrospective material, and
-  # only then the bodies entirely.
+  # Bodies are given up in order of how much a daily update would miss them:
+  # general prose first, then the sections are shortened, and only then given up
+  # entirely. The middle rung matters — without it a day of long descriptions
+  # falls straight from whole bodies to none, which is less than the flat slice
+  # this replaced would have kept.
   defp compact_manifest(manifest) do
-    Enum.reduce_while(
-      [&PullRequestBody.priority_only/1, fn _sections -> nil end],
+    ladder = [
+      {:priority, &PullRequestBody.priority_only/1},
+      {:shortened, &PullRequestBody.shorten(&1, @shortened_section_bytes)},
+      {:dropped, fn _sections -> nil end}
+    ]
+
+    Enum.find_value(
+      ladder,
       {:error, :daily_digest_evidence_too_large},
-      fn reduce_body, _result ->
-        compact = compact_bodies(manifest, reduce_body)
+      fn {coverage, reduce_body} ->
+        compact = compact_bodies(manifest, coverage, reduce_body)
 
         if compact |> Jason.encode!() |> byte_size() <= @max_manifest_bytes,
-          do: {:halt, {:ok, compact}},
-          else: {:cont, {:error, :daily_digest_evidence_too_large}}
+          do: {:ok, compact}
       end
     )
   end
 
-  defp compact_bodies(manifest, reduce_body) do
+  # Each pull request states what happened to its own body. A missing key would
+  # otherwise read as "this change had no description" when it means "we had no
+  # room for it", and the digest would write the change up as having nothing to
+  # say.
+  defp compact_bodies(manifest, coverage, reduce_body) do
     manifest
     |> Map.update!("pull_requests", fn pulls ->
       Enum.map(pulls, fn pull ->
         case pull |> Map.get("body") |> reduce_body.() do
-          nil -> Map.delete(pull, "body")
-          body -> Map.put(pull, "body", body)
+          nil ->
+            pull
+            |> Map.delete("body")
+            |> Map.put("body_coverage", body_coverage(pull, :dropped))
+
+          body ->
+            pull
+            |> Map.put("body", body)
+            |> Map.put("body_coverage", body_coverage(pull, coverage))
         end
       end)
     end)
     |> Map.put("evidence_truncated", true)
   end
+
+  defp body_coverage(pull, _coverage) when not is_map_key(pull, "body"), do: "none_written"
+  defp body_coverage(%{"body" => nil}, _coverage), do: "none_written"
+  defp body_coverage(_pull, coverage), do: to_string(coverage)
 
   defp pull_requests_in_window(items, branch, digest) do
     Enum.reduce_while(items, {:ok, []}, fn item, {:ok, included} ->

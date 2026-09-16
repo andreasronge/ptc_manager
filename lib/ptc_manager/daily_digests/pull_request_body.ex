@@ -2,36 +2,49 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
   @moduledoc """
   Extracts bounded Markdown sections from a pull request body.
 
-  A daily update needs what a change was validated against and what it left
-  behind far more than it needs the opening prose, but a flat character slice
-  keeps exactly the opposite. Splitting the body on its headings lets the
-  manifest bound each section on its own and, under pressure, drop general
-  prose while retaining validation and retrospective material.
+  A daily update needs what a change did, what it was checked against, and what
+  it left behind, but a flat character slice keeps whatever happens to come
+  first. Splitting the body on its headings lets the manifest bound each section
+  on its own and, under pressure, shorten or drop them in order of how much the
+  update would miss them.
   """
 
-  # Headings the repository's pull request convention defines. Anything else is
-  # general prose: useful, but the first thing to go when the manifest is full.
+  # Headings the repository's pull request convention defines, plus the spellings
+  # GitHub's own templates use for the same thing. Anything else is general
+  # prose: useful, but the first thing to go when the manifest is full.
   @known %{
     "summary" => "summary",
+    "what changed" => "summary",
+    "changes" => "summary",
+    "description" => "summary",
     "validation" => "validation",
     "testing" => "validation",
-    "retrospective" => "retrospective"
+    "test plan" => "validation",
+    "how to test" => "validation",
+    "retrospective" => "retrospective",
+    "follow-up" => "retrospective",
+    "follow up" => "retrospective"
   }
 
-  @priority ~w(validation retrospective)
+  # Ordered by how much a daily update loses without them. `summary` leads:
+  # the prompt asks what was added, fixed, changed, or removed, and a title
+  # alone cannot answer that.
+  @priority ~w(summary validation retrospective)
   @preamble "preamble"
 
   @section_limit 1_500
   @preamble_limit 600
 
-  @heading ~r/\A\s{0,3}[#]{1,6}\s+(?<title>.*?)\s*[#]*\s*\z/
+  @heading ~r/\A\s{0,3}(?<hashes>[#]{1,6})\s+(?<title>.*?)\s*[#]*\s*\z/
+  @fence ~r/\A\s{0,3}(?:```|~~~)/
 
   @doc """
   Splits `body` into bounded sections keyed by `summary`, `validation`,
   `retrospective`, and `preamble`.
 
   Empty sections are omitted, and a body with no usable content returns `nil`.
-  `:section_limit` and `:preamble_limit` override the character bounds.
+  `:section_limit` and `:preamble_limit` are byte bounds, matching the only
+  ceiling that actually applies to the manifest.
   """
   def extract(body, opts \\ [])
 
@@ -40,9 +53,9 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
     preamble_limit = Keyword.get(opts, :preamble_limit, @preamble_limit)
 
     body
-    |> String.split(~r/\r?\n/)
-    |> Enum.reduce({@preamble, %{}}, &collect_line/2)
-    |> elem(1)
+    |> String.split(["\r\n", "\n"])
+    |> Enum.reduce({@preamble, nil, %{}}, &collect_line/2)
+    |> elem(2)
     |> Enum.reduce(%{}, fn {key, lines}, sections ->
       limit = if key == @preamble, do: preamble_limit, else: section_limit
 
@@ -72,33 +85,99 @@ defmodule PtcManager.DailyDigests.PullRequestBody do
 
   def priority_only(_sections), do: nil
 
-  defp collect_line(line, {current, collected}) do
-    case heading_key(line) do
-      nil -> {current, Map.update(collected, current, [line], &[line | &1])}
-      key -> {key, collected}
+  @doc """
+  Shortens every section already extracted to `limit` bytes.
+
+  Used between keeping the sections whole and giving them up entirely, so a busy
+  day still reports something about each change rather than nothing about all of
+  them.
+  """
+  def shorten(sections, limit) when is_map(sections) and is_integer(limit) do
+    sections
+    |> Enum.reduce(%{}, fn {key, text}, kept ->
+      case trim_to(text, limit) do
+        nil -> kept
+        shortened -> Map.put(kept, key, shortened)
+      end
+    end)
+    |> case do
+      kept when map_size(kept) == 0 -> nil
+      kept -> kept
     end
   end
 
-  # An unrecognized heading keeps its own text as prose so the preamble still
-  # reads as sentences rather than orphaned body lines.
-  defp heading_key(line) do
-    case Regex.named_captures(@heading, line) do
-      %{"title" => title} -> Map.get(@known, normalize(title), @preamble)
-      nil -> nil
+  def shorten(_sections, _limit), do: nil
+
+  # A fenced block's contents are not Markdown structure. A shell comment inside
+  # one looks exactly like an ATX heading, and treating it as a section boundary
+  # cuts the block in half and strands the rest of the section in prose.
+  defp collect_line(line, {current, fence, collected}) do
+    cond do
+      Regex.match?(@fence, line) ->
+        {current, toggle_fence(fence, line), keep(collected, current, line)}
+
+      is_binary(fence) ->
+        {current, fence, keep(collected, current, line)}
+
+      true ->
+        case heading(line, current) do
+          nil -> {current, fence, keep(collected, current, line)}
+          {key, nil} -> {key, fence, collected}
+          {key, text} -> {key, fence, keep(collected, key, text)}
+        end
     end
   end
+
+  defp toggle_fence(nil, line), do: line |> String.trim_leading() |> String.slice(0, 3)
+  defp toggle_fence(_open, _line), do: nil
+
+  defp keep(collected, key, line), do: Map.update(collected, key, [line], &[line | &1])
+
+  # A heading only closes a section at its own level or above. A `###` step
+  # inside `## Validation` is part of that validation, not the end of it.
+  defp heading(line, current) do
+    case Regex.named_captures(@heading, line) do
+      %{"hashes" => hashes, "title" => title} ->
+        level = byte_size(hashes)
+        key = Map.get(@known, normalize(title), @preamble)
+
+        cond do
+          key != @preamble -> {key, nil}
+          current != @preamble and level > level_of(current) -> nil
+          # An unrecognized heading becomes prose, keeping its own title so the
+          # preamble reads as text rather than orphaned lines.
+          true -> {@preamble, title}
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  # Known sections are written at level two by every convention this reads, so
+  # a deeper heading inside one is a sub-heading rather than the next section.
+  defp level_of(_known_section), do: 2
 
   defp normalize(title) do
     title
     |> String.replace(~r/[*_`:]/, "")
+    |> String.replace(~r/\A\d+[.)]\s*/, "")
     |> String.trim()
     |> String.downcase()
   end
 
+  # Bounded in bytes, because the manifest ceiling is in bytes: a section of
+  # multi-byte text would otherwise claim several times its share of the budget.
   defp trim_to(text, limit) do
     case String.trim(text) do
       "" -> nil
-      trimmed -> String.slice(trimmed, 0, limit)
+      trimmed -> trimmed |> binary_part(0, min(byte_size(trimmed), limit)) |> repair()
     end
+  end
+
+  # binary_part/3 can land inside a codepoint; drop the partial tail rather than
+  # emit invalid UTF-8 the JSON encoder would reject.
+  defp repair(text) do
+    if String.valid?(text), do: text, else: text |> binary_slice(0..-2//1) |> repair()
   end
 end
