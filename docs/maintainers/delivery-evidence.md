@@ -127,7 +127,17 @@ reported content and require manual quality evaluation. Quiet days explicitly
 report no selected changes. Direct commits and external PRs remain useful with
 unavailable managed evidence. Stored Markdown is sanitized by the existing UI,
 and published historical Markdown remains readable without a compatibility
-execution path. The UI exposes the evidence hash for new reports.
+execution path. The UI exposes the full evidence hash for new reports in a native
+keyboard/touch-accessible disclosure with selectable text. Selected reports appear
+above the archive on mobile; desktop retains the two-column layout. Both Updates
+and daily automation runs label no-change reports “Quiet day”.
+
+The editable built-in prompt targets busy maintainers with plain, factual prose,
+a two-sentence summary, short descriptions and explanations of shipped changes,
+and at most three supported lessons. These are editorial instructions, not new
+output-schema limits: the validator retains its safety ceiling of 20 lessons.
+A one-minute ordinary-day read is likewise guidance. The voice migration matches only unchanged built-in
+prompts (including their repository prefix), preserving custom text and enablement.
 
 The built-in prompt migration updates only built-in daily versions and preserves
 maintainer-written versions; neither direction changes definition or trigger

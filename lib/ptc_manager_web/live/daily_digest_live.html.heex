@@ -35,7 +35,110 @@
     :if={@digests != []}
     class="grid items-start gap-6 lg:grid-cols-[minmax(260px,0.7fr)_minmax(0,1.7fr)]"
   >
-    <aside aria-label="Daily updates" class="space-y-3 lg:sticky lg:top-24">
+    <div
+      :if={!@selected_digest}
+      class="row-start-1 rounded-3xl border border-white/10 bg-slate-900/50 p-8 sm:p-12 lg:col-start-2"
+    >
+      <p class="text-xs font-semibold uppercase tracking-[0.22em] text-teal-300">
+        Your update archive
+      </p>
+      <h2 class="mt-3 text-2xl font-semibold">Choose a day</h2>
+      <p class="mt-3 max-w-xl text-sm leading-7 text-slate-400">
+        Open an update to read the main changes, practical examples, and links back to the pull requests and commits that support the summary.
+      </p>
+    </div>
+
+    <article
+      :if={@selected_digest}
+      id="daily-digest-detail"
+      class="row-start-1 min-w-0 rounded-3xl border border-white/10 bg-slate-900/70 p-5 sm:p-8 lg:col-start-2 lg:p-10"
+    >
+      <div class="border-b border-white/10 pb-6">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-teal-300">
+              {digest_date(@selected_digest.digest_date)}
+            </p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
+              {@selected_digest.title || status_label(@selected_digest)}
+            </h2>
+          </div>
+          <span class={[
+            "w-fit shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold ring-1",
+            status_classes(@selected_digest)
+          ]}>
+            {status_label(@selected_digest)}
+          </span>
+        </div>
+        <p :if={@selected_digest.summary} class="mt-4 max-w-3xl text-sm leading-7 text-slate-300">
+          {@selected_digest.summary}
+        </p>
+        <div class="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-500">
+          <span>{@selected_digest.change_count} included change(s)</span>
+          <span>{length(pull_request_numbers(@selected_digest))} pull request(s)</span>
+          <span :if={source_short(@selected_digest)}>
+            Source {source_short(@selected_digest)}
+          </span>
+          <span>{@selected_digest.time_zone}</span>
+          <details
+            :if={evidence_hash(@selected_digest)}
+            id="daily-digest-evidence"
+            class="min-w-0 max-w-full text-slate-300"
+          >
+            <summary class="cursor-pointer rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal-300">
+              Evidence {String.slice(evidence_hash(@selected_digest), 0, 12)}
+            </summary>
+            <label for="daily-digest-evidence-hash" class="mt-2 block">
+              Full evidence SHA-256
+            </label>
+            <input
+              id="daily-digest-evidence-hash"
+              type="text"
+              readonly
+              value={evidence_hash(@selected_digest)}
+              class="mt-1 block w-full min-w-0 rounded border border-white/20 bg-slate-900 p-2 font-mono text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal-300"
+            />
+          </details>
+        </div>
+      </div>
+
+      <div
+        :if={DailyDigests.published?(@selected_digest)}
+        id="daily-digest-markdown"
+        class="mt-8 max-w-none text-[15px] leading-7 text-slate-300 [&_a]:text-teal-300 [&_a]:underline [&_a]:decoration-teal-400/30 [&_a]:underline-offset-4 [&_blockquote]:border-l-2 [&_blockquote]:border-teal-400/40 [&_blockquote]:pl-4 [&_blockquote]:text-slate-400 [&_code]:rounded [&_code]:bg-black/30 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:text-[0.9em] [&_h1]:mt-9 [&_h1]:text-2xl [&_h1]:font-semibold [&_h1]:text-white [&_h2]:mt-9 [&_h2]:border-b [&_h2]:border-white/10 [&_h2]:pb-2 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:text-white [&_h3]:mt-7 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:text-slate-100 [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:list-decimal [&_ol]:pl-6 [&_p]:my-4 [&_pre]:my-5 [&_pre]:overflow-x-auto [&_pre]:rounded-xl [&_pre]:bg-black/40 [&_pre]:p-4 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-semibold [&_strong]:text-slate-100 [&_table]:my-6 [&_table]:w-full [&_td]:border-b [&_td]:border-white/10 [&_td]:p-2 [&_th]:border-b [&_th]:border-white/20 [&_th]:p-2 [&_th]:text-left [&_ul]:my-4 [&_ul]:list-disc [&_ul]:pl-6"
+      >
+        {markdown_html(@selected_digest.markdown, autolink: false)}
+      </div>
+
+      <div
+        :if={!DailyDigests.published?(@selected_digest)}
+        class="mt-8 rounded-2xl border border-white/10 bg-black/20 p-6"
+      >
+        <div class="flex items-center gap-3">
+          <.icon
+            :if={status(@selected_digest) in ["queued", "running", "sync_pending", "pending"]}
+            name="hero-arrow-path"
+            class="size-5 text-teal-300 motion-safe:animate-spin"
+          />
+          <.icon
+            :if={status(@selected_digest) == "failed"}
+            name="hero-exclamation-triangle"
+            class="size-5 text-rose-300"
+          />
+          <div>
+            <h3 class="text-sm font-semibold">{status_label(@selected_digest)}</h3>
+            <p class="mt-1 text-xs leading-5 text-slate-500">
+              {status_detail(@selected_digest)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <aside
+      aria-label="Daily updates"
+      class="row-start-2 space-y-3 lg:sticky lg:top-24 lg:col-start-1 lg:row-start-1"
+    >
       <.link
         :for={digest <- @digests}
         navigate={
@@ -76,89 +179,5 @@
         </p>
       </.link>
     </aside>
-
-    <div
-      :if={!@selected_digest}
-      class="rounded-3xl border border-white/10 bg-slate-900/50 p-8 sm:p-12"
-    >
-      <p class="text-xs font-semibold uppercase tracking-[0.22em] text-teal-300">
-        Your update archive
-      </p>
-      <h2 class="mt-3 text-2xl font-semibold">Choose a day</h2>
-      <p class="mt-3 max-w-xl text-sm leading-7 text-slate-400">
-        Open an update to read the main changes, practical examples, and links back to the pull requests and commits that support the summary.
-      </p>
-    </div>
-
-    <article
-      :if={@selected_digest}
-      id="daily-digest-detail"
-      class="min-w-0 rounded-3xl border border-white/10 bg-slate-900/70 p-5 sm:p-8 lg:p-10"
-    >
-      <div class="border-b border-white/10 pb-6">
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-teal-300">
-              {digest_date(@selected_digest.digest_date)}
-            </p>
-            <h2 class="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-              {@selected_digest.title || status_label(@selected_digest)}
-            </h2>
-          </div>
-          <span class={[
-            "w-fit shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold ring-1",
-            status_classes(@selected_digest)
-          ]}>
-            {status_label(@selected_digest)}
-          </span>
-        </div>
-        <p :if={@selected_digest.summary} class="mt-4 max-w-3xl text-sm leading-7 text-slate-300">
-          {@selected_digest.summary}
-        </p>
-        <div class="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-500">
-          <span>{@selected_digest.change_count} included change(s)</span>
-          <span>{length(pull_request_numbers(@selected_digest))} pull request(s)</span>
-          <span :if={source_short(@selected_digest)}>
-            Source {source_short(@selected_digest)}
-          </span>
-          <span>{@selected_digest.time_zone}</span>
-          <span :if={evidence_hash(@selected_digest)} title={evidence_hash(@selected_digest)}>
-            Evidence {String.slice(evidence_hash(@selected_digest), 0, 12)}
-          </span>
-        </div>
-      </div>
-
-      <div
-        :if={DailyDigests.published?(@selected_digest)}
-        id="daily-digest-markdown"
-        class="mt-8 max-w-none text-[15px] leading-7 text-slate-300 [&_a]:text-teal-300 [&_a]:underline [&_a]:decoration-teal-400/30 [&_a]:underline-offset-4 [&_blockquote]:border-l-2 [&_blockquote]:border-teal-400/40 [&_blockquote]:pl-4 [&_blockquote]:text-slate-400 [&_code]:rounded [&_code]:bg-black/30 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:text-[0.9em] [&_h1]:mt-9 [&_h1]:text-2xl [&_h1]:font-semibold [&_h1]:text-white [&_h2]:mt-9 [&_h2]:border-b [&_h2]:border-white/10 [&_h2]:pb-2 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:text-white [&_h3]:mt-7 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:text-slate-100 [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:list-decimal [&_ol]:pl-6 [&_p]:my-4 [&_pre]:my-5 [&_pre]:overflow-x-auto [&_pre]:rounded-xl [&_pre]:bg-black/40 [&_pre]:p-4 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-semibold [&_strong]:text-slate-100 [&_table]:my-6 [&_table]:w-full [&_td]:border-b [&_td]:border-white/10 [&_td]:p-2 [&_th]:border-b [&_th]:border-white/20 [&_th]:p-2 [&_th]:text-left [&_ul]:my-4 [&_ul]:list-disc [&_ul]:pl-6"
-      >
-        {markdown_html(@selected_digest.markdown, autolink: false)}
-      </div>
-
-      <div
-        :if={!DailyDigests.published?(@selected_digest)}
-        class="mt-8 rounded-2xl border border-white/10 bg-black/20 p-6"
-      >
-        <div class="flex items-center gap-3">
-          <.icon
-            :if={status(@selected_digest) in ["queued", "running", "sync_pending", "pending"]}
-            name="hero-arrow-path"
-            class="size-5 text-teal-300 motion-safe:animate-spin"
-          />
-          <.icon
-            :if={status(@selected_digest) == "failed"}
-            name="hero-exclamation-triangle"
-            class="size-5 text-rose-300"
-          />
-          <div>
-            <h3 class="text-sm font-semibold">{status_label(@selected_digest)}</h3>
-            <p class="mt-1 text-xs leading-5 text-slate-500">
-              {status_detail(@selected_digest)}
-            </p>
-          </div>
-        </div>
-      </div>
-    </article>
   </section>
 </Layouts.app>

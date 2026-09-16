@@ -74,7 +74,7 @@
                   "rounded-full px-2 py-0.5 text-xs",
                   state_classes(row.last_run.state)
                 ]}>
-                  {row.last_run.state}
+                  {run_state_label(row.definition.key, row.last_run.state)}
                 </span>
                 <span class="ml-2 text-xs text-slate-500">
                   {relative(@now, row.last_run.requested_at)}
@@ -127,7 +127,10 @@
         </.link>
         <span class="text-xs text-slate-500">{invocation.trigger_type}</span>
         <span class={["rounded-full px-2 py-0.5 text-xs", state_classes(invocation.state)]}>
-          {invocation.state}
+          {run_state_label(
+            invocation.automation_definition_version.automation_definition.key,
+            invocation.state
+          )}
         </span>
         <span class="ml-auto text-xs text-slate-500">{timestamp(invocation.requested_at)}</span>
       </li>
