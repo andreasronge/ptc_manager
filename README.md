@@ -961,7 +961,16 @@ Markdown before displaying it. See the [daily contract](docs/maintainers/deliver
 for limits and provenance; this wiring does not enable generation.
 
 The new generation prompt remains visible on **Automations** while evaluation
-is pending. Its definition and both built-in triggers default to paused. Evaluate
+is pending and can be edited under **Daily update → Prompt**. The built-in voice
+is plain and factual for a busy maintainer: a two-sentence overview, a short
+description and explanation of each change, and at most three supported lessons.
+These are editorial instructions, not new validation limits (the schema still
+allows up to 20 lessons). An ordinary day should take about a minute to read;
+this is guidance, not a hard word limit. The migration updates unchanged built-in prompts without
+overwriting custom prompts or enabling generation. On narrow screens the selected
+report appears above the archive. Expand **Evidence** to read and select its full
+hash using touch or keyboard. Quiet runs are labelled **Quiet day** in both views.
+Its definition and both built-in triggers default to paused. Evaluate
 manual production-shaped reports before explicitly re-enabling generation.
 
 Before an issue-planning agent starts, PtcManager synchronizes the canonical

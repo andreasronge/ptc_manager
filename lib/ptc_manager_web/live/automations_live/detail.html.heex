@@ -387,7 +387,7 @@
       >
         <div class="flex flex-wrap items-center gap-3">
           <span class={["rounded-full px-2.5 py-1 text-xs", state_classes(run.state)]}>
-            {run.state}
+            {run_state_label(@definition.key, run.state)}
           </span>
           <div class="min-w-0 flex-1">
             <p class="text-sm font-medium text-white">{run_title(run)}</p>

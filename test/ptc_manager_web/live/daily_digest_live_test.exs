@@ -92,6 +92,19 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
     assert has_element?(view, "#daily-digest-markdown h2", "What shipped")
     assert has_element?(view, "#daily-digest-markdown h2", "Delivery health")
     assert has_element?(view, "#daily-digest-markdown", "review rounds unknown")
+
+    assert has_element?(
+             view,
+             "#daily-digest-detail[class*='row-start-1'][class*='lg:col-start-2']"
+           )
+
+    assert has_element?(view, "#daily-digest-evidence summary", "Evidence")
+
+    assert has_element?(
+             view,
+             "#daily-digest-evidence input[readonly][value='#{action.target_snapshot["trusted_evidence_sha256"]}']"
+           )
+
     refute has_element?(view, "#daily-digest-markdown h2", "What we learned")
     refute has_element?(view, "#daily-digest-markdown a[href*='example.org']")
   end

@@ -189,7 +189,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "daily_digest",
       prompt:
-        "Write a concise daily update from the supplied delivery evidence. Explain what shipped and why it matters, then include only concrete, attributed lessons when the evidence supports them. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
+        "Write a concise daily update for a busy maintainer using only the supplied delivery evidence. Use plain, factual language: no hype, generic praise, or unnecessary jargon. Start with a two-sentence overview in the summary field. For each shipped change, give one short sentence describing it and one explaining why it matters. Include at most three concrete, attributed lessons, and omit lessons when the evidence does not support them. Aim for a one-minute read on ordinary days; allow more space when needed to cover significant changes. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
     },
     %{
       key: "repair_pr",

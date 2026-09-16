@@ -557,7 +557,11 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       actual = Repo.get!(PtcManager.Automations.DefinitionVersion, version.id)
 
       if version.created_by == "system:built-in",
-        do: assert(actual.prompt =~ "supplied delivery evidence"),
+        do:
+          assert(
+            "For #{repository.github_owner}/#{repository.github_name}: " <> actual.prompt ==
+              PtcManager.Automations.Defaults.get(repository, "daily_digest").prompt
+          ),
         else: assert(actual.prompt == old)
     end
 
@@ -568,6 +572,50 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       refute definition.enabled
       refute Enum.any?(definition.triggers, & &1.enabled)
       assert Repo.get!(PtcManager.Automations.DefinitionVersion, version.id).prompt == old
+    end
+  end
+
+  @tag migration_opts: [to: 20_260_917_090_000]
+  test "daily voice migration replaces only exact built-in prompts and rolls back safely", %{
+    target: target
+  } do
+    old =
+      "Write a concise daily update from the supplied delivery evidence. Explain what shipped and why it matters, then include only concrete, attributed lessons when the evidence supports them. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
+
+    repository = repository_fixture()
+    definition = PtcManager.Automations.get_definition(repository, "daily_digest")
+    prefix = "For #{repository.github_owner}/#{repository.github_name}: "
+
+    for {prompt, author, changes?} <- [
+          {old, "system:built-in", true},
+          {prefix <> old, "system:built-in", true},
+          {prefix <> old, "maintainer", false},
+          {prefix <> old <> " Custom guidance.", "system:built-in", false}
+        ] do
+      definition.current_version
+      |> Ecto.Changeset.change(%{prompt: prompt, created_by: author})
+      |> Repo.update!()
+
+      migrated = DisposableDeploymentTarget.migrate_remaining!(target)
+      actual = Repo.get!(PtcManager.Automations.DefinitionVersion, definition.current_version.id)
+      expected = PtcManager.Automations.Defaults.get(repository, "daily_digest").prompt
+
+      assert actual.prompt ==
+               if(changes?,
+                 do:
+                   if(prompt == old,
+                     do: String.replace_prefix(expected, prefix, ""),
+                     else: expected
+                   ),
+                 else: prompt
+               )
+
+      paused = PtcManager.Automations.get_definition(repository, "daily_digest")
+      refute paused.enabled
+      refute Enum.any?(paused.triggers, & &1.enabled)
+
+      DisposableDeploymentTarget.rollback!(migrated, to: 20_260_918_090_000)
+      assert Repo.get!(PtcManager.Automations.DefinitionVersion, actual.id).prompt == prompt
     end
   end
 

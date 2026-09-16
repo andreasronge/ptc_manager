@@ -477,6 +477,9 @@ defmodule PtcManagerWeb.AutomationsLive do
     [{"Choose a kind…", ""} | kinds]
   end
 
+  def run_state_label("daily_digest", "no_changes"), do: "Quiet day"
+  def run_state_label(_key, state), do: state
+
   def state_classes(state) when state in ["succeeded", "no_changes"],
     do: "bg-teal-400/15 text-teal-200"
 

@@ -426,6 +426,23 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
     })
   end
 
+  test "daily quiet runs use the same readable status as Updates", %{conn: conn} do
+    repository = repository_fixture()
+    :ok = Automations.ensure_defaults(repository)
+    definition = Automations.get_definition(repository, "daily_digest")
+    run = invocation_fixture(definition, "no_changes", "No changes in the selected window.")
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/automations/#{definition.id}")
+    assert has_element?(view, "#run-#{run.id} span", "Quiet day")
+    refute has_element?(view, "#run-#{run.id} span", "no_changes")
+
+    {:ok, index, _} =
+      conn |> authenticated_conn() |> live(~p"/automations?repo=#{key(repository)}")
+
+    assert has_element?(index, "#automation-row-#{definition.id}", "Quiet day")
+    assert has_element?(index, "#latest-runs", "Quiet day")
+    refute has_element?(index, "#latest-runs", "no_changes")
+  end
+
   defp invocation_fixture(definition, state, markdown) do
     %Invocation{}
     |> Invocation.changeset(%{
