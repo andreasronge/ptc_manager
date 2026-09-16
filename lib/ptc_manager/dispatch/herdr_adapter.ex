@@ -336,7 +336,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           job
       end
 
-    with :ok <- ensure_report_contract(job),
+    with :ok <- ensure_report_contract(job, :optional),
          {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
          {:ok, agent_key} <-
@@ -398,7 +398,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   # The contract a job is handed must be the one reconciliation will read, so
   # both sides derive it from the same frozen automation version. Preparing the
   # wrong protocol's file would leave the agent writing where nobody looks.
-  defp ensure_report_contract(job) do
+  # Under v1 a first dispatch tolerates a failure here, because an agent with no
+  # stop file simply behaves as it did before the contract existed. A review
+  # continuation does not: it already had one, and losing it mid-review would be
+  # a silent regression. Under v2 the report is the only account of the attempt,
+  # so it is required on both paths.
+  defp ensure_report_contract(job, v1_requirement) do
     case PtcManager.Operations.result_protocol_version(job) do
       2 ->
         case OutcomeReport.prepare(job) do
@@ -407,22 +412,30 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         end
 
       _v1 ->
-        _optional = StopReport.prepare(job)
-        :ok
+        case {StopReport.prepare(job), v1_requirement} do
+          {{:ok, _path, _schema_path}, _requirement} -> :ok
+          {{:error, reason}, :required} -> {:error, {:stop_report_unavailable, reason}}
+          {{:error, _reason}, :optional} -> :ok
+        end
     end
   end
+
+  # Shared by both protocols' reporting instructions, so a change to what counts
+  # as blocked cannot reach one and miss the other.
+  @blocked_condition "you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe"
+  @report_closing "Describe what happened in plain language and name no secrets. Do not guess, do not work around a blocker, and do not wait."
 
   # Under protocol v2 the retrospective belongs in the outcome report, so the
   # commit-message channel is not offered as a second destination: an agent
   # given both would fill one and leave the other empty, and nothing says which
   # the broker should believe.
-  defp github_instruction(%{publication_source: "agent"}),
+  defp github_instruction(%{publication_source: "agent"}, _protocol),
     do:
       "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
 
-  defp github_instruction(job) do
+  defp github_instruction(_job, protocol) do
     retrospective =
-      case PtcManager.Operations.result_protocol_version(job) do
+      case protocol do
         2 ->
           ""
 
@@ -437,17 +450,17 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   # Protocol v2 owes one report either way, and the agent is told plainly that
   # the report is an account of what happened rather than a claim that decides
   # anything: PtcManager verifies the commit itself.
-  defp report_instruction(job) do
-    case PtcManager.Operations.result_protocol_version(job) do
+  defp report_instruction(job, protocol) do
+    case protocol do
       2 ->
         {path, schema_path} = {OutcomeReport.path_for(job), OutcomeReport.schema_path_for(job)}
 
-        "Reporting: write #{path} matching the schema at #{schema_path} exactly once, before you stop. If you finished, report outcome \"completed\" with the exact head commit you left on the branch and your summary, validation, and retrospective. If you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — report outcome \"stopped\" instead and stop there. PtcManager verifies the branch itself, so a completed report is accepted only when it names the commit actually on the branch. Describe things in plain language and name no secrets. Do not guess, do not work around a blocker, and do not wait."
+        "Reporting: write #{path} matching the schema at #{schema_path} exactly once, before you stop. If you finished, report outcome \"completed\" with the exact head commit you left on the branch and your summary, validation, and retrospective. If #{@blocked_condition} — report outcome \"stopped\" instead and stop there. PtcManager verifies the branch itself, so a completed report is accepted only when it names the commit actually on the branch. #{@report_closing}"
 
       _v1 ->
         {path, schema_path} = {StopReport.path_for(job), StopReport.schema_path_for(job)}
 
-        "If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{path} matching the schema at #{schema_path}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait."
+        "If you cannot start: if #{@blocked_condition} — write #{path} matching the schema at #{schema_path}, then stop. #{@report_closing}"
     end
   end
 
@@ -788,7 +801,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         },
         else: issue
 
-    github_instruction = github_instruction(job)
+    protocol = PtcManager.Operations.result_protocol_version(job)
+    github_instruction = github_instruction(job, protocol)
 
     context =
       """
@@ -801,7 +815,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       Session: nobody is watching this session. No question you ask here will be answered, and waiting for input only stalls the work until PtcManager times it out.
-      #{report_instruction(job)}
+      #{report_instruction(job, protocol)}
       </context>
       <issue_data>
       Number: #{issue.number}
@@ -898,7 +912,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          true <- File.dir?(path),
          {:ok, pane, workspace} <-
            continuation_pane(name, old_pane, path, job.repository.local_path),
-         :ok <- ensure_report_contract(job),
+         :ok <- ensure_report_contract(job, :required),
          {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
          kind = job.execution_settings["kind"],
          new_name = "impl_j#{job.id}_f#{job.fencing_token}_r#{job.review_generation}",

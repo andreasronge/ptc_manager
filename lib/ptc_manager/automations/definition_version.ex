@@ -73,7 +73,6 @@ defmodule PtcManager.Automations.DefinitionVersion do
     |> validate_inclusion(:resource_class, @resource_classes)
     |> validate_number(:version, greater_than: 0)
     |> validate_number(:timeout_seconds, greater_than: 0, less_than_or_equal_to: 86_400)
-    |> validate_number(:result_protocol_version, greater_than: 0)
     |> validate_length(:result_type, max: 100)
     |> validate_length(:created_by, max: 120)
     |> unique_constraint([:automation_definition_id, :version])

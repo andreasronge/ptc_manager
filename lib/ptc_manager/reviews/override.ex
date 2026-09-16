@@ -106,7 +106,7 @@ defmodule PtcManager.Reviews.Override do
             last_error: nil,
             stop_acknowledged_at:
               if(job.stop_reported_at, do: now, else: job.stop_acknowledged_at),
-            stop_report_token: PtcManager.Operations.StopReport.new_token()
+            stop_report_token: rotated_report_token(job)
           })
           |> Repo.update!()
 
@@ -136,5 +136,16 @@ defmodule PtcManager.Reviews.Override do
       &(is_binary(&1) and Regex.match?(~r/\A(?:[a-f0-9]{40}|[a-f0-9]{64})\z/, &1))
     ) and
       is_binary(round.diff_digest) and Regex.match?(~r/\A[a-f0-9]{64}\z/, round.diff_digest)
+  end
+
+  # Rotating the token makes the previous attempt's report unreachable by the
+  # path both sides derive from the job, so the outcome report is removed here
+  # rather than left in the output directory every managed agent can read.
+  #
+  # Only the protocol v2 file: v1 deliberately keeps its stop report after a
+  # continuation, which `Reviews` covers, and changing that is a separate step.
+  defp rotated_report_token(job) do
+    PtcManager.Operations.OutcomeReport.discard(job)
+    PtcManager.Operations.ReportFile.new_token()
   end
 end

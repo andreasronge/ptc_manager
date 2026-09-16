@@ -34,19 +34,19 @@
           "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
         },
         "summary": {
-          "description": "What changed, as the pull request body's Summary section. No secrets, no raw command output.",
+          "description": "What changed, in plain language. No secrets, no raw command output.",
           "type": "string",
           "minLength": 1,
           "maxLength": 2000
         },
         "validation": {
-          "description": "What was run beyond the repository's standard checks, and what it showed. No test counts, no raw output.",
+          "description": "How the change was checked and what that showed. No secrets, no raw command output.",
           "type": "string",
           "minLength": 1,
           "maxLength": 2000
         },
         "retrospective": {
-          "description": "Untracked follow-up work with a reproduction, and one repository instruction that was missing, wrong, or guessed at. Either may be 'none'.",
+          "description": "What the attempt leaves behind: follow-up work worth tracking, and anything about the repository's own instructions that was missing, wrong, or had to be guessed at. Say so plainly when there is nothing.",
           "type": "string",
           "minLength": 1,
           "maxLength": 2000

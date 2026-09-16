@@ -474,31 +474,36 @@ defmodule PtcManager.ResultReconcilerTest do
       refute_received {:probe, _repository_id, _job_id}
     end
 
-    test "an invalid report can never be read as success", %{job: job} do
-      write_outcome!(job, "{\"schema_version\": 2, \"outcome\": \"completed\"}")
-
-      assert {:error, {:outcome_report_unusable, _id}} = run(job)
-      assert Repo.get!(Job, job.id).result_head_sha == nil
-      refute_received {:probe, _repository_id, _job_id}
-    end
-
-    test "an unusable report is handed to a maintainer, not retried forever", %{job: job} do
+    test "an unreadable report records why and still publishes the verified branch", %{job: job} do
       write_outcome!(job, "not json")
 
-      assert {:error, {:outcome_report_unusable, _id}} = run(job)
-
-      # Pausing takes the job out of the reconciliation queue, so the next tick
-      # does not re-read the same permanently broken file.
-      assert Repo.get!(Job, job.id).review_state == "paused"
-
-      # The real queue, not a stand-in for it: the next tick must find nothing.
-      assert {:ok, nil} = PtcManager.Operations.claim_next_result_job()
+      assert {:ok, ready} = run(job)
+      assert ready.result_head_sha == @head
+      assert ready.result_completion["outcome"] == "unusable"
+      assert ready.result_completion["failure"] == "invalid_outcome_report"
+      refute Map.has_key?(ready.result_completion, "report")
     end
 
-    test "a protocol v2 attempt owes a report, so an absent one is handed over", %{job: job} do
-      assert {:error, {:outcome_report_unusable, _id}} = run(job)
-      assert Repo.get!(Job, job.id).result_head_sha == nil
-      refute_received {:probe, _repository_id, _job_id}
+    test "an absent report lowers the evidence rather than blocking delivery", %{job: job} do
+      assert {:ok, ready} = run(job)
+      assert ready.result_head_sha == @head
+      assert ready.result_completion["outcome"] == "unavailable"
+    end
+
+    test "a token that cannot name a file is recorded as PtcManager's own defect", %{job: job} do
+      job = job |> Job.changeset(%{stop_report_token: "../../etc/passwd"}) |> Repo.update!()
+
+      assert {:ok, ready} = run(job)
+      assert ready.result_completion["outcome"] == "unusable"
+      assert ready.result_completion["failure"] == "report_token_unusable"
+    end
+
+    test "a v2 job with no issued token was owed no report at all", %{job: job} do
+      job = job |> Job.changeset(%{stop_report_token: nil}) |> Repo.update!()
+
+      assert {:ok, ready} = run(job)
+      assert ready.result_head_sha == @head
+      assert ready.result_completion["outcome"] == "unavailable"
     end
 
     test "removes the report once a verified result is durable", %{job: job} do
@@ -511,35 +516,6 @@ defmodule PtcManager.ResultReconcilerTest do
       # Protocol v2 writes a report on success too, and the output directory is
       # shared by every agent under one worker identity.
       refute File.exists?(path)
-    end
-
-    test "ends the attempt and records why when the report is unusable", %{job: job} do
-      write_outcome!(job, "not json")
-
-      assert {:error, {:outcome_report_unusable, _id}} = run(job)
-
-      failed = Repo.get!(Job, job.id)
-      assert failed.review_state == "paused"
-      assert failed.result_attempt_expires_at == nil
-      assert failed.last_error =~ "could not be read"
-
-      assert Repo.get_by!(AuditEvent, action: "job.outcome_report_unusable", target_id: job.id)
-    end
-
-    test "a token that cannot name a file is PtcManager's defect, not a waiver", %{job: job} do
-      job = job |> Job.changeset(%{stop_report_token: "../../etc/passwd"}) |> Repo.update!()
-
-      assert {:error, {:outcome_report_unusable, _id}} = run(job)
-      assert Repo.get!(Job, job.id).result_head_sha == nil
-      refute_received {:probe, _repository_id, _job_id}
-    end
-
-    test "a v2 job with no issued token is PtcManager's omission, not the agent's", %{job: job} do
-      job = job |> Job.changeset(%{stop_report_token: nil}) |> Repo.update!()
-
-      assert {:ok, ready} = run(job)
-      assert ready.result_head_sha == @head
-      assert ready.result_completion == nil
     end
 
     test "removes the v2 report it read when the agent stopped", %{job: job} do

@@ -82,9 +82,11 @@ defmodule PtcManager.Operations.OutcomeReport do
   @doc """
   Builds the durable completion envelope stored beside a verified result.
 
-  A report reaches this point only after the branch was verified, so the two
-  outcomes it records are an accepted report and one naming a different commit.
-  Both are stated rather than inferred from missing fields.
+  The branch is already verified by this point, so the envelope is a record of
+  what evidence came with it: an accepted report, one naming a different commit,
+  one that could not be read, or none at all. Each is stated rather than
+  inferred from missing fields, so a later reader never has to guess whether a
+  delivery had no report or had one nobody could use.
   """
   def envelope(outcome, head_sha, review_generation, now) do
     %{
@@ -105,6 +107,10 @@ defmodule PtcManager.Operations.OutcomeReport do
 
   defp envelope_outcome({:error, reason}) do
     %{"outcome" => "unusable", "failure" => to_string(reason)}
+  end
+
+  defp envelope_outcome(:none) do
+    %{"outcome" => "unavailable"}
   end
 
   defp validate_decoded({:ok, decoded}), do: validate(decoded)

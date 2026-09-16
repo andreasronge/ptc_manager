@@ -41,48 +41,25 @@ defmodule PtcManager.ResultReconciler do
     end
   end
 
-  # Protocol v2 owes exactly one report for the attempt. A missing or unusable
-  # one is a permanent condition: the file will not improve on the next tick,
-  # so re-recording the same error would hold the single reconciliation task in
-  # a loop. It is handed to the maintainer instead, with the worktree retained.
+  # Protocol v2 asks for a report either way, but the branch still decides. A
+  # report that is absent or unreadable lowers the evidence recorded with the
+  # result; it does not withhold work PtcManager verified itself. Blocking here
+  # would turn a swept temporary directory or a host restart into a job that
+  # needs a person, for a delivery that is committed and provable.
   defp read_outcome(2, job, opts) do
     case outcome_contract(job) do
-      :never_issued ->
-        # PtcManager never gave this attempt a path to write to, so there is no
-        # report to owe. Its own omission is not charged to the agent.
-        verify_branch(job, opts, nil)
-
-      :unusable_token ->
-        # A token exists but cannot name a file inside the output directory.
-        # That is a defect in PtcManager's own state, not a benign omission, and
-        # waiving the contract here would publish on branch evidence alone.
-        hand_to_maintainer(job, "The job's report token is not usable as a file name.")
-
-      :issued ->
-        read_issued_outcome(job, opts)
+      :never_issued -> verify_branch(job, opts, :none)
+      :unusable_token -> verify_branch(job, opts, {:error, :report_token_unusable})
+      :issued -> read_issued_outcome(job, opts)
     end
   end
 
   defp read_issued_outcome(job, opts) do
     case OutcomeReport.read(job) do
-      {:ok, {:stopped, report}} ->
-        record_stop(job, report)
-
-      {:ok, {:completed, _payload} = report} ->
-        verify_branch(job, opts, report)
-
-      :none ->
-        # Deliberately not "the agent finished": the file is equally absent when
-        # the pane was killed, the host restarted, or the agent wrote the other
-        # protocol's path. Naming a cause here would point the maintainer away
-        # from the pane and worktree that hold the real one.
-        hand_to_maintainer(job, "No outcome report was written for this attempt.")
-
-      {:error, reason} ->
-        hand_to_maintainer(job, "The outcome report could not be read (#{reason}).")
-
-      other ->
-        hand_to_maintainer(job, "The outcome report reader returned #{inspect(other)}.")
+      {:ok, {:stopped, report}} -> record_stop(job, report)
+      {:ok, {:completed, _payload} = report} -> verify_branch(job, opts, {:ok, report})
+      :none -> verify_branch(job, opts, :none)
+      {:error, reason} -> verify_branch(job, opts, {:error, reason})
     end
   end
 
@@ -92,22 +69,6 @@ defmodule PtcManager.ResultReconciler do
   end
 
   defp outcome_contract(_job), do: :never_issued
-
-  # Terminal by construction: the transition is fenced, ends the attempt, flags
-  # the worktree for attention, and takes the job out of the reconciliation
-  # queue, so a permanently unreadable file is decided by a person instead of
-  # re-read on every tick.
-  defp hand_to_maintainer(job, reason) do
-    case Operations.record_outcome_report_failure(
-           job.id,
-           job.fencing_token,
-           job.result_attempt_token,
-           reason
-         ) do
-      {:ok, _job} -> {:error, {:outcome_report_unusable, job.id}}
-      {:error, _reason} = error -> error
-    end
-  end
 
   defp verify_branch(job, opts, report) do
     probe = Keyword.get(opts, :probe, Application.fetch_env!(:ptc_manager, :result_probe))
@@ -127,10 +88,10 @@ defmodule PtcManager.ResultReconciler do
             )
 
           if match?({:ok, _job}, outcome) do
-            # The outcome is durable now, so the model-written file has served
-            # its purpose. Protocol v2 writes one on success too, and the output
-            # directory is shared by every agent under one worker identity, so
-            # leaving it there would keep one job's prose readable by the next.
+            # The outcome is durable, so the model-written file has served its
+            # purpose. A failed verification deliberately keeps it: that job
+            # returns to the queue under the same report token and the next
+            # tick must still be able to read it.
             discard_report(job)
             PtcManager.PublisherPoller.wake()
           else
@@ -163,20 +124,31 @@ defmodule PtcManager.ResultReconciler do
   # same head. The material stays reported evidence either way: it cannot make
   # a result publishable, and a mismatch discards the report rather than the
   # result.
+  # Protocol v1 records nothing, because it never asked for anything to record.
   defp with_completion(result, _job, nil), do: result
 
-  defp with_completion(result, job, report) do
-    accepted =
-      if OutcomeReport.completed_for?(report, result.head_sha),
-        do: {:ok, report},
-        else: {:error, :outcome_report_head_mismatch}
-
+  defp with_completion(result, job, outcome) do
     Map.put(
       result,
       :completion,
-      OutcomeReport.envelope(accepted, result.head_sha, job.review_generation, DateTime.utc_now())
+      OutcomeReport.envelope(
+        accepted(outcome, result.head_sha),
+        result.head_sha,
+        job.review_generation,
+        DateTime.utc_now()
+      )
     )
   end
+
+  # A report naming another commit describes work this result does not contain,
+  # so it is recorded as unusable rather than attached to the wrong head.
+  defp accepted({:ok, report}, head_sha) do
+    if OutcomeReport.completed_for?(report, head_sha),
+      do: {:ok, report},
+      else: {:error, :outcome_report_head_mismatch}
+  end
+
+  defp accepted(other, _head_sha), do: other
 
   # Both deletes are idempotent, so nothing needs to know which protocol wrote
   # the file — and doing both also removes a report an agent left at the other

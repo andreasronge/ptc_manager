@@ -199,6 +199,14 @@ defmodule PtcManager.Operations.OutcomeReportTest do
              }
     end
 
+    test "records an absent report as unavailable, distinct from an unusable one" do
+      envelope = OutcomeReport.envelope(:none, @head, 1, ~U[2026-09-16 10:00:00Z])
+
+      assert envelope["outcome"] == "unavailable"
+      refute Map.has_key?(envelope, "report")
+      refute Map.has_key?(envelope, "failure")
+    end
+
     test "records a validation failure as unusable rather than as success" do
       envelope =
         OutcomeReport.envelope(
