@@ -322,11 +322,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     worktree_path = job.worktree_allocation.path
 
     # The agent needs its report contract in place before it can read the prompt
-    # that names it. Under protocol v1 a failure here only leaves it without a
-    # structured way to stop, which is how things worked before the contract.
-    # Under v2 the report is required, so a job dispatched without one would be
-    # handed to a maintainer however well its implementation went: there, a
-    # failed preparation has to stop the dispatch instead.
+    # that names it. A failure here is not fatal under either protocol: the
+    # agent behaves as it did before the contract existed, and reconciliation
+    # records the missing report as evidence rather than withholding the work.
     job =
       case PtcManager.Operations.issue_stop_report_token(job) do
         {:ok, issued} ->
@@ -336,8 +334,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           job
       end
 
-    with :ok <- ensure_report_contract(job, :optional),
-         {:ok, _context} <-
+    _optional = ensure_report_contract(job, :optional)
+
+    with {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
          {:ok, agent_key} <-
            start_agent(

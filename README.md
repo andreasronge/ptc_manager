@@ -874,9 +874,11 @@ stores the result in `jobs.result_completion` beside the verified Git fields. A
 report that is absent, unreadable, or written against another commit is recorded
 there with its reason and the delivery publishes as it otherwise would: missing
 evidence lowers what is known about a change, it never withholds work that was
-verified. Every built-in definition is still on protocol v1. Once you acknowledge the report or continue the
-retained work, its explanation and recovery buttons disappear from the live card.
-The report remains stored; a later stop produces a new actionable report.
+verified. Every built-in definition is still on protocol v1.
+
+Once you acknowledge a stop report or continue the retained work, its
+explanation and recovery buttons disappear from the live card. The report
+remains stored; a later stop produces a new actionable report.
 
 When one arrives, the attempt ends the way every unfinished attempt does: the
 job ends, its run ends, and the partial worktree is kept for attention. The

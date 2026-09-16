@@ -1836,7 +1836,7 @@ defmodule PtcManager.Operations do
       |> where([job], job.state == "queued")
       |> order_by([job], asc: job.inserted_at, asc: job.id)
       |> limit(1)
-      |> preload([:approval, :issue, :repository])
+      |> preload([:approval, :issue, :repository, :automation_definition_version])
       |> Repo.one()
     end
   end
@@ -4067,7 +4067,8 @@ defmodule PtcManager.Operations do
       job.result_attempt_token == attempt_token and job.result_base_sha == result.base_sha and
       job.result_head_sha == result.head_sha and
       job.result_diff_digest == result.diff_digest and
-      job.result_commit_count == result.commit_count and pre_publication_matches?(job, contract)
+      job.result_commit_count == result.commit_count and
+      job.result_completion == result[:completion] and pre_publication_matches?(job, contract)
   end
 
   defp pre_publication_attrs(nil) do

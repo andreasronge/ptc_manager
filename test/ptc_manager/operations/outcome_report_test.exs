@@ -66,6 +66,27 @@ defmodule PtcManager.Operations.OutcomeReportTest do
       refute Map.has_key?(payload, "schema_version")
     end
 
+    test "a stopped report carrying an undefined field is still a stop", %{job: job} do
+      write!(
+        job,
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "outcome" => "stopped",
+          "reason_code" => "environment_broken",
+          "summary" => "s",
+          "detail" => "d",
+          "progress" => "none",
+          "attempts" => 3
+        })
+      )
+
+      # Rejecting a stop drops through to the branch and would publish work the
+      # agent said was incomplete, so v2 is exactly as tolerant as v1 here.
+      assert {:ok, {:stopped, payload}} = OutcomeReport.read(job)
+      assert payload["reason_code"] == "environment_broken"
+      refute Map.has_key?(payload, "attempts")
+    end
+
     test "an absent report is none, not a failure", %{job: job} do
       assert OutcomeReport.read(job) == :none
     end
@@ -104,23 +125,6 @@ defmodule PtcManager.Operations.OutcomeReportTest do
       end
     end
 
-    test "a stopped report carrying an undefined field", %{job: job} do
-      write!(
-        job,
-        Jason.encode!(%{
-          "schema_version" => 2,
-          "outcome" => "stopped",
-          "reason_code" => "environment_broken",
-          "summary" => "s",
-          "detail" => "d",
-          "progress" => "none",
-          "head_sha" => String.duplicate("a", 40)
-        })
-      )
-
-      assert OutcomeReport.read(job) == {:error, :invalid_outcome_report}
-    end
-
     test "a missing section", %{job: job} do
       write!(
         job,
@@ -133,6 +137,43 @@ defmodule PtcManager.Operations.OutcomeReportTest do
       )
 
       assert OutcomeReport.read(job) == {:error, :invalid_outcome_report}
+    end
+  end
+
+  describe "prepare/1" do
+    test "places the contract beside the report path", %{job: job} do
+      assert {:ok, path, schema_path} = OutcomeReport.prepare(job)
+      assert path == OutcomeReport.path_for(job)
+      assert File.exists?(schema_path)
+
+      # The agent is pointed at this file by the prompt, so it has to be the
+      # real contract, not an empty placeholder.
+      assert schema_path |> File.read!() |> Jason.decode!() |> Map.get("title") ==
+               "Agent outcome report"
+    end
+
+    test "clears a previous attempt's report so it cannot be read as this one's" do
+      job = %Job{id: 9, fencing_token: 1, stop_report_token: String.duplicate("u", 20)}
+      assert {:ok, path, _schema_path} = OutcomeReport.prepare(job)
+      File.write!(path, "the previous run's report")
+
+      assert {:ok, ^path, _schema} = OutcomeReport.prepare(job)
+      refute File.exists?(path)
+    end
+
+    test "rewrites a read-only schema left by an earlier attempt" do
+      job = %Job{id: 10, fencing_token: 1, stop_report_token: String.duplicate("v", 20)}
+      assert {:ok, _path, schema_path} = OutcomeReport.prepare(job)
+      assert File.stat!(schema_path).mode |> rem(0o1000) == 0o440
+
+      # A retried dispatch reuses the token, so preparing over the 0440 copy
+      # must succeed rather than fail with EACCES.
+      assert {:ok, _path, ^schema_path} = OutcomeReport.prepare(job)
+    end
+
+    test "has no contract to place before a token is issued" do
+      assert OutcomeReport.prepare(%Job{id: 11, fencing_token: 1}) ==
+               {:error, :outcome_report_token_missing}
     end
   end
 

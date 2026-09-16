@@ -525,6 +525,25 @@ defmodule PtcManager.ResultReconcilerTest do
       assert ready.result_completion["failure"] == "report_contract_never_issued"
     end
 
+    test "a stop the contract does not fully describe still stops the job", %{job: job} do
+      write_outcome!(
+        job,
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "outcome" => "stopped",
+          "reason_code" => "environment_broken",
+          "summary" => "No toolchain.",
+          "detail" => "mix was not on PATH.",
+          "progress" => "partial",
+          "attempts" => 3
+        })
+      )
+
+      # Publishing here would ship two partial commits the agent disowned.
+      assert {:error, {:agent_stopped, "environment_broken"}} = run(job)
+      refute_received {:probe, _repository_id, _job_id}
+    end
+
     test "removes the report once a verified result is durable", %{job: job} do
       write_outcome!(job, completed_report(@head))
       path = PtcManager.Operations.OutcomeReport.path_for(job)

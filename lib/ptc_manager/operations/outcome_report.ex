@@ -29,7 +29,6 @@ defmodule PtcManager.Operations.OutcomeReport do
   @prefix "ptc-outcome"
   @schema_name "agent_outcome_report.schema.json"
   @completed_keys ~w(schema_version outcome head_sha summary validation retrospective)
-  @stopped_keys ~w(schema_version outcome reason_code summary detail prerequisite progress)
 
   @doc """
   Where this job's agent writes its outcome report, or nil before a token was
@@ -92,7 +91,6 @@ defmodule PtcManager.Operations.OutcomeReport do
   def envelope(outcome, head_sha, review_generation, now) do
     %{
       "envelope_version" => @envelope_version,
-      "report_schema_version" => @schema_version,
       "head_sha" => head_sha,
       "review_generation" => review_generation,
       "observed_at" => DateTime.to_iso8601(now)
@@ -103,6 +101,7 @@ defmodule PtcManager.Operations.OutcomeReport do
   defp envelope_outcome({:ok, {:completed, report}}) do
     %{
       "outcome" => "completed",
+      "report_schema_version" => @schema_version,
       "report" => Map.take(report, @sections)
     }
   end
@@ -150,11 +149,15 @@ defmodule PtcManager.Operations.OutcomeReport do
   defp validate(%{"schema_version" => @schema_version, "outcome" => "stopped"} = report) do
     payload = report |> Map.delete("schema_version") |> Map.delete("outcome")
 
-    with true <- known_keys_only?(report, @stopped_keys),
-         {:ok, stopped} <- StopReport.validate_payload(payload) do
-      {:ok, {:stopped, stopped}}
-    else
-      _invalid -> {:error, :invalid_outcome_report}
+    # Deliberately as tolerant as protocol v1 here, and no more. Rejecting a
+    # stopped report does not merely lower the evidence: it drops through to the
+    # branch, and an agent that said it could not finish would have its partial
+    # work published. Extra keys are ignored for the same reason v1 ignores
+    # them. The completed branch can afford to be strict because a rejection
+    # there only costs evidence.
+    case StopReport.validate_payload(payload) do
+      {:ok, stopped} -> {:ok, {:stopped, stopped}}
+      {:error, _reason} -> {:error, :invalid_outcome_report}
     end
   end
 
