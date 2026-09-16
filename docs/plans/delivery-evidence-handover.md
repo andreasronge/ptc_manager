@@ -14,22 +14,23 @@ The plan has nine steps. Two have been attempted.
 
 | Step | What | State |
 | --- | --- | --- |
-| 1 | Preserve PR sections | Merged as [#137], then found to regress; fix open as [#141] |
+| 1 | Preserve PR sections | Merged as [#137], then repaired and merged as [#141] |
 | 2 | Prepare outcome protocol v2 | Written, reviewed five times, **parked as draft [#139]** |
 | 3 | Activate outcome protocol v2 | Not started |
-| 4 | Add the pure projection | **Not started — start here** |
+| 4 | Add the pure projection | **Not started — start here**, tracked by [#144] |
 | 5 | Replace the daily-update contract | Not started |
 | 6 | Add the evidence directory | Not started |
 | 7 | Operate before enabling | Not started |
 | 8 | On-demand delivery insights | Deliberately later |
 | 9 | Repository-scoped issue approval | Deliberately later |
 
-Open issues: [#135] umbrella, [#138] step 2, [#140] the step 1 regression.
+Tracking: [#135] umbrella, [#138] step 2, [#140] the step 1 regression,
+[#143] the default/migration pause, and [#144] step 4.
 
 ## Start with step 4, not step 3
 
-The plan orders step 2 and 3 before the projection. That ordering is a
-preference, not a dependency, and following it has not been productive.
+The plan now explicitly orders the restoration around steps 4 and 5; the
+original step numbers remain stable references. Steps 2 and 3 are not dependencies.
 
 §4 of the plan says the projection takes its evidence from "accepted structured
 completion material, **or** bounded historical PR-section extraction with its
@@ -37,23 +38,35 @@ reported provenance". Step 1 shipped the second one. So steps 4 and 5 — the
 projection and the daily-update contract — work today without steps 2 or 3, and
 they are the two that produce something a maintainer can actually read.
 
-Come back to step 3 once a daily update has run for a while and shown which
-evidence is worth having.
+Come back to steps 2 and 3 once a daily update has run for a while and shown
+which evidence is worth having. Step 6, the evidence directory, can also wait
+until the later insights workflow needs it: persisted prompts already preserve
+the exact daily inputs. Step 7's manual evaluation and explicit enablement
+follow steps 4 and 5.
 
 ## What is live right now
 
-Daily updates are **enabled for `ptc_runner`** on `main`
-(`Automations.Defaults.triggers/2` gates on `repository.github_name`). Anything
-you change in `PtcManager.DailyDigests.Evidence` reaches a running automation.
+At the 2026-09-16 read-only production database check, the `ptc_runner`
+definition was disabled, although both its triggers remained enabled. The
+`ptc_manager` and `ptc-fs-mcp` definitions were enabled with both triggers
+disabled. There were no queued or running daily-digest actions. This confirms
+persisted automation state, not the release's in-memory scheduler setting.
 
-There is uncommitted work in the primary checkout that disables them; see
-"Uncommitted work" below.
+At that check, code on `main` still enabled `ptc_runner` triggers by default.
+The disabling change subsequently merged as [#145], from `fix/disable-daily-digests` at
+`/Users/andreasronge/projects/ptc_manager-disable-digests`. It disables defaults,
+migrates existing definitions and triggers, cancels queued legacy actions, and
+keeps published history. Rollback re-enables definitions but leaves triggers
+paused and cancelled actions cancelled. Deployment must be verified separately
+from a merge; never infer deployed state from defaults.
 
-## The two open pull requests
+## Implementation pull requests
 
-### [#141] — fix the step 1 regression. Merge this.
+### [#141] — step 1 regression repaired and merged
 
-CI green. It fixes a live defect that [#137] introduced and that CI, a full
+The continuation fixes passed independent review and CI at head `6d6b997`, then
+merged as `1a678fc`. Future follow-ups must also pass CI for their exact final
+head. This repairs a defect that [#137] introduced and that CI, a full
 `mix precommit`, and the author's own testing all missed.
 
 The short version: #137 replaced a flat 600-character body slice with bounded
@@ -69,18 +82,26 @@ slice would have kept 600 characters each. Measured:
 | 20 | 94,894 | 64,634 | **all bodies dropped** |
 | 30 | 142,354 | 96,964 | **all bodies dropped** |
 
-#141 adds a rung that shortens sections first, moves `summary` to the front of
+#141 adds rungs that shorten sections first, moves `summary` to the front of
 the priority set (the built-in prompt asks what changed; the old order kept
 "Untracked follow-up work: none" and discarded the answer), states body coverage
 per pull request, and fixes three parser faults: fenced code blocks scanned for
 headings, `###` sub-headings ending their parent section, and only exact heading
 spellings matching.
 
+The continuation review reproduced and fixed three further edge cases before
+landing: shortened preambles could still force all bodies out on a 30-PR day;
+an unrelated or shorter fence could end a code block; and section nesting used a
+hard-coded heading level. The preview now shares production's complete ladder,
+including shortened priority-only sections and a final primary-section fallback
+before dropping bodies. Realistic busy-day tests cover 30, 40 and 50 PRs.
+
 ### [#139] — outcome protocol v2. Leave it parked.
 
-Draft on purpose. Six commits, CI green, rebased on current `main`. Everything
-in it is dormant: no built-in definition sets `result_protocol_version: 2`, so
-none of the code runs.
+Draft on purpose. No built-in definition sets `result_protocol_version: 2`, so
+the v2 contract is inactive. Shared report-reading helpers and v1-facing changes
+would still affect live v1 jobs if merged; "inactive v2" does not mean the whole
+diff is dormant. Check its current CI and base before resuming it.
 
 It is not on the path to a useful daily update. It was parked rather than merged
 because merging dormant code buys risk without function — and this branch has
@@ -101,26 +122,28 @@ gaps. Read it before touching the branch. The gaps in brief:
 ## Uncommitted work in the primary checkout
 
 `/Users/andreasronge/projects/ptc_manager` is on `fix/review-long-line-digest`
-with **three unrelated changes mixed together**. Nothing here is committed, and
-the repository convention is that unrelated fixes go on their own branch off
-`origin/main`. Do not commit them as one change.
+with **two concerns mixed together**. The original edits remain uncommitted
+there; the digest concern has been copied into the isolated branch above.
+Do not commit both concerns as one change.
 
 1. **Disable daily digests pending redesign** — `automations.ex`,
    `automations/defaults.ex`, `daily_digest_live.ex` and its template, the
    untracked migration
    `priv/repo/migrations/20260916093000_disable_daily_digests.exs`, part of
    `config/runtime.exs`, `deploy/ptc_manager.env.example`, part of
-   `README.md`, and five test files. This is effectively step 0 of the plan and
-   should land before step 7 turns updates back on.
+   `README.md`, the digest-related test changes, the retirement migration test
+   in `disposable_deployment_target_test.exs`, and the `enable_automation!`
+   fixture helper. This is effectively step 0 of the plan and should land
+   before step 7 turns updates back on.
 2. **Resource-operation recovery retry** — `resource_operation_recovery.ex`
    returns `{:retry, ...}` where it returned `{:error, ...}`, plus the
    `resource_operation_cgroups` production default in `config/runtime.exs`, plus
    `resource_operations_test.exs`.
-3. **Disposable deployment target** — `disposable_deployment_target_test.exs`
-   (+96 lines) and related fixture changes.
 
-Splitting these means hunk-level work in `config/runtime.exs` and `README.md`.
-Ask before guessing the boundaries.
+The earlier handover incorrectly treated the disposable-deployment test as
+unrelated. Its added test verifies digest retirement, so it belongs with step 0.
+The split preserves the cgroup/recovery hunks in `config/runtime.exs` and
+`README.md` outside the digest branch. The untracked `.ignore` is also untouched.
 
 ## Checking your work locally
 
@@ -183,15 +206,16 @@ Non-Codex worktrees in play, all on the same repository:
 
 | Path | Branch | For |
 | --- | --- | --- |
-| `ptc_manager` | `fix/review-long-line-digest` | primary checkout, dirty — see above |
+| `ptc_manager` | `fix/review-long-line-digest` | original local edits, retained — see above |
+| `ptc_manager-disable-digests` | `fix/disable-daily-digests` | isolated step 0 |
 | `ptc_manager-wt3` | `feat/outcome-protocol-v2` | [#139], parked |
 | `ptc_manager-wt4` | `fix/digest-evidence-ladder` | [#141] |
 | `ptc_manager-wt5` | `docs/delivery-evidence-handover` | this file |
 
 `ptc_manager-wt` and `ptc_manager-wt2` predate this work.
 
-Remove wt3, wt4 and wt5 with `git worktree remove` once their branches land or
-are abandoned.
+Remove wt3, wt4, wt5 and `ptc_manager-disable-digests` with `git worktree remove`
+once their branches land or are abandoned, after checking for uncommitted work.
 
 [#135]: https://github.com/andreasronge/ptc_manager/issues/135
 [#137]: https://github.com/andreasronge/ptc_manager/pull/137
@@ -199,3 +223,6 @@ are abandoned.
 [#139]: https://github.com/andreasronge/ptc_manager/pull/139
 [#140]: https://github.com/andreasronge/ptc_manager/issues/140
 [#141]: https://github.com/andreasronge/ptc_manager/pull/141
+[#143]: https://github.com/andreasronge/ptc_manager/issues/143
+[#144]: https://github.com/andreasronge/ptc_manager/issues/144
+[#145]: https://github.com/andreasronge/ptc_manager/pull/145

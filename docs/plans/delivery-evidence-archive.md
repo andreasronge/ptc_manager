@@ -141,10 +141,16 @@ When the result reconciler claims a job under the existing
 3. `mark_result_verified` persists the verified Git fields and the bounded
    completion object in the same compare-and-swap and transaction it already
    uses for the result claim;
-4. a present but invalid report cannot be interpreted as success and produces a
-   bounded reconciliation error;
-5. an absent report is recorded as unavailable for protocol-v1 jobs, while
-   protocol-v2 jobs are required to produce one.
+4. an invalid completion report is recorded as unusable with a bounded reason;
+   it supplies no successful-completion claim and does not change the separate
+   deterministic verification and publication gates;
+5. an absent or unreadable report is recorded as unavailable under either
+   protocol. Protocol-v2 agents are instructed to produce a report, but missing
+   evidence never withholds work that passes the existing delivery gates.
+
+A recognized stop takes the existing fenced stop transition even if it carries
+an unknown field tolerated by protocol v1. Completion validation stays strict.
+Do not turn a rejected stop into permission to publish the branch.
 
 The stored completion envelope records schema version, report outcome, exact
 head, result-attempt observation, review generation, timestamp, and either the
@@ -230,8 +236,9 @@ prepared evidence projection.
 
 Fix the current truncation before changing the digest contract. Raise the
 600-character PR-body limit and add a bounded Markdown heading extractor. Under
-manifest pressure retain `Validation` and `Retrospective` before general summary
-prose rather than deleting every body. Start with the PR #1981 shape as a failing
+manifest pressure retain `Summary`, `Validation`, and `Retrospective`, with
+Summary first. Shorten retained sections before dropping bodies, and record
+per-PR coverage. Start with the PR #1981 shape as a failing
 test. This remains the fallback for external and historical PRs.
 
 ### 6.2 Inline one bounded day
@@ -384,11 +391,19 @@ unresolved for maintainer confirmation; model judgment cannot complete it.
 
 ## 8. Implementation order
 
-The first seven items restore the daily update. Each should normally be its own
-issue and pull request.
+Step numbers below are stable references, not dependencies. Restore the daily
+update in this order: disable generation consistently, repair step 1, implement
+steps 4 and 5, then run the manual checks and enablement in step 7. Each should
+normally be its own issue and pull request.
+
+Steps 2 and 3 are deferred until daily use establishes the value of structured
+completion evidence. Step 6 is also deferred: persisted daily-action prompts
+already retain exact inputs, and the directory is needed for the later insights
+workflow. Neither is a prerequisite for restoring daily updates.
 
 1. **Preserve PR sections.** Add the bounded heading extractor, increase the body
-   allowance, and keep Validation and Retrospective during compaction.
+   allowance, and keep Summary, Validation, and Retrospective during compaction,
+   shortening sections before dropping them.
 2. **Prepare outcome protocol v2.** Add the discriminated completed/stopped
    schema and reader plus bounded completion fields. Extend the existing result
    compare-and-swap to persist accepted completion data atomically beside the
@@ -470,8 +485,9 @@ Every bug fix starts with a failing reproduction. In addition to
   manifest as versioned entries without failing the action;
 - a window requested beyond 30 days, rejected before any file is written;
 - deterministic duplicate issue handling with no unapproved GitHub write;
-- protocol-v1 jobs completing after v2 deployment and v2 jobs requiring exactly
-  one valid outcome report;
+- protocol-v1 jobs completing after v2 deployment, v2 agents instructed to write
+  exactly one outcome report, and missing or unusable completion evidence not
+  blocking independently verified delivery under either protocol;
 - default creation and migration enabling the daily definition plus both built-in
   triggers for existing and newly added repositories.
 
