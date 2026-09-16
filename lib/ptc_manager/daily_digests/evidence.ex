@@ -319,6 +319,7 @@ defmodule PtcManager.DailyDigests.Evidence do
              "html_url" => pull["html_url"],
              "merged_at" => merged_at,
              "merge_commit_sha" => sha,
+             "head_sha" => captured_pull_head(pull),
              "base_ref" => branch
            }}
         else
@@ -332,6 +333,11 @@ defmodule PtcManager.DailyDigests.Evidence do
         {:error, :unexpected_github_pull_request}
     end
   end
+
+  defp captured_pull_head(%{"head" => %{"sha" => sha}}),
+    do: if(valid_sha?(sha), do: sha)
+
+  defp captured_pull_head(_), do: nil
 
   defp commits_in_window(items, digest) do
     Enum.reduce_while(items, {:ok, []}, fn item, {:ok, included} ->

@@ -8,9 +8,13 @@ defmodule PtcManager.DeliveryHistory do
   @pub_fields ~w(state pr_state draft checks_state mergeability remote_head_sha)a
 
   def events(job_id) do
-    Repo.all(from e in DeliveryEvent, where: e.job_id == ^job_id, order_by: [e.inserted_at, e.id])
+    Repo.all(records_query(job_id))
     |> Enum.flat_map(&project/1)
   end
+
+  @doc false
+  def records_query(job_id),
+    do: from(e in DeliveryEvent, where: e.job_id == ^job_id, order_by: [e.inserted_at, e.id])
 
   def project(event) do
     before = context(event.before_state)

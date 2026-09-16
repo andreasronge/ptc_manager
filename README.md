@@ -2088,6 +2088,11 @@ any action. It loads a snapshot on navigation or **Refresh report**; notificatio
 do not replace expanded evidence while it is being read. Other attempts for the
 same issue remain accessible, with metrics scoped to the selected attempt.
 
+`PtcManager.DeliveryEvidence.build/4` also exposes a bounded, versioned projection
+over an already captured GitHub selection and one database snapshot. See the
+[delivery evidence contract](docs/maintainers/delivery-evidence.md) for provenance,
+coverage and limits. This API does not run or enable daily digests.
+
 The merge view keeps coding handoffs separate from reviewer findings and shows
 exact reviewed and validated commits. It does not infer that a finding was fixed
 merely because a later review omitted it. Model history describes requested
