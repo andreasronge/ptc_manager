@@ -427,15 +427,7 @@ defmodule PtcManager.Automations do
           %{state: "synchronizing", started_at: action.started_at}
 
         "done" ->
-          result = decode_result(action.result_summary)
-
-          %{
-            state: if(result["outcome"] == "no-changes", do: "no_changes", else: "succeeded"),
-            result_status: result["outcome"] || "completed",
-            result_markdown:
-              result["markdown"] || result["private_summary"] || action.result_summary,
-            ended_at: action.ended_at
-          }
+          completed_invocation_attrs(action)
 
         "failed" ->
           %{state: "failed", last_error: action.last_error, ended_at: action.ended_at}
@@ -451,6 +443,44 @@ defmodule PtcManager.Automations do
     )
 
     :ok
+  end
+
+  defp completed_invocation_attrs(%AgentAction{action_key: "daily_digest"} = action) do
+    case Repo.get(PtcManager.DailyDigests.DailyDigest, action.target_id) do
+      %{
+        agent_action_id: id,
+        repository_id: repository_id,
+        published_at: %DateTime{},
+        markdown: markdown
+      } = digest
+      when id == action.id and repository_id == action.repository_id and is_binary(markdown) ->
+        %{
+          state: if(digest.change_count == 0, do: "no_changes", else: "succeeded"),
+          result_status: if(digest.change_count == 0, do: "no-changes", else: "published"),
+          result_markdown: markdown,
+          ended_at: action.ended_at
+        }
+
+      _ ->
+        %{
+          state: "failed",
+          result_status: "invalid_report",
+          result_markdown: nil,
+          last_error: "daily_digest_not_published",
+          ended_at: action.ended_at
+        }
+    end
+  end
+
+  defp completed_invocation_attrs(action) do
+    result = decode_result(action.result_summary)
+
+    %{
+      state: if(result["outcome"] == "no-changes", do: "no_changes", else: "succeeded"),
+      result_status: result["outcome"] || "completed",
+      result_markdown: result["markdown"] || result["private_summary"] || action.result_summary,
+      ended_at: action.ended_at
+    }
   end
 
   def record_invocation_runtime(%AgentAction{id: action_id} = action, kind, name) do

@@ -492,7 +492,8 @@ defmodule PtcManagerWeb.AutomationsLive do
     do:
       "#{String.capitalize(invocation.trigger_type)} run · v#{invocation.automation_definition_version.version}"
 
-  def markdown_html(markdown), do: PtcManagerWeb.DailyDigestLive.markdown_html(markdown)
+  def markdown_html(markdown, opts \\ []),
+    do: PtcManagerWeb.DailyDigestLive.markdown_html(markdown, opts)
 
   def prompt_preview(definition) do
     version = definition.current_version

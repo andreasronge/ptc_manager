@@ -31,6 +31,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       with :ok <- validate_health_snapshot(action),
            {:ok, profile} <- AgentProfiles.select(version.agent_selector),
            {:ok, output_path, schema_path} <- prepare_output(action),
+           complete_prompt = action.prompt <> result_protocol(output_path, schema_path),
+           :ok <- validate_complete_prompt(action, complete_prompt),
            {:ok, path, workspace, pane} <- prepare_workspace(action),
            name = agent_name(action),
            {:ok, context} <-
@@ -43,7 +45,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            :ok <- Automations.record_invocation_runtime(action, profile.kind, name),
            :ok <- validate_health_snapshot_for_handoff(action),
            :ok <- ensure_prompt_delivery(name, action, output_path),
-           {:ok, _output} <- prompt_and_wait(name, action, output_path, schema_path),
+           {:ok, _output} <- prompt_and_wait(name, action, complete_prompt),
            {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
         {:ok, result}
       end
@@ -320,17 +322,19 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
     end
   end
 
-  defp prompt_and_wait(name, action, output_path, schema_path) do
+  defp prompt_and_wait(name, action, complete_prompt) do
     timeout = action.automation_definition_version.timeout_seconds * 1_000
-
-    complete_prompt =
-      action.prompt <>
-        result_protocol(output_path, schema_path)
 
     with {:ok, prompt_path} <- write_prompt_file(action, complete_prompt) do
       submit_and_wait(name, prompt_loader(prompt_path), timeout)
     end
   end
+
+  @doc false
+  def validate_complete_prompt(%{action_key: "daily_digest"}, prompt),
+    do: PtcManager.DailyDigests.Input.validate_prompt(prompt)
+
+  def validate_complete_prompt(_action, _prompt), do: :ok
 
   defp ensure_prompt_delivery(name, action, output_path) do
     marker_path = Path.rootname(output_path) <> ".ready"

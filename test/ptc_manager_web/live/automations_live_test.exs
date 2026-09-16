@@ -120,6 +120,29 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
   end
 
   describe "detail" do
+    test "keeps bare links for other automations but not daily-report prose", %{conn: conn} do
+      repository = repository_fixture()
+
+      for {key, auto_links} <- [{"implement_issue", true}, {"daily_digest", false}] do
+        definition = Automations.get_definition(repository, key)
+
+        run =
+          invocation_fixture(
+            definition,
+            "succeeded",
+            "## Result\n\nhttps://example.org/bare\n\n[Selected](https://github.com/owner/repo/pull/1)"
+          )
+
+        {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/automations/#{definition.id}")
+        view |> element("#run-#{run.id} button[phx-click=toggle-run]") |> render_click()
+
+        assert has_element?(view, "#run-result-#{run.id} a[href='https://example.org/bare']") ==
+                 auto_links
+
+        assert has_element?(view, "#run-result-#{run.id} a[href$='/pull/1']")
+      end
+    end
+
     test "shows the test-capable execution boundary for issue reviews", %{conn: conn} do
       repository = repository_fixture()
       definition = Automations.get_definition(repository, "review_issue")

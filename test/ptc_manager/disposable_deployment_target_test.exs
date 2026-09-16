@@ -519,12 +519,56 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     assert PtcManager.DailyDigests.status(PtcManager.DailyDigests.get_digest(digest.id)) ==
              "cancelled"
 
-    _target = DisposableDeploymentTarget.rollback!(target, step: 1)
+    _target = DisposableDeploymentTarget.rollback!(target, to: 20_260_916_093_000)
     rolled_back = PtcManager.Automations.get_definition(repository, "daily_digest")
     assert rolled_back.enabled
     refute Enum.any?(rolled_back.triggers, & &1.enabled)
     assert Repo.get!(AgentAction, queued.id).state == "cancelled"
     assert Repo.get!(PtcManager.Automations.Invocation, invocation.id).state == "cancelled"
+  end
+
+  @tag migration_opts: [to: 20_260_916_093_000]
+  test "daily contract prompt migration preserves custom prompts and paused triggers", %{
+    target: target
+  } do
+    old =
+      "Write a concise, easy-to-read daily update from the supplied change manifest. Explain what was added, fixed, changed, or removed and include practical examples when the evidence supports them."
+
+    versions =
+      for author <- ["system:built-in", "maintainer"] do
+        repository = repository_fixture()
+        :ok = PtcManager.Automations.ensure_defaults(repository)
+        definition = PtcManager.Automations.get_definition(repository, "daily_digest")
+
+        version =
+          definition.current_version
+          |> Ecto.Changeset.change(%{prompt: old, created_by: author})
+          |> Repo.update!()
+
+        {repository, version}
+      end
+
+    target = DisposableDeploymentTarget.migrate_remaining!(target)
+
+    for {repository, version} <- versions do
+      definition = PtcManager.Automations.get_definition(repository, "daily_digest")
+      refute definition.enabled
+      refute Enum.any?(definition.triggers, & &1.enabled)
+      actual = Repo.get!(PtcManager.Automations.DefinitionVersion, version.id)
+
+      if version.created_by == "system:built-in",
+        do: assert(actual.prompt =~ "supplied delivery evidence"),
+        else: assert(actual.prompt == old)
+    end
+
+    _target = DisposableDeploymentTarget.rollback!(target, to: 20_260_917_090_000)
+
+    for {repository, version} <- versions do
+      definition = PtcManager.Automations.get_definition(repository, "daily_digest")
+      refute definition.enabled
+      refute Enum.any?(definition.triggers, & &1.enabled)
+      assert Repo.get!(PtcManager.Automations.DefinitionVersion, version.id).prompt == old
+    end
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

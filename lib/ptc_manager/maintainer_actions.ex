@@ -48,7 +48,6 @@ defmodule PtcManager.MaintainerActions do
 
   @snapshot_action_keys ["daily_digest" | @issue_maintenance_action_keys]
 
-  @max_daily_digest_prompt_bytes 100_000
   @terminal_daily_digest_evidence_errors ~w(
     daily_digest_pull_request_limit_reached
     daily_digest_commit_limit_reached
@@ -57,6 +56,7 @@ defmodule PtcManager.MaintainerActions do
     unexpected_github_pull_request
     unexpected_github_commit_date
     invalid_github_head_sha
+    daily_digest_projection_invalid_or_oversized
   )a
 
   @doc """
@@ -772,6 +772,8 @@ defmodule PtcManager.MaintainerActions do
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
     with {:ok, evidence} <- evidence_source.fetch(repository, digest),
+         {:ok, input} <-
+           PtcManager.DailyDigests.Input.prepare(repository, digest, evidence, DateTime.utc_now()),
          {:ok, %{sha: source_sha, ref: source_ref} = source} <-
            capture_planning_snapshot(source_snapshot, repository, action) do
       captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -783,10 +785,9 @@ defmodule PtcManager.MaintainerActions do
           "source_default_branch" => repository.default_branch,
           "source_captured_at" => DateTime.to_iso8601(captured_at),
           "digest_date" => Date.to_iso8601(digest.digest_date),
-          "trusted_source_head_sha" => evidence["source_head_sha"],
-          "trusted_change_count" => evidence["change_count"],
-          "trusted_pull_request_numbers" => evidence["pull_request_numbers"]
+          "trusted_source_head_sha" => evidence["source_head_sha"]
         })
+        |> Map.merge(input.snapshot)
         |> maybe_put_source_path(source)
 
       prompt =
@@ -794,12 +795,10 @@ defmodule PtcManager.MaintainerActions do
           """
 
           <source_snapshot ref="#{source_ref}" sha="#{source_sha}" default_branch="#{repository.default_branch}" workspace="read_only" github_access="none" />
-          <daily_change_manifest>
-          #{Jason.encode!(evidence)}
-          </daily_change_manifest>
+          #{PtcManager.DailyDigests.Input.block(input)}
           """
 
-      if byte_size(prompt) <= @max_daily_digest_prompt_bytes,
+      if PtcManager.DailyDigests.Input.validate_prompt(prompt) == :ok,
         do: Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt),
         else:
           reject_oversized_daily_digest_prompt(
@@ -1055,8 +1054,7 @@ defmodule PtcManager.MaintainerActions do
          {:ok, result},
          _summary
        ) do
-    with :ok <- validate_daily_digest_provenance(action, result),
-         {:ok, _digest} <- DailyDigests.publish(action, result) do
+    with {:ok, _digest} <- DailyDigests.publish(action, result) do
       {:ok, result}
     else
       {:error, reason} -> {:error, {:daily_digest_publish_failed, reason}}
@@ -1200,16 +1198,6 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp store_private_analysis(_action, result, _summary), do: result
-
-  defp validate_daily_digest_provenance(action, result) do
-    snapshot = action.target_snapshot || %{}
-
-    if result["source_head_sha"] == snapshot["trusted_source_head_sha"] and
-         result["change_count"] == snapshot["trusted_change_count"] and
-         result["pull_request_numbers"] == snapshot["trusted_pull_request_numbers"],
-       do: :ok,
-       else: {:error, :daily_digest_provenance_mismatch}
-  end
 
   defp stored_execution_result(%{result_summary: body}) when is_binary(body) do
     case Jason.decode(body) do

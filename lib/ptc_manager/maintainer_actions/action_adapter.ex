@@ -67,7 +67,7 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
 
   @doc false
   def validate_result(result, "daily_digest") when is_map(result) do
-    validate_daily_digest_result(result)
+    PtcManager.DailyDigests.Report.validate(result)
   end
 
   def validate_result(result, action_key) when is_map(result) do
@@ -99,50 +99,6 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
   end
 
   def validate_result(result, action_key, _snapshot), do: validate_result(result, action_key)
-
-  defp validate_daily_digest_result(%{
-         "status" => status,
-         "title" => title,
-         "summary" => summary,
-         "markdown" => markdown,
-         "window_started_at" => window_started_at,
-         "window_ended_at" => window_ended_at,
-         "source_head_sha" => source_head_sha,
-         "change_count" => change_count,
-         "pull_request_numbers" => pull_request_numbers
-       })
-       when status in ["published", "no-changes"] and is_binary(title) and
-              is_binary(summary) and is_binary(markdown) and is_binary(window_started_at) and
-              is_binary(window_ended_at) and is_binary(source_head_sha) and
-              is_integer(change_count) and change_count in 0..100 and
-              is_list(pull_request_numbers) do
-    valid_strings? =
-      String.trim(title) != "" and byte_size(title) <= 180 and
-        String.trim(summary) != "" and byte_size(summary) <= 4_000 and
-        String.trim(markdown) != "" and byte_size(markdown) <= 40_000
-
-    valid_window? = valid_iso8601?(window_started_at) and valid_iso8601?(window_ended_at)
-    valid_sha? = Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, source_head_sha)
-
-    valid_prs? =
-      Enum.all?(pull_request_numbers, &(is_integer(&1) and &1 > 0)) and
-        pull_request_numbers == Enum.sort(Enum.uniq(pull_request_numbers)) and
-        length(pull_request_numbers) <= 100
-
-    status_matches? =
-      (status == "published" and change_count > 0) or
-        (status == "no-changes" and change_count == 0 and pull_request_numbers == [])
-
-    if valid_strings? and valid_window? and valid_sha? and valid_prs? and status_matches?,
-      do: :ok,
-      else: {:error, :invalid_daily_digest_output}
-  end
-
-  defp validate_daily_digest_result(_result), do: {:error, :invalid_daily_digest_output}
-
-  defp valid_iso8601?(value) do
-    match?({:ok, %DateTime{}, 0}, DateTime.from_iso8601(value))
-  end
 
   defp validate_normalized_result(
          %{

@@ -157,12 +157,13 @@ defmodule PtcManager.DailyDigests do
            Repo.get(DailyDigest, digest_id),
          true <- repository_id == action.repository_id and agent_action_id == action.id,
          :ok <- validate_result_window(digest, result),
+         {:ok, markdown} <- PtcManager.DailyDigests.Report.render(action, result),
          {:ok, updated} <-
            digest
            |> DailyDigest.changeset(%{
              title: result["title"],
              summary: result["summary"],
-             markdown: result["markdown"],
+             markdown: markdown,
              source_head_sha: result["source_head_sha"],
              change_count: result["change_count"],
              pull_request_numbers: %{"numbers" => result["pull_request_numbers"]},
