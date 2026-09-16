@@ -557,7 +557,10 @@ reviewer, stores its validated result, and checks that the reviewed head, base,
 and patch digest match before allowing publication.
 The agent places its retrospective in the final commit message between
 `PTC-AGENT-RETROSPECTIVE-BEGIN` and `PTC-AGENT-RETROSPECTIVE-END` lines, and
-the broker copies that section into the draft PR description.
+the broker copies that section into the draft PR description. Under outcome
+protocol v2 the agent writes the same text into its outcome report as well,
+where it is kept as evidence; the commit message remains what reaches the pull
+request.
 The broker stages untrusted Git data separately, re-verifies the base, head, and
 diff, pushes only the deterministic job branch, and creates or reconciles one
 draft PR. Codex, Claude, Herdr, and the worker never receive its short-lived
@@ -855,7 +858,23 @@ The report is a small JSON file validated against
 `priv/codex/agent_stop_report.schema.json`: a `reason_code`, one plain sentence,
 a detail paragraph, optionally the exact `prerequisite` that is missing, and
 whether anything was committed. It is data. It records a reason and never causes
-a state transition by itself. Once you acknowledge the report or continue the
+a state transition by itself.
+
+An automation definition may instead pin `result_protocol_version: 2`, which
+replaces that failure-only file with one `agent_outcome_report`, validated
+against `priv/codex/agent_outcome_report.schema.json`. It carries exactly one
+outcome for the attempt: `stopped`, with the same fields as above, or
+`completed`, with the exact head commit the agent left on the branch plus its
+summary, validation, and retrospective. One report path per attempt makes a
+simultaneous claim impossible.
+
+A `completed` report is evidence, never authority. PtcManager probes the branch
+itself, accepts the report only when its own probe finds the same head, and
+stores the result in `jobs.result_completion` beside the verified Git fields. A
+report that is absent, unreadable, or written against another commit is recorded
+there with its reason and the delivery publishes as it otherwise would: missing
+evidence lowers what is known about a change, it never withholds work that was
+verified. Every built-in definition is still on protocol v1. Once you acknowledge the report or continue the
 retained work, its explanation and recovery buttons disappear from the live card.
 The report remains stored; a later stop produces a new actionable report.
 

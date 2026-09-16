@@ -4143,9 +4143,11 @@ defmodule PtcManager.Operations do
     end
   end
 
-  # The fence every result write shares: the job must still be the one this
-  # caller claimed, under the same fencing and attempt tokens, before the claim
-  # expired. Writing it once keeps the three transitions from drifting apart.
+  # The fence a result write shares: the job must still be the one this caller
+  # claimed, under the same fencing and attempt tokens, before the claim
+  # expired. `record_job_stop_report/5` deliberately still carries its own,
+  # weaker clause with no expiry check; tightening it changes a live v1 path and
+  # belongs with the work that activates protocol v2.
   defp claimed_result_attempt(job_id, fencing_token, attempt_token, now) do
     where(
       Job,
@@ -4159,10 +4161,7 @@ defmodule PtcManager.Operations do
   end
 
   defp valid_result_fields?(result) do
-    sha = ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
-
-    is_binary(result[:base_sha]) and Regex.match?(sha, result.base_sha) and
-      is_binary(result[:head_sha]) and Regex.match?(sha, result.head_sha) and
+    Job.valid_sha?(result[:base_sha]) and Job.valid_sha?(result[:head_sha]) and
       is_binary(result[:diff_digest]) and
       Regex.match?(~r/\A[0-9a-f]{64}\z/, result.diff_digest) and
       is_integer(result[:commit_count]) and result.commit_count > 0

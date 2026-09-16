@@ -187,7 +187,8 @@ defmodule PtcManager.Operations.OutcomeReportTest do
       envelope = OutcomeReport.envelope({:ok, report}, @head, 2, ~U[2026-09-16 10:00:00Z])
 
       assert envelope["outcome"] == "completed"
-      assert envelope["schema_version"] == 2
+      assert envelope["envelope_version"] == 1
+      assert envelope["report_schema_version"] == 2
       assert envelope["head_sha"] == @head
       assert envelope["review_generation"] == 2
       assert envelope["observed_at"] == "2026-09-16T10:00:00Z"

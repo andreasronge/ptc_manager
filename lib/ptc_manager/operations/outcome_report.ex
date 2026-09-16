@@ -23,6 +23,7 @@ defmodule PtcManager.Operations.OutcomeReport do
   alias PtcManager.Operations.StopReport
 
   @schema_version 2
+  @envelope_version 1
   @max_section 2_000
   @sections ~w(summary validation retrospective)
   @prefix "ptc-outcome"
@@ -90,7 +91,8 @@ defmodule PtcManager.Operations.OutcomeReport do
   """
   def envelope(outcome, head_sha, review_generation, now) do
     %{
-      "schema_version" => @schema_version,
+      "envelope_version" => @envelope_version,
+      "report_schema_version" => @schema_version,
       "head_sha" => head_sha,
       "review_generation" => review_generation,
       "observed_at" => DateTime.to_iso8601(now)
@@ -105,12 +107,27 @@ defmodule PtcManager.Operations.OutcomeReport do
     }
   end
 
+  defp envelope_outcome({:error, {reason, %{"head_sha" => reported}}}) do
+    %{
+      "outcome" => "unusable",
+      "failure" => to_string(reason),
+      "reported_head_sha" => reported
+    }
+  end
+
   defp envelope_outcome({:error, reason}) do
     %{"outcome" => "unusable", "failure" => to_string(reason)}
   end
 
   defp envelope_outcome(:none) do
     %{"outcome" => "unavailable"}
+  end
+
+  # Distinct from :none on purpose. `ReportFile` states that no contract handed
+  # over is not the same condition as a contract ignored, and a maintainer must
+  # be able to tell PtcManager's own omission from the agent's.
+  defp envelope_outcome(:never_issued) do
+    %{"outcome" => "unavailable", "failure" => "report_contract_never_issued"}
   end
 
   defp validate_decoded({:ok, decoded}), do: validate(decoded)

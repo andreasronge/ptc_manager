@@ -398,46 +398,44 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   # The contract a job is handed must be the one reconciliation will read, so
   # both sides derive it from the same frozen automation version. Preparing the
   # wrong protocol's file would leave the agent writing where nobody looks.
-  # Under v1 a first dispatch tolerates a failure here, because an agent with no
-  # stop file simply behaves as it did before the contract existed. A review
-  # continuation does not: it already had one, and losing it mid-review would be
-  # a silent regression. Under v2 the report is the only account of the attempt,
-  # so it is required on both paths.
-  defp ensure_report_contract(job, v1_requirement) do
-    case PtcManager.Operations.result_protocol_version(job) do
-      2 ->
-        case OutcomeReport.prepare(job) do
-          {:ok, _path, _schema_path} -> :ok
-          {:error, reason} -> {:error, {:outcome_report_unavailable, reason}}
-        end
+  # A first dispatch tolerates a failure here: an agent with no report file
+  # behaves as it did before the contract existed, and under v2 reconciliation
+  # records the absence as evidence rather than withholding the delivery. A
+  # review continuation does not tolerate it, because it already had a contract
+  # and losing one mid-review would be a silent regression.
+  defp ensure_report_contract(job, requirement) do
+    prepared =
+      case PtcManager.Operations.result_protocol_version(job) do
+        2 -> OutcomeReport.prepare(job)
+        _v1 -> StopReport.prepare(job)
+      end
 
-      _v1 ->
-        case {StopReport.prepare(job), v1_requirement} do
-          {{:ok, _path, _schema_path}, _requirement} -> :ok
-          {{:error, reason}, :required} -> {:error, {:stop_report_unavailable, reason}}
-          {{:error, _reason}, :optional} -> :ok
-        end
+    case {prepared, requirement} do
+      {{:ok, _path, _schema_path}, _requirement} -> :ok
+      {{:error, _reason}, :optional} -> :ok
+      {{:error, reason}, :required} -> {:error, {:report_contract_unavailable, reason}}
     end
   end
 
-  # Shared by both protocols' reporting instructions, so a change to what counts
-  # as blocked cannot reach one and miss the other.
+  # Only the blocked condition is shared, and only because it is already
+  # identical in both protocols. The closing sentences are not: v1's "describe
+  # what is missing" is guidance matched to its stop schema's prerequisite
+  # field, and it is live wording that this change must leave exactly as it is.
   @blocked_condition "you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe"
-  @report_closing "Describe what happened in plain language and name no secrets. Do not guess, do not work around a blocker, and do not wait."
 
-  # Under protocol v2 the retrospective belongs in the outcome report, so the
-  # commit-message channel is not offered as a second destination: an agent
-  # given both would fill one and leave the other empty, and nothing says which
-  # the broker should believe.
   defp github_instruction(%{publication_source: "agent"}, _protocol),
     do:
       "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
 
+  # The commit-message markers stay under both protocols because they are what
+  # the broker reads today. Protocol v2 also records the retrospective as
+  # evidence, so the agent is told plainly that the two are the same text and
+  # which one becomes the pull request, rather than being left to choose.
   defp github_instruction(_job, protocol) do
     retrospective =
       case protocol do
         2 ->
-          ""
+          " Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END; write the same text in your outcome report, where it is kept as evidence. The commit message is what reaches the pull request."
 
         _v1 ->
           " Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END."
@@ -455,12 +453,12 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       2 ->
         {path, schema_path} = {OutcomeReport.path_for(job), OutcomeReport.schema_path_for(job)}
 
-        "Reporting: write #{path} matching the schema at #{schema_path} exactly once, before you stop. If you finished, report outcome \"completed\" with the exact head commit you left on the branch and your summary, validation, and retrospective. If #{@blocked_condition} — report outcome \"stopped\" instead and stop there. PtcManager verifies the branch itself, so a completed report is accepted only when it names the commit actually on the branch. #{@report_closing}"
+        "Reporting: write #{path} matching the schema at #{schema_path} exactly once, before you stop. If you finished, report outcome \"completed\" with the exact head commit you left on the branch and your summary, validation, and retrospective. If #{@blocked_condition} — report outcome \"stopped\" instead and stop there. PtcManager verifies the branch itself, so a completed report is accepted only when it names the commit actually on the branch. Describe what happened in plain language and name no secrets. Do not guess, do not work around a blocker, and do not wait."
 
       _v1 ->
         {path, schema_path} = {StopReport.path_for(job), StopReport.schema_path_for(job)}
 
-        "If you cannot start: if #{@blocked_condition} — write #{path} matching the schema at #{schema_path}, then stop. #{@report_closing}"
+        "If you cannot start: if #{@blocked_condition} — write #{path} matching the schema at #{schema_path}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait."
     end
   end
 

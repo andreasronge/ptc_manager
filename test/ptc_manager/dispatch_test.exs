@@ -897,6 +897,63 @@ defmodule PtcManager.DispatchTest do
     assert "--model" in PtcManager.AgentProfiles.args("codex")
   end
 
+  describe "outcome protocol v2 prompt" do
+    setup do
+      repository = repository_fixture(%{required_pre_pr_reviews: 2})
+      issue = issue_fixture(repository, %{number: 42, title: "Fix the queue"})
+      proposal_fixture(issue)
+      {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+      job =
+        job
+        |> Job.changeset(%{
+          branch_name: "ptc-manager/issue-42-job-#{job.id}",
+          fencing_token: 3,
+          stop_report_token: String.duplicate("t", 20)
+        })
+        |> Repo.update!()
+
+      {:ok, repository: repository, issue: issue, job: job}
+    end
+
+    test "asks for both outcomes and names the v2 report path", ctx do
+      job = protocol_v2_job(ctx.job, ctx.repository, "outcome_v2_prompt")
+
+      prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(ctx.repository, ctx.issue, job)
+
+      assert prompt =~ "ptc-outcome-"
+      refute prompt =~ "ptc-stop-"
+      assert prompt =~ ~s(report outcome "completed")
+      assert prompt =~ ~s(report outcome "stopped")
+      assert prompt =~ "accepted only when it names the commit actually on the branch"
+    end
+
+    test "still routes the retrospective to the channel the broker reads", ctx do
+      job = protocol_v2_job(ctx.job, ctx.repository, "outcome_v2_prompt")
+
+      prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(ctx.repository, ctx.issue, job)
+
+      # Nothing reads jobs.result_completion yet, so removing these markers
+      # would drop the retrospective from every published pull request.
+      assert prompt =~ "PTC-AGENT-RETROSPECTIVE-BEGIN"
+      assert prompt =~ "PTC-AGENT-RETROSPECTIVE-END"
+      assert prompt =~ "The commit message is what reaches the pull request."
+    end
+
+    test "leaves the live v1 instruction exactly as it was", ctx do
+      prompt = PtcManager.Dispatch.HerdrAdapter.build_prompt(ctx.repository, ctx.issue, ctx.job)
+
+      assert prompt =~ "ptc-stop-"
+      refute prompt =~ "ptc-outcome-"
+      assert prompt =~ "If you cannot start:"
+
+      assert prompt =~
+               "Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait."
+
+      refute prompt =~ ~s(report outcome "completed")
+    end
+  end
+
   test "builds repository-owned validation, provider-neutral review, and broker contract" do
     repository =
       repository_fixture(%{required_pre_pr_reviews: 2})

@@ -84,13 +84,24 @@ defmodule PtcManager.Operations.ReportFile do
     with path when is_binary(path) <- path_for(job, prefix),
          schema_path when is_binary(schema_path) <- schema_path_for(job, prefix),
          :ok <- File.mkdir_p(directory()),
-         _stale_report <- File.rm(path),
-         _stale_schema <- File.rm(schema_path),
+         :ok <- remove_stale(path),
+         :ok <- remove_stale(schema_path),
          :ok <- File.cp(schema_source(schema_name), schema_path),
          :ok <- File.chmod(schema_path, 0o440) do
       {:ok, path, schema_path}
     else
       nil -> {:error, missing_token_error}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # An absent file is the desired state, so only a real removal failure counts:
+  # leaving one behind would let the previous attempt's report be read as this
+  # one's outcome, which is the whole reason for removing it.
+  defp remove_stale(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end

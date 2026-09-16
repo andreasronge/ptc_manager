@@ -717,7 +717,7 @@ defmodule PtcManager.Reviews do
             state: if(job.state in ["failed", "publish_blocked"], do: "blocked", else: job.state),
             stop_acknowledged_at:
               if(job.stop_reported_at, do: DateTime.utc_now(), else: job.stop_acknowledged_at),
-            stop_report_token: rotated_report_token(job),
+            stop_report_token: PtcManager.Operations.StopReport.new_token(),
             review_state: "resume_pending",
             reviewed_head_sha: nil,
             review_generation: generation + 1,
@@ -805,16 +805,5 @@ defmodule PtcManager.Reviews do
   defp notify(outcome) do
     ExecutionProfiles.notify()
     outcome
-  end
-
-  # Rotating the token makes the previous attempt's report unreachable by the
-  # path both sides derive from the job, so the outcome report is removed here
-  # rather than left in the output directory every managed agent can read.
-  #
-  # Only the protocol v2 file: v1 deliberately keeps its stop report after a
-  # continuation, which `Reviews` covers, and changing that is a separate step.
-  defp rotated_report_token(job) do
-    PtcManager.Operations.OutcomeReport.discard(job)
-    PtcManager.Operations.ReportFile.new_token()
   end
 end

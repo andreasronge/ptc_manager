@@ -418,7 +418,18 @@ defmodule PtcManager.ResultReconcilerTest do
       end)
 
       {_repository, _issue, job} = awaiting_job_fixture()
-      job = protocol_v2_job(job)
+
+      job =
+        protocol_v2_job(
+          job,
+          Repo.get!(PtcManager.Operations.Repository, job.repository_id),
+          "outcome_v2_probe"
+        )
+
+      job =
+        job
+        |> Job.changeset(%{stop_report_token: String.duplicate("t", 20)})
+        |> Repo.update!()
 
       Process.put(
         :result_probe_result,
@@ -443,7 +454,8 @@ defmodule PtcManager.ResultReconcilerTest do
       completion = ready.result_completion
       assert completion["outcome"] == "completed"
       assert completion["head_sha"] == @head
-      assert completion["schema_version"] == 2
+      assert completion["envelope_version"] == 1
+      assert completion["report_schema_version"] == 2
       assert completion["report"]["validation"] =~ "ran the suite"
     end
 
@@ -455,6 +467,10 @@ defmodule PtcManager.ResultReconcilerTest do
       assert ready.result_completion["outcome"] == "unusable"
       assert ready.result_completion["failure"] == "outcome_report_head_mismatch"
       refute Map.has_key?(ready.result_completion, "report")
+
+      # The commit the agent named, so a maintainer can tell a stale report
+      # from an invented one without guessing.
+      assert ready.result_completion["reported_head_sha"] == String.duplicate("d", 40)
     end
 
     test "takes the fenced failure transition for a stopped report", %{job: job} do
@@ -498,12 +514,15 @@ defmodule PtcManager.ResultReconcilerTest do
       assert ready.result_completion["failure"] == "report_token_unusable"
     end
 
-    test "a v2 job with no issued token was owed no report at all", %{job: job} do
+    test "a v2 job with no issued token records PtcManager's own omission", %{job: job} do
       job = job |> Job.changeset(%{stop_report_token: nil}) |> Repo.update!()
 
       assert {:ok, ready} = run(job)
       assert ready.result_head_sha == @head
       assert ready.result_completion["outcome"] == "unavailable"
+
+      # Distinct from an agent that was handed a contract and wrote nothing.
+      assert ready.result_completion["failure"] == "report_contract_never_issued"
     end
 
     test "removes the report once a verified result is durable", %{job: job} do
@@ -576,40 +595,6 @@ defmodule PtcManager.ResultReconcilerTest do
       job
       |> PtcManager.Operations.OutcomeReport.path_for()
       |> File.write!(contents)
-    end
-
-    defp protocol_v2_job(job) do
-      repository = Repo.get!(PtcManager.Operations.Repository, job.repository_id)
-
-      {:ok, definition} =
-        PtcManager.Automations.create_definition(
-          repository,
-          %{
-            key: "outcome_v2_probe",
-            name: "Outcome v2 probe",
-            description: "Fixture definition pinned to outcome protocol v2."
-          },
-          %{
-            target_type: "issue",
-            execution_profile: "generic_ephemeral",
-            github_access: "read",
-            queue_lane: "planning",
-            resource_class: "light",
-            lock_policy: %{"type" => "target"},
-            timeout_seconds: 300,
-            result_type: "none",
-            result_protocol_version: 2,
-            prompt: "fixture"
-          },
-          "test"
-        )
-
-      job
-      |> Job.changeset(%{
-        automation_definition_version_id: definition.current_version.id,
-        stop_report_token: String.duplicate("t", 20)
-      })
-      |> Repo.update!()
     end
   end
 

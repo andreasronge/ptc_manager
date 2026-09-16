@@ -189,4 +189,42 @@ defmodule PtcManager.OperationsFixtures do
         reraise(error, __STACKTRACE__)
       end
   end
+
+  @doc """
+  Pins `job` to an automation version that uses outcome protocol v2.
+
+  Protocol is frozen per job through its automation version, so both the
+  dispatch side and the reconciliation side need the same fixture to exercise
+  anything about v2.
+  """
+  def protocol_v2_job(job, repository, key \\ "outcome_v2") do
+    {:ok, definition} =
+      PtcManager.Automations.create_definition(
+        repository,
+        %{
+          key: key,
+          name: "Outcome v2 fixture",
+          description: "Fixture definition pinned to outcome protocol v2."
+        },
+        %{
+          target_type: "issue",
+          execution_profile: "generic_ephemeral",
+          github_access: "read",
+          queue_lane: "planning",
+          resource_class: "light",
+          lock_policy: %{"type" => "target"},
+          timeout_seconds: 300,
+          result_type: "none",
+          result_protocol_version: 2,
+          prompt: "fixture"
+        },
+        "test"
+      )
+
+    job
+    |> PtcManager.Operations.Job.changeset(%{
+      automation_definition_version_id: definition.current_version.id
+    })
+    |> PtcManager.Repo.update!()
+  end
 end

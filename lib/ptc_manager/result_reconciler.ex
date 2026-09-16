@@ -48,7 +48,7 @@ defmodule PtcManager.ResultReconciler do
   # needs a person, for a delivery that is committed and provable.
   defp read_outcome(2, job, opts) do
     case outcome_contract(job) do
-      :never_issued -> verify_branch(job, opts, :none)
+      :never_issued -> verify_branch(job, opts, :never_issued)
       :unusable_token -> verify_branch(job, opts, {:error, :report_token_unusable})
       :issued -> read_issued_outcome(job, opts)
     end
@@ -142,10 +142,10 @@ defmodule PtcManager.ResultReconciler do
 
   # A report naming another commit describes work this result does not contain,
   # so it is recorded as unusable rather than attached to the wrong head.
-  defp accepted({:ok, report}, head_sha) do
+  defp accepted({:ok, {:completed, payload} = report}, head_sha) do
     if OutcomeReport.completed_for?(report, head_sha),
       do: {:ok, report},
-      else: {:error, :outcome_report_head_mismatch}
+      else: {:error, {:outcome_report_head_mismatch, payload}}
   end
 
   defp accepted(other, _head_sha), do: other
