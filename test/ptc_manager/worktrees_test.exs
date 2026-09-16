@@ -231,6 +231,48 @@ defmodule PtcManager.WorktreesTest do
       refute File.exists?(path)
     end
 
+    test "a discard removes a managed directory when no Herdr workspace was recorded" do
+      path = existing_path()
+      allocation = attention_allocation!(path, herdr_workspace: "")
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_missing})
+
+      assert :ok = Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert_receive {:discard_worktree, allocation_id}
+      assert allocation_id == allocation.id
+      removed = Repo.get!(WorktreeAllocation, allocation.id)
+      assert removed.state == "removed"
+      assert removed.removed_at
+      refute File.exists?(path)
+    end
+
+    test "preservation reuses its sealed artifact after removal fails" do
+      path = existing_path()
+      allocation = attention_allocation!(path, herdr_workspace: "")
+      Process.put(:worktree_remove_result, {:error, :workspace_busy})
+
+      assert {:error, {:worktree_cleanup_failed, :workspace_busy}} =
+               Worktrees.preserve_attention(allocation.id, "andreas", FakeAdapter, FakePreserver)
+
+      assert_receive {:preserve_worktree, allocation_id, _token}
+      assert allocation_id == allocation.id
+      kept = Repo.get!(WorktreeAllocation, allocation.id)
+      assert kept.state == "attention"
+      assert kept.preserved_at
+
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_missing})
+
+      assert :ok =
+               Worktrees.preserve_attention(allocation.id, "andreas", FakeAdapter, FakePreserver)
+
+      refute_receive {:preserve_worktree, ^allocation_id, _token}
+      removed = Repo.get!(WorktreeAllocation, allocation.id)
+      assert removed.state == "removed"
+      assert removed.removed_at
+      assert removed.preserved_artifact_path == kept.preserved_artifact_path
+      refute File.exists?(path)
+    end
+
     test "forgotten cleanup never falls back to coordinator deletion when the worker is unavailable" do
       path = existing_path()
       allocation = attention_allocation!(path)
@@ -296,6 +338,26 @@ defmodule PtcManager.WorktreesTest do
       Process.put(:worktree_remove_result, {:error, :worktree_workspace_forgotten})
 
       assert {:error, {:worktree_cleanup_failed, :worktree_path_outside_managed_root}} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
+    test "a missing workspace outside the managed root keeps the worktree for attention" do
+      allocation = attention_allocation!(unmanaged_path(), herdr_workspace: "")
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_missing})
+
+      assert {:error, {:worktree_cleanup_failed, :worktree_path_outside_managed_root}} =
+               Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
+
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
+    test "a missing workspace without a path keeps the worktree for attention" do
+      allocation = attention_allocation!(nil, herdr_workspace: "")
+      Process.put(:worktree_remove_result, {:error, :worktree_workspace_missing})
+
+      assert {:error, {:worktree_cleanup_failed, :worktree_path_missing}} =
                Worktrees.discard_attention(allocation.id, "andreas", FakeAdapter)
 
       assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
@@ -606,6 +668,7 @@ defmodule PtcManager.WorktreesTest do
     {:ok, leased} = lease_pool_job(job.id, remote, 1)
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     job_state = Keyword.get(opts, :job_state, "lost")
+    herdr_workspace = Keyword.get(opts, :herdr_workspace, "retained-workspace")
 
     leased
     |> Job.changeset(%{
@@ -618,7 +681,7 @@ defmodule PtcManager.WorktreesTest do
     |> WorktreeAllocation.changeset(%{
       state: "attention",
       path: path,
-      herdr_workspace: "retained-workspace",
+      herdr_workspace: herdr_workspace,
       last_error: "Herdr confirmed that the retained managed agent is no longer present.",
       last_used_at: now
     })
