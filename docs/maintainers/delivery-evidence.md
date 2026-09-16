@@ -19,9 +19,16 @@ no later than the supplied observation time. PRs are selected by GitHub
 `merged_at`; local publications only enrich them. Direct commits remain a
 separate family. Their committer timestamps are **not** push-arrival timestamps.
 The projection validates repository URLs, base branch, merge identities, times,
-counts and duplicate selection entries. Before enabling the next daily-update
-contract, [#146](https://github.com/andreasronge/ptc_manager/issues/146) must add
-the before/after default-head coherence check to the selector.
+counts and duplicate selection entries. The selector reads and validates the
+default-branch head before and after the complete PR/direct-commit capture.
+Commit pagination is pinned to the first head. If the final head differs, both
+selections are discarded and the whole capture is retried, up to three attempts.
+Continued movement returns `:daily_digest_source_head_unstable` without a
+manifest; this is retryable by the existing action workflow. Read errors and
+malformed final heads propagate without accepting evidence. Matching endpoint
+observations are a coherence guard, not an atomic GitHub snapshot or proof that
+a branch could not move away and back between observations. This guard does not
+enable daily digests; wiring and manual evaluation remain separate steps.
 
 ## Snapshot and provenance
 

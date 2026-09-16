@@ -342,7 +342,6 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     def get_json(url) do
       cond do
         String.ends_with?(url, "/commits/main") ->
-          Process.put(:stable_pull_scan, 0)
           {:ok, %{"sha" => Fixture.sha(999)}}
 
         String.contains?(url, "/commits?") ->
@@ -379,6 +378,45 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     defp unmerged_pull_request(number), do: pull_request(number) |> Map.put("merged_at", nil)
   end
 
+  defmodule MovingHeadClient do
+    def get_json(url) do
+      send(self(), {:capture_url, url})
+      generation = div(Process.get(:head_reads, 0) + 1, 2)
+
+      cond do
+        String.ends_with?(url, "/commits/main") ->
+          [response | rest] = Process.get(:head_responses)
+          Process.put(:head_responses, rest)
+          Process.put(:head_reads, Process.get(:head_reads, 0) + 1)
+          response
+
+        String.contains?(url, "/pulls?") and String.contains?(url, "/commits/") ->
+          {:ok, []}
+
+        String.contains?(url, "/pulls?") ->
+          {:ok, [Fixture.pull_request(generation)]}
+
+        String.contains?(url, "/commits?") ->
+          sha = Fixture.sha(1_000 + generation)
+
+          {:ok,
+           [
+             %{
+               "sha" => sha,
+               "html_url" => "https://github.com/a/r/commit/#{sha}",
+               "commit" => %{
+                 "message" => "Direct change",
+                 "committer" => %{"date" => "2026-08-30T12:00:00Z"}
+               }
+             }
+           ]}
+
+        true ->
+          raise "unexpected capture URL: #{url}"
+      end
+    end
+  end
+
   setup do
     Process.put(:daily_evidence_test_pid, self())
     previous = Application.get_env(:ptc_manager, :daily_digest_github_client)
@@ -391,6 +429,78 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     end)
 
     :ok
+  end
+
+  test "unchanged source head is checked after the complete evidence scan" do
+    assert {:ok, evidence} = capture_heads([{:ok, %{"sha" => @head}}, {:ok, %{"sha" => @head}}])
+    assert evidence["source_head_sha"] == @head
+    assert Process.get(:head_reads) == 2
+    urls = capture_urls([])
+    assert List.first(urls) == List.last(urls)
+    assert Enum.at(urls, -2) =~ "/commits/#{Fixture.sha(1_001)}/pulls?"
+  end
+
+  test "a changed source head retries the whole capture and discards prior PRs and commits" do
+    assert {:ok, evidence} =
+             capture_heads(
+               Enum.map([@head, @next_day, @next_day, @next_day], &{:ok, %{"sha" => &1}})
+             )
+
+    assert Process.get(:head_reads) == 4
+    assert evidence["source_head_sha"] == @next_day
+    assert evidence["pull_request_numbers"] == [2]
+    assert Enum.map(evidence["commits"], & &1["sha"]) == [Fixture.sha(2), Fixture.sha(1_002)]
+    queries = capture_urls([]) |> Enum.filter(&String.contains?(&1, "/commits?"))
+    assert length(queries) == 2
+    assert hd(queries) =~ "sha=#{@head}"
+    assert List.last(queries) =~ "sha=#{@next_day}"
+  end
+
+  test "source head instability exhausts a bounded capture retry budget" do
+    responses =
+      Enum.map([@head, @next_day, @head, @next_day, @head, @next_day], &{:ok, %{"sha" => &1}})
+
+    assert {:error, :daily_digest_source_head_unstable} = capture_heads(responses)
+    assert Process.get(:head_reads) == 6
+
+    refute :daily_digest_source_head_unstable in PtcManager.MaintainerActions.terminal_daily_digest_evidence_errors()
+  end
+
+  test "failed or malformed second head observations never accept a manifest" do
+    for {response, reason} <- [
+          {{:error, :rate_limited}, :rate_limited},
+          {{:ok, %{"sha" => "bad-sha"}}, :invalid_github_head_sha},
+          {{:ok, %{}}, :unexpected_github_response}
+        ] do
+      assert {:error, ^reason} = capture_heads([{:ok, %{"sha" => @head}}, response])
+      assert Process.get(:head_reads) == 2
+    end
+  end
+
+  defp capture_heads(responses) do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MovingHeadClient)
+    Process.put(:head_responses, responses)
+    Process.put(:head_reads, 0)
+
+    Evidence.fetch(
+      %PtcManager.Operations.Repository{
+        github_owner: "a",
+        github_name: "r",
+        default_branch: "main"
+      },
+      %DailyDigest{
+        window_started_at: ~U[2026-08-29 22:00:00Z],
+        window_ended_at: ~U[2026-08-30 22:00:00Z]
+      }
+    )
+  end
+
+  defp capture_urls(urls) do
+    receive do
+      {:capture_url, url} -> capture_urls([url | urls])
+    after
+      0 -> Enum.reverse(urls)
+    end
   end
 
   # The scan reads up to three pages ordered by mutable updated_at, so it sees
