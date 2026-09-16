@@ -3,7 +3,10 @@
   "title": "Agent outcome report",
   "description": "Written once by an implementation agent for the attempt it currently holds. It reports what happened and is never itself authority: a completed report is attached to a result only when PtcManager's own Git probe finds the same head, and a stopped report is displayed to the maintainer rather than acted on automatically.",
   "type": "object",
-  "required": ["schema_version", "outcome"],
+  "required": [
+    "schema_version",
+    "outcome"
+  ],
   "properties": {
     "schema_version": {
       "description": "The contract this report was written against.",
@@ -13,17 +16,22 @@
     "outcome": {
       "description": "What happened to this attempt. There is exactly one report path, so an attempt cannot claim both.",
       "type": "string",
-      "enum": ["completed", "stopped"]
+      "enum": [
+        "completed",
+        "stopped"
+      ]
     }
   },
   "oneOf": [
     {
       "properties": {
-        "outcome": { "const": "completed" },
+        "outcome": {
+          "const": "completed"
+        },
         "head_sha": {
-          "description": "The exact commit the agent believes it left on the branch. PtcManager accepts the report only when its own probe finds this head, so a wrong value discards the report rather than moving the job.",
+          "description": "The exact commit the agent believes it left on the branch, as Git reports it for this repository's object format. PtcManager accepts the report only when its own probe finds this head, so a wrong value discards the report rather than moving the job.",
           "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
         },
         "summary": {
           "description": "What changed, as the pull request body's Summary section. No secrets, no raw command output.",
@@ -42,14 +50,24 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 2000
+        },
+        "schema_version": {
+          "const": 2
         }
       },
-      "required": ["head_sha", "summary", "validation", "retrospective"],
+      "required": [
+        "head_sha",
+        "summary",
+        "validation",
+        "retrospective"
+      ],
       "additionalProperties": false
     },
     {
       "properties": {
-        "outcome": { "const": "stopped" },
+        "outcome": {
+          "const": "stopped"
+        },
         "reason_code": {
           "description": "Why the agent stopped. This decides which recovery PtcManager offers first.",
           "type": "string",
@@ -80,10 +98,21 @@
         "progress": {
           "description": "Whether anything was committed to the branch before stopping.",
           "type": "string",
-          "enum": ["none", "partial"]
+          "enum": [
+            "none",
+            "partial"
+          ]
+        },
+        "schema_version": {
+          "const": 2
         }
       },
-      "required": ["reason_code", "summary", "detail", "progress"],
+      "required": [
+        "reason_code",
+        "summary",
+        "detail",
+        "progress"
+      ],
       "additionalProperties": false
     }
   ]

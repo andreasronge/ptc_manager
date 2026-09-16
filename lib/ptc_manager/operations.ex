@@ -1849,6 +1849,10 @@ defmodule PtcManager.Operations do
   edited afterwards. Anything unreadable is treated as v1, because that is the
   contract whose absence of a report is not itself a failure.
   """
+  def result_protocol_version(%Job{automation_definition_version: %{result_protocol_version: v}})
+      when v in [1, 2],
+      do: v
+
   def result_protocol_version(%Job{automation_definition_version_id: nil}), do: 1
 
   def result_protocol_version(%Job{} = job) do
@@ -1895,7 +1899,11 @@ defmodule PtcManager.Operations do
       )
 
     if updated == 1 do
-      job = Job |> preload([:issue, :repository, :worktree_allocation]) |> Repo.get!(job_id)
+      job =
+        Job
+        |> preload([:issue, :repository, :worktree_allocation, :automation_definition_version])
+        |> Repo.get!(job_id)
+
       notify_changed(__MODULE__)
       {:ok, job}
     else

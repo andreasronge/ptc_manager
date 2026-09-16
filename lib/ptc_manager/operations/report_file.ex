@@ -12,11 +12,10 @@ defmodule PtcManager.Operations.ReportFile do
   vocabulary of the contract that was being read.
   """
 
+  alias PtcManager.Operations.Job
+
   @max_file_bytes 32_768
   @read_timeout_ms 2_000
-
-  @doc "The largest report this reader will accept."
-  def max_bytes, do: @max_file_bytes
 
   @doc """
   Returns `{:ok, decoded_map}`, `:none` when nothing was written, or
@@ -48,6 +47,66 @@ defmodule PtcManager.Operations.ReportFile do
 
   @doc "A fresh random identifier naming one attempt's report file."
   def new_token, do: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+
+  @doc """
+  Where a job's agent writes one report, or nil when no token was issued.
+
+  A nil path means no contract was ever handed over, which is not the same
+  condition as an agent that was given one and wrote nothing. Callers must not
+  treat the two alike.
+  """
+  def path_for(%Job{stop_report_token: token} = job, prefix)
+      when is_binary(token) and token != "" do
+    if safe_token?(token),
+      do: Path.join(directory(), "#{prefix}-#{job.id}-#{job.fencing_token}-#{token}.json"),
+      else: nil
+  end
+
+  def path_for(%Job{}, _prefix), do: nil
+
+  @doc "Where the contract itself is placed, so the agent can read it."
+  def schema_path_for(%Job{} = job, prefix) do
+    case path_for(job, prefix) do
+      nil -> nil
+      path -> Path.rootname(path) <> ".schema.json"
+    end
+  end
+
+  @doc """
+  Places the schema next to the report path so the agent has the contract.
+
+  The copy is rewritten rather than skipped when one is already there: a review
+  continuation reuses the token, and a read-only leftover from the previous
+  attempt would otherwise make the copy fail.
+  """
+  def prepare(%Job{} = job, prefix, schema_name, missing_token_error) do
+    with path when is_binary(path) <- path_for(job, prefix),
+         schema_path when is_binary(schema_path) <- schema_path_for(job, prefix),
+         :ok <- File.mkdir_p(directory()),
+         _stale <- File.rm(schema_path),
+         :ok <- File.cp(schema_source(schema_name), schema_path),
+         :ok <- File.chmod(schema_path, 0o440) do
+      {:ok, path, schema_path}
+    else
+      nil -> {:error, missing_token_error}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Removes a job's report and its schema once the outcome is durable."
+  def discard(%Job{} = job, prefix) do
+    for path <- [path_for(job, prefix), schema_path_for(job, prefix)],
+        is_binary(path),
+        do: File.rm(path)
+
+    :ok
+  end
+
+  defp directory,
+    do: Application.get_env(:ptc_manager, :agent_action_output_dir) || System.tmp_dir!()
+
+  defp schema_source(name),
+    do: Application.app_dir(:ptc_manager, Path.join("priv/codex", name))
 
   defp bounded_contents(path) do
     task = Task.async(fn -> read_head(path) end)

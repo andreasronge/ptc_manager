@@ -25,11 +25,14 @@ defmodule PtcManager.Operations.OutcomeReport do
   @schema_version 2
   @max_section 2_000
   @sections ~w(summary validation retrospective)
+  @prefix "ptc-outcome"
+  @schema_name "agent_outcome_report.schema.json"
   @completed_keys ~w(schema_version outcome head_sha summary validation retrospective)
-  @sha ~r/\A[0-9a-f]{40}\z/
-
-  @doc "The contract version this module reads."
-  def schema_version, do: @schema_version
+  @stopped_keys ~w(schema_version outcome reason_code summary detail prerequisite progress)
+  # The repository may use either object format, matching every other SHA
+  # check in the pipeline. A 40-hex-only reader would fail every honest report
+  # on a SHA-256 repository.
+  @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   @doc """
   Where this job's agent writes its outcome report, or nil before a token was
@@ -38,50 +41,28 @@ defmodule PtcManager.Operations.OutcomeReport do
   Distinct from the v1 stop-report name so a job that changes protocol can
   never have one attempt's file read as the other's contract.
   """
-  def path_for(%Job{stop_report_token: token} = job) when is_binary(token) and token != "" do
-    if ReportFile.safe_token?(token),
-      do: Path.join(directory(), "ptc-outcome-#{job.id}-#{job.fencing_token}-#{token}.json"),
-      else: nil
-  end
-
-  def path_for(%Job{}), do: nil
+  def path_for(%Job{} = job), do: ReportFile.path_for(job, @prefix)
 
   @doc "Where the contract itself is placed, so the agent can read it."
-  def schema_path_for(%Job{} = job) do
-    case path_for(job) do
-      nil -> nil
-      path -> Path.rootname(path) <> ".schema.json"
-    end
-  end
+  def schema_path_for(%Job{} = job), do: ReportFile.schema_path_for(job, @prefix)
 
-  @doc """
-  Places the schema next to the report path so the agent has the contract.
-  """
-  def prepare(%Job{} = job) do
-    with path when is_binary(path) <- path_for(job),
-         schema_path when is_binary(schema_path) <- schema_path_for(job),
-         :ok <- File.mkdir_p(directory()),
-         :ok <- File.cp(schema_source(), schema_path),
-         :ok <- File.chmod(schema_path, 0o440) do
-      {:ok, path, schema_path}
-    else
-      nil -> {:error, :outcome_report_token_missing}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  @doc "Places the schema next to the report path so the agent has the contract."
+  def prepare(%Job{} = job),
+    do: ReportFile.prepare(job, @prefix, @schema_name, :outcome_report_token_missing)
 
   @doc "Removes the report and its schema once the outcome is durable."
-  def discard(%Job{} = job) do
-    for path <- [path_for(job), schema_path_for(job)], is_binary(path), do: File.rm(path)
-    :ok
-  end
+  def discard(%Job{} = job), do: ReportFile.discard(job, @prefix)
 
   @doc """
   Reads and validates this job's outcome report.
 
-  Returns `{:ok, report}` with string keys, `:none` when the agent wrote
-  nothing, or `{:error, :invalid_outcome_report}` when it wrote something this
-  contract does not describe. An invalid report can never be read as success.
+  Returns `{:ok, {:completed, payload}}` or `{:ok, {:stopped, payload}}`,
+  `:none` when the agent wrote nothing, or `{:error, :invalid_outcome_report}`
+  when it wrote something this contract does not describe. An invalid report can
+  never be read as success.
+
+  The outcome is the tag rather than a field, so a payload handed on to durable
+  storage carries only what its own contract defines.
   """
   def read(%Job{} = job) do
     case path_for(job) do
@@ -96,7 +77,7 @@ defmodule PtcManager.Operations.OutcomeReport do
   The probed head is PtcManager's own observation. A report that names a
   different commit is describing work this result does not contain.
   """
-  def completed_for?(%{"outcome" => "completed", "head_sha" => reported}, head_sha)
+  def completed_for?({:completed, %{"head_sha" => reported}}, head_sha)
       when is_binary(head_sha),
       do: reported == head_sha
 
@@ -119,7 +100,7 @@ defmodule PtcManager.Operations.OutcomeReport do
     |> Map.merge(envelope_outcome(outcome))
   end
 
-  defp envelope_outcome({:ok, %{"outcome" => "completed"} = report}) do
+  defp envelope_outcome({:ok, {:completed, report}}) do
     %{
       "outcome" => "completed",
       "report" => Map.take(report, @sections)
@@ -145,19 +126,20 @@ defmodule PtcManager.Operations.OutcomeReport do
     with true <- known_keys_only?(report, @completed_keys),
          true <- is_binary(head_sha) and Regex.match?(@sha, head_sha),
          {:ok, sections} <- validate_sections(report) do
-      {:ok, Map.merge(sections, %{"outcome" => "completed", "head_sha" => head_sha})}
+      {:ok, {:completed, Map.put(sections, "head_sha", head_sha)}}
     else
       _invalid -> {:error, :invalid_outcome_report}
     end
   end
 
   defp validate(%{"schema_version" => @schema_version, "outcome" => "stopped"} = report) do
-    case report
-         |> Map.delete("schema_version")
-         |> Map.delete("outcome")
-         |> StopReport.validate_payload() do
-      {:ok, stopped} -> {:ok, Map.put(stopped, "outcome", "stopped")}
-      {:error, _reason} -> {:error, :invalid_outcome_report}
+    payload = report |> Map.delete("schema_version") |> Map.delete("outcome")
+
+    with true <- known_keys_only?(report, @stopped_keys),
+         {:ok, stopped} <- StopReport.validate_payload(payload) do
+      {:ok, {:stopped, stopped}}
+    else
+      _invalid -> {:error, :invalid_outcome_report}
     end
   end
 
@@ -181,10 +163,4 @@ defmodule PtcManager.Operations.OutcomeReport do
       end
     end)
   end
-
-  defp directory,
-    do: Application.get_env(:ptc_manager, :agent_action_output_dir) || System.tmp_dir!()
-
-  defp schema_source,
-    do: Application.app_dir(:ptc_manager, "priv/codex/agent_outcome_report.schema.json")
 end

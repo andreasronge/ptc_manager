@@ -7,6 +7,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.AgentProfiles
   alias PtcManager.Automations
   alias PtcManager.Gateway
+  alias PtcManager.Operations.OutcomeReport
   alias PtcManager.Operations.StopReport
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerAgentLogin
@@ -326,7 +327,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     job =
       case PtcManager.Operations.issue_stop_report_token(job) do
         {:ok, issued} ->
-          _ = StopReport.prepare(issued)
+          _ = prepare_report(issued)
           %{issued | worktree_allocation: job.worktree_allocation, issue: job.issue}
 
         {:error, _reason} ->
@@ -389,6 +390,39 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   defp repository_path(repository) do
     Checkout.available_path(repository)
+  end
+
+  # The contract a job is handed must be the one reconciliation will read, so
+  # both sides derive it from the same frozen automation version. Preparing the
+  # wrong protocol's file would leave the agent writing where nobody looks.
+  defp prepare_report(job) do
+    case PtcManager.Operations.result_protocol_version(job) do
+      2 -> OutcomeReport.prepare(job)
+      _v1 -> StopReport.prepare(job)
+    end
+  end
+
+  # Protocol v1 has a file for failure only, so it says nothing about finishing.
+  # Protocol v2 owes one report either way, and the agent is told plainly that
+  # the report is an account of what happened rather than a claim that decides
+  # anything: PtcManager verifies the commit itself.
+  defp report_instruction(job) do
+    {path, schema_path} = report_contract(job)
+
+    case PtcManager.Operations.result_protocol_version(job) do
+      2 ->
+        "Reporting: write #{path} matching the schema at #{schema_path} exactly once, before you stop. If you finished, report outcome \"completed\" with the exact head commit you left on the branch and your summary, validation, and retrospective. If you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — report outcome \"stopped\" instead and stop there. PtcManager verifies the branch itself, so a completed report is accepted only when it names the commit actually on the branch. Describe things in plain language and name no secrets. Do not guess, do not work around a blocker, and do not wait."
+
+      _v1 ->
+        "If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{path} matching the schema at #{schema_path}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait."
+    end
+  end
+
+  defp report_contract(job) do
+    case PtcManager.Operations.result_protocol_version(job) do
+      2 -> {OutcomeReport.path_for(job), OutcomeReport.schema_path_for(job)}
+      _v1 -> {StopReport.path_for(job), StopReport.schema_path_for(job)}
+    end
   end
 
   defp create_worktree(command, path, base_sha, job) do
@@ -746,7 +780,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       Session: nobody is watching this session. No question you ask here will be answered, and waiting for input only stalls the work until PtcManager times it out.
-      If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{StopReport.path_for(job)} matching the schema at #{StopReport.schema_path_for(job)}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait.
+      #{report_instruction(job)}
       </context>
       <issue_data>
       Number: #{issue.number}
@@ -843,7 +877,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          true <- File.dir?(path),
          {:ok, pane, workspace} <-
            continuation_pane(name, old_pane, path, job.repository.local_path),
-         {:ok, _report_path, _schema_path} <- StopReport.prepare(job),
+         {:ok, _report_path, _schema_path} <- prepare_report(job),
          {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
          kind = job.execution_settings["kind"],
          new_name = "impl_j#{job.id}_f#{job.fencing_token}_r#{job.review_generation}",

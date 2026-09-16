@@ -35,6 +35,8 @@ defmodule PtcManager.Operations.StopReport do
 
   @reason_codes ~w(missing_prerequisite environment_broken ambiguous_requirement unsafe_to_proceed)
   @progress_values ~w(none partial)
+  @prefix "ptc-stop"
+  @schema_name "agent_stop_report.schema.json"
   @max_summary 300
   @max_detail 2_000
   @max_prerequisite 120
@@ -57,40 +59,17 @@ defmodule PtcManager.Operations.StopReport do
   The token keeps two attempts from colliding and makes the name impractical to
   guess. It is not a secret: see the note on shared worker identity above.
   """
-  def path_for(%Job{stop_report_token: token} = job) when is_binary(token) and token != "" do
-    if ReportFile.safe_token?(token),
-      do: Path.join(directory(), "ptc-stop-#{job.id}-#{job.fencing_token}-#{token}.json"),
-      else: nil
-  end
-
-  def path_for(%Job{}), do: nil
+  def path_for(%Job{} = job), do: ReportFile.path_for(job, @prefix)
 
   @doc "Where the contract itself is placed, so the agent can read it."
-  def schema_path_for(%Job{} = job) do
-    case path_for(job) do
-      nil -> nil
-      path -> Path.rootname(path) <> ".schema.json"
-    end
-  end
+  def schema_path_for(%Job{} = job), do: ReportFile.schema_path_for(job, @prefix)
 
-  @doc """
-  Places the schema next to the report path so the agent has the contract.
+  @doc "Places the schema next to the report path so the agent has the contract."
+  def prepare(%Job{} = job),
+    do: ReportFile.prepare(job, @prefix, @schema_name, :stop_report_token_missing)
 
-  A failure here is never fatal: the agent simply has no structured way to stop,
-  which is the behaviour that existed before this contract.
-  """
-  def prepare(%Job{} = job) do
-    with path when is_binary(path) <- path_for(job),
-         schema_path when is_binary(schema_path) <- schema_path_for(job),
-         :ok <- File.mkdir_p(directory()),
-         :ok <- File.cp(schema_source(), schema_path),
-         :ok <- File.chmod(schema_path, 0o440) do
-      {:ok, path, schema_path}
-    else
-      nil -> {:error, :stop_report_token_missing}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  @doc "Removes the report and its schema once the outcome is durable."
+  def discard(%Job{} = job), do: ReportFile.discard(job, @prefix)
 
   @doc """
   Reads and validates this job's report.
@@ -105,12 +84,6 @@ defmodule PtcManager.Operations.StopReport do
       nil -> :none
       path -> path |> ReportFile.read_json(:invalid_stop_report) |> validate_decoded()
     end
-  end
-
-  @doc "Removes the report and its schema once the outcome is durable."
-  def discard(%Job{} = job) do
-    for path <- [path_for(job), schema_path_for(job)], is_binary(path), do: File.rm(path)
-    :ok
   end
 
   @doc """
@@ -200,10 +173,4 @@ defmodule PtcManager.Operations.StopReport do
   defp maybe_put_prerequisite(report, nil), do: report
   defp maybe_put_prerequisite(report, ""), do: report
   defp maybe_put_prerequisite(report, value), do: Map.put(report, "prerequisite", value)
-
-  defp directory,
-    do: Application.get_env(:ptc_manager, :agent_action_output_dir) || System.tmp_dir!()
-
-  defp schema_source,
-    do: Application.app_dir(:ptc_manager, "priv/codex/agent_stop_report.schema.json")
 end

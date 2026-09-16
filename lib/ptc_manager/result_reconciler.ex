@@ -33,33 +33,57 @@ defmodule PtcManager.ResultReconciler do
   end
 
   # Protocol v1 could only say "I could not continue", so anything other than a
-  # stop report means the branch decides. Protocol v2 owes exactly one report
-  # for the attempt, so an absent or unreadable one is a reconciliation failure
-  # rather than a silent fall through to the branch.
+  # stop report means the branch decides.
   defp read_outcome(1, job, opts) do
     case StopReport.read(job) do
-      {:ok, report} -> record_stop(job, report)
-      _no_usable_report -> verify_branch(job, opts)
+      {:ok, report} -> record_stop(job, report, 1)
+      _no_usable_report -> verify_branch(job, opts, nil)
     end
   end
 
+  # Protocol v2 owes exactly one report for the attempt. A missing or unusable
+  # one is a permanent condition: the file will not improve on the next tick,
+  # so re-recording the same error would hold the single reconciliation task in
+  # a loop. It is handed to the maintainer instead, with the worktree retained.
   defp read_outcome(2, job, opts) do
-    case OutcomeReport.read(job) do
-      {:ok, %{"outcome" => "stopped"} = report} ->
-        record_stop(job, report)
+    if is_nil(OutcomeReport.path_for(job)) do
+      # No token was ever issued, so no contract was handed over. That is
+      # PtcManager's own omission and must not be charged to the agent.
+      verify_branch(job, opts, nil)
+    else
+      case OutcomeReport.read(job) do
+        {:ok, {:stopped, report}} ->
+          record_stop(job, report, 2)
 
-      {:ok, %{"outcome" => "completed"} = report} ->
-        verify_branch(job, [{:report, report} | opts])
+        {:ok, {:completed, _payload} = report} ->
+          verify_branch(job, opts, report)
 
-      :none ->
-        record_failure(job, :outcome_report_missing)
+        :none ->
+          hand_to_maintainer(
+            job,
+            "The agent finished without writing its required outcome report."
+          )
 
-      {:error, _reason} ->
-        record_failure(job, :outcome_report_invalid)
+        {:error, reason} ->
+          hand_to_maintainer(
+            job,
+            "The agent's outcome report could not be read as either outcome (#{reason})."
+          )
+
+        other ->
+          hand_to_maintainer(job, "The outcome report reader returned #{inspect(other)}.")
+      end
     end
   end
 
-  defp verify_branch(job, opts) do
+  # Terminal and visible: pausing takes the job out of the reconciliation queue,
+  # so the condition is decided by a person rather than retried forever.
+  defp hand_to_maintainer(job, reason) do
+    PtcManager.Reviews.pause(job.id, reason, job)
+    {:error, {:outcome_report_unusable, job.id}}
+  end
+
+  defp verify_branch(job, opts, report) do
     probe = Keyword.get(opts, :probe, Application.fetch_env!(:ptc_manager, :result_probe))
     contract_provider = Keyword.get(opts, :contract_provider, PtcManager.Repository.Contract)
 
@@ -72,7 +96,7 @@ defmodule PtcManager.ResultReconciler do
               job.id,
               job.fencing_token,
               job.result_attempt_token,
-              with_completion(result, job, opts),
+              with_completion(result, job, report),
               contract
             )
 
@@ -108,31 +132,25 @@ defmodule PtcManager.ResultReconciler do
   # same head. The material stays reported evidence either way: it cannot make
   # a result publishable, and a mismatch discards the report rather than the
   # result.
-  defp with_completion(result, job, opts) do
-    case Keyword.fetch(opts, :report) do
-      {:ok, report} ->
-        accepted =
-          if OutcomeReport.completed_for?(report, result.head_sha),
-            do: {:ok, report},
-            else: {:error, :outcome_report_head_mismatch}
+  defp with_completion(result, _job, nil), do: result
 
-        Map.put(
-          result,
-          :completion,
-          OutcomeReport.envelope(
-            accepted,
-            result.head_sha,
-            job.review_generation,
-            DateTime.utc_now()
-          )
-        )
+  defp with_completion(result, job, report) do
+    accepted =
+      if OutcomeReport.completed_for?(report, result.head_sha),
+        do: {:ok, report},
+        else: {:error, :outcome_report_head_mismatch}
 
-      :error ->
-        result
-    end
+    Map.put(
+      result,
+      :completion,
+      OutcomeReport.envelope(accepted, result.head_sha, job.review_generation, DateTime.utc_now())
+    )
   end
 
-  defp record_stop(job, report) do
+  defp discard_report(job, 1), do: StopReport.discard(job)
+  defp discard_report(job, 2), do: OutcomeReport.discard(job)
+
+  defp record_stop(job, report, protocol) do
     case Operations.record_job_stop_report(
            job.id,
            job.fencing_token,
@@ -140,7 +158,7 @@ defmodule PtcManager.ResultReconciler do
            report
          ) do
       {:ok, _job} ->
-        StopReport.discard(job)
+        discard_report(job, protocol)
         {:error, {:agent_stopped, report["reason_code"]}}
 
       {:error, _reason} = error ->

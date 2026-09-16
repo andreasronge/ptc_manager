@@ -477,15 +477,75 @@ defmodule PtcManager.ResultReconcilerTest do
     test "an invalid report can never be read as success", %{job: job} do
       write_outcome!(job, "{\"schema_version\": 2, \"outcome\": \"completed\"}")
 
-      assert {:error, _reason} = run(job)
+      assert {:error, {:outcome_report_unusable, _id}} = run(job)
       assert Repo.get!(Job, job.id).result_head_sha == nil
       refute_received {:probe, _repository_id, _job_id}
     end
 
-    test "a protocol v2 attempt owes a report, so an absent one fails", %{job: job} do
-      assert {:error, _reason} = run(job)
+    test "an unusable report is handed to a maintainer, not retried forever", %{job: job} do
+      write_outcome!(job, "not json")
+
+      assert {:error, {:outcome_report_unusable, _id}} = run(job)
+
+      # Pausing takes the job out of the reconciliation queue, so the next tick
+      # does not re-read the same permanently broken file.
+      assert Repo.get!(Job, job.id).review_state == "paused"
+
+      # The real queue, not a stand-in for it: the next tick must find nothing.
+      assert {:ok, nil} = PtcManager.Operations.claim_next_result_job()
+    end
+
+    test "a protocol v2 attempt owes a report, so an absent one is handed over", %{job: job} do
+      assert {:error, {:outcome_report_unusable, _id}} = run(job)
       assert Repo.get!(Job, job.id).result_head_sha == nil
       refute_received {:probe, _repository_id, _job_id}
+    end
+
+    test "a v2 job with no issued token is PtcManager's omission, not the agent's", %{job: job} do
+      job = job |> Job.changeset(%{stop_report_token: nil}) |> Repo.update!()
+
+      assert {:ok, ready} = run(job)
+      assert ready.result_head_sha == @head
+      assert ready.result_completion == nil
+    end
+
+    test "removes the v2 report it read when the agent stopped", %{job: job} do
+      write_outcome!(
+        job,
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "outcome" => "stopped",
+          "reason_code" => "environment_broken",
+          "summary" => "No toolchain.",
+          "detail" => "mix was not on PATH.",
+          "progress" => "none"
+        })
+      )
+
+      path = PtcManager.Operations.OutcomeReport.path_for(job)
+      assert File.exists?(path)
+
+      assert {:error, {:agent_stopped, "environment_broken"}} = run(job)
+      refute File.exists?(path)
+    end
+
+    test "stores only the fields the stopped contract defines", %{job: job} do
+      write_outcome!(
+        job,
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "outcome" => "stopped",
+          "reason_code" => "environment_broken",
+          "summary" => "No toolchain.",
+          "detail" => "mix was not on PATH.",
+          "progress" => "none"
+        })
+      )
+
+      assert {:error, {:agent_stopped, _code}} = run(job)
+
+      stored = Repo.get!(Job, job.id).stop_report
+      assert Map.keys(stored) |> Enum.sort() == ["detail", "progress", "reason_code", "summary"]
     end
 
     defp run(job) do

@@ -40,10 +40,11 @@ defmodule PtcManager.Operations.OutcomeReportTest do
     test "reads a completed report", %{job: job} do
       write!(job, completed())
 
-      assert {:ok, report} = OutcomeReport.read(job)
-      assert report["outcome"] == "completed"
-      assert report["head_sha"] == @head
-      assert report["validation"] =~ "preview task"
+      assert {:ok, {:completed, payload}} = OutcomeReport.read(job)
+      assert payload["head_sha"] == @head
+      assert payload["validation"] =~ "preview task"
+      refute Map.has_key?(payload, "outcome")
+      refute Map.has_key?(payload, "schema_version")
     end
 
     test "reads a stopped report through the shared stopped contract", %{job: job} do
@@ -59,9 +60,10 @@ defmodule PtcManager.Operations.OutcomeReportTest do
         })
       )
 
-      assert {:ok, report} = OutcomeReport.read(job)
-      assert report["outcome"] == "stopped"
-      assert report["reason_code"] == "missing_prerequisite"
+      assert {:ok, {:stopped, payload}} = OutcomeReport.read(job)
+      assert payload["reason_code"] == "missing_prerequisite"
+      refute Map.has_key?(payload, "outcome")
+      refute Map.has_key?(payload, "schema_version")
     end
 
     test "an absent report is none, not a failure", %{job: job} do
@@ -102,6 +104,23 @@ defmodule PtcManager.Operations.OutcomeReportTest do
       end
     end
 
+    test "a stopped report carrying an undefined field", %{job: job} do
+      write!(
+        job,
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "outcome" => "stopped",
+          "reason_code" => "environment_broken",
+          "summary" => "s",
+          "detail" => "d",
+          "progress" => "none",
+          "head_sha" => String.duplicate("a", 40)
+        })
+      )
+
+      assert OutcomeReport.read(job) == {:error, :invalid_outcome_report}
+    end
+
     test "a missing section", %{job: job} do
       write!(
         job,
@@ -127,7 +146,18 @@ defmodule PtcManager.Operations.OutcomeReportTest do
     end
 
     test "a stopped report is never completed for any head" do
-      refute OutcomeReport.completed_for?(%{"outcome" => "stopped"}, @head)
+      refute OutcomeReport.completed_for?(
+               {:stopped, %{"reason_code" => "unsafe_to_proceed"}},
+               @head
+             )
+    end
+
+    test "accepts a SHA-256 head, which this pipeline supports elsewhere", %{job: job} do
+      long = String.duplicate("a", 64)
+      write!(job, completed(%{"head_sha" => long}))
+
+      assert {:ok, report} = OutcomeReport.read(job)
+      assert OutcomeReport.completed_for?(report, long)
     end
   end
 
@@ -150,13 +180,9 @@ defmodule PtcManager.Operations.OutcomeReportTest do
 
   describe "envelope/4" do
     test "records accepted completion material without the head twice" do
-      report = %{
-        "outcome" => "completed",
-        "head_sha" => @head,
-        "summary" => "s",
-        "validation" => "v",
-        "retrospective" => "r"
-      }
+      report =
+        {:completed,
+         %{"head_sha" => @head, "summary" => "s", "validation" => "v", "retrospective" => "r"}}
 
       envelope = OutcomeReport.envelope({:ok, report}, @head, 2, ~U[2026-09-16 10:00:00Z])
 
