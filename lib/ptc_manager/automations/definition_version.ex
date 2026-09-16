@@ -69,6 +69,7 @@ defmodule PtcManager.Automations.DefinitionVersion do
     |> validate_inclusion(:execution_profile, @profiles)
     |> validate_inclusion(:github_access, @github_access)
     |> validate_inclusion(:queue_lane, @queue_lanes)
+    |> validate_inclusion(:result_protocol_version, [1, 2])
     |> validate_inclusion(:resource_class, @resource_classes)
     |> validate_number(:version, greater_than: 0)
     |> validate_number(:timeout_seconds, greater_than: 0, less_than_or_equal_to: 86_400)

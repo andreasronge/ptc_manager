@@ -75,15 +75,17 @@ defmodule PtcManager.Operations.ReportFile do
   @doc """
   Places the schema next to the report path so the agent has the contract.
 
-  The copy is rewritten rather than skipped when one is already there: a review
-  continuation reuses the token, and a read-only leftover from the previous
-  attempt would otherwise make the copy fail.
+  Both files are removed first. A dispatch that is retried reuses the same
+  token, so a report left by the previous run would otherwise still be at this
+  attempt's path and could be read as this attempt's outcome; the schema copy
+  is 0440, so writing over it without removing it fails.
   """
   def prepare(%Job{} = job, prefix, schema_name, missing_token_error) do
     with path when is_binary(path) <- path_for(job, prefix),
          schema_path when is_binary(schema_path) <- schema_path_for(job, prefix),
          :ok <- File.mkdir_p(directory()),
-         _stale <- File.rm(schema_path),
+         _stale_report <- File.rm(path),
+         _stale_schema <- File.rm(schema_path),
          :ok <- File.cp(schema_source(schema_name), schema_path),
          :ok <- File.chmod(schema_path, 0o440) do
       {:ok, path, schema_path}
@@ -108,8 +110,11 @@ defmodule PtcManager.Operations.ReportFile do
   defp schema_source(name),
     do: Application.app_dir(:ptc_manager, Path.join("priv/codex", name))
 
+  # async_nolink, not async: the reader must survive a crash in the spawned
+  # process as well as a stall. A linked task would take the caller down with
+  # it, which is the single reconciliation task this module exists to protect.
   defp bounded_contents(path) do
-    task = Task.async(fn -> read_head(path) end)
+    task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn -> read_head(path) end)
 
     case Task.yield(task, @read_timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result

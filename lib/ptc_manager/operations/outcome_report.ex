@@ -29,10 +29,6 @@ defmodule PtcManager.Operations.OutcomeReport do
   @schema_name "agent_outcome_report.schema.json"
   @completed_keys ~w(schema_version outcome head_sha summary validation retrospective)
   @stopped_keys ~w(schema_version outcome reason_code summary detail prerequisite progress)
-  # The repository may use either object format, matching every other SHA
-  # check in the pipeline. A 40-hex-only reader would fail every honest report
-  # on a SHA-256 repository.
-  @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   @doc """
   Where this job's agent writes its outcome report, or nil before a token was
@@ -86,9 +82,9 @@ defmodule PtcManager.Operations.OutcomeReport do
   @doc """
   Builds the durable completion envelope stored beside a verified result.
 
-  It records how the report was obtained as well as what it said, so a later
-  reader can tell accepted material from a validation failure without inferring
-  it from missing fields.
+  A report reaches this point only after the branch was verified, so the two
+  outcomes it records are an accepted report and one naming a different commit.
+  Both are stated rather than inferred from missing fields.
   """
   def envelope(outcome, head_sha, review_generation, now) do
     %{
@@ -111,10 +107,6 @@ defmodule PtcManager.Operations.OutcomeReport do
     %{"outcome" => "unusable", "failure" => to_string(reason)}
   end
 
-  defp envelope_outcome(:none) do
-    %{"outcome" => "unavailable"}
-  end
-
   defp validate_decoded({:ok, decoded}), do: validate(decoded)
   defp validate_decoded(other), do: other
 
@@ -124,7 +116,7 @@ defmodule PtcManager.Operations.OutcomeReport do
     head_sha = Map.get(report, "head_sha")
 
     with true <- known_keys_only?(report, @completed_keys),
-         true <- is_binary(head_sha) and Regex.match?(@sha, head_sha),
+         true <- Job.valid_sha?(head_sha),
          {:ok, sections} <- validate_sections(report) do
       {:ok, {:completed, Map.put(sections, "head_sha", head_sha)}}
     else

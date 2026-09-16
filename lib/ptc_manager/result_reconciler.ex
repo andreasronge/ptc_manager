@@ -36,7 +36,7 @@ defmodule PtcManager.ResultReconciler do
   # stop report means the branch decides.
   defp read_outcome(1, job, opts) do
     case StopReport.read(job) do
-      {:ok, report} -> record_stop(job, report, 1)
+      {:ok, report} -> record_stop(job, report)
       _no_usable_report -> verify_branch(job, opts, nil)
     end
   end
@@ -46,41 +46,67 @@ defmodule PtcManager.ResultReconciler do
   # so re-recording the same error would hold the single reconciliation task in
   # a loop. It is handed to the maintainer instead, with the worktree retained.
   defp read_outcome(2, job, opts) do
-    if is_nil(OutcomeReport.path_for(job)) do
-      # No token was ever issued, so no contract was handed over. That is
-      # PtcManager's own omission and must not be charged to the agent.
-      verify_branch(job, opts, nil)
-    else
-      case OutcomeReport.read(job) do
-        {:ok, {:stopped, report}} ->
-          record_stop(job, report, 2)
+    case outcome_contract(job) do
+      :never_issued ->
+        # PtcManager never gave this attempt a path to write to, so there is no
+        # report to owe. Its own omission is not charged to the agent.
+        verify_branch(job, opts, nil)
 
-        {:ok, {:completed, _payload} = report} ->
-          verify_branch(job, opts, report)
+      :unusable_token ->
+        # A token exists but cannot name a file inside the output directory.
+        # That is a defect in PtcManager's own state, not a benign omission, and
+        # waiving the contract here would publish on branch evidence alone.
+        hand_to_maintainer(job, "The job's report token is not usable as a file name.")
 
-        :none ->
-          hand_to_maintainer(
-            job,
-            "The agent finished without writing its required outcome report."
-          )
-
-        {:error, reason} ->
-          hand_to_maintainer(
-            job,
-            "The agent's outcome report could not be read as either outcome (#{reason})."
-          )
-
-        other ->
-          hand_to_maintainer(job, "The outcome report reader returned #{inspect(other)}.")
-      end
+      :issued ->
+        read_issued_outcome(job, opts)
     end
   end
 
-  # Terminal and visible: pausing takes the job out of the reconciliation queue,
-  # so the condition is decided by a person rather than retried forever.
+  defp read_issued_outcome(job, opts) do
+    case OutcomeReport.read(job) do
+      {:ok, {:stopped, report}} ->
+        record_stop(job, report)
+
+      {:ok, {:completed, _payload} = report} ->
+        verify_branch(job, opts, report)
+
+      :none ->
+        # Deliberately not "the agent finished": the file is equally absent when
+        # the pane was killed, the host restarted, or the agent wrote the other
+        # protocol's path. Naming a cause here would point the maintainer away
+        # from the pane and worktree that hold the real one.
+        hand_to_maintainer(job, "No outcome report was written for this attempt.")
+
+      {:error, reason} ->
+        hand_to_maintainer(job, "The outcome report could not be read (#{reason}).")
+
+      other ->
+        hand_to_maintainer(job, "The outcome report reader returned #{inspect(other)}.")
+    end
+  end
+
+  defp outcome_contract(%{stop_report_token: token} = job)
+       when is_binary(token) and token != "" do
+    if is_nil(OutcomeReport.path_for(job)), do: :unusable_token, else: :issued
+  end
+
+  defp outcome_contract(_job), do: :never_issued
+
+  # Terminal by construction: the transition is fenced, ends the attempt, flags
+  # the worktree for attention, and takes the job out of the reconciliation
+  # queue, so a permanently unreadable file is decided by a person instead of
+  # re-read on every tick.
   defp hand_to_maintainer(job, reason) do
-    PtcManager.Reviews.pause(job.id, reason, job)
-    {:error, {:outcome_report_unusable, job.id}}
+    case Operations.record_outcome_report_failure(
+           job.id,
+           job.fencing_token,
+           job.result_attempt_token,
+           reason
+         ) do
+      {:ok, _job} -> {:error, {:outcome_report_unusable, job.id}}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp verify_branch(job, opts, report) do
@@ -101,6 +127,11 @@ defmodule PtcManager.ResultReconciler do
             )
 
           if match?({:ok, _job}, outcome) do
+            # The outcome is durable now, so the model-written file has served
+            # its purpose. Protocol v2 writes one on success too, and the output
+            # directory is shared by every agent under one worker identity, so
+            # leaving it there would keep one job's prose readable by the next.
+            discard_report(job)
             PtcManager.PublisherPoller.wake()
           else
             if outcome == {:error, :independent_review_required},
@@ -147,10 +178,15 @@ defmodule PtcManager.ResultReconciler do
     )
   end
 
-  defp discard_report(job, 1), do: StopReport.discard(job)
-  defp discard_report(job, 2), do: OutcomeReport.discard(job)
+  # Both deletes are idempotent, so nothing needs to know which protocol wrote
+  # the file — and doing both also removes a report an agent left at the other
+  # protocol's path.
+  defp discard_report(job) do
+    StopReport.discard(job)
+    OutcomeReport.discard(job)
+  end
 
-  defp record_stop(job, report, protocol) do
+  defp record_stop(job, report) do
     case Operations.record_job_stop_report(
            job.id,
            job.fencing_token,
@@ -158,7 +194,7 @@ defmodule PtcManager.ResultReconciler do
            report
          ) do
       {:ok, _job} ->
-        discard_report(job, protocol)
+        discard_report(job)
         {:error, {:agent_stopped, report["reason_code"]}}
 
       {:error, _reason} = error ->
@@ -191,8 +227,7 @@ defmodule PtcManager.ResultReconciler do
 
   defp valid_result?(_result), do: false
 
-  defp valid_sha?(sha),
-    do: is_binary(sha) and Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, sha)
+  defp valid_sha?(sha), do: PtcManager.Operations.Job.valid_sha?(sha)
 
   defp publication_contract(%{publication_source: "agent"}, _result, _provider),
     do: {:ok, nil}

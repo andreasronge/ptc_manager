@@ -321,20 +321,23 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     agent_name = agent_name(job)
     worktree_path = job.worktree_allocation.path
 
-    # The agent needs its stop contract in place before it can read the prompt
-    # that names it. A failure here leaves it with no structured way to stop,
-    # which is only the behaviour that existed before the contract.
+    # The agent needs its report contract in place before it can read the prompt
+    # that names it. Under protocol v1 a failure here only leaves it without a
+    # structured way to stop, which is how things worked before the contract.
+    # Under v2 the report is required, so a job dispatched without one would be
+    # handed to a maintainer however well its implementation went: there, a
+    # failed preparation has to stop the dispatch instead.
     job =
       case PtcManager.Operations.issue_stop_report_token(job) do
         {:ok, issued} ->
-          _ = prepare_report(issued)
           %{issued | worktree_allocation: job.worktree_allocation, issue: job.issue}
 
         {:error, _reason} ->
           job
       end
 
-    with {:ok, _context} <-
+    with :ok <- ensure_report_contract(job),
+         {:ok, _context} <-
            PtcManager.ManagedOperationContext.prepare_job(command, pane_id, job),
          {:ok, agent_key} <-
            start_agent(
@@ -395,11 +398,39 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   # The contract a job is handed must be the one reconciliation will read, so
   # both sides derive it from the same frozen automation version. Preparing the
   # wrong protocol's file would leave the agent writing where nobody looks.
-  defp prepare_report(job) do
+  defp ensure_report_contract(job) do
     case PtcManager.Operations.result_protocol_version(job) do
-      2 -> OutcomeReport.prepare(job)
-      _v1 -> StopReport.prepare(job)
+      2 ->
+        case OutcomeReport.prepare(job) do
+          {:ok, _path, _schema_path} -> :ok
+          {:error, reason} -> {:error, {:outcome_report_unavailable, reason}}
+        end
+
+      _v1 ->
+        _optional = StopReport.prepare(job)
+        :ok
     end
+  end
+
+  # Under protocol v2 the retrospective belongs in the outcome report, so the
+  # commit-message channel is not offered as a second destination: an agent
+  # given both would fill one and leave the other empty, and nothing says which
+  # the broker should believe.
+  defp github_instruction(%{publication_source: "agent"}),
+    do:
+      "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
+
+  defp github_instruction(job) do
+    retrospective =
+      case PtcManager.Operations.result_protocol_version(job) do
+        2 ->
+          ""
+
+        _v1 ->
+          " Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END."
+      end
+
+    "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it.#{retrospective} Do not push, create a pull request, or merge."
   end
 
   # Protocol v1 has a file for failure only, so it says nothing about finishing.
@@ -407,21 +438,16 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   # the report is an account of what happened rather than a claim that decides
   # anything: PtcManager verifies the commit itself.
   defp report_instruction(job) do
-    {path, schema_path} = report_contract(job)
-
     case PtcManager.Operations.result_protocol_version(job) do
       2 ->
+        {path, schema_path} = {OutcomeReport.path_for(job), OutcomeReport.schema_path_for(job)}
+
         "Reporting: write #{path} matching the schema at #{schema_path} exactly once, before you stop. If you finished, report outcome \"completed\" with the exact head commit you left on the branch and your summary, validation, and retrospective. If you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — report outcome \"stopped\" instead and stop there. PtcManager verifies the branch itself, so a completed report is accepted only when it names the commit actually on the branch. Describe things in plain language and name no secrets. Do not guess, do not work around a blocker, and do not wait."
 
       _v1 ->
-        "If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{path} matching the schema at #{schema_path}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait."
-    end
-  end
+        {path, schema_path} = {StopReport.path_for(job), StopReport.schema_path_for(job)}
 
-  defp report_contract(job) do
-    case PtcManager.Operations.result_protocol_version(job) do
-      2 -> {OutcomeReport.path_for(job), OutcomeReport.schema_path_for(job)}
-      _v1 -> {StopReport.path_for(job), StopReport.schema_path_for(job)}
+        "If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{path} matching the schema at #{schema_path}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait."
     end
   end
 
@@ -762,12 +788,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         },
         else: issue
 
-    github_instruction =
-      if job.publication_source == "agent" do
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
-      else
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END. Do not push, create a pull request, or merge."
-      end
+    github_instruction = github_instruction(job)
 
     context =
       """
@@ -877,7 +898,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
          true <- File.dir?(path),
          {:ok, pane, workspace} <-
            continuation_pane(name, old_pane, path, job.repository.local_path),
-         {:ok, _report_path, _schema_path} <- prepare_report(job),
+         :ok <- ensure_report_contract(job),
          {:ok, _context} <- PtcManager.ManagedOperationContext.prepare_job(Command, pane, job),
          kind = job.execution_settings["kind"],
          new_name = "impl_j#{job.id}_f#{job.fencing_token}_r#{job.review_generation}",

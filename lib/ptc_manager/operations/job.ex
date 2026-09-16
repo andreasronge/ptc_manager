@@ -70,6 +70,16 @@ defmodule PtcManager.Operations.Job do
   @doc "States in which a job still owns work: everything before done, failed, cancelled, or lost."
   def live_states, do: @states -- @terminal_states
 
+  @doc """
+  True when `value` is a commit id in either object format this pipeline
+  accepts.
+
+  The reporter and the verifier must agree on what a valid head looks like, so
+  the shape lives here rather than beside each check.
+  """
+  def valid_sha?(value) when is_binary(value), do: Regex.match?(@sha, value)
+  def valid_sha?(_value), do: false
+
   def changeset(job, attrs) do
     job
     |> cast(attrs, [

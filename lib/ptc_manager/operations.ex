@@ -2542,15 +2542,7 @@ defmodule PtcManager.Operations do
             do: Repo.rollback(:independent_review_required)
 
           {updated, _rows} =
-            Job
-            |> where(
-              [job],
-              job.id == ^job_id and job.state == "verifying_result" and
-                job.fencing_token == ^fencing_token and
-                job.result_attempt_token == ^attempt_token and
-                not is_nil(job.result_attempt_expires_at) and
-                job.result_attempt_expires_at > ^now
-            )
+            claimed_result_attempt(job_id, fencing_token, attempt_token, now)
             |> Repo.update_all(
               set:
                 [
@@ -2634,6 +2626,72 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc """
+  Ends a result attempt that cannot be interpreted, and hands the job to a
+  maintainer.
+
+  Unlike `record_result_error/4` this is terminal: the condition is a report
+  file that will not improve, so the job is taken out of the reconciliation
+  queue rather than returned to it. `review_state` is set here rather than
+  through `PtcManager.Reviews.pause/3`, which only applies under conditions
+  this path cannot guarantee and reports no failure when it declines.
+
+  The worktree is kept and flagged for attention, so the work the agent did is
+  still there when the maintainer looks.
+  """
+  def record_outcome_report_failure(job_id, fencing_token, attempt_token, reason)
+      when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) do
+    message = bounded_error(reason)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    outcome =
+      Repo.transaction(fn ->
+        {updated, _rows} =
+          claimed_result_attempt(job_id, fencing_token, attempt_token, now)
+          |> Repo.update_all(
+            set: [
+              state: "awaiting_reconciliation",
+              review_state: "paused",
+              result_attempt_expires_at: nil,
+              result_checked_at: now,
+              lease_expires_at: nil,
+              review_resume_expires_at: nil,
+              last_error: message,
+              updated_at: now
+            ]
+          )
+
+        if updated == 1 do
+          mark_allocation!(job_id, %{
+            state: "attention",
+            last_used_at: now,
+            last_error: message
+          })
+
+          insert_audit!(%{
+            actor: "coordinator",
+            action: "job.outcome_report_unusable",
+            target_type: "job",
+            target_id: job_id,
+            details: %{
+              "fencing_token" => fencing_token,
+              "reason" => message,
+              "observed_at" => DateTime.to_iso8601(now)
+            }
+          })
+
+          Repo.get!(Job, job_id)
+        else
+          Repo.rollback(:result_attempt_lost)
+        end
+      end)
+
+    case outcome do
+      {:ok, job} -> notify_and_return({:ok, job})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   def record_result_error(job_id, fencing_token, attempt_token, reason)
       when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) do
     message = bounded_error(reason)
@@ -2644,15 +2702,7 @@ defmodule PtcManager.Operations do
         previous = Repo.get!(Job, job_id)
 
         {updated, _rows} =
-          Job
-          |> where(
-            [job],
-            job.id == ^job_id and job.state == "verifying_result" and
-              job.fencing_token == ^fencing_token and
-              job.result_attempt_token == ^attempt_token and
-              not is_nil(job.result_attempt_expires_at) and
-              job.result_attempt_expires_at > ^now
-          )
+          claimed_result_attempt(job_id, fencing_token, attempt_token, now)
           |> Repo.update_all(
             set: [
               state: "awaiting_reconciliation",
@@ -4157,6 +4207,21 @@ defmodule PtcManager.Operations do
       :ok -> :result_race
       {:error, reason} -> reason
     end
+  end
+
+  # The fence every result write shares: the job must still be the one this
+  # caller claimed, under the same fencing and attempt tokens, before the claim
+  # expired. Writing it once keeps the three transitions from drifting apart.
+  defp claimed_result_attempt(job_id, fencing_token, attempt_token, now) do
+    where(
+      Job,
+      [job],
+      job.id == ^job_id and job.state == "verifying_result" and
+        job.fencing_token == ^fencing_token and
+        job.result_attempt_token == ^attempt_token and
+        not is_nil(job.result_attempt_expires_at) and
+        job.result_attempt_expires_at > ^now
+    )
   end
 
   defp valid_result_fields?(result) do

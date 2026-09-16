@@ -501,6 +501,39 @@ defmodule PtcManager.ResultReconcilerTest do
       refute_received {:probe, _repository_id, _job_id}
     end
 
+    test "removes the report once a verified result is durable", %{job: job} do
+      write_outcome!(job, completed_report(@head))
+      path = PtcManager.Operations.OutcomeReport.path_for(job)
+      assert File.exists?(path)
+
+      assert {:ok, _ready} = run(job)
+
+      # Protocol v2 writes a report on success too, and the output directory is
+      # shared by every agent under one worker identity.
+      refute File.exists?(path)
+    end
+
+    test "ends the attempt and records why when the report is unusable", %{job: job} do
+      write_outcome!(job, "not json")
+
+      assert {:error, {:outcome_report_unusable, _id}} = run(job)
+
+      failed = Repo.get!(Job, job.id)
+      assert failed.review_state == "paused"
+      assert failed.result_attempt_expires_at == nil
+      assert failed.last_error =~ "could not be read"
+
+      assert Repo.get_by!(AuditEvent, action: "job.outcome_report_unusable", target_id: job.id)
+    end
+
+    test "a token that cannot name a file is PtcManager's defect, not a waiver", %{job: job} do
+      job = job |> Job.changeset(%{stop_report_token: "../../etc/passwd"}) |> Repo.update!()
+
+      assert {:error, {:outcome_report_unusable, _id}} = run(job)
+      assert Repo.get!(Job, job.id).result_head_sha == nil
+      refute_received {:probe, _repository_id, _job_id}
+    end
+
     test "a v2 job with no issued token is PtcManager's omission, not the agent's", %{job: job} do
       job = job |> Job.changeset(%{stop_report_token: nil}) |> Repo.update!()
 
