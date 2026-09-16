@@ -11,21 +11,29 @@ defmodule PtcManager.DailyDigests.Evidence do
   @max_pull_requests 50
   @max_direct_commits 50
   @max_manifest_bytes 60_000
+  @max_capture_attempts 3
 
   def fetch(%Repository{} = repository, %DailyDigest{} = digest) do
     client = Application.get_env(:ptc_manager, :daily_digest_github_client, Client)
     owner = URI.encode_www_form(repository.github_owner)
     name = URI.encode_www_form(repository.github_name)
     base = "https://api.github.com/repos/#{owner}/#{name}"
-    branch = URI.encode_www_form(repository.default_branch)
+    capture(client, base, repository.default_branch, digest, @max_capture_attempts)
+  end
 
-    with {:ok, %{"sha" => head_sha}} <- client.get_json("#{base}/commits/#{branch}"),
+  defp capture(_client, _base, _branch, _digest, 0),
+    do: {:error, :daily_digest_source_head_unstable}
+
+  defp capture(client, base, branch, digest, attempts_left) do
+    head_url = "#{base}/commits/#{URI.encode_www_form(branch)}"
+
+    with {:ok, %{"sha" => head_sha}} <- client.get_json(head_url),
          :ok <- validate_sha(head_sha),
          {:ok, pull_requests} <-
            fetch_stable_merged_pull_requests(
              client,
              base,
-             repository.default_branch,
+             branch,
              digest
            ),
          :ok <-
@@ -36,11 +44,18 @@ defmodule PtcManager.DailyDigests.Evidence do
            ),
          {:ok, candidates} <- fetch_commits(client, base, head_sha, digest, 1, []),
          {:ok, direct_commits} <-
-           find_direct_commits(client, base, repository.default_branch, candidates),
+           find_direct_commits(client, base, branch, candidates),
          :ok <-
            validate_limit(direct_commits, @max_direct_commits, :daily_digest_commit_limit_reached),
-         {:ok, manifest} <- build_manifest(head_sha, pull_requests, direct_commits) do
-      {:ok, manifest}
+         {:ok, %{"sha" => final_head_sha}} <- client.get_json(head_url),
+         :ok <- validate_sha(final_head_sha) do
+      if head_sha == final_head_sha do
+        build_manifest(head_sha, pull_requests, direct_commits)
+      else
+        # Discard both selections: only a fresh full capture can bind them to
+        # the next head. Do not mix new PRs with commits from the earlier head.
+        capture(client, base, branch, digest, attempts_left - 1)
+      end
     else
       {:ok, _unexpected} -> {:error, :unexpected_github_response}
       {:error, reason} -> {:error, reason}
