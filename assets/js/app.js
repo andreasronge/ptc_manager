@@ -24,6 +24,9 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/ptc_manager"
 import topbar from "../vendor/topbar"
+import {installActionFeedback} from "./action_feedback.mjs"
+
+installActionFeedback(window, document)
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {

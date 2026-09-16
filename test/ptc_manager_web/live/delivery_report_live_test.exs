@@ -25,6 +25,9 @@ defmodule PtcManagerWeb.DeliveryReportLiveTest do
     assert has_element?(view, "#report-logbook", "Implementation approved")
     view |> element("#report-tab-coverage") |> render_click()
     assert has_element?(view, "#report-coverage", "Unknown is never reported as zero")
+    view |> element("button[phx-click=refresh]") |> render_click()
+    assert has_element?(view, "#flash-info", "Report refreshed.")
+    assert has_element?(view, "#report-coverage")
     assert Repo.get!(Job, job.id).state == "queued"
   end
 end

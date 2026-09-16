@@ -13,7 +13,9 @@ defmodule PtcManagerWeb.DeliveryReportLive do
       when tab in ~w(summary performance logbook coverage),
       do: {:noreply, assign(socket, :tab, tab)}
 
-  def handle_event("refresh", _, socket), do: {:noreply, reload(socket)}
+  def handle_event("refresh", _, socket),
+    do: {:noreply, socket |> reload() |> put_flash(:info, "Report refreshed.")}
+
   defp reload(socket), do: assign(socket, :report, Report.load(socket.assigns.job_id))
   defp value(nil), do: "Not recorded"
   defp value(v), do: to_string(v)

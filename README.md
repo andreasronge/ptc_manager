@@ -45,6 +45,18 @@ Upgrades still honor the former `PTC_REQUIRED_PRE_PR_REVIEWS` value when this
 release first backfills already-existing jobs; it no longer overrides new
 per-task choices after that migration.
 
+### Button feedback
+
+Buttons show a pressed state and a visible keyboard-focus outline. While a button
+request or form submission is awaiting the server, the control is marked busy
+and a shared **Working…** status is announced. Completion removes the busy state;
+existing success/error messages describe the outcome, not the request indicator.
+Automation switches confirm their saved state, and **Refresh report** confirms
+when its snapshot has been refreshed. Paused schedules do not promise a next run.
+
+The small browser-feedback tests use Node.js 22 or newer:
+`node --test test/js/*.mjs`. CI runs these alongside the Elixir checks.
+
 ### Machine usage history
 
 PtcManager samples the host every 30 seconds and stores CPU, memory, build-disk

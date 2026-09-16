@@ -157,6 +157,14 @@ defmodule PtcManagerWeb.Layouts do
         </div>
       </main>
 
+      <div
+        id="action-feedback"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        phx-update="ignore"
+      >
+      </div>
       <.flash_group flash={@flash} />
     </div>
     """
@@ -196,6 +204,7 @@ defmodule PtcManagerWeb.Layouts do
 
   ## Examples
 
+      <div id="action-feedback" role="status" aria-live="polite" aria-atomic="true" phx-update="ignore"></div>
       <.flash_group flash={@flash} />
   """
   attr :flash, :map, required: true, doc: "the map of flash messages"

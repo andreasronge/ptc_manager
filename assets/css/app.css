@@ -103,3 +103,51 @@
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
 /* This file is for your main application CSS */
+
+/* Shared feedback also covers native buttons outside CoreComponents. */
+button:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--color-teal-300);
+  outline-offset: 3px;
+}
+button:not(:disabled):active { filter: brightness(0.8); }
+button:is(.phx-click-loading, .phx-submit-loading) {
+  cursor: progress;
+  opacity: 0.65;
+  outline: 2px solid var(--color-teal-300);
+  outline-offset: 2px;
+}
+
+#action-feedback {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  pointer-events: none;
+  border-radius: 9999px;
+  background: var(--color-slate-800);
+  color: var(--color-slate-100);
+  font-size: 0.875rem;
+  box-shadow: 0 4px 16px #0008;
+}
+#action-feedback.is-pending {
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--color-teal-400);
+}
+#action-feedback.is-pending::before {
+  content: "";
+  display: inline-block;
+  width: 0.8rem;
+  height: 0.8rem;
+  margin-right: 0.5rem;
+  vertical-align: -0.1rem;
+  border: 2px solid var(--color-teal-300);
+  border-right-color: transparent;
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  #action-feedback.is-pending::before { animation: action-spin 0.8s linear infinite; }
+}
+@keyframes action-spin { to { transform: rotate(360deg); } }
