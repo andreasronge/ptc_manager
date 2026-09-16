@@ -2,6 +2,7 @@ defmodule PtcManager.DailyDigests.Evidence do
   @moduledoc "Builds a bounded daily-change manifest through the GET-only GitHub client."
 
   alias PtcManager.DailyDigests.DailyDigest
+  alias PtcManager.DailyDigests.PullRequestBody
   alias PtcManager.GitHub.Client
   alias PtcManager.Operations.Repository
 
@@ -211,16 +212,34 @@ defmodule PtcManager.DailyDigests.Evidence do
       else: compact_manifest(manifest)
   end
 
+  # Bodies are given up in order of how much a daily update would miss them.
+  # General prose goes first, then validation and retrospective material, and
+  # only then the bodies entirely.
   defp compact_manifest(manifest) do
-    compact =
-      Map.update!(manifest, "pull_requests", fn pulls ->
-        Enum.map(pulls, &Map.delete(&1, "body"))
-      end)
-      |> Map.put("evidence_truncated", true)
+    Enum.reduce_while(
+      [&PullRequestBody.priority_only/1, fn _sections -> nil end],
+      {:error, :daily_digest_evidence_too_large},
+      fn reduce_body, _result ->
+        compact = compact_bodies(manifest, reduce_body)
 
-    if compact |> Jason.encode!() |> byte_size() <= @max_manifest_bytes,
-      do: {:ok, compact},
-      else: {:error, :daily_digest_evidence_too_large}
+        if compact |> Jason.encode!() |> byte_size() <= @max_manifest_bytes,
+          do: {:halt, {:ok, compact}},
+          else: {:cont, {:error, :daily_digest_evidence_too_large}}
+      end
+    )
+  end
+
+  defp compact_bodies(manifest, reduce_body) do
+    manifest
+    |> Map.update!("pull_requests", fn pulls ->
+      Enum.map(pulls, fn pull ->
+        case pull |> Map.get("body") |> reduce_body.() do
+          nil -> Map.delete(pull, "body")
+          body -> Map.put(pull, "body", body)
+        end
+      end)
+    end)
+    |> Map.put("evidence_truncated", true)
   end
 
   defp pull_requests_in_window(items, branch, digest) do
@@ -276,7 +295,7 @@ defmodule PtcManager.DailyDigests.Evidence do
            %{
              "number" => number,
              "title" => bounded(pull["title"], 300),
-             "body" => bounded(pull["body"], 600),
+             "body" => PullRequestBody.extract(pull["body"]),
              "html_url" => pull["html_url"],
              "merged_at" => merged_at,
              "merge_commit_sha" => sha,
