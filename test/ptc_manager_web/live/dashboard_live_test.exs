@@ -1497,8 +1497,18 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   end
 
   test "an issue whose pull request a person opened by hand counts as in delivery", %{conn: conn} do
-    repository = repository_fixture()
-    issue = issue_fixture(repository, %{number: 640, title: "Fixed by a hand-made PR"})
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "later", "role" => "park"}]}
+      })
+
+    issue =
+      issue_fixture(repository, %{
+        number: 640,
+        title: "Fixed by a hand-made PR",
+        github_labels: %{"names" => ["later"]}
+      })
+
     proposal_fixture(issue)
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -1537,6 +1547,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     assert has_element?(view, "#planning-group-in_delivery #issue-#{issue.id}")
     assert has_element?(view, "#in-delivery-#{issue.id}[href='/board']")
+    assert has_element?(view, "#parked-delivery-note-#{issue.id}", "active delivery continues")
   end
 
   test "marks an issue somebody else opened, and stays quiet until the identity is known", %{
@@ -1602,6 +1613,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     Operations.notify_changed(:test)
 
+    assert has_element?(view, "#planning-group-waiting #issue-#{issue.id}")
     assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=true]", "wait")
     assert has_element?(view, "#toggle-label-#{issue.id}-ux[aria-pressed=true]", "ux")
     refute has_element?(view, "#issue-#{issue.id}", "needs-design")
@@ -1609,6 +1621,72 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     view |> element("#toggle-issue-#{issue.id}") |> render_click()
 
     assert has_element?(view, "#issue-detail-#{issue.id}", "GitHub labels: needs-design")
+  end
+
+  test "parked cards retain collection structure and failed planning details", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "later", "role" => "park"}]}
+      })
+
+    collection =
+      issue_fixture(repository, %{
+        number: 701,
+        github_labels: %{"names" => ["later"]},
+        sub_issues: %{
+          "nodes" => [
+            %{
+              "number" => 702,
+              "state" => "open",
+              "repository_full_name" =>
+                String.downcase("#{repository.github_owner}/#{repository.github_name}")
+            }
+          ],
+          "total" => 1
+        }
+      })
+
+    failed = issue_fixture(repository, %{number: 703, github_labels: %{"names" => ["later"]}})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %AgentAction{}
+    |> AgentAction.changeset(%{
+      repository_id: repository.id,
+      action_key: "prepare_issue",
+      target_type: "issue",
+      target_id: failed.id,
+      target_label: "issue ##{failed.number}",
+      prompt_version: 1,
+      prompt: "Prepare issue",
+      baseline_issue_numbers: %{"numbers" => []},
+      target_snapshot: %{},
+      actor: "maintainer",
+      state: "failed",
+      attempt_count: 1,
+      requested_at: now,
+      started_at: now,
+      ended_at: now,
+      last_error: "Planning failed for a retained reason."
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    view |> element("#planning-group-toggle-waiting") |> render_click()
+
+    assert has_element?(view, "#planning-group-waiting #issue-#{collection.id}")
+    assert has_element?(view, "#planning-group-waiting #issue-#{failed.id}")
+
+    view |> element("#toggle-issue-#{collection.id}") |> render_click()
+    view |> element("#toggle-issue-#{failed.id}") |> render_click()
+
+    assert has_element?(view, "#issue-#{collection.id}-collection", "Collection · 0/1")
+    assert has_element?(view, "#collection-note-#{collection.id}")
+
+    assert has_element?(
+             view,
+             "#issue-detail-#{failed.id}",
+             "Planning failed for a retained reason"
+           )
   end
 
   test "toggles one configured label straight from a Planning card", %{conn: conn} do
@@ -1628,10 +1706,21 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     repository =
       repository_fixture(%{
-        maintainer_labels: %{"labels" => [%{"name" => "wait", "role" => "park"}]}
+        maintainer_labels: %{
+          "labels" => [
+            %{"name" => "Later", "role" => "park"},
+            %{"name" => "display-only", "role" => "badge"}
+          ]
+        }
       })
 
-    issue = issue_fixture(repository, %{title: "Park this one"})
+    issue =
+      issue_fixture(repository, %{
+        title: "Park this decision",
+        workflow_label: "ptc:needs-decision",
+        github_labels: %{"names" => ["ptc:needs-decision", "display-only"]}
+      })
+
     proposal_fixture(issue)
 
     Application.put_env(
@@ -1647,7 +1736,11 @@ defmodule PtcManagerWeb.DashboardLiveTest do
          "parent" => nil,
          "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
          "structure_projected" => true,
-         "labels" => [%{"name" => "wait"}],
+         "labels" => [
+           %{"name" => "ptc:needs-decision"},
+           %{"name" => "display-only"},
+           %{"name" => "lAtEr"}
+         ],
          "updated_at" =>
            issue.github_updated_at |> DateTime.add(5, :second) |> DateTime.to_iso8601()
        }}
@@ -1655,15 +1748,67 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
 
-    assert has_element?(view, "#toggle-label-#{issue.id}-wait[aria-pressed=false]", "wait")
+    assert has_element?(view, "#planning-group-needs_decision #issue-#{issue.id}")
+    assert has_element?(view, "#toggle-label-#{issue.id}-Later[aria-pressed=false]", "Later")
 
-    view |> element("#toggle-label-#{issue.id}-wait") |> render_click()
+    view |> element("#toggle-label-#{issue.id}-Later") |> render_click()
 
-    assert_receive {:label_written, :add, "wait"}
-    assert render_async(view) =~ "Added wait on GitHub"
+    assert_receive {:label_written, :add, "Later"}
+    assert render_async(view) =~ "Added Later on GitHub"
 
-    # The issue is now parked, so it leaves the decision queue for Waiting.
-    assert has_element?(view, "#planning-group-waiting")
+    refute has_element?(view, "#planning-group-needs_decision #issue-#{issue.id}")
+    view |> element("#planning-group-toggle-waiting") |> render_click()
+    assert has_element?(view, "#planning-group-waiting #issue-#{issue.id}")
+    assert has_element?(view, "#toggle-label-#{issue.id}-Later[aria-pressed=true]")
+
+    Application.put_env(
+      :ptc_manager,
+      :dashboard_label_remote_issue,
+      {:ok,
+       %{
+         "number" => issue.number,
+         "title" => issue.title,
+         "html_url" => issue.html_url,
+         "body" => "",
+         "state" => "open",
+         "parent" => nil,
+         "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+         "structure_projected" => true,
+         "labels" => [%{"name" => "ptc:needs-decision"}, %{"name" => "display-only"}],
+         "updated_at" =>
+           issue.github_updated_at |> DateTime.add(10, :second) |> DateTime.to_iso8601()
+       }}
+    )
+
+    view |> element("#toggle-label-#{issue.id}-Later") |> render_click()
+    assert_receive {:label_written, :remove, "Later"}
+    assert render_async(view) =~ "Removed Later on GitHub"
+    assert has_element?(view, "#planning-group-needs_decision #issue-#{issue.id}")
+    refute has_element?(view, "#planning-group-waiting")
+  end
+
+  test "parking an active job keeps it in delivery and explains why", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        maintainer_labels: %{"labels" => [%{"name" => "hold", "role" => "park"}]}
+      })
+
+    issue = issue_fixture(repository, %{github_labels: %{"names" => ["HOLD"]}})
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    view |> element("#planning-group-toggle-in_delivery") |> render_click()
+
+    assert has_element?(view, "#planning-group-in_delivery #issue-#{issue.id}")
+
+    assert has_element?(
+             view,
+             "#parked-delivery-note-#{issue.id}",
+             "Parked for planning; active delivery continues."
+           )
+
+    assert Repo.get!(Job, job.id).state == "queued"
   end
 
   test "says the local copy is behind when GitHub took the label but the re-read failed", %{

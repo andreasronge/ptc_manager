@@ -1194,28 +1194,31 @@ defmodule PtcManager.OperationsTest do
              ) == :waiting
     end
 
-    test "a question for the maintainer is never hidden by parking" do
+    test "parking wins over every inactive planning group without changing its state" do
       parked = %{"names" => ["wait"]}
 
-      assert group(
-               planning_item(
-                 issue: %{github_labels: parked, workflow_label: "ptc:needs-decision"}
-               ),
-               parked_labels: ["wait"]
-             ) == :needs_decision
+      items = [
+        planning_item(issue: %{github_labels: parked, workflow_label: "ptc:needs-decision"}),
+        planning_item(issue: %{github_labels: parked, workflow_label_conflict: true}),
+        planning_item(issue: %{github_labels: parked}, issue_agent_action: %{state: "failed"}),
+        planning_item(
+          issue: %{
+            github_labels: parked,
+            sub_issues: %{
+              "nodes" => [%{"number" => 2, "state" => "open"}],
+              "total" => 1
+            }
+          }
+        ),
+        planning_item(issue: %{github_labels: parked, workflow_label: "ptc:blocked"}),
+        planning_item(issue: %{github_labels: parked}, proposal: nil)
+      ]
 
-      assert group(
-               planning_item(issue: %{github_labels: parked, workflow_label_conflict: true}),
-               parked_labels: ["wait"]
-             ) == :needs_decision
+      assert Enum.all?(items, &(group(&1, parked_labels: ["wait"]) == :waiting))
 
-      assert group(
-               planning_item(
-                 issue: %{github_labels: parked},
-                 issue_agent_action: %{state: "failed"}
-               ),
-               parked_labels: ["wait"]
-             ) == :needs_decision
+      for item <- items do
+        refute group(item, parked_labels: ["badge-only"]) == :waiting
+      end
     end
 
     test "anything asking a question of the maintainer needs a decision" do

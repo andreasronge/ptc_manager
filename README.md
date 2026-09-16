@@ -653,9 +653,13 @@ GitHub attributes them to the maintainer and they never carry the badge.
 #### Your own triage labels
 
 Each repository can configure a short list of GitHub labels with a role. A
-**badge** label is shown on the card. A **park** label additionally moves the
-issue into the **Waiting** group; it is a placement, never an approval gate, and
-an issue can still be approved while parked. Names starting with `ptc:` are
+**badge** label is shown on the card. A **park** label additionally moves any
+inactive issue into the **Waiting** group, ahead of decision, collection,
+readiness, blocking, preparation, and staleness classifications. It is a
+placement, never an approval gate, and an issue can still be approved while
+parked. Active jobs and issues with open managed or external pull requests stay
+in **In delivery**, where the card explains that active delivery continues;
+parking does not pause or cancel that work. Names starting with `ptc:` are
 refused, because those three labels are PtcManager's own display projection.
 Configure the list under **Configuration → Your triage labels**; the label must
 already exist in the GitHub repository, because PtcManager never creates one.

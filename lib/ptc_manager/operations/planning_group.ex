@@ -54,10 +54,10 @@ defmodule PtcManager.Operations.PlanningGroup do
   Returns the group of one dashboard issue item.
 
   The first matching rule wins, and the rules are ordered by how strongly they
-  determine what happens next: work that already started, work waiting on you,
-  work you parked, then readiness. A question for the maintainer outranks
-  parking, because Waiting starts collapsed and a parked issue must not be able
-  to hide one.
+  determine what happens next: work that already started, work you explicitly
+  parked, work waiting on you, then readiness. Parking is an inactive-planning
+  placement; it never hides an active job or open managed or external pull
+  request.
 
   Options: `:now`, `:stale_after_days`, and `:parked_labels` (the label names
   this repository configured with the `park` role).
@@ -69,9 +69,9 @@ defmodule PtcManager.Operations.PlanningGroup do
 
     cond do
       in_delivery?(item) -> :in_delivery
+      parked?(item, parked_labels) -> :waiting
       needs_decision?(item) -> :needs_decision
       collection?(item) -> :collections
-      parked?(item, parked_labels) -> :waiting
       approvable?(item) -> :ready
       blocked?(item) -> stale_or(:blocked, item, now, stale_after_days)
       true -> stale_or(:not_prepared, item, now, stale_after_days)
