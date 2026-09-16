@@ -13,38 +13,17 @@ defmodule PtcManager.DeliveryReport do
     job =
       Repo.get!(Job, id) |> Repo.preload([:issue, :repository, :approval, :worktree_allocation])
 
-    rounds = Reviews.rounds(job.id)
-
-    operations =
-      Repo.all(from o in ResourceOperation, where: o.job_id == ^job.id, order_by: o.queued_at)
-
-    audits =
-      Repo.all(
-        from a in AuditEvent,
-          where: a.target_type == "job" and a.target_id == ^job.id,
-          order_by: [a.inserted_at, a.id]
-      )
-
-    workspace_audits =
-      case job.worktree_allocation do
-        nil ->
-          []
-
-        w ->
-          Repo.all(
-            from a in AuditEvent,
-              where: a.target_type == "worktree_allocation" and a.target_id == ^w.id,
-              order_by: [a.inserted_at, a.id]
-          )
-      end
+    records = records(job)
+    rounds = records.rounds
+    operations = records.operations
+    publication = records.publication
 
     audits =
       Enum.sort_by(
-        audits ++ workspace_audits ++ PtcManager.DeliveryHistory.events(job.id),
+        records.audits ++
+          Enum.flat_map(records.delivery_events, &PtcManager.DeliveryHistory.project/1),
         &{DateTime.to_unix(&1.inserted_at, :microsecond), &1.id}
       )
-
-    publication = Repo.get_by(PrPublication, job_id: job.id)
 
     attempts =
       Repo.all(from j in Job, where: j.issue_id == ^job.issue_id, order_by: j.inserted_at)
@@ -73,6 +52,51 @@ defmodule PtcManager.DeliveryReport do
     }
   end
 
+  @doc "Shared record queries. Call inside a read transaction; a limit bounds each collection."
+  def records(job, row_limit \\ nil) do
+    job = Repo.preload(job, :worktree_allocation)
+    publication = Repo.get_by(PrPublication, job_id: job.id)
+    rounds = read_rows(Reviews.rounds_query(job.id), row_limit)
+
+    operations =
+      read_rows(
+        from(o in ResourceOperation, where: o.job_id == ^job.id, order_by: [o.queued_at, o.id]),
+        row_limit
+      )
+
+    targets = [
+      {"job", job},
+      {"worktree_allocation", job.worktree_allocation},
+      {"pr_publication", publication}
+    ]
+
+    predicate =
+      Enum.reduce(targets, dynamic(false), fn
+        {_type, nil}, query ->
+          query
+
+        {type, record}, query ->
+          dynamic([a], ^query or (a.target_type == ^type and a.target_id == ^record.id))
+      end)
+
+    audits =
+      read_rows(
+        from(a in AuditEvent, where: ^predicate, order_by: [a.inserted_at, a.id]),
+        row_limit
+      )
+
+    %{
+      rounds: rounds,
+      operations: operations,
+      audits: audits,
+      publication: publication,
+      delivery_events: read_rows(PtcManager.DeliveryHistory.records_query(job.id), row_limit)
+    }
+  end
+
+  defp read_rows(query, nil), do: Repo.all(query)
+  defp read_rows(query, row_limit), do: Repo.all(limit(query, ^row_limit))
+
   def validation_status(job, publication) do
     cond do
       is_nil(publication) or is_nil(publication.remote_head_sha) ->
@@ -86,7 +110,8 @@ defmodule PtcManager.DeliveryReport do
     end
   end
 
-  defp ready_at(audits, publication) do
+  @doc false
+  def ready_at(audits, publication) do
     if publication do
       audits
       |> Enum.reverse()

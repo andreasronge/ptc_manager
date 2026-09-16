@@ -28,6 +28,7 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
           "merged_at" => "2026-08-30T12:00:00Z",
           "updated_at" => "2026-08-30T12:00:00Z",
           "merge_commit_sha" => sha(number),
+          "head" => %{"sha" => sha(number + 100_000)},
           "base" => %{"ref" => "main"}
         },
         overrides
