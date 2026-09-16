@@ -3,8 +3,8 @@ defmodule Mix.Tasks.Ptc.Digest.Preview do
 
   @moduledoc """
   Prints the bounded sections a daily update extracts from one pull request
-  body, beside the flat slice it used to receive, so the difference is visible
-  without a database, a GitHub token, or a running server.
+  body, and what survives each rung of manifest compaction, without a database,
+  a GitHub token, or a running server.
 
       mix ptc.digest.preview docs/example-body.md
 
@@ -16,9 +16,6 @@ defmodule Mix.Tasks.Ptc.Digest.Preview do
   use Mix.Task
 
   alias PtcManager.DailyDigests.PullRequestBody
-
-  # What the body allowance used to be, kept here only to show what changed.
-  @previous_limit 600
 
   @order ~w(summary validation retrospective preamble)
 
@@ -45,18 +42,20 @@ defmodule Mix.Tasks.Ptc.Digest.Preview do
 
     shell.info("Body: #{byte_size(body)} bytes\n")
 
-    shell.info("Previously (first #{@previous_limit} characters):")
-    shell.info(indent(String.slice(body, 0, @previous_limit)))
-
-    shell.info("\nNow:")
+    shell.info("Extracted:")
     Enum.each(@order, &report_section(shell, sections, &1))
 
-    shell.info("\nUnder manifest pressure this is retained:")
+    shell.info("\nUnder manifest pressure, in the order they are given up:")
 
-    case PullRequestBody.priority_only(sections) do
-      nil -> shell.info(indent("nothing; the body is dropped"))
-      kept -> Enum.each(@order, &report_section(shell, kept, &1))
-    end
+    Enum.each(
+      PullRequestBody.compaction_steps(),
+      fn {stage, reduce_body} ->
+        label = stage |> Atom.to_string() |> String.replace("_", " ")
+        kept = reduce_body.(sections)
+        shell.info("\n  [#{label}]#{if kept, do: "", else: " nothing; the body is dropped"}")
+        if kept, do: Enum.each(@order, &report_section(shell, kept, &1))
+      end
+    )
   end
 
   defp report_section(shell, sections, key) do

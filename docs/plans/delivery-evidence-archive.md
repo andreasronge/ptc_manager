@@ -230,8 +230,9 @@ prepared evidence projection.
 
 Fix the current truncation before changing the digest contract. Raise the
 600-character PR-body limit and add a bounded Markdown heading extractor. Under
-manifest pressure retain `Validation` and `Retrospective` before general summary
-prose rather than deleting every body. Start with the PR #1981 shape as a failing
+manifest pressure retain `Summary`, `Validation`, and `Retrospective`, with
+Summary first. Shorten retained sections before dropping bodies, and record
+per-PR coverage. Start with the PR #1981 shape as a failing
 test. This remains the fallback for external and historical PRs.
 
 ### 6.2 Inline one bounded day
@@ -388,7 +389,8 @@ The first seven items restore the daily update. Each should normally be its own
 issue and pull request.
 
 1. **Preserve PR sections.** Add the bounded heading extractor, increase the body
-   allowance, and keep Validation and Retrospective during compaction.
+   allowance, and keep Summary, Validation, and Retrospective during compaction,
+   shortening sections before dropping them.
 2. **Prepare outcome protocol v2.** Add the discriminated completed/stopped
    schema and reader plus bounded completion fields. Extend the existing result
    compare-and-swap to persist accepted completion data atomically beside the

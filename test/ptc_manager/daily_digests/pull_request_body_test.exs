@@ -84,15 +84,140 @@ defmodule PtcManager.DailyDigests.PullRequestBodyTest do
       assert PullRequestBody.extract("   \n\n  ") == nil
     end
 
-    test "keeps only the priority sections when asked" do
-      sections = PullRequestBody.extract(@body)
+    test "keeps the sections a daily update needs and drops general prose" do
+      sections = PullRequestBody.extract("intro prose\n\n" <> @body)
       priority = PullRequestBody.priority_only(sections)
 
-      assert Map.keys(priority) |> Enum.sort() == ["retrospective", "validation"]
+      # summary leads: the prompt asks what changed, and a title cannot say.
+      assert Map.keys(priority) |> Enum.sort() == ["retrospective", "summary", "validation"]
+      refute Map.has_key?(priority, "preamble")
     end
 
     test "priority_only/1 drops a body that has no priority section" do
       assert PullRequestBody.extract("no headings here") |> PullRequestBody.priority_only() == nil
+    end
+  end
+
+  describe "structure the old parser broke" do
+    test "a shell comment inside a fenced block is not a heading" do
+      body = """
+      ## Validation
+      Ran the extra probe:
+
+      ```bash
+      # Rebuild the snapshot and diff it
+      mix ptc.digest.preview -
+      ```
+
+      Confirmed the byte count matched.
+
+      ## Retrospective
+      - none
+      """
+
+      sections = PullRequestBody.extract(body)
+
+      assert sections["validation"] =~ "mix ptc.digest.preview"
+      assert sections["validation"] =~ "Confirmed the byte count matched."
+      assert sections["retrospective"] =~ "none"
+    end
+
+    test "a sub-heading does not end the section that contains it" do
+      body = """
+      ## Validation
+      - ran mix precommit
+
+      ### Manual check
+      - clicked through the console and confirmed the digest rendered
+
+      ## Retrospective
+      - none
+      """
+
+      sections = PullRequestBody.extract(body)
+
+      assert sections["validation"] =~ "ran mix precommit"
+      assert sections["validation"] =~ "clicked through the console"
+      refute sections["retrospective"] =~ "clicked through"
+    end
+
+    test "recognises the spellings GitHub templates use" do
+      for {heading, key} <- [
+            {"Test plan", "validation"},
+            {"How to test", "validation"},
+            {"What changed", "summary"},
+            {"Changes", "summary"},
+            {"1. Summary", "summary"},
+            {"Follow-up", "retrospective"}
+          ] do
+        sections = PullRequestBody.extract("## #{heading}\nthe content\n")
+
+        assert sections[key] == "the content", "expected #{heading} to map to #{key}"
+      end
+    end
+
+    test "only a matching fence of sufficient length closes a code block" do
+      for nested <- ["```", "~~~", "````not a closing fence"] do
+        body =
+          "## Summary\n````markdown\n#{nested}\n## Validation\nexample only\n````\n## Validation\nreal check"
+
+        sections = PullRequestBody.extract(body)
+        assert sections["summary"] =~ "## Validation\nexample only"
+        assert sections["validation"] == "real check"
+      end
+    end
+
+    test "section boundaries use the actual heading level" do
+      for level <- 1..5 do
+        heading = String.duplicate("#", level)
+        child = heading <> "#"
+
+        body =
+          "#{heading} Validation\nreal check\n#{child} Summary\nnested detail\n#{heading} Notes\nunrelated"
+
+        sections = PullRequestBody.extract(body)
+        assert sections["validation"] =~ "nested detail"
+        refute sections["validation"] =~ "unrelated"
+        refute Map.has_key?(sections, "summary")
+        assert sections["preamble"] =~ "unrelated"
+      end
+    end
+
+    test "an unrecognised heading keeps its own title in the prose" do
+      sections = PullRequestBody.extract("Top prose.\n\n## Notes\nsomething\n")
+
+      assert sections["preamble"] =~ "Notes"
+      assert sections["preamble"] =~ "something"
+    end
+  end
+
+  describe "shorten/2" do
+    test "trims every section to the byte budget" do
+      sections = PullRequestBody.extract(@body)
+
+      shortened = PullRequestBody.shorten(sections, 40)
+
+      assert Enum.all?(shortened, fn {_key, text} -> byte_size(text) <= 40 end)
+      assert shortened["validation"] =~ "Recreated"
+    end
+
+    test "never produces invalid UTF-8 when the cut lands inside a codepoint" do
+      sections = PullRequestBody.extract("## Summary\n" <> String.duplicate("é", 50))
+
+      shortened = PullRequestBody.shorten(sections, 25)
+
+      assert String.valid?(shortened["summary"])
+      assert {:ok, _json} = Jason.encode(shortened)
+    end
+  end
+
+  describe "byte bounds" do
+    test "bounds a multi-byte section by bytes, not characters" do
+      body = "## Summary\n" <> String.duplicate("—", 2_000)
+
+      sections = PullRequestBody.extract(body, section_limit: 300)
+
+      assert byte_size(sections["summary"]) <= 300
     end
   end
 end
