@@ -933,9 +933,11 @@ independently. The two limits are persisted and editable under **Configuration
 `PTC_LIGHT_AGENT_CAPACITY` and `PTC_HEAVY_AGENT_CAPACITY` only provide the
 initial values for a new database.
 
-Daily updates are disabled pending a redesign. Deployments disable their
+Daily updates remain disabled pending manual evaluation of the new delivery
+reports. The disable migration pauses their
 definition and triggers and cancel queued legacy update actions, while retaining
-already-published history on the Updates page. Running actions may finish.
+already-published history on the Updates page. Running actions are not cancelled
+by that migration, but result acceptance now requires the evidence-bound contract.
 Rolling the migration back re-enables definitions but leaves triggers paused
 and queued actions cancelled; rollback does not restart generation.
 Cancelled update entries remain as terminal history. The existing one-action-per-day
@@ -946,16 +948,21 @@ coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
 commits by their committer timestamp for the exact timezone-aware window. Every
 commit query is pinned to one captured default-branch head. GitHub does not
 expose the arrival time of a direct push, so that distinction is shown in the
-bounded manifest rather than guessed. A configured generic Herdr agent receives
-that manifest and a read-only local snapshot, then writes a plain-language
-Markdown briefing with practical examples. PtcManager rejects model-reported
-SHA, included-change count, or PR numbers that differ from the coordinator manifest. It
-stores the structured result and provenance in SQLite. The Updates page renders
-the Markdown through an HTML sanitizer before displaying it.
+bounded evidence rather than guessed. A configured generic Herdr agent receives
+the delivery projection and a read-only local snapshot, then returns bounded
+shipped summaries and attributed lessons. The exact escaped JSON is retained in
+the persisted prompt and hashed in the action snapshot. Publication rejects
+missing/tampered evidence, mismatched hashes, windows, SHAs, counts, PR numbers,
+or citations outside the selected changes. PtcManager renders **What shipped**,
+optional **What we learned**, and factual **Delivery health** from that captured
+evidence. Missing metrics stay unknown; model prose is not verified fact. Old
+published Markdown remains readable. The Updates page sanitizes the generated
+Markdown before displaying it. See the [daily contract](docs/maintainers/delivery-evidence.md)
+for limits and provenance; this wiring does not enable generation.
 
-The dormant generation prompt remains visible on **Automations** for the future
-redesign. Its definition and both built-in triggers default to paused; an
-operator would have to explicitly re-enable them to enqueue work there.
+The new generation prompt remains visible on **Automations** while evaluation
+is pending. Its definition and both built-in triggers default to paused. Evaluate
+manual production-shaped reports before explicitly re-enabling generation.
 
 Before an issue-planning agent starts, PtcManager synchronizes the canonical
 GitHub issue, records its content digest, and captures the configured checkout's

@@ -12,6 +12,7 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
     assert has_element?(view, "nav", "Updates")
     assert has_element?(view, "#daily-digest-empty", "Daily updates are paused")
     assert html =~ "Published history remains available"
+    assert html =~ "paused pending evaluation"
   end
 
   test "shows that generation is paused while history is retained", %{conn: conn} do
@@ -19,12 +20,14 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
     assert html =~ "Generation paused by default · history retained"
   end
 
-  test "renders a published update and sanitizes model-generated Markdown", %{conn: conn} do
+  test "retains historical updates and sanitizes their model-generated Markdown", %{conn: conn} do
     repository = repository_fixture(%{github_owner: "andreas", github_name: "runner"})
     digest = digest_fixture(repository)
 
     assert {:ok, digest} =
-             DailyDigests.publish(digest.agent_action, %{
+             digest
+             |> PtcManager.DailyDigests.DailyDigest.changeset(%{
+               "published_at" => DateTime.utc_now(),
                "status" => "published",
                "title" => "Build feedback became clearer",
                "summary" =>
@@ -48,8 +51,9 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
                "window_ended_at" => DateTime.to_iso8601(digest.window_ended_at),
                "source_head_sha" => String.duplicate("c", 40),
                "change_count" => 1,
-               "pull_request_numbers" => [1722]
+               "pull_request_numbers" => %{"numbers" => [1722]}
              })
+             |> Repo.update()
 
     {:ok, view, html} =
       conn |> authenticated_conn() |> live(~p"/updates/#{digest.id}")
@@ -65,6 +69,33 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
     refute render(view) =~ "alert('unsafe')"
   end
 
+  test "renders the delivery contract sections and omits empty lessons", %{conn: conn} do
+    repository = repository_fixture()
+    digest = digest_fixture(repository)
+    action = PtcManager.DailyDigestFixtures.prepare(digest)
+
+    result = PtcManager.DailyDigestFixtures.result(action)
+    [item] = result["what_shipped"]
+
+    result =
+      Map.put(result, "what_shipped", [
+        Map.put(
+          item,
+          "summary",
+          "See https://example.org/unselected or [invented](https://example.org/invented)."
+        )
+      ])
+
+    assert {:ok, published} = DailyDigests.publish(action, result)
+
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/updates/#{published.id}")
+    assert has_element?(view, "#daily-digest-markdown h2", "What shipped")
+    assert has_element?(view, "#daily-digest-markdown h2", "Delivery health")
+    assert has_element?(view, "#daily-digest-markdown", "review rounds unknown")
+    refute has_element?(view, "#daily-digest-markdown h2", "What we learned")
+    refute has_element?(view, "#daily-digest-markdown a[href*='example.org']")
+  end
+
   test "shows queued and failed generation state", %{conn: conn} do
     repository = repository_fixture()
     queued = digest_fixture(repository)
@@ -73,6 +104,7 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
       conn |> authenticated_conn() |> live(~p"/updates/#{queued.id}")
 
     assert has_element?(queued_view, "#daily-digest-detail", "Queued")
+    assert has_element?(queued_view, "#daily-digest-detail", "validated and rendered")
     assert has_element?(queued_view, "#daily-digest-detail [class*='animate-spin']")
 
     queued.agent_action

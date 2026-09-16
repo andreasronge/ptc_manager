@@ -107,21 +107,22 @@ defmodule PtcManager.DailyDigestsTest do
     enable_automation!(repository, "daily_digest")
     assert {:ok, [digest]} = DailyDigests.enqueue_due(~U[2026-08-31 00:30:00Z])
 
-    result = valid_result(digest)
+    action = PtcManager.DailyDigestFixtures.prepare(digest, [1713, 1716])
+    result = PtcManager.DailyDigestFixtures.result(action)
     wrong_window = Map.put(result, "window_started_at", "2026-08-29T21:00:00.000000Z")
 
     assert {:error, :daily_digest_window_mismatch} =
-             DailyDigests.publish(digest.agent_action, wrong_window)
+             DailyDigests.publish(action, wrong_window)
 
-    assert {:ok, published} = DailyDigests.publish(digest.agent_action, result)
+    assert {:ok, published} = DailyDigests.publish(action, result)
     assert published.title == "A steadier build day"
     assert published.change_count == 2
     assert published.pull_request_numbers == %{"numbers" => [1713, 1716]}
-    assert published.source_head_sha == String.duplicate("a", 40)
+    assert published.source_head_sha == String.duplicate("8", 40)
     assert DailyDigests.published?(published)
 
     assert {:error, :daily_digest_already_published} =
-             DailyDigests.publish(digest.agent_action, result)
+             DailyDigests.publish(action, result)
   end
 
   test "validates the constrained daily output contract" do
@@ -129,7 +130,15 @@ defmodule PtcManager.DailyDigestsTest do
       "status" => "published",
       "title" => "A steadier build day",
       "summary" => "Two changes made build feedback clearer.",
-      "markdown" => "## Fixed\n\nBuild errors now explain the missing tool.",
+      "what_shipped" => [
+        %{
+          "source_id" => "pr:1713",
+          "summary" => "Improved feedback",
+          "why_it_matters" => "Clear errors"
+        }
+      ],
+      "what_we_learned" => [],
+      "evidence_sha256" => String.duplicate("a", 64),
       "window_started_at" => "2026-08-29T22:00:00Z",
       "window_ended_at" => "2026-08-30T22:00:00Z",
       "source_head_sha" => String.duplicate("b", 40),
@@ -172,20 +181,6 @@ defmodule PtcManager.DailyDigestsTest do
 
     Application.put_env(:ptc_manager, :daily_digest_interval_ms, 5_000)
     assert Scheduler.interval() == 5_000
-  end
-
-  defp valid_result(digest) do
-    %{
-      "status" => "published",
-      "title" => "A steadier build day",
-      "summary" => "Two changes made build feedback clearer.",
-      "markdown" => "## Fixed\n\nBuild errors now explain the missing tool.",
-      "window_started_at" => DateTime.to_iso8601(digest.window_started_at),
-      "window_ended_at" => DateTime.to_iso8601(digest.window_ended_at),
-      "source_head_sha" => String.duplicate("a", 40),
-      "change_count" => 2,
-      "pull_request_numbers" => [1713, 1716]
-    }
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

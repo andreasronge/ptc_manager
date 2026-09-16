@@ -1,0 +1,13 @@
+{
+  "status": "published",
+  "title": "Clearer build feedback",
+  "summary": "The selected change improves build errors.",
+  "what_shipped": [{"source_id": "pr:1722", "summary": "Build errors explain missing prerequisites.", "why_it_matters": "Troubleshooting is easier."}],
+  "what_we_learned": [{"source_ids": ["pr:1722"], "lesson": "The author reports that the prerequisite check caught this case."}],
+  "window_started_at": "2026-08-30T00:00:00.000000Z",
+  "window_ended_at": "2026-08-31T00:00:00.000000Z",
+  "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "change_count": 1,
+  "pull_request_numbers": [1722],
+  "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

@@ -189,7 +189,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "daily_digest",
       prompt:
-        "Write a concise, easy-to-read daily update from the supplied change manifest. Explain what was added, fixed, changed, or removed and include practical examples when the evidence supports them."
+        "Write a concise daily update from the supplied delivery evidence. Explain what shipped and why it matters, then include only concrete, attributed lessons when the evidence supports them. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
     },
     %{
       key: "repair_pr",

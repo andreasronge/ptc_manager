@@ -37,19 +37,10 @@ defmodule PtcManager.MaintainerActionsTest do
   end
 
   defmodule FakeDailyDigestEvidence do
-    def fetch(_repository, _digest) do
+    def fetch(repository, digest) do
       Process.get(
         :daily_digest_evidence_result,
-        {:ok,
-         %{
-           "source_head_sha" => String.duplicate("8", 40),
-           "change_count" => 1,
-           "pull_request_numbers" => [1722],
-           "commits" => [],
-           "pull_requests" => [],
-           "evidence_limit" => 50,
-           "evidence_truncated" => false
-         }}
+        {:ok, PtcManager.DailyDigestFixtures.selection(repository, digest)}
       )
     end
   end
@@ -212,7 +203,15 @@ defmodule PtcManager.MaintainerActionsTest do
          "status" => "published",
          "title" => "A clearer maintainer day",
          "summary" => "The included work made build feedback easier to understand.",
-         "markdown" => "## Fixed\n\nBuild failures now explain the missing prerequisite.",
+         "what_shipped" => [
+           %{
+             "source_id" => "pr:1722",
+             "summary" => "Build failures explain the missing prerequisite.",
+             "why_it_matters" => "Faster troubleshooting."
+           }
+         ],
+         "what_we_learned" => [],
+         "evidence_sha256" => action.target_snapshot["trusted_evidence_sha256"],
          "window_started_at" => action.target_snapshot["window_started_at"],
          "window_ended_at" => action.target_snapshot["window_ended_at"],
          "source_head_sha" => Process.get(:daily_digest_output_head, String.duplicate("8", 40)),
@@ -665,7 +664,9 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed.target_snapshot["trusted_source_head_sha"] == String.duplicate("8", 40)
     assert executed.target_snapshot["trusted_change_count"] == 1
     assert executed.prompt =~ ~s(<source_snapshot ref="main")
-    assert executed.prompt =~ "<daily_change_manifest>"
+    assert executed.prompt =~ "<daily_delivery_evidence>"
+    assert {:ok, projection} = PtcManager.DailyDigests.Input.read(executed)
+    assert projection["schema_version"] == 1
 
     published = DailyDigests.get_digest(digest.id)
     assert published.title == "A clearer maintainer day"
@@ -673,6 +674,10 @@ defmodule PtcManager.MaintainerActionsTest do
     assert published.pull_request_numbers == %{"numbers" => [1722]}
     assert published.source_head_sha == String.duplicate("8", 40)
     assert DailyDigests.status(published) == "published"
+    assert published.markdown =~ "## What shipped"
+    assert published.markdown =~ "## Delivery health"
+    assert published.markdown =~ "review rounds unknown"
+    refute published.markdown =~ "## What we learned"
   end
 
   test "rejects model-asserted daily provenance that differs from GET-only evidence" do

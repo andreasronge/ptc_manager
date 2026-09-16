@@ -82,17 +82,19 @@ defmodule PtcManagerWeb.DailyDigestLive do
      )}
   end
 
-  def markdown_html(markdown) when is_binary(markdown) do
+  def markdown_html(markdown, opts \\ [])
+
+  def markdown_html(markdown, opts) when is_binary(markdown) do
     markdown
     |> MDEx.to_html!(
-      extension: [table: true, strikethrough: true, autolink: true],
+      extension: [table: true, strikethrough: true, autolink: Keyword.get(opts, :autolink, true)],
       render: [unsafe: true],
       sanitize: MDEx.Document.default_sanitize_options()
     )
     |> Phoenix.HTML.raw()
   end
 
-  def markdown_html(_markdown), do: Phoenix.HTML.raw("")
+  def markdown_html(_markdown, _opts), do: Phoenix.HTML.raw("")
 
   def digest_date(date), do: Calendar.strftime(date, "%A, %d %B %Y")
 
@@ -110,9 +112,14 @@ defmodule PtcManagerWeb.DailyDigestLive do
 
   def status_detail(digest) do
     case status(digest) do
-      "cancelled" -> "This update was cancelled. Its record is retained in Operations."
-      "failed" -> "The retained agent output can be inspected from Operations."
-      _ -> "This page will update automatically when the agent has saved the Markdown."
+      "cancelled" ->
+        "This update was cancelled. Its record is retained in Operations."
+
+      "failed" ->
+        "The retained agent output can be inspected from Operations."
+
+      _ ->
+        "This page will update automatically when PtcManager has validated and rendered the agent's structured report."
     end
   end
 
@@ -129,6 +136,11 @@ defmodule PtcManagerWeb.DailyDigestLive do
 
   def source_short(%{source_head_sha: sha}) when is_binary(sha), do: String.slice(sha, 0, 10)
   def source_short(_digest), do: nil
+
+  def evidence_hash(%{agent_action: %{target_snapshot: snapshot}}) when is_map(snapshot),
+    do: snapshot["trusted_evidence_sha256"]
+
+  def evidence_hash(_digest), do: nil
 
   def pull_request_numbers(digest),
     do: get_in(digest.pull_request_numbers || %{}, ["numbers"]) || []

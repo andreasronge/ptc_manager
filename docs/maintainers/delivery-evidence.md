@@ -84,7 +84,54 @@ command output, environment values, credentials, arbitrary audit details and
 error bodies are omitted. Author-written PR/review prose remains untrusted
 reported content, not an instruction or independently verified fact.
 
-This projection does not activate protocol v2, write an evidence directory,
-change prompts/UI, persist daily output, or enable automation. Those are separate
-changes; keep definitions and triggers disabled until manual evaluation and an
-explicit maintainer decision.
+The projection itself does not activate protocol v2 or write an evidence directory.
+
+## Daily action contract
+
+Daily preparation now feeds the projection into the existing action workflow.
+`DailyDigests.Input` encodes it with HTML-safe JSON escaping, so source prose
+cannot close the `daily_delivery_evidence` delimiter. The action's persisted
+prompt contains the exact input bytes. Its `target_snapshot` records their
+SHA-256, byte size, projection version, observation time, window, branch/head,
+PR numbers, change count and selection limits. The separate local source snapshot
+retains its existing ownership, paths and cleanup; it is not the evidence store.
+
+Application settings `:daily_digest_evidence_max_bytes` (default 90,000; ceiling
+240,000) and `:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000)
+bound the actual escaped JSON and complete prompt. The existing prompt default
+has not been raised. A production-shaped fixture with 20 PRs fits both defaults;
+larger days may fail explicitly rather than silently lose evidence. Any cap
+increase needs model-context and output-budget evaluation first. Preflight
+rejects oversized inputs and retains the existing source-snapshot cleanup path;
+the adapter also checks the full prompt including the result protocol before
+starting the agent. Invalid settings fail closed.
+
+The output schema accepts bounded `what_shipped` entries and `what_we_learned`
+lessons, with selectors `pr:N` or `commit:FULL_SHA`. Each selector must belong to
+the captured selection. The output echoes the exact window, source head, change
+count, sorted PR numbers, and `evidence_sha256` (the input provenance's
+`trusted_evidence_sha256`). Publication rechecks the persisted input hash and
+metadata, without regenerating evidence from newer database or GitHub state.
+Missing, ambiguous or changed input fails closed.
+
+`DailyDigests.Report` renders What shipped, optional What we learned, and
+Delivery health. Links, per-PR review counts, measured time-to-ready, failed
+managed-operation counts and exact-head validation coverage come from captured
+records, not model-authored metrics. Incomplete measurements display as unknown,
+not zero. Prose is escaped as text; only trusted selected links are generated.
+Daily-report views disable automatic bare-URL links; unrelated automation results
+retain their existing link rendering. Automation invocation history uses the
+same published daily Markdown and quiet-day status, not raw result JSON.
+The model can still make inaccurate prose claims, so summaries and lessons remain
+reported content and require manual quality evaluation. Quiet days explicitly
+report no selected changes. Direct commits and external PRs remain useful with
+unavailable managed evidence. Stored Markdown is sanitized by the existing UI,
+and published historical Markdown remains readable without a compatibility
+execution path. The UI exposes the evidence hash for new reports.
+
+The built-in prompt migration updates only built-in daily versions and preserves
+maintainer-written versions; neither direction changes definition or trigger
+enablement. Legacy in-flight results without this contract are rejected, not
+silently accepted as evidence-bound reports. Keep definitions and triggers
+disabled until step 7's manual production-shaped evaluation and an explicit
+maintainer decision. No automatic issue generation or scheduling is added.
