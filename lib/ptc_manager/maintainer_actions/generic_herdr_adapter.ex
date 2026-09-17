@@ -46,6 +46,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            :ok <- validate_health_snapshot_for_handoff(action),
            :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, complete_prompt),
+           :ok <- archive_provider_session(action, profile.kind, agent_key),
            {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
         {:ok, result}
       end
@@ -57,6 +58,37 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   def run(%AgentAction{}), do: {:error, :automation_version_missing}
+
+  defp archive_provider_session(action, kind, session_id) do
+    root = Application.get_env(:ptc_manager, :execution_artifact_root)
+
+    if is_binary(root) and root != "" and kind in ~w(codex claude cursor) and
+         is_binary(session_id) do
+      destination =
+        Path.join([
+          root,
+          "repository-#{action.repository_id}",
+          "action-#{action.id}",
+          "agent-run-#{action.attempt_count}"
+        ])
+
+      max_bytes = Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
+      helper = "/usr/local/bin/ptc-manager-worker-review"
+
+      case PtcManager.Repository.WorkerHelper.run(helper, [
+             "archive-session",
+             kind,
+             session_id,
+             destination,
+             Integer.to_string(max_bytes)
+           ]) do
+        {_output, 0} -> :ok
+        _ -> :ok
+      end
+    else
+      :ok
+    end
+  end
 
   defp validate_health_snapshot(%AgentAction{
          action_key: "check_health",

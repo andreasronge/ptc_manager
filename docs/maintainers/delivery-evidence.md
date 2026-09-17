@@ -101,6 +101,11 @@ The action's persisted prompt contains only their paths and hashes. Its
 `target_snapshot` records both hashes, byte size, projection version, observation
 time, window, branch/head, PR numbers, change count and selection limits. The separate local source snapshot
 retains its existing ownership, paths and cleanup; it is not the evidence store.
+The manifest indexes exact available operation and review captures by durable
+source ID and artifact-root-relative manifest path. Missing captures lower
+coverage. Workspace setup retains its full combined output independently of the
+UI tail, and supported provider sessions are acquired by exact session ID;
+unsupported or absent artifacts are explicitly unavailable.
 
 Application settings `:daily_digest_bundle_max_bytes` (default 32 MB) and
 `:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000) separately
@@ -149,3 +154,9 @@ enablement. Legacy in-flight results without this contract are rejected, not
 silently accepted as evidence-bound reports. Keep definitions and triggers
 disabled until step 7's manual production-shaped evaluation and an explicit
 maintainer decision. No automatic issue generation or scheduling is added.
+
+File retention defaults to 90 days. Cleanup removes only finalized, expired,
+unreferenced bundle and execution directories. It protects every bundle named by
+an action snapshot and every execution manifest indexed by those bundles; active
+captures have no final manifest and are not eligible. Prompt rejection removes
+its newly published bundle immediately.

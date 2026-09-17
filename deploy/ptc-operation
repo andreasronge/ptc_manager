@@ -325,6 +325,7 @@ def managed_run(args, context):
         artifact = OperationArtifact(context, operation_id, attempt_token)
     except Exception as error:
         print(f"PtcManager artifact capture unavailable: {error}", file=sys.stderr)
+        artifact = PassthroughArtifact()
     try:
         if cgroup_path:
 
@@ -384,15 +385,14 @@ def managed_run(args, context):
 
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
-    pumps = artifact.start(child) if artifact else []
+    pumps = artifact.start(child)
     status = child.wait()
     for pump in pumps:
         pump.join()
-    if artifact:
-        try:
-            artifact.seal(status if status >= 0 else 128 + abs(status))
-        except OSError as error:
-            print(f"PtcManager artifact sealing failed: {error}", file=sys.stderr)
+    try:
+        artifact.seal(status if status >= 0 else 128 + abs(status))
+    except OSError as error:
+        print(f"PtcManager artifact sealing failed: {error}", file=sys.stderr)
     stop_heartbeat.set()
     thread.join(timeout=1)
 
@@ -493,6 +493,29 @@ class OperationArtifact:
                 os.chmod(os.path.join(self.directory, record["path"]), 0o440)
             except OSError:
                 pass
+
+
+class PassthroughArtifact:
+    """Drain and forward streams even when durable capture cannot start."""
+    def start(self, child):
+        threads = []
+        for source, live in ((child.stdout, sys.stdout.buffer), (child.stderr, sys.stderr.buffer)):
+            thread = threading.Thread(target=self._pump, args=(source, live), daemon=True)
+            thread.start()
+            threads.append(thread)
+        return threads
+
+    @staticmethod
+    def _pump(source, live):
+        try:
+            while data := source.read(65536):
+                live.write(data)
+                live.flush()
+        finally:
+            source.close()
+
+    def seal(self, _exit_status):
+        pass
 
 
 def main():

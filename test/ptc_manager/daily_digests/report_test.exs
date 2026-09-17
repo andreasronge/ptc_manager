@@ -60,6 +60,69 @@ defmodule PtcManager.DailyDigests.ReportTest do
     refute prompt =~ "query-me"
   end
 
+  test "bundle indexes exact captured operation manifests with truthful coverage", %{
+    repository: repository,
+    digest: digest
+  } do
+    root = Path.join(System.tmp_dir!(), "artifact-index-#{System.unique_integer([:positive])}")
+    previous = Application.get_env(:ptc_manager, :execution_artifact_root)
+    Application.put_env(:ptc_manager, :execution_artifact_root, root)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :execution_artifact_root, previous)
+      File.rm_rf!(root)
+    end)
+
+    directory = Path.join(root, "repository-#{repository.id}/job-9/operation-42-token")
+    File.mkdir_p!(directory)
+    File.write!(Path.join(directory, "stdout.log"), "full output")
+    File.write!(Path.join(directory, "stderr.log"), "")
+
+    File.write!(
+      Path.join(directory, "manifest.json"),
+      Jason.encode!(%{
+        "coverage" => "complete",
+        "streams" => %{
+          "stdout" => %{
+            "path" => "stdout.log",
+            "bytes" => 11,
+            "sha256" => String.duplicate("a", 64),
+            "coverage" => "complete"
+          }
+        }
+      })
+    )
+
+    evidence = %{
+      "pull_requests" => %{
+        "data" => [
+          %{
+            "attempts" => %{
+              "data" => [
+                %{
+                  "managed_operations" => %{"data" => [%{"id" => 42}]},
+                  "reviews" => %{"data" => []}
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+
+    snapshot = %{
+      "source_default_branch" => "main",
+      "trusted_source_head_sha" => String.duplicate("a", 40)
+    }
+
+    assert {:ok, bundle} = Bundle.publish(repository, digest, evidence, snapshot, "indexed")
+    manifest = File.read!(bundle.manifest_path) |> Jason.decode!()
+    assert manifest["coverage"]["execution_logs"] == "complete"
+    assert [entry] = manifest["execution_artifacts"]["data"]
+    assert entry["source_id"] == "operation:42"
+    assert entry["manifest_path"] =~ "operation-42-token/manifest.json"
+  end
+
   test "quiet days publish without invented work or lessons", %{digest: digest} do
     action = DailyDigestFixtures.prepare(digest, [])
     result = DailyDigestFixtures.result(action)

@@ -52,7 +52,9 @@ defmodule PtcManager.Reviews.Adapter do
       repository_path: snapshot_path,
       contract_version: 2,
       schema: round.input["schema"],
-      artifact_directory: review_artifact_directory(round)
+      artifact_directory: review_artifact_directory(round),
+      artifact_max_bytes:
+        Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
     }
 
     try do

@@ -36,6 +36,30 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     refute report.output_truncated
   end
 
+  @tag nightly: false
+  test "runner retains setup bytes independently of its bounded report" do
+    fixture =
+      workspace_fixture("head -c 70000 /dev/zero | tr '\\000' x\nprintf 'late-marker\\n'\n")
+
+    on_exit(fn -> File.rm_rf!(fixture.root) end)
+    artifact = Path.join(fixture.root, "setup-artifact")
+
+    assert {:ok, %{output_truncated: true}} =
+             WorkspaceSetup.Runner.run(
+               fixture.worktree,
+               "scripts/ptc/setup-worktree",
+               5_000,
+               artifact
+             )
+
+    full = File.read!(Path.join(artifact, "combined.log"))
+    assert byte_size(full) > 70_000
+    assert full =~ "late-marker"
+
+    assert Jason.decode!(File.read!(Path.join(artifact, "manifest.json")))["coverage"] ==
+             "complete"
+  end
+
   test "ignores malformed or unknown setup metrics" do
     fixture =
       workspace_fixture(

@@ -58,6 +58,7 @@ defmodule PtcManager.MaintainerActions do
     unexpected_github_commit_date
     invalid_github_head_sha
     daily_digest_projection_invalid_or_oversized
+    daily_digest_legacy_contract_cancelled
   )a
 
   @doc """
@@ -772,18 +773,19 @@ defmodule PtcManager.MaintainerActions do
     source_snapshot =
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
-    with {:ok, evidence} <- evidence_source.fetch(repository, digest),
+    with :ok <- require_file_daily_contract(action),
+         {:ok, evidence} <- evidence_source.fetch(repository, digest),
          {:ok, input} <-
            PtcManager.DailyDigests.Input.prepare(repository, digest, evidence, DateTime.utc_now()),
+         {:ok, %{sha: source_sha, ref: source_ref} = source} <-
+           capture_planning_snapshot(source_snapshot, repository, action),
          {:ok, input} <-
            PtcManager.DailyDigests.Input.publish(
              repository,
              digest,
              input,
              "#{action.id}-#{action.attempt_count}"
-           ),
-         {:ok, %{sha: source_sha, ref: source_ref} = source} <-
-           capture_planning_snapshot(source_snapshot, repository, action) do
+           ) do
       captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
       snapshot =
@@ -821,6 +823,13 @@ defmodule PtcManager.MaintainerActions do
     end
   end
 
+  defp require_file_daily_contract(%{prompt: prompt}) when is_binary(prompt) do
+    if String.contains?(prompt, ~s(action="daily_digest")) and
+         String.contains?(prompt, ~s(github_access="read")),
+       do: :ok,
+       else: {:error, :daily_digest_legacy_contract_cancelled}
+  end
+
   defp handle_daily_digest_preflight_error(action, reason)
        when reason in @terminal_daily_digest_evidence_errors,
        do: fail_preflight(action.id, reason)
@@ -846,6 +855,8 @@ defmodule PtcManager.MaintainerActions do
   end
 
   defp reject_oversized_daily_digest_prompt(action, repository, source_snapshot, snapshot) do
+    _ = PtcManager.DailyDigests.Bundle.release(snapshot)
+
     release_result =
       if is_binary(snapshot["source_path"]) and is_atom(source_snapshot) and
            function_exported?(source_snapshot, :release, 3) do

@@ -34,6 +34,18 @@ class ReviewerContract(unittest.TestCase):
             self.assertEqual(manifest['ordering'], 'streams_are_independent')
             self.assertEqual(manifest['streams']['stdout']['bytes'], 6)
 
+    def test_reviewer_artifact_budget_is_truthful_without_changing_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = context['run'](
+                [sys.executable, '-c', 'print("x" * 2000000)'],
+                max_output=3000000, artifact_directory=os.path.join(root, 'review'),
+                artifact_max_bytes=1000000)
+            self.assertGreater(len(output), 1000000)
+            run = next(Path(root).glob('review/run-*'))
+            manifest = json.loads((run / 'manifest.json').read_text())
+            self.assertEqual(manifest['coverage'], 'partial')
+            self.assertEqual(manifest['streams']['stdout']['coverage'], 'partial')
+
     def test_claude_catalog_initializes_without_a_model_turn(self):
         def fake_run(args, prompt=None, cwd=None, **kwargs):
             request = json.loads(prompt)

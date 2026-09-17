@@ -985,10 +985,15 @@ for limits and provenance; this wiring does not enable generation.
 
 Managed commands continuously tee stdout and stderr to separate files under
 `PTC_EXECUTION_ARTIFACT_ROOT` while preserving live output. Reviewer CLI events
-and streams use the same root. Capture manifests record coverage, sizes, hashes,
+and streams, workspace setup output, and supported provider session JSONL use
+the same root. Daily manifests index exact available artifacts by source ID and
+artifact-root-relative path. Capture manifests record coverage, sizes, hashes,
 and exit status without claiming a total ordering between streams. Defaults are
 256 MB per command stream and 32 MB per daily bundle. Capture failure is surfaced
-without replacing the command result or retaining its resource slot.
+without replacing the command result or retaining its resource slot. Finalized,
+unreferenced artifacts expire after 90 days by default; active and daily-bundle-
+referenced captures are protected. Queued inline-contract daily actions are
+cancelled or rejected rather than silently reinterpreted.
 
 The new generation prompt remains visible on **Automations** while evaluation
 is pending and can be edited under **Daily update → Prompt**. The built-in voice

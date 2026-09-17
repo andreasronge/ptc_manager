@@ -720,7 +720,9 @@ defmodule PtcManager.MaintainerActionsTest do
              })
 
     digest.agent_action
-    |> AgentAction.changeset(%{prompt: String.duplicate("🧭", 25_001)})
+    |> AgentAction.changeset(%{
+      prompt: digest.agent_action.prompt <> String.duplicate("🧭", 25_001)
+    })
     |> Repo.update!()
 
     assert {:ok, failed} =

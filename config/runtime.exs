@@ -241,6 +241,8 @@ config :ptc_manager,
       ),
   daily_digest_bundle_max_bytes:
     System.get_env("PTC_DAILY_DIGEST_BUNDLE_MAX_BYTES", "32000000") |> String.to_integer(),
+  daily_digest_bundle_retention_days:
+    System.get_env("PTC_DAILY_DIGEST_BUNDLE_RETENTION_DAYS", "90") |> String.to_integer(),
   daily_digest_enabled: false,
   daily_digest_interval_ms: 60_000,
   daily_digest_hour: 2,
