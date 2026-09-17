@@ -48,7 +48,8 @@ defmodule PtcManager.DailyDigests.Report do
          true <- selectors?(result, sources) do
       markdown =
         shipped(result["what_shipped"], sources) <>
-          lessons(result["what_we_learned"], sources) <> health(evidence)
+          lessons(result["what_we_learned"], sources) <>
+          supplemental(result["supplemental_references"] || []) <> health(evidence)
 
       if byte_size(markdown) <= 40_000,
         do: {:ok, markdown},
@@ -116,6 +117,15 @@ defmodule PtcManager.DailyDigests.Report do
       Enum.map_join(items, "\n", fn item ->
         refs = Enum.map_join(item["source_ids"], ", ", &link(sources[&1]))
         "- #{prose(item["lesson"])} (#{refs})"
+      end) <> "\n"
+  end
+
+  defp supplemental([]), do: ""
+
+  defp supplemental(references) do
+    "\n## Current supplemental context\n\n" <>
+      Enum.map_join(references, "\n", fn reference ->
+        "- [#{prose(reference["context"])}](#{reference["url"]}) — observed #{reference["observed_at"]}."
       end) <> "\n"
   end
 

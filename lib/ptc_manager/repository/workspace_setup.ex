@@ -332,8 +332,28 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
           Enum.reduce(Path.split(relative), root, fn part, parent ->
             path = Path.join(parent, part)
-            File.mkdir_p!(path)
-            File.chmod!(path, 0o2770)
+
+            case File.lstat(path) do
+              {:error, :enoent} ->
+                File.mkdir!(path)
+                File.chmod!(path, 0o2770)
+
+              {:ok, %{type: :directory, mode: mode}} ->
+                if Bitwise.band(mode, 0o020) == 0,
+                  do:
+                    raise(File.Error,
+                      reason: :eacces,
+                      action: "use shared artifact directory",
+                      path: path
+                    )
+
+              _ ->
+                raise File.Error,
+                  reason: :eacces,
+                  action: "use shared artifact directory",
+                  path: path
+            end
+
             path
           end)
 
@@ -387,6 +407,7 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
       manifest = %{
         schema_version: 1,
+        kind: "workspace_setup",
         coverage: artifact.coverage,
         exit_status: status,
         streams: %{

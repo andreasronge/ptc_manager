@@ -83,12 +83,19 @@ defmodule PtcManager.DailyDigests.ReportTest do
     File.write!(
       Path.join(directory, "manifest.json"),
       Jason.encode!(%{
+        "kind" => "operation",
         "coverage" => "complete",
         "streams" => %{
           "stdout" => %{
             "path" => "stdout.log",
             "bytes" => 11,
             "sha256" => output_hash,
+            "coverage" => "complete"
+          },
+          "stderr" => %{
+            "path" => "stderr.log",
+            "bytes" => 0,
+            "sha256" => Base.encode16(:crypto.hash(:sha256, ""), case: :lower),
             "coverage" => "complete"
           }
         }
@@ -102,6 +109,7 @@ defmodule PtcManager.DailyDigests.ReportTest do
     File.write!(
       Path.join(setup_directory, "manifest.json"),
       Jason.encode!(%{
+        "kind" => "workspace_setup",
         "coverage" => "complete",
         "streams" => %{
           "combined" => %{

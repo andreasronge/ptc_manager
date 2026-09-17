@@ -470,15 +470,18 @@ class OperationArtifact:
         finally:
             source.close()
             if target is not None:
-                target.flush()
-                os.fsync(target.fileno())
-                target.close()
+                try:
+                    target.flush()
+                    os.fsync(target.fileno())
+                    target.close()
+                except OSError as error:
+                    state, detail = "error", f"finalization failed: {error.strerror}"
             self.records[name] = {"path": name + ".log", "bytes": size,
                                   "sha256": digest.hexdigest(), "coverage": state,
                                   "diagnostic": detail}
 
     def seal(self, exit_status):
-        manifest = {"schema_version": 1, "exit_status": exit_status,
+        manifest = {"schema_version": 1, "kind": "operation", "exit_status": exit_status,
                     "streams": self.records, "ordering": "streams_are_independent"}
         temporary = os.path.join(self.directory, ".manifest.json.tmp")
         final = os.path.join(self.directory, "manifest.json")
@@ -521,12 +524,20 @@ class PassthroughArtifact:
 def ensure_shared_directory(root, directory):
     current = os.path.abspath(root)
     target = os.path.abspath(directory)
+    if os.path.islink(current) or not os.path.isdir(current):
+        raise RuntimeError("unsafe artifact root")
     if not target.startswith(current + os.sep):
         raise RuntimeError("artifact path escaped configured root")
     for part in os.path.relpath(target, current).split(os.sep):
         current = os.path.join(current, part)
-        os.makedirs(current, mode=0o2770, exist_ok=True)
-        os.chmod(current, 0o2770)
+        try:
+            os.mkdir(current, mode=0o2770)
+            os.chmod(current, 0o2770)
+        except FileExistsError:
+            if os.path.islink(current) or not os.path.isdir(current):
+                raise RuntimeError("unsafe artifact directory")
+            if os.stat(current, follow_symlinks=False).st_mode & 0o020 == 0:
+                raise RuntimeError("artifact directory is not group writable")
 
 
 def main():

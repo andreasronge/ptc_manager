@@ -311,7 +311,8 @@ defmodule PtcManager.DailyDigests.Bundle do
             kind,
             session_id,
             destination,
-            Integer.to_string(max_bytes)
+            Integer.to_string(max_bytes),
+            root
           ])
       end)
     end
@@ -351,7 +352,8 @@ defmodule PtcManager.DailyDigests.Bundle do
     with {:ok, %{type: :regular}} <- File.lstat(path),
          {:ok, bytes} <- File.read(path),
          {:ok, manifest} when is_map(manifest) <- Jason.decode(bytes),
-         {:ok, streams, stream_coverage} <- verify_streams(path, manifest["streams"]) do
+         {:ok, streams, stream_coverage} <-
+           verify_streams(path, manifest["kind"], manifest["streams"]) do
       [
         %{
           "source_id" => source_id,
@@ -367,10 +369,17 @@ defmodule PtcManager.DailyDigests.Bundle do
     end
   end
 
-  defp verify_streams(_manifest_path, streams) when not is_map(streams),
+  defp verify_streams(_manifest_path, _kind, streams) when not is_map(streams),
     do: {:ok, %{}, "unavailable"}
 
-  defp verify_streams(manifest_path, streams) do
+  defp verify_streams(manifest_path, kind, streams) do
+    expected = %{
+      "operation" => ~w(stdout stderr),
+      "review" => ~w(stdout stderr),
+      "workspace_setup" => ~w(combined),
+      "provider_session" => ~w(session)
+    }
+
     verified =
       Map.new(streams, fn {name, stream} ->
         relative = stream["path"]
@@ -378,6 +387,7 @@ defmodule PtcManager.DailyDigests.Bundle do
 
         valid =
           with true <- is_binary(path),
+               true <- Path.basename(relative) == relative,
                true <- Path.expand(Path.dirname(path)) == Path.expand(Path.dirname(manifest_path)),
                {:ok, %{type: :regular, size: size}} <- File.lstat(path),
                true <- size == stream["bytes"],
@@ -391,9 +401,10 @@ defmodule PtcManager.DailyDigests.Bundle do
       end)
 
     coverage =
-      if Enum.all?(verified, fn {_name, stream} ->
-           stream["verified"] and stream["coverage"] == "complete"
-         end),
+      if Enum.sort(Map.keys(verified)) == Enum.sort(Map.get(expected, kind, [])) and
+           Enum.all?(verified, fn {_name, stream} ->
+             stream["verified"] and stream["coverage"] == "complete"
+           end),
          do: "complete",
          else: "partial"
 
@@ -412,6 +423,8 @@ defmodule PtcManager.DailyDigests.Bundle do
     |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
     |> :crypto.hash_final()
     |> Base.encode16(case: :lower)
+  rescue
+    _ -> nil
   end
 
   defp safe_regular_file(path, root) do

@@ -53,6 +53,7 @@ defmodule PtcManager.Reviews.Adapter do
       contract_version: 2,
       schema: round.input["schema"],
       artifact_directory: review_artifact_directory(round),
+      artifact_root: Application.get_env(:ptc_manager, :execution_artifact_root),
       artifact_max_bytes:
         Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
     }

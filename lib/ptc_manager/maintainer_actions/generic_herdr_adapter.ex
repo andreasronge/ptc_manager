@@ -93,7 +93,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
              kind,
              session_id,
              destination,
-             Integer.to_string(max_bytes)
+             Integer.to_string(max_bytes),
+             root
            ]) do
         {_output, 0} -> :ok
         _ -> :ok
