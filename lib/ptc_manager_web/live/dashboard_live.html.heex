@@ -206,6 +206,20 @@
                 expanded={expanded_issue?(@expanded_issue_ids, item)}
               />
 
+              <p
+                :if={
+                  group == :in_delivery and
+                    PlanningGroup.parked?(
+                      item,
+                      MaintainerLabels.parked_names(item.issue.repository)
+                    )
+                }
+                id={"parked-delivery-note-#{item.issue.id}"}
+                class="mt-3 text-sm font-medium text-amber-300"
+              >
+                Parked for planning; active delivery continues.
+              </p>
+
               <div class="mt-4 flex flex-wrap items-end gap-3">
                 <%= case group do %>
                   <% :in_delivery -> %>
