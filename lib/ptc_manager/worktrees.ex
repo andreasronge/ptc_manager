@@ -154,9 +154,7 @@ defmodule PtcManager.Worktrees do
              from: ["attention"],
              purpose: "preservation"
            ),
-         {:ok, preservation} <- preserver.preserve(claimed, token),
-         {:ok, preserved} <-
-           Operations.record_worktree_preservation(claimed.id, token, preservation),
+         {:ok, preserved, preservation} <- preserve_claimed(claimed, token, preserver),
          :ok <-
            remove_claimed(preserved, adapter, token, :discard_worktree, %{
              actor: actor,
@@ -173,6 +171,23 @@ defmodule PtcManager.Worktrees do
 
       {:error, reason} ->
         fail_preservation_claim(allocation.id, reason)
+    end
+  end
+
+  defp preserve_claimed(
+         %{preserved_at: %DateTime{}, preserved_artifact_path: path} = allocation,
+         _token,
+         _preserver
+       )
+       when is_binary(path) do
+    {:ok, allocation, %{preserved_artifact_path: path}}
+  end
+
+  defp preserve_claimed(allocation, token, preserver) do
+    with {:ok, preservation} <- preserver.preserve(allocation, token),
+         {:ok, preserved} <-
+           Operations.record_worktree_preservation(allocation.id, token, preservation) do
+      {:ok, preserved, preservation}
     end
   end
 
@@ -367,7 +382,8 @@ defmodule PtcManager.Worktrees do
       :ok ->
         complete_claimed(allocation, token, audit)
 
-      {:error, :worktree_workspace_forgotten} ->
+      {:error, reason}
+      when reason in [:worktree_workspace_forgotten, :worktree_workspace_missing] ->
         case discard_forgotten_directory(allocation) do
           :ok -> complete_claimed(allocation, token, audit)
           {:error, reason} -> {:error, reason, allocation, token}
@@ -388,10 +404,10 @@ defmodule PtcManager.Worktrees do
     end
   end
 
-  # Herdr has forgotten the workspace, so nothing else will ever remove the
-  # directory it left behind and the cleanup would fail forever instead. Doing
-  # it here is only safe inside the validated managed root, which is the guard
-  # the abandonment probe already applies before it trusts a path.
+  # Herdr has forgotten the workspace, or no workspace was recorded, so nothing
+  # else will ever remove the directory and the cleanup would fail forever.
+  # Doing it here is only safe inside the validated managed root, which is the
+  # guard the abandonment probe already applies before it trusts a path.
   defp discard_forgotten_directory(%{path: path}) when is_binary(path) do
     if managed_path?(path) do
       remove_directory(path)

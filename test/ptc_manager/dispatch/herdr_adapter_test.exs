@@ -77,6 +77,32 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
                  command: %WorktreeRemoveStub{result: busy}
                )
     end
+
+    test "an empty workspace is reported missing while its directory remains", %{
+      allocation: allocation
+    } do
+      allocation = %{allocation | herdr_workspace: ""}
+
+      assert {:error, :worktree_workspace_missing} =
+               HerdrAdapter.remove_worktree(allocation,
+                 command: %WorktreeRemoveStub{result: :should_not_run}
+               )
+
+      assert {:error, :worktree_workspace_missing} =
+               HerdrAdapter.discard_worktree(allocation,
+                 command: %WorktreeRemoveStub{result: :should_not_run}
+               )
+    end
+
+    test "an empty workspace is already removed when its directory is gone", %{
+      allocation: allocation
+    } do
+      File.rm_rf!(allocation.path)
+      allocation = %{allocation | herdr_workspace: ""}
+
+      assert :ok = HerdrAdapter.remove_worktree(allocation)
+      assert :ok = HerdrAdapter.discard_worktree(allocation)
+    end
   end
 
   describe "worktree creation" do

@@ -41,7 +41,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
   @doc false
   def remove_worktree(%{herdr_workspace: workspace} = allocation, opts)
-      when is_binary(workspace) and is_list(opts) do
+      when is_binary(workspace) and workspace != "" and is_list(opts) do
     args = remove_worktree_args(allocation)
     command = Keyword.get(opts, :command, Command)
 
