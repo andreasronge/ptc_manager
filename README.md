@@ -959,8 +959,11 @@ and queued actions cancelled; rollback does not restart generation.
 Cancelled update entries remain as terminal history. The existing one-action-per-day
 contract does not regenerate an already recorded date when generation is re-enabled.
 When reintroduced, the existing coordinator can select one local calendar day
-without scanning or backfilling older dates. The
-coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
+without scanning or backfilling older dates. The manual **Generate update now**
+action selects the previous local calendar day in
+the configured `:daily_digest_time_zone`; an explicit valid trigger timezone takes
+precedence. Scheduled triggers continue to use their own configured timezone.
+The coordinator selects pull requests by GitHub's `merged_at` timestamp and direct
 commits by their committer timestamp for the exact timezone-aware window. Every
 commit query is pinned to one captured default-branch head. GitHub does not
 expose the arrival time of a direct push, so that distinction is shown in the

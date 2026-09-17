@@ -1012,5 +1012,9 @@ defmodule PtcManagerWeb.AutomationsLive do
 
   defp error_message(%Ecto.Changeset{}), do: "The automation configuration is invalid."
   defp error_message(:surface_mismatch), do: "That button belongs on the other surface."
+
+  defp error_message(:invalid_daily_digest_time_zone),
+    do: "Could not generate the update because its reporting timezone is invalid."
+
   defp error_message(reason), do: "Could not complete that action: #{inspect(reason)}"
 end
