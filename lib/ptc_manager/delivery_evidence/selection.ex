@@ -93,6 +93,11 @@ defmodule PtcManager.DeliveryEvidence.Selection do
       "base_ref" => pull["base_ref"],
       "head_sha" => F.sha(pull["head_sha"]),
       "merge_commit_sha" => pull["merge_commit_sha"],
+      "merge_commit_source" =>
+        F.enum(
+          pull["merge_commit_source"] || "pull_request",
+          ~w(pull_request pull_request_detail issue_event.merged.commit_id)
+        ),
       "merged_at" => F.timestamp(pull["merged_at"]),
       "body" => if(body, do: Map.new(body, fn {key, value} -> {key, F.text(value, 1_500)} end)),
       "body_coverage" =>

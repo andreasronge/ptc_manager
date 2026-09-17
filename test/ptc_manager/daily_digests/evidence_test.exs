@@ -172,6 +172,44 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     end
   end
 
+  defmodule MissingMergeFieldClient do
+    def get_json(url) do
+      send(Process.get(:daily_evidence_test_pid), {:missing_merge_get, url})
+
+      cond do
+        String.ends_with?(url, "/commits/main") ->
+          {:ok, %{"sha" => String.duplicate("f", 40)}}
+
+        String.contains?(url, "/commits?") ->
+          {:ok, []}
+
+        String.contains?(url, "/pulls?") ->
+          {:ok, [pull_without_merge_sha()]}
+
+        String.ends_with?(url, "/pulls/1760") ->
+          Process.get(
+            :missing_merge_detail,
+            {:ok, Map.delete(pull_without_merge_sha(), "head")}
+          )
+
+        String.contains?(url, "/issues/1760/events?") ->
+          Process.get(:missing_merge_events)
+
+        true ->
+          {:error, {:unexpected_url, url}}
+      end
+    end
+
+    defp pull_without_merge_sha do
+      Fixture.pull_request(1760, %{
+        "head" => %{"sha" => Fixture.sha(99_999)},
+        "merged_at" => "2026-08-30T14:15:00Z",
+        "updated_at" => "2026-08-30T14:15:00Z"
+      })
+      |> Map.delete("merge_commit_sha")
+    end
+  end
+
   defmodule LargeFakeClient do
     def get_json(url) do
       cond do
@@ -540,6 +578,109 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     refute :github_pull_request_merge_pending in PtcManager.MaintainerActions.terminal_daily_digest_evidence_errors()
   end
 
+  test "resolves an omitted list and detail merge SHA from the exact merged event" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+    merge_sha = Fixture.sha(1760)
+
+    Process.put(
+      :missing_merge_events,
+      {:ok,
+       [
+         %{"event" => "closed", "commit_id" => nil, "created_at" => "2026-08-30T14:15:00Z"},
+         %{
+           "event" => "merged",
+           "commit_id" => merge_sha,
+           "created_at" => "2026-08-30T14:15:00Z"
+         }
+       ]}
+    )
+
+    assert {:ok, evidence} = Evidence.fetch(repository_fixture(), digest())
+    assert [%{"merge_commit_sha" => ^merge_sha} = pull] = evidence["pull_requests"]
+    assert pull["merge_commit_source"] == "issue_event.merged.commit_id"
+    assert pull["head_sha"] == Fixture.sha(99_999)
+    assert hd(evidence["commits"])["sha"] == merge_sha
+    refute hd(evidence["commits"])["sha"] == pull["head_sha"]
+    urls = missing_merge_urls([])
+    assert Enum.any?(urls, &String.ends_with?(&1, "/pulls/1760"))
+    assert Enum.any?(urls, &String.contains?(&1, "/issues/1760/events?"))
+  end
+
+  test "treats unavailable omitted merge identity as terminal instead of merge-pending" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+    Process.put(:missing_merge_events, {:ok, []})
+
+    assert {:error, :github_pull_request_merge_identity_unavailable} =
+             Evidence.fetch(repository_fixture(), digest())
+
+    assert :github_pull_request_merge_identity_unavailable in PtcManager.MaintainerActions.terminal_daily_digest_evidence_errors()
+  end
+
+  test "keeps merge identity transport failures retryable" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+    Process.put(:missing_merge_events, {:error, {:github_transport_error, :timeout}})
+
+    assert {:error, {:github_transport_error, :timeout}} =
+             Evidence.fetch(repository_fixture(), digest())
+  end
+
+  test "maps permanent detail and event endpoint failures to a terminal identity error" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+
+    for {detail, events} <- [
+          {{:error, {:github_http_error, 404, "Not Found", nil}}, nil},
+          {nil, {:error, {:github_http_error, 422, "Validation Failed", nil}}}
+        ] do
+      if detail,
+        do: Process.put(:missing_merge_detail, detail),
+        else: Process.delete(:missing_merge_detail)
+
+      if events,
+        do: Process.put(:missing_merge_events, events),
+        else: Process.delete(:missing_merge_events)
+
+      assert {:error, :github_pull_request_merge_identity_unavailable} =
+               Evidence.fetch(repository_fixture(), digest())
+    end
+  end
+
+  test "keeps server and rate-limit endpoint failures retryable" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+
+    for reason <- [
+          {:github_http_error, 503, "Unavailable", nil},
+          {:github_http_error, 403, "API rate limit exceeded", nil},
+          {:github_http_error, 403, "Forbidden", 30_000}
+        ] do
+      Process.delete(:missing_merge_detail)
+      Process.put(:missing_merge_events, {:error, reason})
+      assert {:error, ^reason} = Evidence.fetch(repository_fixture(), digest())
+    end
+  end
+
+  test "rejects malformed or mismatched merged events without using the PR head" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+
+    for event <- [
+          "not-an-event",
+          %{
+            "event" => "merged",
+            "commit_id" => "not-a-sha",
+            "created_at" => "2026-08-30T14:15:00Z"
+          },
+          %{
+            "event" => "merged",
+            "commit_id" => Fixture.sha(1760),
+            "created_at" => "2026-08-30T14:15:01Z"
+          }
+        ] do
+      Process.put(:missing_merge_events, {:ok, [event]})
+
+      assert {:error, :unexpected_github_pull_request} =
+               Evidence.fetch(repository_fixture(), digest())
+    end
+  end
+
   test "uses merge time, labels direct-commit time, and fences every query to one head" do
     repository = repository_fixture(%{github_owner: "andreas", github_name: "runner"})
 
@@ -578,6 +719,21 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
     assert commits_url =~ "until=2026-08-30T22%3A00%3A00Z"
 
     refute_received {:github_write, _request}
+  end
+
+  defp digest do
+    %DailyDigest{
+      window_started_at: ~U[2026-08-29 22:00:00Z],
+      window_ended_at: ~U[2026-08-30 22:00:00Z]
+    }
+  end
+
+  defp missing_merge_urls(urls) do
+    receive do
+      {:missing_merge_get, url} -> missing_merge_urls([url | urls])
+    after
+      0 -> Enum.reverse(urls)
+    end
   end
 
   test "compacts oversized optional prose and marks the manifest as truncated" do

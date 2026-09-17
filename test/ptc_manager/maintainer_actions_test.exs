@@ -795,6 +795,37 @@ defmodule PtcManager.MaintainerActionsTest do
     refute_receive {:ran_daily_digest, _action}
   end
 
+  test "fails a daily update when GitHub omits the supported merge identity" do
+    repository = repository_fixture()
+    enable_automation!(repository, "daily_digest")
+
+    Process.put(
+      :daily_digest_evidence_result,
+      {:error, :github_pull_request_merge_identity_unavailable}
+    )
+
+    assert {:ok, _digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Europe/Stockholm",
+               started_at: ~U[2026-08-29 22:00:00Z],
+               ended_at: ~U[2026-08-30 22:00:00Z]
+             })
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert failed.state == "failed"
+    assert failed.sync_attempt_count == 0
+    refute failed.next_sync_attempt_at
+    assert failed.last_error =~ "github_pull_request_merge_identity_unavailable"
+    refute_receive {:ran_daily_digest, _action}
+  end
+
   test "queues a generic issue action once with its immutable prompt" do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{number: 42})

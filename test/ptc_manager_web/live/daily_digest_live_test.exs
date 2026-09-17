@@ -121,13 +121,22 @@ defmodule PtcManagerWeb.DailyDigestLiveTest do
     assert has_element?(queued_view, "#daily-digest-detail [class*='animate-spin']")
 
     queued.agent_action
+    |> AgentAction.changeset(%{
+      last_error: "Planning source snapshot pending: :github_pull_request_merge_pending"
+    })
+    |> Repo.update!()
+
+    send(queued_view.pid, {:operations_changed, :test})
+    assert render(queued_view) =~ "github_pull_request_merge_pending"
+
+    queued.agent_action
     |> AgentAction.changeset(%{state: "failed", last_error: "agent stopped"})
     |> Repo.update!()
 
     send(queued_view.pid, {:operations_changed, :test})
 
     assert has_element?(queued_view, "#daily-digest-detail", "Generation failed")
-    assert render(queued_view) =~ "inspected from Operations"
+    assert render(queued_view) =~ "agent stopped"
   end
 
   defp digest_fixture(repository) do

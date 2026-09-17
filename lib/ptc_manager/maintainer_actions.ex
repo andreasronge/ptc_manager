@@ -54,6 +54,7 @@ defmodule PtcManager.MaintainerActions do
     daily_digest_evidence_too_large
     unexpected_github_response
     unexpected_github_pull_request
+    github_pull_request_merge_identity_unavailable
     unexpected_github_commit_date
     invalid_github_head_sha
     daily_digest_projection_invalid_or_oversized
