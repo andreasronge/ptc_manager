@@ -39,6 +39,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
              PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
            :ok <- remember_context(context),
            {:ok, agent_key} <- start_agent(name, pane, profile, path, action),
+           :ok <- remember_agent_session(profile.kind, agent_key),
            dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
@@ -46,11 +47,11 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
            :ok <- validate_health_snapshot_for_handoff(action),
            :ok <- ensure_prompt_delivery(name, action, output_path),
            {:ok, _output} <- prompt_and_wait(name, action, complete_prompt),
-           :ok <- archive_provider_session(action, profile.kind, agent_key),
            {:ok, result} <- read_result(output_path, action.action_key, action.target_snapshot) do
         {:ok, result}
       end
     after
+      archive_remembered_session(action)
       cleanup(action)
     end
   rescue
@@ -58,6 +59,18 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   def run(%AgentAction{}), do: {:error, :automation_version_missing}
+
+  defp remember_agent_session(kind, session_id) do
+    Process.put({__MODULE__, :provider_session}, {kind, session_id})
+    :ok
+  end
+
+  defp archive_remembered_session(action) do
+    case Process.delete({__MODULE__, :provider_session}) do
+      {kind, session_id} -> archive_provider_session(action, kind, session_id)
+      nil -> :ok
+    end
+  end
 
   defp archive_provider_session(action, kind, session_id) do
     root = Application.get_env(:ptc_manager, :execution_artifact_root)

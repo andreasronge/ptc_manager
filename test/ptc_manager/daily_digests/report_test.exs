@@ -75,7 +75,9 @@ defmodule PtcManager.DailyDigests.ReportTest do
 
     directory = Path.join(root, "repository-#{repository.id}/job-9/operation-42-token")
     File.mkdir_p!(directory)
-    File.write!(Path.join(directory, "stdout.log"), "full output")
+    output = "full output"
+    output_hash = Base.encode16(:crypto.hash(:sha256, output), case: :lower)
+    File.write!(Path.join(directory, "stdout.log"), output)
     File.write!(Path.join(directory, "stderr.log"), "")
 
     File.write!(
@@ -86,7 +88,26 @@ defmodule PtcManager.DailyDigests.ReportTest do
           "stdout" => %{
             "path" => "stdout.log",
             "bytes" => 11,
-            "sha256" => String.duplicate("a", 64),
+            "sha256" => output_hash,
+            "coverage" => "complete"
+          }
+        }
+      })
+    )
+
+    setup_directory = Path.join(root, "repository-#{repository.id}/job-9/workspace-setup-1")
+    File.mkdir_p!(setup_directory)
+    File.write!(Path.join(setup_directory, "combined.log"), output)
+
+    File.write!(
+      Path.join(setup_directory, "manifest.json"),
+      Jason.encode!(%{
+        "coverage" => "complete",
+        "streams" => %{
+          "combined" => %{
+            "path" => "combined.log",
+            "bytes" => 11,
+            "sha256" => output_hash,
             "coverage" => "complete"
           }
         }
@@ -100,6 +121,7 @@ defmodule PtcManager.DailyDigests.ReportTest do
             "attempts" => %{
               "data" => [
                 %{
+                  "job_id" => 9,
                   "managed_operations" => %{"data" => [%{"id" => 42}]},
                   "reviews" => %{"data" => []}
                 }
@@ -118,7 +140,13 @@ defmodule PtcManager.DailyDigests.ReportTest do
     assert {:ok, bundle} = Bundle.publish(repository, digest, evidence, snapshot, "indexed")
     manifest = File.read!(bundle.manifest_path) |> Jason.decode!()
     assert manifest["coverage"]["execution_logs"] == "complete"
-    assert [entry] = manifest["execution_artifacts"]["data"]
+
+    assert [entry] =
+             Enum.filter(
+               manifest["execution_artifacts"]["data"],
+               &(&1["source_id"] == "operation:42")
+             )
+
     assert entry["source_id"] == "operation:42"
     assert entry["manifest_path"] =~ "operation-42-token/manifest.json"
   end

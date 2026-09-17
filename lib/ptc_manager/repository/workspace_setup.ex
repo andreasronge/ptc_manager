@@ -100,13 +100,16 @@ defmodule PtcManager.Repository.WorkspaceSetup do
   defp setup_artifact(owner) do
     case Application.get_env(:ptc_manager, :execution_artifact_root) do
       root when is_binary(root) and root != "" ->
-        type = if is_struct(owner, Job), do: "job", else: "action"
+        {type, attempt} =
+          if is_struct(owner, Job),
+            do: {"job", owner.fencing_token},
+            else: {"action", owner.attempt_count}
 
         Path.join([
           root,
           "repository-#{owner.repository_id}",
           "#{type}-#{owner.id}",
-          "workspace-setup"
+          "workspace-setup-#{attempt}"
         ])
 
       _ ->
@@ -291,6 +294,10 @@ defmodule PtcManager.Repository.WorkspaceSetup do
            }}
       after
         remaining ->
+          if artifact do
+            Process.put({__MODULE__, artifact.path}, %{artifact | coverage: "partial"})
+          end
+
           close_port(port)
           {:error, :workspace_setup_timeout}
       end

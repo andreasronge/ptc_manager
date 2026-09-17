@@ -424,7 +424,8 @@ class OperationArtifact:
         owner = f"{context['owner_type']}-{context['owner_id']}"
         self.directory = os.path.join(root, f"repository-{context['repository_id']}", owner,
                                       f"operation-{operation_id}-{attempt_token}")
-        os.makedirs(self.directory, mode=0o750, exist_ok=False)
+        os.makedirs(self.directory, mode=0o2770, exist_ok=False)
+        os.chmod(self.directory, 0o2770)
         self.limit = context.get("artifact_max_bytes", 256_000_000)
         self.records = {}
 

@@ -84,7 +84,8 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
         if artifact_directory:
             try:
                 artifact_directory = os.path.join(artifact_directory, "run-" + str(uuid.uuid4()))
-                os.makedirs(artifact_directory, mode=0o750, exist_ok=False)
+                os.makedirs(artifact_directory, mode=0o2770, exist_ok=False)
+                os.chmod(artifact_directory, 0o2770)
                 artifact_files = {"stdout": open(os.path.join(artifact_directory, "stdout.log"), "xb", buffering=0),
                                   "stderr": open(os.path.join(artifact_directory, "stderr.log"), "xb", buffering=0)}
             except OSError:
@@ -95,6 +96,7 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
                     state["coverage"] = "error"
                     state["diagnostic"] = "artifact initialization failed"
         captured = 0
+        completed_normally = False
         events = CodexSessionEvents() if session_events else None
         deadline = time.monotonic() + timeout
         streams.register(process.stdout, selectors.EVENT_READ, stdout)
@@ -141,6 +143,7 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
                     if key.data is stderr:
                         del stderr[:-4_000]
             process.wait(timeout=max(0, deadline - time.monotonic()))
+            completed_normally = True
         except subprocess.TimeoutExpired:
             raise RuntimeError("review_timeout") from None
         finally:
@@ -161,6 +164,11 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
                 except OSError:
                     pass
             if artifact_directory and os.path.isdir(artifact_directory):
+                if not completed_normally:
+                    for state in artifact_state.values():
+                        if state["coverage"] == "complete":
+                            state["coverage"] = "partial"
+                            state["diagnostic"] = "provider process was forcibly terminated"
                 coverage = "complete" if all(s["coverage"] == "complete" for s in artifact_state.values()) else "partial"
                 manifest = {"schema_version": 1, "coverage": coverage,
                             "ordering": "streams_are_independent",

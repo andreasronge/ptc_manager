@@ -3,6 +3,8 @@ defmodule PtcManager.DailyDigests.Bundle do
 
   import Ecto.Query
   alias PtcManager.{Repo, Operations.AgentAction}
+  alias PtcManager.Operations.{AgentRun, WorktreeAllocation}
+  alias PtcManager.Repository.WorkerHelper
 
   @manifest "manifest.json"
   @evidence "delivery.json"
@@ -153,6 +155,8 @@ defmodule PtcManager.DailyDigests.Bundle do
   end
 
   defp manifest(repository, digest, evidence, snapshot, json) do
+    job_ids = job_ids(evidence)
+    acquire_job_sessions(repository.id, job_ids)
     artifacts = artifact_index(repository.id, evidence)
 
     %{
@@ -205,7 +209,7 @@ defmodule PtcManager.DailyDigests.Bundle do
       cond do
         ids == [] -> "not_applicable"
         entries == [] -> "unavailable"
-        missing == [] -> "complete"
+        missing == [] and Enum.all?(entries, &(&1["coverage"] == "complete")) -> "complete"
         true -> "partial"
       end
 
@@ -220,10 +224,57 @@ defmodule PtcManager.DailyDigests.Bundle do
     |> Enum.flat_map(fn attempt ->
       operations = get_in(attempt, ["managed_operations", "data"]) || []
       reviews = get_in(attempt, ["reviews", "data"]) || []
-      Enum.map(operations, &{:operation, &1["id"]}) ++ Enum.map(reviews, &{:review, &1["id"]})
+
+      [{:job, attempt["job_id"]}] ++
+        Enum.map(operations, &{:operation, &1["id"]}) ++
+        Enum.map(reviews, &{:review, &1["id"]})
     end)
     |> Enum.filter(fn {_kind, id} -> is_integer(id) end)
     |> Enum.uniq()
+  end
+
+  defp job_ids(evidence) do
+    evidence
+    |> artifact_source_ids()
+    |> Enum.flat_map(fn
+      {:job, id} -> [id]
+      _ -> []
+    end)
+  end
+
+  defp acquire_job_sessions(_repository_id, []), do: :ok
+
+  defp acquire_job_sessions(repository_id, job_ids) do
+    root = Application.get_env(:ptc_manager, :execution_artifact_root)
+
+    if WorkerHelper.worker_boundary?() and is_binary(root) and root != "" do
+      Repo.all(
+        from run in AgentRun,
+          join: allocation in WorktreeAllocation,
+          on: allocation.job_id == run.job_id,
+          where: run.job_id in ^job_ids and not is_nil(run.external_key),
+          select: {run.id, run.job_id, run.external_key, allocation.agent_kind}
+      )
+      |> Enum.each(fn {run_id, job_id, external_key, kind} ->
+        session_id = external_key |> String.split(":") |> List.last()
+
+        destination =
+          Path.join([root, "repository-#{repository_id}", "job-#{job_id}", "agent-run-#{run_id}"])
+
+        max_bytes = Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
+
+        _ =
+          WorkerHelper.run("/usr/local/bin/ptc-manager-worker-review", [
+            "archive-session",
+            kind,
+            session_id,
+            destination,
+            Integer.to_string(max_bytes)
+          ])
+      end)
+    end
+
+    :ok
   end
 
   defp artifact_entries(root, repository_id, :operation, id) do
@@ -240,18 +291,28 @@ defmodule PtcManager.DailyDigests.Bundle do
     |> Enum.flat_map(&artifact_entry(root, &1, "review:#{id}"))
   end
 
+  defp artifact_entries(root, repository_id, :job, id) do
+    root
+    |> Path.join(
+      "repository-#{repository_id}/job-#{id}/{workspace-setup-*,agent-run-*}/manifest.json"
+    )
+    |> Path.wildcard(match_dot: false)
+    |> Enum.flat_map(&artifact_entry(root, &1, "job:#{id}"))
+  end
+
   defp artifact_entry(root, path, source_id) do
     with {:ok, %{type: :regular}} <- File.lstat(path),
          {:ok, bytes} <- File.read(path),
-         {:ok, manifest} when is_map(manifest) <- Jason.decode(bytes) do
+         {:ok, manifest} when is_map(manifest) <- Jason.decode(bytes),
+         {:ok, streams, stream_coverage} <- verify_streams(path, manifest["streams"]) do
       [
         %{
           "source_id" => source_id,
           "manifest_path" => Path.relative_to(path, root),
           "manifest_bytes" => byte_size(bytes),
           "manifest_sha256" => hash(bytes),
-          "coverage" => manifest["coverage"] || stream_coverage(manifest["streams"]),
-          "streams" => manifest["streams"] || %{}
+          "coverage" => combine_coverage(manifest["coverage"], stream_coverage),
+          "streams" => streams
         }
       ]
     else
@@ -259,13 +320,50 @@ defmodule PtcManager.DailyDigests.Bundle do
     end
   end
 
-  defp stream_coverage(streams) when is_map(streams) do
-    if Enum.all?(streams, fn {_name, data} -> data["coverage"] == "complete" end),
-      do: "complete",
-      else: "partial"
+  defp verify_streams(_manifest_path, streams) when not is_map(streams),
+    do: {:ok, %{}, "unavailable"}
+
+  defp verify_streams(manifest_path, streams) do
+    verified =
+      Map.new(streams, fn {name, stream} ->
+        relative = stream["path"]
+        path = if is_binary(relative), do: Path.join(Path.dirname(manifest_path), relative)
+
+        valid =
+          with true <- is_binary(path),
+               true <- Path.expand(Path.dirname(path)) == Path.expand(Path.dirname(manifest_path)),
+               {:ok, %{type: :regular, size: size}} <- File.lstat(path),
+               true <- size == stream["bytes"],
+               true <- file_hash(path) == stream["sha256"] do
+            true
+          else
+            _ -> false
+          end
+
+        {name, Map.put(stream, "verified", valid)}
+      end)
+
+    coverage =
+      if Enum.all?(verified, fn {_name, stream} ->
+           stream["verified"] and stream["coverage"] == "complete"
+         end),
+         do: "complete",
+         else: "partial"
+
+    {:ok, verified, coverage}
   end
 
-  defp stream_coverage(_), do: "error"
+  defp combine_coverage("complete", "complete"), do: "complete"
+  defp combine_coverage(nil, coverage), do: coverage
+  defp combine_coverage(coverage, _), do: coverage
+
+  defp file_hash(path) do
+    path
+    |> File.stream!(65_536, [])
+    |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
+    |> :crypto.hash_final()
+    |> Base.encode16(case: :lower)
+  end
 
   defp safe_regular_file(path, root) do
     expanded = Path.expand(path)
