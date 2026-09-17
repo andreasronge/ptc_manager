@@ -784,7 +784,7 @@ defmodule PtcManager.MaintainerActions do
              repository,
              digest,
              input,
-             "#{action.id}-#{action.attempt_count}"
+             %{action_id: action.id, attempt: action.attempt_count + 1}
            ) do
       captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 

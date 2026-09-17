@@ -51,7 +51,11 @@ defmodule PtcManager.DailyDigestFixtures do
         DateTime.add(digest.window_ended_at, 1)
       )
 
-    {:ok, input} = Input.publish(repository, digest, input, System.unique_integer([:positive]))
+    {:ok, input} =
+      Input.publish(repository, digest, input, %{
+        action_id: action.id,
+        attempt: action.attempt_count
+      })
 
     action
     |> AgentAction.changeset(%{

@@ -40,7 +40,7 @@ defmodule PtcManager.DailyDigests.ReportTest do
                digest,
                evidence,
                snapshot,
-               System.unique_integer([:positive])
+               %{action_id: digest.agent_action.id, attempt: digest.agent_action.attempt_count}
              )
 
     assert bundle.evidence_bytes > 2_000_000
@@ -137,7 +137,12 @@ defmodule PtcManager.DailyDigests.ReportTest do
       "trusted_source_head_sha" => String.duplicate("a", 40)
     }
 
-    assert {:ok, bundle} = Bundle.publish(repository, digest, evidence, snapshot, "indexed")
+    assert {:ok, bundle} =
+             Bundle.publish(repository, digest, evidence, snapshot, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
     manifest = File.read!(bundle.manifest_path) |> Jason.decode!()
     assert manifest["coverage"]["execution_logs"] == "complete"
 
@@ -262,7 +267,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
 
     assert {:ok, input} =
-             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
 
     refute input.json =~ "</daily_delivery_evidence>"
     assert input.json =~ "\\u003C"
@@ -341,7 +349,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
     Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1_000)
 
     assert {:error, :daily_digest_evidence_too_large} =
-             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
 
     Application.put_env(:ptc_manager, :daily_digest_prompt_max_bytes, 100)
     assert :ok = Input.validate_prompt(String.duplicate("x", 100))
@@ -432,7 +443,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
 
     assert {:ok, input} =
-             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
 
     action = %{digest.agent_action | prompt: Input.block(input), target_snapshot: input.snapshot}
     assert {:ok, markdown} = Report.render(action, DailyDigestFixtures.result(action))
@@ -468,7 +482,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
 
     assert {:ok, input} =
-             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
 
     action = %{digest.agent_action | prompt: Input.block(input), target_snapshot: input.snapshot}
 

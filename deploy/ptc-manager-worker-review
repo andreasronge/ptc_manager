@@ -84,8 +84,7 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
         if artifact_directory:
             try:
                 artifact_directory = os.path.join(artifact_directory, "run-" + str(uuid.uuid4()))
-                os.makedirs(artifact_directory, mode=0o2770, exist_ok=False)
-                os.chmod(artifact_directory, 0o2770)
+                ensure_shared_directory(artifact_directory)
                 artifact_files = {"stdout": open(os.path.join(artifact_directory, "stdout.log"), "xb", buffering=0),
                                   "stderr": open(os.path.join(artifact_directory, "stderr.log"), "xb", buffering=0)}
             except OSError:
@@ -426,7 +425,8 @@ def read_json_file(path, limit):
 
 def archive_session(kind, session_id, destination, max_bytes):
     session_id = checked_session_id(session_id)
-    allowed = "/var/lib/ptc_manager-output/execution-artifacts/"
+    configured_root = os.environ.get("PTC_EXECUTION_ARTIFACT_ROOT", "/var/lib/ptc_manager-output/execution-artifacts")
+    allowed = os.path.abspath(configured_root) + os.sep
     destination = os.path.abspath(destination)
     if not destination.startswith(allowed) or kind not in BINARIES or not 1_000_000 <= max_bytes <= 2_000_000_000:
         raise RuntimeError("invalid_session_archive_target")
@@ -436,9 +436,9 @@ def archive_session(kind, session_id, destination, max_bytes):
     for pattern in homes[kind]:
         candidates += glob.glob(os.path.join(os.path.expanduser("~"), pattern), recursive=True)
     matches = [path for path in candidates if session_id in os.path.basename(path)]
-    os.makedirs(destination, mode=0o750, exist_ok=False)
+    ensure_shared_directory(destination)
     manifest = {"schema_version": 1, "provider": kind, "session_id": session_id,
-                "coverage": "unavailable", "files": []}
+                "coverage": "unavailable", "streams": {}}
     if len(matches) == 1:
         source, target = matches[0], os.path.join(destination, "session.jsonl")
         size = os.path.getsize(source)
@@ -446,8 +446,9 @@ def archive_session(kind, session_id, destination, max_bytes):
             with open(source, "rb") as input_file, open(target, "xb") as output:
                 shutil.copyfileobj(input_file, output, 65536)
             manifest["coverage"] = "complete"
-            manifest["files"] = [{"path": "session.jsonl", "bytes": size,
-                                  "sha256": file_digest(target)}]
+            manifest["streams"] = {"session": {"path": "session.jsonl", "bytes": size,
+                                                 "sha256": file_digest(target),
+                                                 "coverage": "complete"}}
         else:
             manifest["coverage"] = "partial"
             manifest["diagnostic"] = "provider session exceeded configured file budget"
@@ -466,6 +467,22 @@ def file_digest(path):
         while data := source.read(65536):
             digest.update(data)
     return digest.hexdigest()
+
+
+def ensure_shared_directory(directory):
+    configured = os.environ.get("PTC_EXECUTION_ARTIFACT_ROOT")
+    target = os.path.abspath(directory)
+    if not configured:
+        os.makedirs(target, mode=0o2770, exist_ok=False)
+        return
+    root = os.path.abspath(configured)
+    if not target.startswith(root + os.sep):
+        raise RuntimeError("artifact path escaped configured root")
+    current = root
+    for part in os.path.relpath(target, root).split(os.sep):
+        current = os.path.join(current, part)
+        os.makedirs(current, mode=0o2770, exist_ok=True)
+        os.chmod(current, 0o2770)
 
 
 def main():

@@ -307,7 +307,7 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
     defp open_artifact(directory) do
       try do
-        File.mkdir_p!(directory)
+        ensure_shared_directory!(directory)
         path = Path.join(directory, "combined.log")
 
         artifact = %{
@@ -322,6 +322,26 @@ defmodule PtcManager.Repository.WorkspaceSetup do
       rescue
         _ -> nil
       end
+    end
+
+    defp ensure_shared_directory!(directory) do
+      case Application.get_env(:ptc_manager, :execution_artifact_root) do
+        root when is_binary(root) and root != "" ->
+          root = Path.expand(root)
+          relative = Path.relative_to(Path.expand(directory), root)
+
+          Enum.reduce(Path.split(relative), root, fn part, parent ->
+            path = Path.join(parent, part)
+            File.mkdir_p!(path)
+            File.chmod!(path, 0o2770)
+            path
+          end)
+
+        _ ->
+          File.mkdir_p!(directory)
+      end
+
+      :ok
     end
 
     defp write_artifact(nil, _data), do: nil

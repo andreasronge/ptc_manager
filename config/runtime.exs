@@ -209,10 +209,11 @@ config :ptc_manager,
   operation_memory_max_bytes:
     System.get_env("PTC_OPERATION_MEMORY_MAX_BYTES", "2684354560") |> String.to_integer(),
   execution_artifact_root:
-    System.get_env(
-      "PTC_EXECUTION_ARTIFACT_ROOT",
-      "/var/lib/ptc_manager-output/execution-artifacts"
-    ),
+    System.get_env("PTC_EXECUTION_ARTIFACT_ROOT") ||
+      if(System.get_env("RELEASE_NAME"),
+        do: "/var/lib/ptc_manager-output/execution-artifacts",
+        else: Application.get_env(:ptc_manager, :execution_artifact_root)
+      ),
   execution_artifact_max_bytes:
     System.get_env("PTC_EXECUTION_ARTIFACT_MAX_BYTES", "256000000") |> String.to_integer(),
   agent_action_timeout_ms:

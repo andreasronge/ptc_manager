@@ -424,8 +424,7 @@ class OperationArtifact:
         owner = f"{context['owner_type']}-{context['owner_id']}"
         self.directory = os.path.join(root, f"repository-{context['repository_id']}", owner,
                                       f"operation-{operation_id}-{attempt_token}")
-        os.makedirs(self.directory, mode=0o2770, exist_ok=False)
-        os.chmod(self.directory, 0o2770)
+        ensure_shared_directory(root, self.directory)
         self.limit = context.get("artifact_max_bytes", 256_000_000)
         self.records = {}
 
@@ -517,6 +516,17 @@ class PassthroughArtifact:
 
     def seal(self, _exit_status):
         pass
+
+
+def ensure_shared_directory(root, directory):
+    current = os.path.abspath(root)
+    target = os.path.abspath(directory)
+    if not target.startswith(current + os.sep):
+        raise RuntimeError("artifact path escaped configured root")
+    for part in os.path.relpath(target, current).split(os.sep):
+        current = os.path.join(current, part)
+        os.makedirs(current, mode=0o2770, exist_ok=True)
+        os.chmod(current, 0o2770)
 
 
 def main():

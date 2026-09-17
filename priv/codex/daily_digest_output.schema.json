@@ -42,6 +42,18 @@
         }
       }
     },
+    "supplemental_references": {
+      "type": "array", "maxItems": 20,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["url", "observed_at", "context"],
+        "properties": {
+          "url": {"type": "string", "pattern": "^https://github\\.com/", "maxLength": 500},
+          "observed_at": {"type": "string", "format": "date-time"},
+          "context": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
+      }
+    },
     "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "window_started_at": {"type": "string", "format": "date-time"},
     "window_ended_at": {"type": "string", "format": "date-time"},

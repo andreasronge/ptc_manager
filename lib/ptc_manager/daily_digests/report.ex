@@ -7,8 +7,10 @@ defmodule PtcManager.DailyDigests.Report do
   @hash ~r/\A[0-9a-f]{64}\z/
 
   def validate(result) when is_map(result) do
+    supplemental = Map.get(result, "supplemental_references", [])
+
     valid =
-      keys?(result, @keys) and
+      keys?(Map.delete(result, "supplemental_references"), @keys) and
         text?(result["title"], 180) and text?(result["summary"], 4_000) and
         iso?(result["window_started_at"]) and iso?(result["window_ended_at"]) and
         matches?(result["source_head_sha"], @sha) and matches?(result["evidence_sha256"], @hash) and
@@ -17,12 +19,26 @@ defmodule PtcManager.DailyDigests.Report do
         result["pull_request_numbers"] == Enum.sort(Enum.uniq(result["pull_request_numbers"])) and
         list?(result["what_shipped"], 100, &shipped?/1) and
         list?(result["what_we_learned"], 20, &lesson?/1) and
+        list?(supplemental, 20, &supplemental_reference?/1) and
         status?(result) and byte_size(Jason.encode!(result)) <= 60_000
 
     if valid, do: :ok, else: {:error, :invalid_daily_digest_output}
   end
 
   def validate(_), do: {:error, :invalid_daily_digest_output}
+
+  defp supplemental_reference?(
+         %{
+           "url" => "https://github.com/" <> _ = url,
+           "observed_at" => observed_at,
+           "context" => context
+         } = reference
+       ) do
+    map_size(reference) == 3 and
+      byte_size(url) <= 500 and iso?(observed_at) and text?(context, 500)
+  end
+
+  defp supplemental_reference?(_), do: false
 
   def render(action, result) do
     with :ok <- validate(result),

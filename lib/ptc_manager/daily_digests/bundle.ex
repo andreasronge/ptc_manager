@@ -15,12 +15,12 @@ defmodule PtcManager.DailyDigests.Bundle do
     with {:ok, root} <- root(),
          {:ok, json} <- Jason.encode(evidence, escape: :html_safe),
          :ok <- enforce_budget(json),
-         directory <- bundle_path(root, repository.id, digest.id, identity),
+         directory <- bundle_path(root, repository.id, digest.id, identity_label(identity)),
          staging <- directory <> ".staging-" <> random(),
          :ok <- ensure_new_path(directory),
          :ok <- File.mkdir_p(staging),
          :ok <- File.write(Path.join(staging, @evidence), json, [:exclusive, :binary]),
-         manifest <- manifest(repository, digest, evidence, snapshot, json),
+         manifest <- manifest(repository, digest, evidence, snapshot, json, identity),
          manifest_json <- Jason.encode!(manifest, escape: :html_safe),
          :ok <- File.write(Path.join(staging, @manifest), manifest_json, [:exclusive, :binary]),
          :ok <- File.rename(staging, directory),
@@ -141,7 +141,14 @@ defmodule PtcManager.DailyDigests.Bundle do
          {:ok, manifest_json} <- File.read(path),
          true <- hash(manifest_json) == snapshot["evidence_manifest_sha256"],
          {:ok, manifest} when is_map(manifest) <- Jason.decode(manifest_json),
+         :ok <- verify_artifact_index(manifest),
          true <- manifest["repository"]["id"] == action.repository_id,
+         true <-
+           manifest["action"] == %{
+             "id" => action.id,
+             "attempt" => action.attempt_count,
+             "daily_digest_id" => action.target_id
+           },
          evidence_path <- Path.join(Path.dirname(path), manifest["delivery"]["path"]),
          :ok <- safe_regular_file(evidence_path, Path.dirname(path)),
          {:ok, json} <- File.read(evidence_path),
@@ -154,7 +161,22 @@ defmodule PtcManager.DailyDigests.Bundle do
     end
   end
 
-  defp manifest(repository, digest, evidence, snapshot, json) do
+  defp verify_artifact_index(%{"execution_artifacts" => %{"root" => root, "data" => data}})
+       when is_binary(root) and is_list(data) do
+    if Enum.all?(data, fn stored ->
+         path = Path.join(root, stored["manifest_path"] || "")
+         artifact_entry(root, path, stored["source_id"]) == [stored]
+       end),
+       do: :ok,
+       else: {:error, :daily_digest_artifact_mismatch}
+  end
+
+  defp verify_artifact_index(%{"execution_artifacts" => %{"root" => nil, "data" => []}}),
+    do: :ok
+
+  defp verify_artifact_index(_), do: {:error, :daily_digest_artifact_mismatch}
+
+  defp manifest(repository, digest, evidence, snapshot, json, identity) do
     job_ids = job_ids(evidence)
     acquire_job_sessions(repository.id, job_ids)
     artifacts = artifact_index(repository.id, evidence)
@@ -165,7 +187,11 @@ defmodule PtcManager.DailyDigests.Bundle do
         "id" => repository.id,
         "full_name" => "#{repository.github_owner}/#{repository.github_name}"
       },
-      "action" => %{"daily_digest_id" => digest.id},
+      "action" => %{
+        "id" => identity.action_id,
+        "attempt" => identity.attempt,
+        "daily_digest_id" => digest.id
+      },
       "window" => %{
         "started_at" => DateTime.to_iso8601(digest.window_started_at),
         "ended_at" => DateTime.to_iso8601(digest.window_ended_at)
@@ -187,9 +213,11 @@ defmodule PtcManager.DailyDigests.Bundle do
     }
   end
 
+  defp identity_label(%{action_id: id, attempt: attempt}), do: "#{id}-#{attempt}"
+
   defp artifact_index(repository_id, evidence) do
     root = Application.get_env(:ptc_manager, :execution_artifact_root)
-    ids = artifact_source_ids(evidence)
+    ids = expected_artifact_ids(evidence)
 
     entries =
       if is_binary(root) and Path.type(root) == :absolute do
@@ -225,7 +253,7 @@ defmodule PtcManager.DailyDigests.Bundle do
       operations = get_in(attempt, ["managed_operations", "data"]) || []
       reviews = get_in(attempt, ["reviews", "data"]) || []
 
-      [{:job, attempt["job_id"]}] ++
+      [{:setup, attempt["job_id"]}] ++
         Enum.map(operations, &{:operation, &1["id"]}) ++
         Enum.map(reviews, &{:review, &1["id"]})
     end)
@@ -234,12 +262,26 @@ defmodule PtcManager.DailyDigests.Bundle do
   end
 
   defp job_ids(evidence) do
-    evidence
-    |> artifact_source_ids()
-    |> Enum.flat_map(fn
-      {:job, id} -> [id]
-      _ -> []
-    end)
+    pulls = get_in(evidence, ["pull_requests", "data"]) || []
+
+    pulls
+    |> Enum.flat_map(fn pull -> get_in(pull, ["attempts", "data"]) || [] end)
+    |> Enum.map(& &1["job_id"])
+    |> Enum.filter(&is_integer/1)
+    |> Enum.uniq()
+  end
+
+  defp expected_artifact_ids(evidence) do
+    jobs = job_ids(evidence)
+
+    runs =
+      if jobs == [],
+        do: [],
+        else:
+          Repo.all(from r in AgentRun, where: r.job_id in ^jobs, select: r.id)
+          |> Enum.map(&{:agent_run, &1})
+
+    Enum.uniq(artifact_source_ids(evidence) ++ runs)
   end
 
   defp acquire_job_sessions(_repository_id, []), do: :ok
@@ -291,13 +333,18 @@ defmodule PtcManager.DailyDigests.Bundle do
     |> Enum.flat_map(&artifact_entry(root, &1, "review:#{id}"))
   end
 
-  defp artifact_entries(root, repository_id, :job, id) do
+  defp artifact_entries(root, repository_id, :setup, id) do
     root
-    |> Path.join(
-      "repository-#{repository_id}/job-#{id}/{workspace-setup-*,agent-run-*}/manifest.json"
-    )
+    |> Path.join("repository-#{repository_id}/job-#{id}/workspace-setup-*/manifest.json")
     |> Path.wildcard(match_dot: false)
-    |> Enum.flat_map(&artifact_entry(root, &1, "job:#{id}"))
+    |> Enum.flat_map(&artifact_entry(root, &1, "setup:#{id}"))
+  end
+
+  defp artifact_entries(root, repository_id, :agent_run, id) do
+    root
+    |> Path.join("repository-#{repository_id}/job-*/agent-run-#{id}/manifest.json")
+    |> Path.wildcard(match_dot: false)
+    |> Enum.flat_map(&artifact_entry(root, &1, "agent_run:#{id}"))
   end
 
   defp artifact_entry(root, path, source_id) do
@@ -354,6 +401,8 @@ defmodule PtcManager.DailyDigests.Bundle do
   end
 
   defp combine_coverage("complete", "complete"), do: "complete"
+  defp combine_coverage(_declared, "unavailable"), do: "unavailable"
+  defp combine_coverage(_declared, "partial"), do: "partial"
   defp combine_coverage(nil, coverage), do: coverage
   defp combine_coverage(coverage, _), do: coverage
 
