@@ -187,7 +187,10 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
           {:ok, [pull_without_merge_sha()]}
 
         String.ends_with?(url, "/pulls/1760") ->
-          Process.get(:missing_merge_detail, {:ok, Map.delete(pull_without_merge_sha(), "head")})
+          Process.get(
+            :missing_merge_detail,
+            {:ok, Map.delete(pull_without_merge_sha(), "head")}
+          )
 
         String.contains?(url, "/issues/1760/events?") ->
           Process.get(:missing_merge_events)
@@ -621,10 +624,45 @@ defmodule PtcManager.DailyDigests.EvidenceTest do
              Evidence.fetch(repository_fixture(), digest())
   end
 
+  test "maps permanent detail and event endpoint failures to a terminal identity error" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+
+    for {detail, events} <- [
+          {{:error, {:github_http_error, 404, "Not Found", nil}}, nil},
+          {nil, {:error, {:github_http_error, 422, "Validation Failed", nil}}}
+        ] do
+      if detail,
+        do: Process.put(:missing_merge_detail, detail),
+        else: Process.delete(:missing_merge_detail)
+
+      if events,
+        do: Process.put(:missing_merge_events, events),
+        else: Process.delete(:missing_merge_events)
+
+      assert {:error, :github_pull_request_merge_identity_unavailable} =
+               Evidence.fetch(repository_fixture(), digest())
+    end
+  end
+
+  test "keeps server and rate-limit endpoint failures retryable" do
+    Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
+
+    for reason <- [
+          {:github_http_error, 503, "Unavailable", nil},
+          {:github_http_error, 403, "API rate limit exceeded", nil},
+          {:github_http_error, 403, "Forbidden", 30_000}
+        ] do
+      Process.delete(:missing_merge_detail)
+      Process.put(:missing_merge_events, {:error, reason})
+      assert {:error, ^reason} = Evidence.fetch(repository_fixture(), digest())
+    end
+  end
+
   test "rejects malformed or mismatched merged events without using the PR head" do
     Application.put_env(:ptc_manager, :daily_digest_github_client, MissingMergeFieldClient)
 
     for event <- [
+          "not-an-event",
           %{
             "event" => "merged",
             "commit_id" => "not-a-sha",

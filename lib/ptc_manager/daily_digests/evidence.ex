@@ -368,7 +368,7 @@ defmodule PtcManager.DailyDigests.Evidence do
         {:error, :unexpected_github_response}
 
       {:error, reason} ->
-        {:error, reason}
+        merge_identity_endpoint_error(reason)
     end
   end
 
@@ -378,38 +378,71 @@ defmodule PtcManager.DailyDigests.Evidence do
 
   defp fetch_merge_event(client, base, pull, number, merged_at, branch, page) do
     case client.get_json("#{base}/issues/#{number}/events?per_page=100&page=#{page}") do
-      {:ok, events} when is_list(events) ->
-        case Enum.find(events, &(&1["event"] == "merged")) do
-          %{"commit_id" => sha, "created_at" => event_at}
-          when is_binary(sha) and is_binary(event_at) ->
-            with :ok <- same_instant(event_at, merged_at) do
-              normalize_merged_pull_request(
-                pull,
-                number,
-                merged_at,
-                branch,
-                sha,
-                "issue_event.merged.commit_id"
-              )
-            end
+      {:ok, events} when is_list(events) and events != [] ->
+        if Enum.all?(events, &is_map/1),
+          do: find_merge_event(client, base, pull, number, merged_at, branch, page, events),
+          else: {:error, :unexpected_github_pull_request}
 
-          nil when length(events) == 100 ->
-            fetch_merge_event(client, base, pull, number, merged_at, branch, page + 1)
-
-          nil ->
-            {:error, :github_pull_request_merge_identity_unavailable}
-
-          _malformed ->
-            {:error, :unexpected_github_pull_request}
-        end
+      {:ok, []} ->
+        {:error, :github_pull_request_merge_identity_unavailable}
 
       {:ok, _unexpected} ->
         {:error, :unexpected_github_response}
 
       {:error, reason} ->
-        {:error, reason}
+        merge_identity_endpoint_error(reason)
     end
   end
+
+  defp find_merge_event(client, base, pull, number, merged_at, branch, page, events) do
+    case Enum.find(events, &(&1["event"] == "merged")) do
+      %{"commit_id" => sha, "created_at" => event_at}
+      when is_binary(sha) and is_binary(event_at) ->
+        with :ok <- same_instant(event_at, merged_at) do
+          normalize_merged_pull_request(
+            pull,
+            number,
+            merged_at,
+            branch,
+            sha,
+            "issue_event.merged.commit_id"
+          )
+        end
+
+      nil when length(events) == 100 ->
+        fetch_merge_event(client, base, pull, number, merged_at, branch, page + 1)
+
+      nil ->
+        {:error, :github_pull_request_merge_identity_unavailable}
+
+      _malformed ->
+        {:error, :unexpected_github_pull_request}
+    end
+  end
+
+  defp merge_identity_endpoint_error({:github_transport_error, _reason} = reason),
+    do: {:error, reason}
+
+  defp merge_identity_endpoint_error({:github_http_error, _status, _message, delay} = reason)
+       when is_integer(delay),
+       do: {:error, reason}
+
+  defp merge_identity_endpoint_error({:github_http_error, status, _message, _delay} = reason)
+       when status in 500..599 or status == 429,
+       do: {:error, reason}
+
+  defp merge_identity_endpoint_error({:github_http_error, 403, message, nil} = reason)
+       when is_binary(message) do
+    normalized = String.downcase(message)
+
+    if String.contains?(normalized, "rate limit") or
+         String.contains?(normalized, "secondary rate"),
+       do: {:error, reason},
+       else: {:error, :github_pull_request_merge_identity_unavailable}
+  end
+
+  defp merge_identity_endpoint_error(_permanent),
+    do: {:error, :github_pull_request_merge_identity_unavailable}
 
   defp normalize_merged_pull_request(pull, number, merged_at, branch, sha, source) do
     if valid_sha?(sha) do
