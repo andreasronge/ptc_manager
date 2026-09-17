@@ -5,7 +5,9 @@ defmodule PtcManager.AutomationsTest do
 
   alias PtcManager.Automations
   alias PtcManager.Automations.{DefinitionVersion, Invocation, Trigger}
+  alias PtcManager.DailyDigests.DailyDigest
   alias PtcManager.MaintainerActions
+  alias PtcManager.Operations.AgentAction
   alias PtcManager.Repo
 
   defmodule GitTrustCommand do
@@ -1113,6 +1115,109 @@ defmodule PtcManager.AutomationsTest do
     assert Repo.aggregate(Invocation, :count) == 1
   end
 
+  describe "daily update triggers" do
+    setup do
+      previous_time_zone = Application.get_env(:ptc_manager, :daily_digest_time_zone)
+      Application.put_env(:ptc_manager, :daily_digest_time_zone, "Europe/Stockholm")
+
+      on_exit(fn ->
+        if is_nil(previous_time_zone) do
+          Application.delete_env(:ptc_manager, :daily_digest_time_zone)
+        else
+          Application.put_env(:ptc_manager, :daily_digest_time_zone, previous_time_zone)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a built-in manual trigger uses the configured reporting timezone" do
+      {_definition, trigger} = enabled_daily_trigger("manual")
+      assert is_nil(trigger.time_zone)
+
+      assert {:ok, invocation} =
+               Automations.run_trigger(trigger, "maintainer",
+                 now: ~U[2026-09-17 08:45:14.368521Z],
+                 occurrence_key: "manual:stockholm"
+               )
+
+      digest = Repo.one!(DailyDigest)
+      assert digest.digest_date == ~D[2026-09-16]
+      assert digest.window_started_at == ~U[2026-09-15 22:00:00.000000Z]
+      assert digest.window_ended_at == ~U[2026-09-16 22:00:00.000000Z]
+      assert digest.time_zone == "Europe/Stockholm"
+      assert invocation.agent_action_id == digest.agent_action_id
+    end
+
+    test "configured reporting timezone is used unless the trigger has an explicit valid timezone" do
+      Application.put_env(:ptc_manager, :daily_digest_time_zone, "America/New_York")
+      {_definition, manual} = enabled_daily_trigger("manual")
+
+      assert {:ok, _invocation} =
+               Automations.run_trigger(manual, "maintainer",
+                 now: ~U[2026-01-02 02:00:00Z],
+                 occurrence_key: "manual:new-york"
+               )
+
+      digest = Repo.one!(DailyDigest)
+      assert digest.digest_date == ~D[2025-12-31]
+      assert digest.time_zone == "America/New_York"
+
+      other_repository = repository_fixture(%{github_name: "scheduled-digest"})
+      _definition = enable_automation!(other_repository, "daily_digest")
+      definition = Automations.get_definition(other_repository, "daily_digest")
+      schedule = Enum.find(definition.triggers, &(&1.trigger_type == "schedule"))
+      assert schedule.time_zone == "Europe/Stockholm"
+      {:ok, schedule} = Automations.update_trigger(schedule, %{enabled: true})
+
+      assert {:ok, _invocation} =
+               Automations.run_trigger(schedule, "scheduler",
+                 now: ~U[2026-01-02 02:00:00Z],
+                 occurrence_key: "schedule:stockholm"
+               )
+
+      scheduled_digest = Repo.get_by!(DailyDigest, repository_id: other_repository.id)
+      assert scheduled_digest.digest_date == ~D[2026-01-01]
+      assert scheduled_digest.time_zone == "Europe/Stockholm"
+    end
+
+    test "an invalid effective timezone is controlled and creates no partial records" do
+      {_definition, trigger} = enabled_daily_trigger("manual")
+
+      Application.put_env(:ptc_manager, :daily_digest_time_zone, "Not/A_Timezone")
+
+      assert {:error, :invalid_daily_digest_time_zone} =
+               Automations.run_trigger(trigger, "maintainer", now: ~U[2026-09-17 08:45:14Z])
+
+      Application.delete_env(:ptc_manager, :daily_digest_time_zone)
+
+      assert {:error, :invalid_daily_digest_time_zone} =
+               Automations.run_trigger(trigger, "maintainer", now: ~U[2026-09-17 08:45:14Z])
+
+      assert Repo.aggregate(DailyDigest, :count) == 0
+      assert Repo.aggregate(AgentAction, :count) == 0
+      assert Repo.aggregate(Invocation, :count) == 0
+    end
+
+    test "manual generation keeps DST local-midnight boundaries and same-day idempotency" do
+      {_definition, trigger} = enabled_daily_trigger("manual")
+      opts = [now: ~U[2026-03-30 00:30:00Z]]
+
+      assert {:ok, first} = Automations.run_trigger(trigger, "maintainer", opts)
+      assert {:ok, repeated} = Automations.run_trigger(trigger, "maintainer", opts)
+      refute repeated.id == first.id
+      assert repeated.agent_action_id == first.agent_action_id
+
+      digest = Repo.one!(DailyDigest)
+      assert digest.window_started_at == ~U[2026-03-28 23:00:00.000000Z]
+      assert digest.window_ended_at == ~U[2026-03-29 22:00:00.000000Z]
+      assert DateTime.diff(digest.window_ended_at, digest.window_started_at, :hour) == 23
+      assert Repo.aggregate(DailyDigest, :count) == 1
+      assert Repo.aggregate(AgentAction, :count) == 1
+      assert Repo.aggregate(Invocation, :count) == 2
+    end
+  end
+
   test "schedule tick materializes a due occurrence and advances the trigger" do
     repository = repository_fixture(%{github_name: "ptc_runner"})
     definition = Automations.get_definition(repository, "nightly_ci_investigation")
@@ -1485,6 +1590,15 @@ defmodule PtcManager.AutomationsTest do
       |> Repo.insert!()
 
     %{action: action, old_run: old_run, new_run: new_run}
+  end
+
+  defp enabled_daily_trigger(trigger_type) do
+    repository = repository_fixture()
+    _definition = enable_automation!(repository, "daily_digest")
+    definition = Automations.get_definition(repository, "daily_digest")
+    trigger = Enum.find(definition.triggers, &(&1.trigger_type == trigger_type))
+    {:ok, trigger} = Automations.update_trigger(trigger, %{enabled: true})
+    {definition, trigger}
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

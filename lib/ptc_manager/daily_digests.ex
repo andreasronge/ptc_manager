@@ -141,9 +141,14 @@ defmodule PtcManager.DailyDigests do
     error in [Ecto.InvalidChangesetError, Exqlite.Error] -> {:error, error}
   end
 
-  def previous_day_window(now, time_zone) when is_binary(time_zone) do
-    with {:ok, local_now} <- DateTime.shift_zone(now, time_zone, Tz.TimeZoneDatabase) do
+  def previous_day_window(now, time_zone) do
+    time_zone = effective_time_zone(time_zone)
+
+    with true <- is_binary(time_zone) and time_zone != "",
+         {:ok, local_now} <- DateTime.shift_zone(now, time_zone, Tz.TimeZoneDatabase) do
       previous_local_day_window(local_now, time_zone)
+    else
+      _invalid -> {:error, :invalid_daily_digest_time_zone}
     end
   end
 
@@ -226,6 +231,12 @@ defmodule PtcManager.DailyDigests do
       _invalid -> {:error, :invalid_daily_digest_window}
     end
   end
+
+  defp effective_time_zone(time_zone) when is_binary(time_zone) and time_zone != "",
+    do: time_zone
+
+  defp effective_time_zone(_missing),
+    do: Application.get_env(:ptc_manager, :daily_digest_time_zone)
 
   defp local_day_boundary(date, time_zone) do
     case DateTime.new(date, ~T[00:00:00], time_zone, Tz.TimeZoneDatabase) do

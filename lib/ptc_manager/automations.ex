@@ -793,10 +793,15 @@ defmodule PtcManager.Automations do
         requested_at: now
       }
 
-      case Repo.get_by(Invocation,
-             automation_trigger_id: trigger.id,
-             occurrence_key: occurrence_key
-           ) do
+      existing =
+        if occurrence_key,
+          do:
+            Repo.get_by(Invocation,
+              automation_trigger_id: trigger.id,
+              occurrence_key: occurrence_key
+            )
+
+      case existing do
         nil -> %Invocation{} |> Invocation.changeset(attrs) |> Repo.insert()
         existing -> {:ok, existing}
       end

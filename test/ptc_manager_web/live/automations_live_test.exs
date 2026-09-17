@@ -301,6 +301,24 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
       assert %{enabled: false} = Automations.get_definition(other, "nightly_ci_investigation_2")
     end
 
+    test "Generate update now queues a daily run when its built-in timezone is absent", %{
+      conn: conn
+    } do
+      repository = repository_fixture()
+      _definition = PtcManager.OperationsFixtures.enable_automation!(repository, "daily_digest")
+      definition = Automations.get_definition(repository, "daily_digest")
+      manual = Enum.find(definition.triggers, &(&1.trigger_type == "manual"))
+      assert is_nil(manual.time_zone)
+      {:ok, manual} = Automations.update_trigger(manual, %{enabled: true})
+
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/automations/#{definition.id}")
+      view |> element("#run-now[phx-value-trigger-id='#{manual.id}']") |> render_click()
+
+      assert has_element?(view, "#flash-info", "Automation queued.")
+      assert has_element?(view, "#automation-runs", "Manual run · v1")
+      assert Repo.aggregate(Invocation, :count) == 1
+    end
+
     test "navigates to the index when the selector chooses another repository", %{conn: conn} do
       repository = repository_fixture()
       other = repository_fixture()
