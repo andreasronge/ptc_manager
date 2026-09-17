@@ -664,7 +664,8 @@ defmodule PtcManager.MaintainerActionsTest do
     assert executed.target_snapshot["trusted_source_head_sha"] == String.duplicate("8", 40)
     assert executed.target_snapshot["trusted_change_count"] == 1
     assert executed.prompt =~ ~s(<source_snapshot ref="main")
-    assert executed.prompt =~ "<daily_delivery_evidence>"
+    assert executed.prompt =~ "<daily_delivery_bundle>"
+    refute executed.prompt =~ "Useful change"
     assert {:ok, projection} = PtcManager.DailyDigests.Input.read(executed)
     assert projection["schema_version"] == 1
 

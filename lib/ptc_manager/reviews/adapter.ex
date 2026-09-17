@@ -51,7 +51,8 @@ defmodule PtcManager.Reviews.Adapter do
         ),
       repository_path: snapshot_path,
       contract_version: 2,
-      schema: round.input["schema"]
+      schema: round.input["schema"],
+      artifact_directory: review_artifact_directory(round)
     }
 
     try do
@@ -84,6 +85,16 @@ defmodule PtcManager.Reviews.Adapter do
     after
       File.rm(request)
       File.rm(result)
+    end
+  end
+
+  defp review_artifact_directory(round) do
+    case Application.get_env(:ptc_manager, :execution_artifact_root) do
+      root when is_binary(root) and root != "" ->
+        Path.join([root, "reviews", "round-#{round.id}"])
+
+      _ ->
+        nil
     end
   end
 

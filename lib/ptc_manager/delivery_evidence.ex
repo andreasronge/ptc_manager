@@ -7,11 +7,11 @@ defmodule PtcManager.DeliveryEvidence do
   alias Fields, as: F
 
   @schema_version 1
-  @max_bytes 240_000
+  @max_bytes 32_000_000
   @max_jobs 200
   @max_attempts 20
 
-  @doc "Builds evidence without network/filesystem access. Requires :observed_at; :max_bytes may lower the 240,000-byte ceiling."
+  @doc "Builds evidence without network/filesystem access. Requires :observed_at; :max_bytes may lower the 32 MB file budget."
   def build(%Repository{} = repository, window, selection, opts \\ []) do
     limit = Keyword.get(opts, :max_bytes, @max_bytes)
     F.require!(is_integer(limit) and limit > 0 and limit <= @max_bytes, :invalid_byte_limit)

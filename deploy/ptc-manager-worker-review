@@ -66,7 +66,8 @@ class CodexSessionEvents:
         return json.dumps({"type": "thread.started", "thread_id": self.session_id, "usage": self.usage})
 
 
-def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, session_events=False):
+def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, session_events=False,
+        artifact_directory=None):
     # Bound captured output, not the CLI's persistent databases and WAL files.
     with tempfile.TemporaryFile() as input_file, selectors.DefaultSelector() as streams:
         if prompt:
@@ -75,6 +76,17 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
         process = subprocess.Popen(command, stdin=input_file, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
         stdout, stderr = bytearray(), bytearray()
+        artifact_files = {}
+        if artifact_directory:
+            try:
+                artifact_directory = os.path.join(artifact_directory, "run-" + str(uuid.uuid4()))
+                os.makedirs(artifact_directory, mode=0o750, exist_ok=False)
+                artifact_files = {"stdout": open(os.path.join(artifact_directory, "stdout.log"), "xb", buffering=0),
+                                  "stderr": open(os.path.join(artifact_directory, "stderr.log"), "xb", buffering=0)}
+            except OSError:
+                for output in artifact_files.values():
+                    output.close()
+                artifact_files = {}
         captured = 0
         events = CodexSessionEvents() if session_events else None
         deadline = time.monotonic() + timeout
@@ -90,6 +102,13 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
                     if not data:
                         streams.unregister(key.fileobj)
                         continue
+                    if artifact_files:
+                        try:
+                            artifact_files["stdout" if key.data is stdout else "stderr"].write(data)
+                        except OSError:
+                            for output in artifact_files.values():
+                                output.close()
+                            artifact_files = {}
                     if events is not None:
                         if key.data is stdout:
                             events.feed(data)
@@ -115,10 +134,32 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
             process.wait()
             process.stdout.close()
             process.stderr.close()
+            for output in artifact_files.values():
+                output.flush()
+                os.fsync(output.fileno())
+                output.close()
+                os.chmod(output.name, 0o440)
+            if artifact_files:
+                manifest = {"schema_version": 1, "coverage": "complete",
+                            "ordering": "streams_are_independent",
+                            "exit_status": process.returncode,
+                            "streams": {name: {"path": name + ".log", "bytes": os.path.getsize(output.name),
+                                               "sha256": file_sha256(output.name)}
+                                        for name, output in artifact_files.items()}}
+                with open(os.path.join(artifact_directory, "manifest.json"), "x") as record:
+                    json.dump(manifest, record, separators=(",", ":"), sort_keys=True)
         if process.returncode:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(f"agent_command_failed exit={process.returncode}: {detail}")
         return events.result() if events is not None else stdout.decode()
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while data := source.read(65536):
+            digest.update(data)
+    return digest.hexdigest()
 
 
 def catalog(kind):
@@ -300,7 +341,8 @@ def run_review(request, remaining=None):
             if effort:
                 args += ["-c", 'model_reasoning_effort="' + effort + '"']
             args += ["-c", 'web_search="disabled"']
-            events = run(args + ["-"], prompt, repository_path, timeout=timeout, session_events=True)
+            events = run(args + ["-"], prompt, repository_path, timeout=timeout, session_events=True,
+                         artifact_directory=request.get("artifact_directory"))
             started = [json.loads(line) for line in events.splitlines() if line.strip()]
             ids = [event["thread_id"] for event in started if event.get("type") == "thread.started"]
             if len(ids) != 1:
@@ -316,13 +358,15 @@ def run_review(request, remaining=None):
                 args += ["--resume", session_id]
             if effort:
                 args += ["--effort", effort]
-            envelope = json.loads(run(args, prompt, repository_path, timeout=timeout))
+            envelope = json.loads(run(args, prompt, repository_path, timeout=timeout,
+                                      artifact_directory=request.get("artifact_directory")))
             return review_envelope(envelope["structured_output"], envelope.get("session_id"), session_id)
         args = [BINARIES[kind], "--print", "--mode", "ask", "--model", model,
                 "--workspace", repository_path, "--output-format", "json"]
         if session_id:
             args += ["--resume", session_id]
-        envelope = json.loads(run(args, prompt, repository_path, timeout=timeout))
+        envelope = json.loads(run(args, prompt, repository_path, timeout=timeout,
+                                  artifact_directory=request.get("artifact_directory")))
         return review_envelope(json.loads(envelope["result"]), envelope.get("session_id"), session_id)
 
 

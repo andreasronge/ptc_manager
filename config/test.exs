@@ -34,6 +34,8 @@ config :ptc_manager,
   git_run_as_user: nil,
   git_verifier_home: System.tmp_dir!()
 
+config :ptc_manager, :daily_digest_bundle_read_only, false
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used

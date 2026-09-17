@@ -208,6 +208,13 @@ config :ptc_manager,
     System.get_env("PTC_OPERATION_MEMORY_HIGH_BYTES", "2147483648") |> String.to_integer(),
   operation_memory_max_bytes:
     System.get_env("PTC_OPERATION_MEMORY_MAX_BYTES", "2684354560") |> String.to_integer(),
+  execution_artifact_root:
+    System.get_env(
+      "PTC_EXECUTION_ARTIFACT_ROOT",
+      "/var/lib/ptc_manager-output/execution-artifacts"
+    ),
+  execution_artifact_max_bytes:
+    System.get_env("PTC_EXECUTION_ARTIFACT_MAX_BYTES", "256000000") |> String.to_integer(),
   agent_action_timeout_ms:
     System.get_env("PTC_AGENT_ACTION_TIMEOUT_MS", "7200000") |> String.to_integer(),
   agent_action_sync_retry_base_ms:
@@ -226,6 +233,14 @@ config :ptc_manager,
       "PTC_PLANNING_SNAPSHOT_PERMISSION_CHECK",
       if(System.get_env("RELEASE_NAME"), do: "true", else: "false")
     ) == "true",
+  daily_digest_bundle_root:
+    System.get_env("PTC_DAILY_DIGEST_BUNDLE_ROOT") ||
+      if(System.get_env("RELEASE_NAME"),
+        do: "/var/lib/ptc_manager-output/daily-digest-bundles",
+        else: Application.get_env(:ptc_manager, :daily_digest_bundle_root)
+      ),
+  daily_digest_bundle_max_bytes:
+    System.get_env("PTC_DAILY_DIGEST_BUNDLE_MAX_BYTES", "32000000") |> String.to_integer(),
   daily_digest_enabled: false,
   daily_digest_interval_ms: 60_000,
   daily_digest_hour: 2,

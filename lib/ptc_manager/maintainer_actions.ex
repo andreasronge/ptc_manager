@@ -775,6 +775,13 @@ defmodule PtcManager.MaintainerActions do
     with {:ok, evidence} <- evidence_source.fetch(repository, digest),
          {:ok, input} <-
            PtcManager.DailyDigests.Input.prepare(repository, digest, evidence, DateTime.utc_now()),
+         {:ok, input} <-
+           PtcManager.DailyDigests.Input.publish(
+             repository,
+             digest,
+             input,
+             "#{action.id}-#{action.attempt_count}"
+           ),
          {:ok, %{sha: source_sha, ref: source_ref} = source} <-
            capture_planning_snapshot(source_snapshot, repository, action) do
       captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -795,7 +802,7 @@ defmodule PtcManager.MaintainerActions do
         action.prompt <>
           """
 
-          <source_snapshot ref="#{source_ref}" sha="#{source_sha}" default_branch="#{repository.default_branch}" workspace="read_only" github_access="none" />
+          <source_snapshot ref="#{source_ref}" sha="#{source_sha}" default_branch="#{repository.default_branch}" workspace="read_only" github_access="read" />
           #{PtcManager.DailyDigests.Input.block(input)}
           """
 

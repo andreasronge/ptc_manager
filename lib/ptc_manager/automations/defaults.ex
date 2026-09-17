@@ -189,7 +189,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "daily_digest",
       prompt:
-        "Write a concise daily update for a busy maintainer using only the supplied delivery evidence. Use plain, factual language: no hype, generic praise, or unnecessary jargon. Start with a two-sentence overview in the summary field. For each shipped change, give one short sentence describing it and one explaining why it matters. Include at most three concrete, attributed lessons, and omit lessons when the evidence does not support them. Aim for a one-minute read on ordinary days; allow more space when needed to cover significant changes. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
+        "Write a concise daily update for a busy maintainer by investigating the supplied immutable delivery bundle, full available execution logs, repository history, and read-only GitHub context. Use plain, factual language: no hype, generic praise, or unnecessary jargon. Start with a two-sentence overview in the summary field. For each shipped change, give one short sentence describing it and one explaining why it matters. Include at most three concrete, attributed lessons, and omit lessons when the evidence does not support them. Aim for a one-minute read on ordinary days; allow more space when needed to cover significant changes. Keep captured facts distinct from current supplemental context and reported claims attributed. Do not propose or create issues, write to GitHub, push, implement, or change production."
     },
     %{
       key: "repair_pr",

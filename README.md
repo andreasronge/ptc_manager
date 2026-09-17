@@ -970,10 +970,11 @@ expose the arrival time of a direct push, so that distinction is shown in the
 bounded evidence rather than guessed. A PR merge identity comes from the pull
 response when available, or from the matching GitHub merged-event `commit_id`
 when the configured API omits it; its source is retained and no branch or PR head
-is substituted. A configured generic Herdr agent receives
-the delivery projection and a read-only local snapshot, then returns bounded
-shipped summaries and attributed lessons. The exact escaped JSON is retained in
-the persisted prompt and hashed in the action snapshot. Publication rejects
+is substituted. A configured generic Herdr agent receives a short path/index
+prompt and a read-only local snapshot, then investigates the immutable on-disk
+delivery bundle with `jq`, `rg`, `git`, and read-only `gh`. Captured window facts
+stay distinct from current supplemental GitHub context. The exact JSON and small
+manifest are retained outside the prompt and hashed in the action snapshot. Publication rejects
 missing/tampered evidence, mismatched hashes, windows, SHAs, counts, PR numbers,
 or citations outside the selected changes. PtcManager renders **What shipped**,
 optional **What we learned**, and factual **Delivery health** from that captured
@@ -981,6 +982,13 @@ evidence. Missing metrics stay unknown; model prose is not verified fact. Old
 published Markdown remains readable. The Updates page sanitizes the generated
 Markdown before displaying it. See the [daily contract](docs/maintainers/delivery-evidence.md)
 for limits and provenance; this wiring does not enable generation.
+
+Managed commands continuously tee stdout and stderr to separate files under
+`PTC_EXECUTION_ARTIFACT_ROOT` while preserving live output. Reviewer CLI events
+and streams use the same root. Capture manifests record coverage, sizes, hashes,
+and exit status without claiming a total ordering between streams. Defaults are
+256 MB per command stream and 32 MB per daily bundle. Capture failure is surfaced
+without replacing the command result or retaining its resource slot.
 
 The new generation prompt remains visible on **Automations** while evaluation
 is pending and can be edited under **Daily update → Prompt**. The built-in voice

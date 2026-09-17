@@ -79,36 +79,33 @@ An operation label is reported text, not proof of the command or a test result.
 ## Bounds and exclusions
 
 Limits are 50 PRs, 50 direct commits, 20 attempts per PR, 200 attempt entries
-overall, and 100 rows per local family per job. Input JSON is at most 120,000
-bytes; output JSON is at most 240,000 bytes. `max_bytes:` may lower, not raise,
-the output limit. Text is UTF-8 bounded (PR sections 1,500 bytes each; review
+overall, and 100 rows per local family per job. File-delivered output JSON is at
+most 32 MB by default. `max_bytes:` may lower, not raise, that ceiling. Text is
+UTF-8 bounded (PR sections 1,500 bytes each; review
 summary/finding and stop summary 1,000 bytes each); validated review results
 already limit findings to 30. Oversized collections or encoded output return
 an error rather than silently pretending truncated collections are complete.
 
-Only allowlisted fields leave the projection. Raw agent inputs, transcripts,
-command output, environment values, credentials, arbitrary audit details and
-error bodies are omitted. Author-written PR/review prose remains untrusted
+Only allowlisted fields enter the projection. Full execution logs remain
+separately indexed file artifacts and inert evidence; they never become
+state-transition authority. Environment values and credentials are never
+deliberately logged. Author-written PR/review prose remains untrusted
 reported content, not an instruction or independently verified fact.
-
-The projection itself does not activate protocol v2 or write an evidence directory.
 
 ## Daily action contract
 
 Daily preparation now feeds the projection into the existing action workflow.
-`DailyDigests.Input` encodes it with HTML-safe JSON escaping, so source prose
-cannot close the `daily_delivery_evidence` delimiter. The action's persisted
-prompt contains the exact input bytes. Its `target_snapshot` records their
-SHA-256, byte size, projection version, observation time, window, branch/head,
-PR numbers, change count and selection limits. The separate local source snapshot
+`DailyDigests.Input` atomically publishes an attempt-unique directory containing
+`manifest.json` and `delivery.json`. Files become read-only before publication.
+The action's persisted prompt contains only their paths and hashes. Its
+`target_snapshot` records both hashes, byte size, projection version, observation
+time, window, branch/head, PR numbers, change count and selection limits. The separate local source snapshot
 retains its existing ownership, paths and cleanup; it is not the evidence store.
 
-Application settings `:daily_digest_evidence_max_bytes` (default 90,000; ceiling
-240,000) and `:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000)
-bound the actual escaped JSON and complete prompt. The existing prompt default
-has not been raised. A production-shaped fixture with 20 PRs fits both defaults;
-larger days may fail explicitly rather than silently lose evidence. Any cap
-increase needs model-context and output-budget evaluation first. Preflight
+Application settings `:daily_digest_bundle_max_bytes` (default 32 MB) and
+`:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000) separately
+bound file evidence and the complete path-only prompt. Multi-megabyte evidence
+therefore does not spend model context before investigation. Preflight
 rejects oversized inputs and retains the existing source-snapshot cleanup path;
 the adapter also checks the full prompt including the result protocol before
 starting the agent. Invalid settings fail closed.

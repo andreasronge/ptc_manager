@@ -1,6 +1,6 @@
 defmodule PtcManager.DailyDigests.ReportTest do
   use PtcManager.DataCase, async: false
-  alias PtcManager.DailyDigests.{Input, Report}
+  alias PtcManager.DailyDigests.{Bundle, Input, Report}
   alias PtcManager.{DailyDigests, DailyDigestFixtures}
 
   test "schema example satisfies application validation" do
@@ -21,6 +21,43 @@ defmodule PtcManager.DailyDigests.ReportTest do
       })
 
     %{repository: repository, digest: digest}
+  end
+
+  test "multi-megabyte evidence is file-backed while the handoff stays small", %{
+    repository: repository,
+    digest: digest
+  } do
+    evidence = %{"late_marker" => String.duplicate("x", 2_000_000) <> "query-me"}
+
+    snapshot = %{
+      "source_default_branch" => "main",
+      "trusted_source_head_sha" => String.duplicate("a", 40)
+    }
+
+    assert {:ok, bundle} =
+             Bundle.publish(
+               repository,
+               digest,
+               evidence,
+               snapshot,
+               System.unique_integer([:positive])
+             )
+
+    assert bundle.evidence_bytes > 2_000_000
+    assert File.read!(bundle.evidence_path) =~ "query-me"
+
+    prompt =
+      Input.block(%{
+        snapshot: %{
+          "evidence_manifest_path" => bundle.manifest_path,
+          "evidence_manifest_sha256" => bundle.manifest_sha256,
+          "evidence_path" => bundle.evidence_path,
+          "trusted_evidence_sha256" => bundle.evidence_sha256
+        }
+      })
+
+    assert byte_size(prompt) < 1_000
+    refute prompt =~ "query-me"
   end
 
   test "quiet days publish without invented work or lessons", %{digest: digest} do
@@ -100,19 +137,18 @@ defmodule PtcManager.DailyDigests.ReportTest do
     action = DailyDigestFixtures.prepare(digest)
     result = DailyDigestFixtures.result(action)
 
-    for prompt <- [
-          nil,
-          "no evidence",
-          String.replace(action.prompt, "Useful change", "Tampered change"),
-          action.prompt <> "\n<daily_delivery_evidence>\n{}\n</daily_delivery_evidence>"
+    for snapshot <- [
+          Map.delete(action.target_snapshot, "evidence_manifest_path"),
+          Map.put(action.target_snapshot, "evidence_manifest_path", "/tmp/outside.json"),
+          Map.put(action.target_snapshot, "evidence_manifest_sha256", String.duplicate("0", 64))
         ] do
       assert {:error, :daily_digest_evidence_mismatch} =
-               Report.render(%{action | prompt: prompt}, result)
+               Report.render(%{action | target_snapshot: snapshot}, result)
     end
 
     bad_snapshot = Map.delete(action.target_snapshot, "trusted_evidence_sha256")
 
-    assert {:error, :daily_digest_evidence_mismatch} =
+    assert {:error, :daily_digest_provenance_mismatch} =
              Report.render(%{action | target_snapshot: bad_snapshot}, result)
 
     refute DailyDigests.published?(DailyDigests.get_digest(digest.id))
@@ -133,6 +169,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
       ])
 
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
+
+    assert {:ok, input} =
+             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+
     refute input.json =~ "</daily_delivery_evidence>"
     assert input.json =~ "\\u003C"
 
@@ -186,7 +226,7 @@ defmodule PtcManager.DailyDigests.ReportTest do
     repository: repository,
     digest: digest
   } do
-    keys = [:daily_digest_evidence_max_bytes, :daily_digest_prompt_max_bytes]
+    keys = [:daily_digest_bundle_max_bytes, :daily_digest_prompt_max_bytes]
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
 
     on_exit(fn ->
@@ -197,15 +237,20 @@ defmodule PtcManager.DailyDigests.ReportTest do
       end)
     end)
 
-    Application.put_env(:ptc_manager, :daily_digest_evidence_max_bytes, 100)
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1_000_000)
 
-    assert {:error, :daily_digest_projection_invalid_or_oversized} =
+    assert {:ok, input} =
              Input.prepare(
                repository,
                digest,
                DailyDigestFixtures.selection(repository, digest),
                digest.window_ended_at
              )
+
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1_000)
+
+    assert {:error, :daily_digest_evidence_too_large} =
+             Input.publish(repository, digest, input, System.unique_integer([:positive]))
 
     Application.put_env(:ptc_manager, :daily_digest_prompt_max_bytes, 100)
     assert :ok = Input.validate_prompt(String.duplicate("x", 100))
@@ -294,6 +339,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
       )
 
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
+
+    assert {:ok, input} =
+             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+
     action = %{digest.agent_action | prompt: Input.block(input), target_snapshot: input.snapshot}
     assert {:ok, markdown} = Report.render(action, DailyDigestFixtures.result(action))
     assert markdown =~ "review rounds 0; time to ready 10000 ms; failed managed operations 0"
@@ -326,6 +375,10 @@ defmodule PtcManager.DailyDigests.ReportTest do
       })
 
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
+
+    assert {:ok, input} =
+             Input.publish(repository, digest, input, System.unique_integer([:positive]))
+
     action = %{digest.agent_action | prompt: Input.block(input), target_snapshot: input.snapshot}
 
     result =

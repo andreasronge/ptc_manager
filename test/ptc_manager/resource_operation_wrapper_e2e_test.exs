@@ -36,7 +36,12 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
         "context_id" => "e2e-context",
         "token" => "fake-token",
         "socket_path" => socket_path,
-        "lock_directory" => root
+        "lock_directory" => root,
+        "artifact_root" => Path.join(root, "artifacts"),
+        "artifact_max_bytes" => 1_000_000,
+        "repository_id" => 12,
+        "owner_type" => "job",
+        "owner_id" => 34
       })
     )
 
@@ -52,7 +57,7 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
                  "--",
                  "/bin/sh",
                  "-c",
-                 "printf 'managed:%s\\n' \"$PTC_OPERATION_ACTIVE\""
+                 "printf 'managed:%s\\n' \"$PTC_OPERATION_ACTIVE\"; printf 'diagnostic\\n' >&2"
                ],
                env: [
                  {"PTC_MANAGED_OPERATION_CONTEXT", context_path},
@@ -67,6 +72,17 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
     assert_receive {:wrapper_request, %{"operation" => "request", "label" => "test"}}
     assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 0}}
     Task.await(server, 2_000)
+
+    [artifact] =
+      Path.wildcard(Path.join(root, "artifacts/repository-12/job-34/operation-77-*/"))
+
+    assert File.read!(Path.join(artifact, "stdout.log")) == "managed:77\n"
+    assert File.read!(Path.join(artifact, "stderr.log")) == "diagnostic\n"
+
+    manifest = Path.join(artifact, "manifest.json") |> File.read!() |> Jason.decode!()
+    assert manifest["streams"]["stdout"]["coverage"] == "complete"
+    assert manifest["streams"]["stderr"]["coverage"] == "complete"
+    assert manifest["ordering"] == "streams_are_independent"
     File.rm_rf!(root)
   end
 

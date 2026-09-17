@@ -19,6 +19,21 @@ context = review.__globals__
 
 
 class ReviewerContract(unittest.TestCase):
+    def test_full_reviewer_streams_are_sealed_before_parsing(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = context['run'](
+                [sys.executable, '-c',
+                 'import sys; sys.stdout.write("event\\n"); sys.stderr.write("detail\\n")'],
+                artifact_directory=os.path.join(root, 'review'))
+            self.assertEqual(output, 'event\n')
+            runs = list(Path(root).glob('review/run-*'))
+            self.assertEqual(len(runs), 1)
+            self.assertEqual((runs[0] / 'stdout.log').read_bytes(), b'event\n')
+            self.assertEqual((runs[0] / 'stderr.log').read_bytes(), b'detail\n')
+            manifest = json.loads((runs[0] / 'manifest.json').read_text())
+            self.assertEqual(manifest['ordering'], 'streams_are_independent')
+            self.assertEqual(manifest['streams']['stdout']['bytes'], 6)
+
     def test_claude_catalog_initializes_without_a_model_turn(self):
         def fake_run(args, prompt=None, cwd=None, **kwargs):
             request = json.loads(prompt)
