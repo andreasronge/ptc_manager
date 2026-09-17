@@ -13,6 +13,22 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
     assert AutomationsLive.page_path(:show, id: 7, repo: "all") == "/automations/7?repo=all"
   end
 
+  test "a paused schedule does not promise a next run" do
+    trigger = %Trigger{
+      trigger_type: "schedule",
+      enabled: false,
+      next_run_at: ~U[2026-09-17 00:00:00.000000Z],
+      time_zone: "Europe/Stockholm"
+    }
+
+    assert AutomationsLive.trigger_detail(trigger) == "Paused · no runs scheduled"
+
+    assert AutomationsLive.trigger_detail(%{trigger | enabled: true}, false) ==
+             "Paused · no runs scheduled"
+
+    assert AutomationsLive.trigger_detail(%{trigger | enabled: true}, true) =~ "Next "
+  end
+
   describe "index" do
     test "lists one row per automation with how it runs, the last run, and the next run",
          %{conn: conn} do
@@ -47,6 +63,7 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
 
       view |> element("#automation-switch-#{nightly.id}") |> render_click()
       refute Automations.get_definition(repository, "nightly_ci_investigation").enabled
+      assert has_element?(view, "#flash-info", "Investigate nightly CI paused.")
       assert has_element?(view, "#automation-switch-#{nightly.id}[aria-checked=false]")
 
       {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/automations")
@@ -174,8 +191,14 @@ defmodule PtcManagerWeb.AutomationsLiveTest do
       refute has_element?(view, "#automation-runs #run-#{theirs.id}")
       refute has_element?(view, "#run-result-#{mine.id}")
 
+      assert has_element?(
+               view,
+               "#run-#{mine.id} button[aria-expanded=false][aria-controls='run-result-#{mine.id}']"
+             )
+
       view |> element("#run-#{mine.id} button[phx-click=toggle-run]") |> render_click()
       assert has_element?(view, "#run-result-#{mine.id} h2", "Done")
+      assert has_element?(view, "#run-#{mine.id} button[aria-expanded=true]")
 
       view
       |> form("#automation-settings-form", automation: %{agent_mode: "require"})

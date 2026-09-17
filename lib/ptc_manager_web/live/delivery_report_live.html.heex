@@ -5,7 +5,13 @@
       <span :if={Application.get_env(:ptc_manager, :demo_mode, false)} class="text-amber-300">
         Demo data · no external actions
       </span>
-      <button phx-click="refresh" class="rounded-lg bg-white/10 px-3 py-2">Refresh report</button>
+      <button
+        phx-click="refresh"
+        phx-disable-with="Refreshing…"
+        class="rounded-lg bg-white/10 px-3 py-2"
+      >
+        Refresh report
+      </button>
     </div>
     <header>
       <p class="text-sm text-slate-400">

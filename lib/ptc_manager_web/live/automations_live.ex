@@ -67,8 +67,17 @@ defmodule PtcManagerWeb.AutomationsLive do
     definition = Automations.get_definition!(String.to_integer(id))
 
     case Automations.update_identity(definition, %{enabled: enabled == "true"}) do
-      {:ok, _definition} -> {:noreply, reload(socket)}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "#{updated.name} #{if updated.enabled, do: "enabled", else: "paused"}."
+         )
+         |> reload()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
     end
   end
 
@@ -162,8 +171,17 @@ defmodule PtcManagerWeb.AutomationsLive do
     trigger = Automations.get_trigger!(String.to_integer(id))
 
     case Automations.update_trigger(trigger, %{enabled: enabled == "true"}) do
-      {:ok, _trigger} -> {:noreply, refresh_show(socket)}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "#{trigger_name(updated)} #{if updated.enabled, do: "enabled", else: "paused"}."
+         )
+         |> refresh_show()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
     end
   end
 
@@ -387,13 +405,19 @@ defmodule PtcManagerWeb.AutomationsLive do
   def trigger_title(%Trigger{trigger_type: "contextual"} = trigger),
     do: "“#{trigger.label}” on #{Automations.surface_label(trigger.surface)}"
 
-  def trigger_detail(%Trigger{trigger_type: "schedule"} = trigger),
+  def trigger_detail(trigger, automation_enabled \\ true)
+
+  def trigger_detail(%Trigger{trigger_type: "schedule", enabled: enabled}, automation_enabled)
+      when not enabled or not automation_enabled,
+      do: "Paused · no runs scheduled"
+
+  def trigger_detail(%Trigger{trigger_type: "schedule"} = trigger, _automation_enabled),
     do: "Next " <> local_time(trigger.next_run_at, trigger.time_zone)
 
-  def trigger_detail(%Trigger{trigger_type: "manual"}),
+  def trigger_detail(%Trigger{trigger_type: "manual"}, _automation_enabled),
     do: "Queues a run from this page."
 
-  def trigger_detail(%Trigger{trigger_type: "contextual"}),
+  def trigger_detail(%Trigger{trigger_type: "contextual"}, _automation_enabled),
     do: "Appears as a maintainer action on that surface."
 
   def sorted_triggers(triggers) do
@@ -525,6 +549,7 @@ defmodule PtcManagerWeb.AutomationsLive do
       aria-checked={to_string(@enabled)}
       aria-label={@label}
       title={if(@enabled, do: "Enabled · click to pause", else: "Paused · click to enable")}
+      phx-disable-with=""
       phx-click={@event}
       phx-value-id={@value}
       phx-value-enabled={to_string(!@enabled)}
