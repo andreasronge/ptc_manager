@@ -967,7 +967,10 @@ The coordinator selects pull requests by GitHub's `merged_at` timestamp and dire
 commits by their committer timestamp for the exact timezone-aware window. Every
 commit query is pinned to one captured default-branch head. GitHub does not
 expose the arrival time of a direct push, so that distinction is shown in the
-bounded evidence rather than guessed. A configured generic Herdr agent receives
+bounded evidence rather than guessed. A PR merge identity comes from the pull
+response when available, or from the matching GitHub merged-event `commit_id`
+when the configured API omits it; its source is retained and no branch or PR head
+is substituted. A configured generic Herdr agent receives
 the delivery projection and a read-only local snapshot, then returns bounded
 shipped summaries and attributed lessons. The exact escaped JSON is retained in
 the persisted prompt and hashed in the action snapshot. Publication rejects

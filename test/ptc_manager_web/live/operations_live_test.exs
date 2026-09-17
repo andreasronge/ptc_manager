@@ -119,6 +119,13 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       assert has_element?(view, "#queued-action-#{context.priority_action.id}", "Heavy work")
       assert has_element?(view, "#queued-action-#{context.planning_action.id}", "Heavy work")
       assert has_element?(view, "#queued-action-#{context.daily_action.id}", "Daily update")
+
+      assert has_element?(
+               view,
+               "#queued-action-#{context.daily_action.id}",
+               "github_pull_request_merge_pending"
+             )
+
       assert has_element?(view, "#queued-job-#{context.queued_job.id}", "Implementation")
       assert has_element?(view, "#queued-job-#{context.queued_job.id}", "3 review passes")
 
@@ -434,6 +441,13 @@ defmodule PtcManagerWeb.OperationsLiveTest do
         9_006,
         DateTime.add(now, 2, :microsecond)
       )
+
+    daily_action =
+      daily_action
+      |> AgentAction.changeset(%{
+        last_error: "Planning source snapshot pending: :github_pull_request_merge_pending"
+      })
+      |> Repo.update!()
 
     {:ok, planning_run} =
       Operations.create_agent_run(%{

@@ -12,6 +12,7 @@ defmodule PtcManager.DailyDigests.Evidence do
   @max_direct_commits 50
   @max_manifest_bytes 60_000
   @max_capture_attempts 3
+  @max_issue_event_pages 3
 
   def fetch(%Repository{} = repository, %DailyDigest{} = digest) do
     client = Application.get_env(:ptc_manager, :daily_digest_github_client, Client)
@@ -94,7 +95,7 @@ defmodule PtcManager.DailyDigests.Evidence do
 
     case client.get_json("#{base}/pulls?#{query}") do
       {:ok, items} when is_list(items) ->
-        with {:ok, window_items} <- pull_requests_in_window(items, branch, digest) do
+        with {:ok, window_items} <- pull_requests_in_window(client, base, items, branch, digest) do
           # The closed-PR feed is ordered by mutable updated_at. A concurrent
           # update can move one PR across page boundaries, so collapse repeats
           # before enforcing limits or freezing provenance.
@@ -277,9 +278,9 @@ defmodule PtcManager.DailyDigests.Evidence do
   defp body_coverage(%{"body" => nil}, _coverage), do: "none_written"
   defp body_coverage(_pull, coverage), do: to_string(coverage)
 
-  defp pull_requests_in_window(items, branch, digest) do
+  defp pull_requests_in_window(client, base, items, branch, digest) do
     Enum.reduce_while(items, {:ok, []}, fn item, {:ok, included} ->
-      case normalize_pull_request(item, branch, digest) do
+      case normalize_pull_request(client, base, item, branch, digest) do
         {:ok, nil} -> {:cont, {:ok, included}}
         {:ok, pull} -> {:cont, {:ok, [pull | included]}}
         {:error, reason} -> {:halt, {:error, reason}}
@@ -291,13 +292,16 @@ defmodule PtcManager.DailyDigests.Evidence do
     end
   end
 
-  defp normalize_pull_request(%{"merged_at" => nil}, _branch, _digest), do: {:ok, nil}
+  defp normalize_pull_request(_client, _base, %{"merged_at" => nil}, _branch, _digest),
+    do: {:ok, nil}
 
   # The window decides first. The scan reads pages ordered by a mutable
   # updated_at, so it sees pull requests merged long before this digest covers,
   # and holding one of those to the evidence this digest needs failed the whole
   # day over a row it was never going to report on.
   defp normalize_pull_request(
+         client,
+         base,
          %{"number" => number, "merged_at" => merged_at, "base" => %{"ref" => branch}} = pull,
          branch,
          digest
@@ -306,7 +310,7 @@ defmodule PtcManager.DailyDigests.Evidence do
     case DateTime.from_iso8601(merged_at) do
       {:ok, merged_at_dt, _offset} ->
         if in_window?(merged_at_dt, digest),
-          do: merged_pull_request(pull, number, merged_at, branch),
+          do: merged_pull_request(client, base, pull, number, merged_at, branch),
           else: {:ok, nil}
 
       _invalid ->
@@ -314,38 +318,125 @@ defmodule PtcManager.DailyDigests.Evidence do
     end
   end
 
-  defp normalize_pull_request(_pull, _branch, _digest),
+  defp normalize_pull_request(_client, _base, _pull, _branch, _digest),
     do: {:error, :unexpected_github_pull_request}
 
-  # Inside the window the merge commit is evidence the digest cannot do without,
-  # so a pull request missing one still stops the scan. GitHub computes that sha
-  # after recording the merge, though, so a pull request merged as the scan
-  # started is briefly missing one and is worth asking about again; anything
-  # else in its place is malformed and asking again would not help.
-  defp merged_pull_request(pull, number, merged_at, branch) do
-    case Map.get(pull, "merge_commit_sha") do
-      sha when is_binary(sha) ->
-        if valid_sha?(sha) do
-          {:ok,
-           %{
-             "number" => number,
-             "title" => bounded(pull["title"], 300),
-             "body" => PullRequestBody.extract(pull["body"]),
-             "html_url" => pull["html_url"],
-             "merged_at" => merged_at,
-             "merge_commit_sha" => sha,
-             "head_sha" => captured_pull_head(pull),
-             "base_ref" => branch
-           }}
-        else
-          {:error, :unexpected_github_pull_request}
-        end
+  # Explicit null still means GitHub has not finished a merge. An absent field is
+  # different: API versions can omit it permanently, so resolve it from the
+  # merged issue event, whose commit_id and timestamp identify the exact merge.
+  defp merged_pull_request(client, base, pull, number, merged_at, branch) do
+    case Map.fetch(pull, "merge_commit_sha") do
+      {:ok, sha} when is_binary(sha) ->
+        normalize_merged_pull_request(pull, number, merged_at, branch, sha, "pull_request")
 
-      nil ->
+      {:ok, nil} ->
         {:error, :github_pull_request_merge_pending}
 
-      _invalid ->
+      {:ok, _invalid} ->
         {:error, :unexpected_github_pull_request}
+
+      :error ->
+        resolve_missing_merge_commit(client, base, pull, number, merged_at, branch)
+    end
+  end
+
+  defp resolve_missing_merge_commit(client, base, pull, number, merged_at, branch) do
+    case client.get_json("#{base}/pulls/#{number}") do
+      {:ok, detail} when is_map(detail) ->
+        case Map.fetch(detail, "merge_commit_sha") do
+          {:ok, sha} when is_binary(sha) ->
+            normalize_merged_pull_request(
+              pull,
+              number,
+              merged_at,
+              branch,
+              sha,
+              "pull_request_detail"
+            )
+
+          {:ok, nil} ->
+            {:error, :github_pull_request_merge_pending}
+
+          {:ok, _invalid} ->
+            {:error, :unexpected_github_pull_request}
+
+          :error ->
+            fetch_merge_event(client, base, pull, number, merged_at, branch, 1)
+        end
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_github_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_merge_event(_client, _base, _pull, _number, _merged_at, _branch, page)
+       when page > @max_issue_event_pages,
+       do: {:error, :github_pull_request_merge_identity_unavailable}
+
+  defp fetch_merge_event(client, base, pull, number, merged_at, branch, page) do
+    case client.get_json("#{base}/issues/#{number}/events?per_page=100&page=#{page}") do
+      {:ok, events} when is_list(events) ->
+        case Enum.find(events, &(&1["event"] == "merged")) do
+          %{"commit_id" => sha, "created_at" => event_at}
+          when is_binary(sha) and is_binary(event_at) ->
+            with :ok <- same_instant(event_at, merged_at) do
+              normalize_merged_pull_request(
+                pull,
+                number,
+                merged_at,
+                branch,
+                sha,
+                "issue_event.merged.commit_id"
+              )
+            end
+
+          nil when length(events) == 100 ->
+            fetch_merge_event(client, base, pull, number, merged_at, branch, page + 1)
+
+          nil ->
+            {:error, :github_pull_request_merge_identity_unavailable}
+
+          _malformed ->
+            {:error, :unexpected_github_pull_request}
+        end
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_github_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp normalize_merged_pull_request(pull, number, merged_at, branch, sha, source) do
+    if valid_sha?(sha) do
+      {:ok,
+       %{
+         "number" => number,
+         "title" => bounded(pull["title"], 300),
+         "body" => PullRequestBody.extract(pull["body"]),
+         "html_url" => pull["html_url"],
+         "merged_at" => merged_at,
+         "merge_commit_sha" => sha,
+         "merge_commit_source" => source,
+         "head_sha" => captured_pull_head(pull),
+         "base_ref" => branch
+       }}
+    else
+      {:error, :unexpected_github_pull_request}
+    end
+  end
+
+  defp same_instant(left, right) do
+    with {:ok, left, _offset} <- DateTime.from_iso8601(left),
+         {:ok, right, _offset} <- DateTime.from_iso8601(right),
+         true <- DateTime.compare(left, right) == :eq do
+      :ok
+    else
+      _mismatch -> {:error, :unexpected_github_pull_request}
     end
   end
 

@@ -116,7 +116,12 @@ defmodule PtcManagerWeb.DailyDigestLive do
         "This update was cancelled. Its record is retained in Operations."
 
       "failed" ->
-        "The retained agent output can be inspected from Operations."
+        digest.agent_action.last_error ||
+          "The retained agent output can be inspected from Operations."
+
+      state when state in ["queued", "pending"] ->
+        digest.agent_action.last_error ||
+          "This page will update automatically when PtcManager has validated and rendered the agent's structured report."
 
       _ ->
         "This page will update automatically when PtcManager has validated and rendered the agent's structured report."

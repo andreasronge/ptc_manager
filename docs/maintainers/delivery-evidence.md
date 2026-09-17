@@ -18,6 +18,13 @@ a second GitHub scan. The window is half-open, at most 31 days, and must end
 no later than the supplied observation time. PRs are selected by GitHub
 `merged_at`; local publications only enrich them. Direct commits remain a
 separate family. Their committer timestamps are **not** push-arrival timestamps.
+The merge identity comes from `merge_commit_sha` when the pull-request response
+provides it. When the configured API version omits that field from both list and
+detail responses, capture uses the matching `merged` issue event's `commit_id`
+and records that source in `merge_commit_source`; it never substitutes the PR
+head or current default-branch head. An explicit null remains a transient
+merge-pending result. Missing or malformed merged-event identity is terminal,
+while endpoint transport failures retain the action's bounded retry schedule.
 The projection validates repository URLs, base branch, merge identities, times,
 counts and duplicate selection entries. The selector reads and validates the
 default-branch head before and after the complete PR/direct-commit capture.
