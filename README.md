@@ -304,21 +304,23 @@ page shows the waiting or running phase, timings, success rate, percentiles, and
 peak memory. If the coordinator is unavailable in an explicitly managed pane,
 the wrapper exits with status 75 instead of silently bypassing the limit.
 
-Linux cgroup-v2 containment is optional and off unless
-`PTC_OPERATION_CGROUPS=true`. The checked-in Herdr systemd unit delegates only
-the memory and process controllers. Its launcher keeps the Herdr server in a
-separate leaf; each managed pane then receives an agent memory boundary and
-each coordinated command a child cgroup. That makes unwrapped agent commands
-remain bounded and lets PtcManager measure the complete command process tree.
+Linux production releases enable cgroup-v2 containment by default;
+`PTC_OPERATION_CGROUPS=false` is the explicit escape hatch. The checked-in Herdr
+systemd unit delegates only the memory and process controllers. Its launcher
+keeps the Herdr server in a separate leaf; each managed pane then receives an
+agent memory boundary and each coordinated command a child cgroup. That makes
+unwrapped agent commands remain bounded and lets PtcManager measure the complete
+command process tree.
 If a wrapper or worker disappears, the broker first fences the stale attempt,
 then the root-owned bounded recovery helper terminates that exact child cgroup
 before releasing its operation slot. Waiting wrappers send heartbeats and are
 cancelled when they disappear, so abandoned queue rows cannot consume capacity.
 When cgroup containment is disabled, crash recovery deliberately keeps the slot
-fenced for maintainer attention because wrapper disappearance cannot prove that
-its child process tree stopped.
-Enable this only after installing the versioned Herdr unit, launcher, and
-sourceable agent-context helper. It is never enabled on the Mac.
+fenced for a grace period so a delayed heartbeat can restore the live operation;
+it then enters maintenance because wrapper disappearance cannot prove that its
+child process tree stopped. The production default requires the versioned Herdr
+unit, launcher, and sourceable agent-context helper installed by deployment. It
+is never enabled by default on the Mac.
 
 The deterministic state-machine tests run in the normal suite. A sub-second
 socket/process integration test is kept out of the default suite and can be run

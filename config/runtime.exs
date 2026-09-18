@@ -187,7 +187,9 @@ config :ptc_manager,
       "PTC_OPERATION_CONTEXT_DIR",
       "/var/lib/ptc_manager-worker/agent-results/operation-contexts"
     ),
-  resource_operation_cgroups: System.get_env("PTC_OPERATION_CGROUPS", "false") == "true",
+  resource_operation_cgroups:
+    System.get_env("PTC_OPERATION_CGROUPS", if(config_env() == :prod, do: "true", else: "false")) ==
+      "true",
   resource_operation_agent_context:
     System.get_env(
       "PTC_OPERATION_AGENT_CONTEXT",

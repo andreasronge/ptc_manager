@@ -23,8 +23,12 @@ defmodule PtcManager.ResourceOperationRecovery do
     recover_starting_lock(operation)
   end
 
+  # A heartbeat can be delayed by the same transient database contention that
+  # moved the operation into recovery_pending. Without a cgroup we cannot
+  # prove the process tree stopped, so keep the slot fenced and give the live
+  # wrapper time to heartbeat itself back to running before escalating.
   def recover(%ResourceOperation{}),
-    do: {:error, :operation_recovery_requires_cgroup_containment}
+    do: {:retry, :operation_recovery_requires_cgroup_containment}
 
   defp recover_starting_lock(%ResourceOperation{slot_number: slot_number} = operation)
        when is_integer(slot_number) and slot_number > 0 do
