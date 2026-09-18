@@ -22,7 +22,12 @@ defmodule PtcManager.GitHub.Poller do
       task =
         Task.Supervisor.async_nolink(
           PtcManager.TaskSupervisor,
-          &Sync.sync_enabled_repositories/0
+          fn ->
+            PtcManager.DatabaseDiagnostics.with_context(
+              "github_sync",
+              &Sync.sync_enabled_repositories/0
+            )
+          end
         )
 
       {:noreply, %{state | task_ref: task.ref}}

@@ -11,7 +11,7 @@ defmodule PtcManager.Herdr.Poller do
   @impl true
   def init(:ok) do
     state = %{task_ref: nil, timer_ref: nil}
-    {:ok, PollerWake.schedule(state, enabled?(), :sync, 0)}
+    {:ok, PollerWake.schedule(state, enabled?(), :sync, initial_delay())}
   end
 
   @impl true
@@ -19,7 +19,11 @@ defmodule PtcManager.Herdr.Poller do
     state = PollerWake.clear_timer(state)
 
     if enabled?() do
-      task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &Sync.sync/0)
+      task =
+        Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
+          PtcManager.DatabaseDiagnostics.with_context("herdr_sync", &Sync.sync/0)
+        end)
+
       {:noreply, %{state | task_ref: task.ref}}
     else
       {:noreply, state}
@@ -45,4 +49,5 @@ defmodule PtcManager.Herdr.Poller do
 
   defp enabled?, do: PtcManager.OperationalMode.reconciliation_allowed?() and interval() > 0
   defp interval, do: Application.get_env(:ptc_manager, :herdr_sync_interval_ms, 0)
+  defp initial_delay, do: div(interval(), 2)
 end

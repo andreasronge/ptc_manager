@@ -650,6 +650,42 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert helper =~ "exit 74"
   end
 
+  test "remote deployment verifies cgroups and emits bounded failure diagnostics" do
+    script = File.read!(@remote_script)
+    context = File.read!(Path.join(@project_root, "deploy/ptc-manager-agent-context"))
+    runtime = File.read!(Path.join(@project_root, "config/runtime.exs"))
+
+    assert script =~ "verify_operation_cgroup_prerequisites"
+    assert script =~ ~s(if [ "$configured_operation_cgroups" = true ])
+    assert script =~ "Operation cgroup prerequisites passed"
+    assert script =~ "deploy/ptc_manager-herdr.service"
+    assert script =~ "/etc/systemd/system/ptc_manager-herdr.service"
+    assert script =~ "configured_operation_wrapper"
+    assert script =~ "configured_operation_agent_context"
+    assert script =~ "configured_operation_recovery_command"
+    assert script =~ "configured_operation_recovery_helper"
+
+    assert script =~
+             "production deployment requires the versioned operation wrapper, context, recovery command, and helper paths"
+
+    assert script =~
+             "Skipping operation cgroup prerequisite check because PTC_OPERATION_CGROUPS=false"
+
+    assert script =~ "Herdr launcher is not isolated in its delegated server leaf"
+    assert script =~ "deployment_diagnostics"
+    assert script =~ "=== PtcManager deployment diagnostics ==="
+    assert script =~ ~s(journalctl -u "$service_name" -n 160)
+    assert script =~ "pragma journal_mode; pragma quick_check;"
+    assert script =~ "=== end deployment diagnostics ==="
+
+    assert context =~ "ptc-manager-agent-context: $1"
+    assert context =~ "membership=$ptc_cgroup_relative"
+    assert context =~ "cannot move pane shell $$"
+    assert runtime =~ ~S|config_env() == :prod and :os.type() == {:unix, :linux}|
+    assert runtime =~ ~S|env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default)|
+    assert runtime =~ ~S|env_default.("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo")|
+  end
+
   test "deployment failure policy classifies the effect boundary" do
     assert policy_for("swapping_pre_effect") == "restore_snapshot"
     assert policy_for("post_effect") == "preserve_current"

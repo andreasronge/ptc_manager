@@ -322,6 +322,14 @@ child process tree stopped. The production default requires the versioned Herdr
 unit, launcher, and sourceable agent-context helper installed by deployment. It
 is never enabled by default on the Mac.
 
+SQLite permits one writer. High-frequency Herdr and maintainer-action work is
+phase-shifted, and only one housekeeping poller runs shared action expiry and
+cleanup work. Queries that spend at least one second waiting, and transactions
+that hold the writer slot for at least one second, emit bounded warnings with
+their workload, process identity, timings, and result class; SQL text and
+parameters are not included. Set `PTC_DATABASE_SLOW_QUERY_MS` to tune that
+diagnostic threshold.
+
 The deterministic state-machine tests run in the normal suite. A sub-second
 socket/process integration test is kept out of the default suite and can be run
 explicitly:
@@ -1535,6 +1543,18 @@ Operations. The deployment canary does not invoke an external agent. The task
 verifies `/health` in canary mode,
 removes the persistent systemd maintenance override, and makes exact canary
 activation its final transition. Only then do ordinary queues resume.
+
+When operation cgroups are enabled, deployment verifies before the release swap
+that the Herdr service has the delegated memory and process controllers, that
+its launcher is in the isolated server leaf, and that the operation context and
+recovery helpers are installed.
+The managed deployment owns their default paths and rejects production path
+overrides, so its prerequisite check always verifies the same versioned files
+that it installed.
+Any deployment failure prints a bounded diagnostic bundle before rollback or
+forward repair: deployment phase and commit, coordinator and worker status,
+health output, SQLite quick-check/WAL state, delegated cgroup layout, and recent
+coordinator and worker journal lines. The bundle never prints environment files.
 
 Before the canary starts, a failure can safely restore both the previous
 release and the SQLite backup. The canary itself is the effect boundary because

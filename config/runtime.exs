@@ -118,6 +118,9 @@ pr_reconcile_enabled =
 
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
+operation_cgroups_default =
+  if config_env() == :prod and :os.type() == {:unix, :linux}, do: "true", else: "false"
+
 implementation_agent_kind = System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex")
 
 implementation_agent_args =
@@ -149,6 +152,8 @@ agent_profiles =
 
 config :ptc_manager,
   operational_mode: operational_mode,
+  database_slow_query_ms:
+    System.get_env("PTC_DATABASE_SLOW_QUERY_MS", "1000") |> String.to_integer(),
   demo_mode: demo_mode,
   github_read_token: if(demo_mode, do: nil, else: System.get_env("GITHUB_READ_TOKEN")),
   github_sync_interval_ms: github_sync_interval_ms,
@@ -181,24 +186,23 @@ config :ptc_manager,
       )
     ),
   resource_operation_wrapper:
-    System.get_env("PTC_OPERATION_WRAPPER", "/usr/local/bin/ptc-operation"),
+    env_default.("PTC_OPERATION_WRAPPER", "/usr/local/bin/ptc-operation"),
   resource_operation_context_dir:
     System.get_env(
       "PTC_OPERATION_CONTEXT_DIR",
       "/var/lib/ptc_manager-worker/agent-results/operation-contexts"
     ),
   resource_operation_cgroups:
-    System.get_env("PTC_OPERATION_CGROUPS", if(config_env() == :prod, do: "true", else: "false")) ==
-      "true",
+    env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default) == "true",
   resource_operation_agent_context:
-    System.get_env(
+    env_default.(
       "PTC_OPERATION_AGENT_CONTEXT",
       "/usr/local/libexec/ptc-manager-agent-context"
     ),
   resource_operation_recovery_command:
-    System.get_env("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo"),
+    env_default.("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo"),
   resource_operation_recovery_helper:
-    System.get_env(
+    env_default.(
       "PTC_OPERATION_RECOVERY_HELPER",
       "/usr/local/bin/ptc-manager-operation-recover"
     ),
