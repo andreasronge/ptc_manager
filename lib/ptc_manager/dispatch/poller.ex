@@ -17,7 +17,13 @@ defmodule PtcManager.Dispatch.Poller do
   @impl true
   def handle_info(:dispatch, %{task_ref: nil} = state) do
     if enabled?() do
-      task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &Dispatch.run_once/0)
+      task =
+        PtcManager.DatabaseDiagnostics.async_nolink(
+          PtcManager.TaskSupervisor,
+          "dispatch",
+          &Dispatch.run_once/0
+        )
+
       {:noreply, %{state | task_ref: task.ref}}
     else
       {:noreply, state}

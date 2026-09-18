@@ -14,8 +14,9 @@ defmodule PtcManager.PublicationStatusPoller do
   def handle_info(:reconcile_pr, %{task_ref: nil} = state) do
     if enabled?() do
       task =
-        Task.Supervisor.async_nolink(
+        PtcManager.DatabaseDiagnostics.async_nolink(
           PtcManager.TaskSupervisor,
+          "publication_status_reconciliation",
           &PublicationStatusReconciler.run_once/0
         )
 

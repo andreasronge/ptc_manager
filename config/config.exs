@@ -24,10 +24,17 @@ config :ptc_manager, Oban,
      ]}
   ]
 
-# Writers wait for SQLite's lock instead of failing after the 2 s default; the
-# console's pollers commit every few seconds, a failed write drops the
-# connection, and a swapping host can hold a commit for seconds.
-config :ptc_manager, PtcManager.Repo, busy_timeout: 5_000
+# Writers wait for SQLite's lock instead of failing after the 2 s default. The
+# connection queue tolerates the same bounded delay so a burst larger than the
+# pool is not rejected while the current writer can still finish. The request
+# deadline covers the queue target after its one adaptive doubling, the SQLite
+# writer wait, and cleanup margin.
+config :ptc_manager, PtcManager.Repo,
+  busy_timeout: 15_000,
+  queue_target: 15_000,
+  queue_interval: 2_000,
+  timeout: 50_000
+
 config :ptc_manager, :database_slow_query_ms, 1_000
 
 config :ptc_manager,
