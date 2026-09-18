@@ -393,9 +393,17 @@ defmodule PtcManager.AutoImplementationTest do
              })
   end
 
-  test "dispatch refuses a fresh dependency projection that no longer matches" do
+  test "dispatch refuses when a completed native blocker is reopened remotely" do
     repository = repository_fixture(%{auto_fix_issues: true})
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    issue_dependency_fixture(issue, %{
+      blocking_repository: repository,
+      blocking_issue_number: 999,
+      blocking_state: "closed",
+      blocking_state_reason: "completed"
+    })
+
     {:ok, job} = Operations.auto_approve_issue(issue.id)
     job = Repo.preload(job, [:approval, :repository, :issue])
 
@@ -406,7 +414,9 @@ defmodule PtcManager.AutoImplementationTest do
         %{
           repository_full_name:
             String.downcase("#{repository.github_owner}/#{repository.github_name}"),
-          number: 999
+          number: 999,
+          state: "open",
+          state_reason: nil
         }
       ])
 
