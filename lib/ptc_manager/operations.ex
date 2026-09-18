@@ -3597,6 +3597,14 @@ defmodule PtcManager.Operations do
   def dependencies_resolved?(%Issue{} = issue),
     do: issue_dependencies_resolved(Repo, issue) == :ok
 
+  @doc false
+  def dependencies_resolved?(repo, %Issue{} = issue),
+    do: issue_dependencies_resolved(repo, issue) == :ok
+
+  @doc "Checks that a fresh GitHub snapshot names the same projected dependencies."
+  def dependency_projection_matches?(%Issue{} = issue, remote_issue) when is_map(remote_issue),
+    do: issue_dependency_projection_matches(Repo, issue, remote_issue) == :ok
+
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 

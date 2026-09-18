@@ -105,6 +105,92 @@ defmodule PtcManager.AutoImplementationTest do
     assert Repo.aggregate(Job, :count) == 0
   end
 
+  test "unresolved native dependencies prevent admission and automatic eligibility" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    blocker = issue_fixture(repository)
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    issue_dependency_fixture(issue, %{
+      blocking_issue: blocker,
+      blocking_repository: repository
+    })
+
+    assert AutoImplementation.reconcile(repository.id) == []
+    assert {:error, :issue_dependencies_unresolved} = AutoImplementation.eligible(Repo, issue)
+    assert {:error, :issue_dependencies_unresolved} = Operations.auto_approve_issue(issue.id)
+  end
+
+  test "dependency projection failures and explicit holds prevent admission" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+
+    for attrs <- [
+          %{dependencies_projected: false},
+          %{dependency_overflow: true},
+          %{dependency_unknown_count: 1}
+        ] do
+      issue = issue_fixture(repository, Map.merge(%{workflow_label: "ptc:ready"}, attrs))
+      assert AutoImplementation.reconcile(repository.id, issue.number) == []
+    end
+
+    held = issue_fixture(repository, %{workflow_label: "ptc:blocked"})
+
+    issue_dependency_fixture(held, %{
+      blocking_repository: repository,
+      blocking_issue_number: 919,
+      blocking_state: "closed",
+      blocking_state_reason: "completed"
+    })
+
+    assert AutoImplementation.reconcile(repository.id, held.number) == []
+
+    assert Repo.aggregate(Job, :count) == 0
+  end
+
+  test "repository sync admits a ready dependent after its native blocker completes" do
+    repository =
+      repository_fixture(%{
+        auto_fix_issues: true,
+        github_owner: "example",
+        github_name: "project"
+      })
+
+    blocker = remote_issue(920, "Build the prerequisite", "open", nil)
+
+    dependent =
+      remote_issue(921, "Use the prerequisite", "open", nil)
+      |> Map.put("blocked_by", [native_blocker(blocker)])
+
+    Process.put(:auto_fix_remote, {:ok, [blocker, dependent]})
+    assert {:ok, _} = PtcManager.GitHub.Sync.sync_repository(repository, client: IssueClient)
+
+    assert [%Job{issue_id: first_issue_id}] = Repo.all(Job)
+    assert Repo.get_by!(Issue, repository_id: repository.id, number: 920).id == first_issue_id
+
+    completed = remote_issue(920, "Build the prerequisite", "closed", "completed")
+    dependent = Map.put(dependent, "blocked_by", [native_blocker(completed)])
+    Process.put(:auto_fix_remote, {:ok, [dependent]})
+    Process.put(:auto_fix_remote_single, {:ok, completed})
+
+    assert {:ok, _} = PtcManager.GitHub.Sync.sync_repository(repository, client: IssueClient)
+    dependent_issue = Repo.get_by!(Issue, repository_id: repository.id, number: 921)
+    assert dependent_issue.workflow_label == "ptc:ready"
+    assert Repo.get_by!(Job, issue_id: dependent_issue.id)
+  end
+
+  test "a blocker closed as not planned does not admit its ready dependent" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    issue_dependency_fixture(issue, %{
+      blocking_repository: repository,
+      blocking_issue_number: 930,
+      blocking_state: "closed",
+      blocking_state_reason: "not_planned"
+    })
+
+    assert AutoImplementation.reconcile(repository.id) == []
+  end
+
   test "daily budget survives failed jobs and applies across synchronizations" do
     repository = repository_fixture(%{auto_fix_issues: true})
     for _ <- 1..6, do: issue_fixture(repository, %{workflow_label: "ptc:ready"})
@@ -294,15 +380,60 @@ defmodule PtcManager.AutoImplementationTest do
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
     {:ok, job} = Operations.auto_approve_issue(issue.id)
     job = Repo.preload(job, [:approval, :repository, :issue])
-    assert :ok = AutoImplementation.dispatch_allowed(job, issue)
+    remote = issue |> Map.from_struct() |> Map.put(:blocking_issues, [])
+    assert :ok = AutoImplementation.dispatch_allowed(job, remote)
 
     assert {:error, :issue_workflow_not_ready} =
-             AutoImplementation.dispatch_allowed(job, %{issue | workflow_label: nil})
+             AutoImplementation.dispatch_allowed(job, %{remote | workflow_label: nil})
 
     assert {:error, :issue_claimed} =
              AutoImplementation.dispatch_allowed(job, %{
-               issue
+               remote
                | github_assignees: %{"logins" => ["other"]}
              })
+  end
+
+  test "dispatch refuses a fresh dependency projection that no longer matches" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    {:ok, job} = Operations.auto_approve_issue(issue.id)
+    job = Repo.preload(job, [:approval, :repository, :issue])
+
+    remote =
+      issue
+      |> Map.from_struct()
+      |> Map.put(:blocking_issues, [
+        %{
+          repository_full_name:
+            String.downcase("#{repository.github_owner}/#{repository.github_name}"),
+          number: 999
+        }
+      ])
+
+    assert {:error, :issue_dependencies_unresolved} =
+             AutoImplementation.dispatch_allowed(job, remote)
+  end
+
+  defp remote_issue(number, title, state, state_reason) do
+    %{
+      "number" => number,
+      "title" => title,
+      "html_url" => "https://github.com/example/project/issues/#{number}",
+      "body" => "Issue body #{number}",
+      "state" => state,
+      "state_reason" => state_reason,
+      "updated_at" => "2026-09-18T09:21:00Z",
+      "labels" => [%{"name" => "ptc:ready"}],
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
+    }
+  end
+
+  defp native_blocker(blocker) do
+    blocker
+    |> Map.put("id", blocker["number"] + 10_000)
+    |> Map.put("node_id", "ISSUE_#{blocker["number"]}")
+    |> Map.put("repository", %{"full_name" => "example/project"})
   end
 end

@@ -26,7 +26,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
   <collection_protocol>
   A collection is a GitHub issue with sub-issues. PtcManager reads only native relations:
   - make an issue a sub-issue: `gh api -X POST repos/{owner}/{repo}/issues/{parent_number}/sub_issues -F sub_issue_id={child_database_id}`
-  - record an ordering: `gh api -X POST repos/{owner}/{repo}/issues/{blocked_number}/dependencies/blocked_by -F issue_id={blocker_database_id}`
+  - record an ordering with GitHub's native issue dependency, which PtcManager reads: `gh api -X POST repos/{owner}/{repo}/issues/{blocked_number}/dependencies/blocked_by -F issue_id={blocker_database_id}`; a `Blocked by #N` line in the body is only for people and is not read
   - a database id comes from `gh api repos/{owner}/{repo}/issues/{number} --jq .id`
   Every member must be in this repository, must not have sub-issues of its own, and while open must carry exactly one of `ptc:ready`, `ptc:blocked`, `ptc:needs-decision`. Blockers of a member must be members or closed issues; orderings must not form a cycle. The parent never carries `ptc:ready`.
   </collection_protocol>
