@@ -143,6 +143,7 @@ needrestart_candidate="/tmp/ptc-manager-needrestart.conf-${release_id}"
 resources_dropin_candidate="/tmp/ptc-manager-resources.conf-${release_id}"
 agent_context_candidate="/tmp/ptc-manager-agent-context-${release_id}"
 herdr_launch_candidate="/tmp/ptc-manager-herdr-launch-${release_id}"
+herdr_service_candidate="/tmp/ptc-manager-herdr-service-${release_id}"
 herdr_ssh_bridge_candidate="/tmp/ptc-manager-herdr-ssh-bridge-${release_id}"
 herdr_worker_bridge_candidate="/tmp/ptc-manager-herdr-worker-bridge-${release_id}"
 herdr_bridge_canary_candidate="/tmp/ptc-manager-herdr-bridge-canary-${release_id}"
@@ -180,7 +181,7 @@ cleanup_remote() {
     "$operation_recovery_candidate" \
     "$needrestart_candidate" \
     "$resources_dropin_candidate" \
-    "$agent_context_candidate" "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" \
+    "$agent_context_candidate" "$herdr_launch_candidate" "$herdr_service_candidate" "$herdr_ssh_bridge_candidate" \
     "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate" "$ssh_firewall_candidate" "$sudoers_candidate" \
     "$self_deploy_runner_candidate" "$self_deploy_service_candidate" \
     "$self_deploy_access_candidate" "$health_snapshot_candidate" \
@@ -1350,9 +1351,85 @@ rollback() {
   fi
 }
 
+deployment_diagnostics() {
+  echo "=== PtcManager deployment diagnostics ===" >&2
+  echo "release=$release_id phase=$deployment_phase commit=$source_commit_sha" >&2
+  echo "-- coordinator status --" >&2
+  sudo systemctl status "$service_name" --no-pager -l >&2 || true
+  echo "-- worker status --" >&2
+  sudo systemctl status ptc_manager-herdr.service --no-pager -l >&2 || true
+  echo "-- coordinator health --" >&2
+  if [ -n "$health_url" ]; then
+    curl --fail --silent --show-error --max-time 5 "$health_url" >&2 || true
+    echo >&2
+  else
+    echo "health URL was not resolved before failure" >&2
+  fi
+  echo "-- SQLite state --" >&2
+  if [ -n "$database_path" ] && sudo test -f "$database_path"; then
+    timeout 15 sudo sqlite3 -readonly "$database_path" \
+      "pragma journal_mode; pragma quick_check;" >&2 || true
+    sudo stat -c '%n size=%s owner=%U:%G mode=%a modified=%y' \
+      "$database_path" "${database_path}-wal" "${database_path}-shm" >&2 2>/dev/null || true
+  else
+    echo "database path was not resolved before failure" >&2
+  fi
+  echo "-- delegated cgroups --" >&2
+  sudo systemctl show ptc_manager-herdr.service \
+    -p ActiveState -p SubState -p MainPID -p Delegate -p ControlGroup --no-pager >&2 || true
+  sudo find /sys/fs/cgroup/system.slice/ptc_manager-herdr.service -maxdepth 3 \
+    -type d -print 2>/dev/null | head -n 80 >&2 || true
+  echo "-- recent coordinator journal --" >&2
+  sudo journalctl -u "$service_name" -n 160 --no-pager >&2 || true
+  echo "-- recent worker journal --" >&2
+  sudo journalctl -u ptc_manager-herdr.service -n 80 --no-pager >&2 || true
+  echo "=== end deployment diagnostics ===" >&2
+}
+
+verify_operation_cgroup_prerequisites() {
+  delegate=$(sudo systemctl show ptc_manager-herdr.service -p Delegate --value)
+  control_group=$(sudo systemctl show ptc_manager-herdr.service -p ControlGroup --value)
+  worker_pid=$(sudo systemctl show ptc_manager-herdr.service -p MainPID --value)
+
+  case "$delegate" in
+    yes|memory*|*pids*) ;;
+    *) echo "Herdr operation cgroups are not delegated: Delegate=$delegate" >&2; return 1 ;;
+  esac
+  case "$worker_pid" in *[!0-9]*|''|0) echo "Herdr cgroup check has no worker PID" >&2; return 1 ;; esac
+  [ -r "/proc/$worker_pid/cgroup" ] || {
+    echo "Herdr cgroup check cannot read /proc/$worker_pid/cgroup" >&2
+    return 1
+  }
+
+  membership=$(awk -F: '$1 == "0" {print $3}' "/proc/$worker_pid/cgroup")
+  case "$membership" in
+    "$control_group/server") ;;
+    *)
+      echo "Herdr launcher is not isolated in its delegated server leaf: membership=$membership control_group=$control_group" >&2
+      return 1
+      ;;
+  esac
+
+  subtree="/sys/fs/cgroup${control_group}/cgroup.subtree_control"
+  controllers=$(sudo cat "$subtree")
+  case " $controllers " in *" memory "*) ;; *) echo "Herdr cgroup is missing delegated memory controller" >&2; return 1 ;; esac
+  case " $controllers " in *" pids "*) ;; *) echo "Herdr cgroup is missing delegated pids controller" >&2; return 1 ;; esac
+  sudo test -r "$configured_operation_agent_context"
+  sudo test -x "$configured_operation_wrapper"
+  sudo test -x "$configured_operation_recovery_command"
+  sudo test -x "$configured_operation_recovery_helper"
+
+  echo "Operation cgroup prerequisites passed: control_group=$control_group membership=$membership controllers=$controllers"
+}
+
 finish() {
   exit_status=$?
   trap - EXIT HUP INT TERM
+
+  if [ "$exit_status" -ne 0 ]; then
+    deployment_diagnostics
+  fi
+
   failure_action=$("$failure_policy" "$deployment_phase")
 
   case "$failure_action" in
@@ -1430,6 +1507,7 @@ tar -xOf "$source_archive" deploy/ptc-manager-needrestart.conf >"$needrestart_ca
 tar -xOf "$source_archive" deploy/ptc_manager-resources.conf >"$resources_dropin_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-agent-context >"$agent_context_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-launch >"$herdr_launch_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-herdr.service >"$herdr_service_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-ssh-bridge >"$herdr_ssh_bridge_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-worker-bridge >"$herdr_worker_bridge_candidate"
 tar -xOf "$source_archive" deploy/ptc-manager-herdr-bridge-canary >"$herdr_bridge_canary_candidate"
@@ -1459,6 +1537,7 @@ chmod 0755 "$operation_recovery_candidate"
 chmod 0644 "$agent_context_candidate"
 chmod 0755 "$herdr_launch_candidate" "$herdr_ssh_bridge_candidate" \
   "$herdr_worker_bridge_candidate" "$herdr_bridge_canary_candidate" "$ssh_firewall_candidate"
+chmod 0644 "$herdr_service_candidate"
 chmod 0440 "$sudoers_candidate"
 chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
@@ -1513,6 +1592,16 @@ configured_gate_user=$(read_environment_setting PTC_PRE_PUBLICATION_RUN_AS_USER 
 configured_gate_home=$(read_environment_setting PTC_PRE_PUBLICATION_HOME $coordinator_environment_files)
 # shellcheck disable=SC2086
 configured_gate_mix_home=$(read_environment_setting PTC_PRE_PUBLICATION_MIX_HOME $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_operation_cgroups=$(read_environment_setting PTC_OPERATION_CGROUPS $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_operation_wrapper=$(read_environment_setting PTC_OPERATION_WRAPPER $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_operation_agent_context=$(read_environment_setting PTC_OPERATION_AGENT_CONTEXT $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_operation_recovery_command=$(read_environment_setting PTC_OPERATION_RECOVERY_COMMAND $coordinator_environment_files)
+# shellcheck disable=SC2086
+configured_operation_recovery_helper=$(read_environment_setting PTC_OPERATION_RECOVERY_HELPER $coordinator_environment_files)
 
 running_database_path=$(read_process_setting "$service_pid" DATABASE_PATH "")
 running_health_port=$(read_process_setting "$service_pid" PORT 4000)
@@ -1523,6 +1612,11 @@ running_worktree_root=$(read_process_setting "$service_pid" PTC_WORKTREE_ROOT ""
 configured_health_port=${configured_health_port:-4000}
 configured_health_snapshot_path=${configured_health_snapshot_path:-/var/lib/ptc_manager-output/ptc-health.json}
 configured_coordinator_session=${configured_coordinator_session:-default}
+configured_operation_cgroups=${configured_operation_cgroups:-true}
+configured_operation_wrapper=${configured_operation_wrapper:-/usr/local/bin/ptc-operation}
+configured_operation_agent_context=${configured_operation_agent_context:-/usr/local/libexec/ptc-manager-agent-context}
+configured_operation_recovery_command=${configured_operation_recovery_command:-/usr/bin/sudo}
+configured_operation_recovery_helper=${configured_operation_recovery_helper:-/usr/local/bin/ptc-manager-operation-recover}
 configured_gate_user=${configured_gate_user:-ptc-manager-gate}
 configured_gate_home=${configured_gate_home:-/var/lib/ptc_manager-gate}
 configured_gate_mix_home=${configured_gate_mix_home:-/opt/ptc-manager-gate-mix}
@@ -1531,6 +1625,19 @@ if [ "$configured_gate_user" != "ptc-manager-gate" ] ||
   [ "$configured_gate_home" != "/var/lib/ptc_manager-gate" ] ||
   [ "$configured_gate_mix_home" != "/opt/ptc-manager-gate-mix" ]; then
   echo "pre-publication gates must use the isolated ptc-manager-gate identity" >&2
+  exit 1
+fi
+
+case "$configured_operation_cgroups" in
+  true|false) ;;
+  *) echo "PTC_OPERATION_CGROUPS must be true or false when set" >&2; exit 1 ;;
+esac
+
+if [ "$configured_operation_wrapper" != /usr/local/bin/ptc-operation ] ||
+  [ "$configured_operation_agent_context" != /usr/local/libexec/ptc-manager-agent-context ] ||
+  [ "$configured_operation_recovery_command" != /usr/bin/sudo ] ||
+  [ "$configured_operation_recovery_helper" != /usr/local/bin/ptc-manager-operation-recover ]; then
+  echo "production deployment requires the versioned operation wrapper, context, recovery command, and helper paths" >&2
   exit 1
 fi
 
@@ -1733,6 +1840,8 @@ sudo install -o root -g root -m 0644 "$agent_context_candidate" \
   /usr/local/libexec/ptc-manager-agent-context
 sudo install -o root -g root -m 0755 "$herdr_launch_candidate" \
   /usr/local/bin/ptc-manager-herdr-launch
+sudo install -o root -g root -m 0644 "$herdr_service_candidate" \
+  /etc/systemd/system/ptc_manager-herdr.service
 sudo install -o root -g root -m 0755 "$herdr_ssh_bridge_candidate" \
   /usr/local/bin/ptc-manager-herdr-ssh-bridge
 sudo install -o root -g root -m 0755 "$herdr_worker_bridge_candidate" \
@@ -1867,6 +1976,11 @@ deployment_phase=service_stopped
 sudo systemctl stop "$service_name"
 ensure_no_managed_runs
 restart_worker_when_nothing_retained
+if [ "$configured_operation_cgroups" = true ]; then
+  verify_operation_cgroup_prerequisites
+else
+  echo "Skipping operation cgroup prerequisite check because PTC_OPERATION_CGROUPS=false"
+fi
 active_herdr_version=$(sudo -u ptc-manager-worker -H /usr/local/bin/herdr --version | awk '{print $NF}')
 echo "Running the managed Herdr SSH bridge canary..."
 sudo /usr/local/bin/ptc-manager-herdr-bridge-canary \

@@ -269,15 +269,21 @@ defmodule PtcManager.MaintainerActions do
     sync = Keyword.get(opts, :sync, ActionSync)
     lane = Keyword.get(opts, :lane, :any)
     resource_class = Keyword.get(opts, :resource_class, :any)
-    Operations.expire_agent_action_attempts()
 
-    if lane in [:planning, :any], do: reap_planning_worktrees()
+    if Keyword.get(opts, :housekeeping, true), do: run_housekeeping()
 
     case Operations.next_agent_action_sync_pending_for_lane(lane) do
       nil -> execute_next(adapter, sync, lane, resource_class)
       action -> reconcile_action(action, sync)
     end
     |> tap(&reconcile_collections/1)
+  end
+
+  @doc false
+  def run_housekeeping do
+    Operations.expire_agent_action_attempts()
+    reap_planning_worktrees()
+    :ok
   end
 
   # A finished action may have merged a member, handed off, or asked; the run

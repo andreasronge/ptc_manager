@@ -170,8 +170,8 @@ defmodule PtcManager.ResourceOperationsTest do
     assert {:ok, ^released} = ResourceOperations.finish(first.id, first.attempt_token)
   end
 
-  test "recovery without cgroup containment fails closed" do
-    assert {:error, :operation_recovery_requires_cgroup_containment} =
+  test "recovery without cgroup containment keeps the slot fenced for a retry" do
+    assert {:retry, :operation_recovery_requires_cgroup_containment} =
              ResourceOperationRecovery.recover(%ResourceOperation{wrapper_pid: 999_999})
   end
 

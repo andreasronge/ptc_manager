@@ -11,6 +11,7 @@ defmodule PtcManager.Application do
 
     children = [
       PtcManagerWeb.Telemetry,
+      PtcManager.DatabaseDiagnostics,
       PtcManager.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
@@ -51,9 +52,10 @@ defmodule PtcManager.Application do
 
   defp maintainer_action_supervisor do
     children =
-      for index <- 1..16 do
-        {PtcManager.MaintainerActions.Poller, lane: :planning, index: index}
-      end ++
+      [PtcManager.MaintainerActions.HousekeepingPoller] ++
+        for index <- 1..16 do
+          {PtcManager.MaintainerActions.Poller, lane: :planning, index: index}
+        end ++
         for index <- 1..16 do
           {PtcManager.MaintainerActions.Poller, lane: :writing, index: index}
         end

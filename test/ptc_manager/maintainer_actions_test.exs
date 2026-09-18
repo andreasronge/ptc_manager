@@ -2867,6 +2867,53 @@ defmodule PtcManager.MaintainerActionsTest do
     assert PtcManager.MaintainerActions.Poller.resource_class(:writing, 3) == "heavy"
   end
 
+  test "pollers stagger database work and schedule separate housekeeping" do
+    previous_light = Application.get_env(:ptc_manager, :light_agent_capacity)
+    previous_heavy = Application.get_env(:ptc_manager, :heavy_agent_capacity)
+    Application.put_env(:ptc_manager, :light_agent_capacity, 3)
+    Application.put_env(:ptc_manager, :heavy_agent_capacity, 2)
+
+    on_exit(fn ->
+      restore_test_env(:light_agent_capacity, previous_light)
+      restore_test_env(:heavy_agent_capacity, previous_heavy)
+    end)
+
+    assert PtcManager.MaintainerActions.Poller.initial_delay(:planning, 1, 5_000) == 0
+    assert PtcManager.MaintainerActions.Poller.initial_delay(:writing, 1, 5_000) == 500
+    assert PtcManager.MaintainerActions.Poller.initial_delay(:planning, 2, 5_000) == 1_000
+    assert PtcManager.MaintainerActions.Poller.initial_delay(:writing, 5, 5_000) == 4_500
+
+    assert PtcManager.MaintainerActions.HousekeepingPoller.initial_delay(5_000) == 1_250
+  end
+
+  test "repeated wakes preserve already scheduled action and housekeeping runs" do
+    action_timer = Process.send_after(self(), :action_timer, 60_000)
+    housekeeping_timer = Process.send_after(self(), :housekeeping_timer, 60_000)
+
+    on_exit(fn ->
+      Process.cancel_timer(action_timer)
+      Process.cancel_timer(housekeeping_timer)
+    end)
+
+    action_state = %{
+      lane: :writing,
+      index: 5,
+      task_ref: nil,
+      timer_ref: action_timer
+    }
+
+    housekeeping_state = %{task_ref: nil, timer_ref: housekeeping_timer}
+
+    assert {:noreply, ^action_state} =
+             PtcManager.MaintainerActions.Poller.handle_cast(:wake, action_state)
+
+    assert {:noreply, ^housekeeping_state} =
+             PtcManager.MaintainerActions.HousekeepingPoller.handle_cast(
+               :wake,
+               housekeeping_state
+             )
+  end
+
   test "resource-class pollers retain deterministic scheduling for versionless actions" do
     repository = repository_fixture()
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
