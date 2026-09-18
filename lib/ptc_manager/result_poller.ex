@@ -17,7 +17,11 @@ defmodule PtcManager.ResultPoller do
   def handle_info(:reconcile, %{task_ref: nil} = state) do
     if enabled?() do
       task =
-        Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &ResultReconciler.run_once/0)
+        PtcManager.DatabaseDiagnostics.async_nolink(
+          PtcManager.TaskSupervisor,
+          "result_reconciliation",
+          &ResultReconciler.run_once/0
+        )
 
       {:noreply, %{state | task_ref: task.ref}}
     else

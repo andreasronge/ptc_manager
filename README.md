@@ -328,7 +328,13 @@ cleanup work. Queries that spend at least one second waiting, and transactions
 that hold the writer slot for at least one second, emit bounded warnings with
 their workload, process identity, timings, and result class; SQL text and
 parameters are not included. Set `PTC_DATABASE_SLOW_QUERY_MS` to tune that
-diagnostic threshold.
+diagnostic threshold. In production, writers wait up to 15 seconds by default;
+set `PTC_DATABASE_BUSY_TIMEOUT_MS` to tune that wait and the connection queue's
+target. The queue is sampled every two seconds (or sooner for a shorter custom
+writer wait), and DBConnection may double its target before shedding load.
+`PTC_DATABASE_TIMEOUT_MS` therefore defaults to 50 seconds and must cover the
+doubled queue target, one complete SQLite writer wait, and five seconds for
+cleanup.
 
 The deterministic state-machine tests run in the normal suite. A sub-second
 socket/process integration test is kept out of the default suite and can be run

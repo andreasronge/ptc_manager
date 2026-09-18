@@ -24,7 +24,11 @@ defmodule PtcManager.DatabaseDiagnostics do
 
     Logger.info(
       "SQLite diagnostics attached: slow threshold=#{slow_ms()}ms, " <>
-        "busy timeout=#{repo_config(:busy_timeout, 0)}ms, pool size=#{repo_config(:pool_size, 1)}"
+        "busy timeout=#{repo_config(:busy_timeout, 0)}ms, " <>
+        "request timeout=#{repo_config(:timeout, 0)}ms, " <>
+        "queue target=#{repo_config(:queue_target, 0)}ms, " <>
+        "queue interval=#{repo_config(:queue_interval, 0)}ms, " <>
+        "pool size=#{repo_config(:pool_size, 1)}"
     )
 
     {:ok, nil}
@@ -59,12 +63,27 @@ defmodule PtcManager.DatabaseDiagnostics do
     end
   end
 
-  defp transaction_started(measurements, metadata) do
-    duration_ms = milliseconds(measurements[:total_time])
+  @doc "Starts a supervised task whose database telemetry carries a safe workload name."
+  def async_nolink(supervisor, name, operation)
+      when is_binary(name) and is_function(operation, 0) do
+    Task.Supervisor.async_nolink(supervisor, fn -> with_context(name, operation) end)
+  end
 
-    if duration_ms >= slow_ms() do
+  defp transaction_started(measurements, metadata) do
+    total_ms = milliseconds(measurements[:total_time])
+    queue_ms = milliseconds(measurements[:queue_time])
+    query_ms = milliseconds(measurements[:query_time])
+
+    if queue_ms >= slow_ms() do
       Logger.warning(
-        "SQLite writer acquisition was slow: duration_ms=#{duration_ms} " <>
+        "SQLite pool checkout was slow: queue_ms=#{queue_ms} total_ms=#{total_ms} " <>
+          "result=#{result_name(metadata[:result])} owner=#{owner()}"
+      )
+    end
+
+    if is_integer(measurements[:query_time]) and query_ms >= slow_ms() do
+      Logger.warning(
+        "SQLite writer acquisition was slow: query_ms=#{query_ms} queue_ms=#{queue_ms} " <>
           "result=#{result_name(metadata[:result])} owner=#{owner()}"
       )
     end

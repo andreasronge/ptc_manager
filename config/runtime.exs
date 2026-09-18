@@ -11,6 +11,28 @@ config :ptc_manager,
   health_snapshot_path:
     env_default.("PTC_HEALTH_OUT", "/var/lib/ptc_manager-output/ptc-health.json")
 
+if config_env() == :prod do
+  database_busy_timeout_ms =
+    env_default.("PTC_DATABASE_BUSY_TIMEOUT_MS", "15000") |> String.to_integer()
+
+  database_timeout_ms =
+    env_default.("PTC_DATABASE_TIMEOUT_MS", "50000") |> String.to_integer()
+
+  database_queue_interval_ms =
+    database_busy_timeout_ms |> div(4) |> min(2_000) |> max(1)
+
+  if database_busy_timeout_ms <= 0 or
+       database_timeout_ms < database_busy_timeout_ms * 3 + 5_000 do
+    raise "PTC_DATABASE_TIMEOUT_MS must cover DBConnection's doubled queue target, a positive PTC_DATABASE_BUSY_TIMEOUT_MS wait, and 5000"
+  end
+
+  config :ptc_manager, PtcManager.Repo,
+    busy_timeout: database_busy_timeout_ms,
+    queue_target: database_busy_timeout_ms,
+    queue_interval: database_queue_interval_ms,
+    timeout: database_timeout_ms
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

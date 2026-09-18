@@ -24,7 +24,10 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
         DatabaseDiagnostics.with_context("test_workload", fn ->
           DatabaseDiagnostics.handle_event(
             [:ptc_manager, :repo, :query],
-            %{total_time: System.convert_time_unit(2, :millisecond, :native)},
+            %{
+              total_time: System.convert_time_unit(2, :millisecond, :native),
+              query_time: System.convert_time_unit(2, :millisecond, :native)
+            },
             %{query: "begin", result: {:ok, %{command: :begin}}},
             nil
           )
@@ -58,12 +61,90 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
     refute log =~ "value ="
   end
 
+  test "labels supervised database workloads in their task process" do
+    log =
+      capture_log(fn ->
+        task =
+          DatabaseDiagnostics.async_nolink(
+            PtcManager.TaskSupervisor,
+            "result_reconciliation",
+            fn ->
+              DatabaseDiagnostics.handle_event(
+                [:ptc_manager, :repo, :query],
+                %{total_time: System.convert_time_unit(2, :millisecond, :native)},
+                %{query: "SELECT secret FROM jobs", source: "jobs", result: {:ok, %{}}},
+                nil
+              )
+            end
+          )
+
+        assert Task.await(task) == :ok
+      end)
+
+    assert log =~ "result_reconciliation"
+    assert log =~ ~s(source="jobs")
+    refute log =~ "SELECT secret"
+  end
+
+  test "production defaults keep the connection alive beyond the SQLite writer wait" do
+    repo_config =
+      "config/config.exs"
+      |> Config.Reader.read!(env: :prod)
+      |> Keyword.fetch!(:ptc_manager)
+      |> Keyword.fetch!(PtcManager.Repo)
+
+    assert repo_config[:busy_timeout] >= 15_000
+    assert repo_config[:queue_target] == repo_config[:busy_timeout]
+    assert repo_config[:queue_interval] <= div(repo_config[:busy_timeout], 4)
+    assert repo_config[:timeout] >= repo_config[:busy_timeout] * 3 + 5_000
+  end
+
+  test "production runtime pairs custom SQLite and connection timeouts" do
+    config =
+      read_production_runtime(%{
+        "PTC_DATABASE_BUSY_TIMEOUT_MS" => "23000",
+        "PTC_DATABASE_TIMEOUT_MS" => "74000"
+      })
+
+    repo_config = config |> Keyword.fetch!(:ptc_manager) |> Keyword.fetch!(PtcManager.Repo)
+    assert repo_config[:busy_timeout] == 23_000
+    assert repo_config[:queue_target] == 23_000
+    assert repo_config[:queue_interval] == 2_000
+    assert repo_config[:timeout] == 74_000
+  end
+
+  test "production runtime uses safe defaults for blank timeout variables" do
+    config =
+      read_production_runtime(%{
+        "PTC_DATABASE_BUSY_TIMEOUT_MS" => "",
+        "PTC_DATABASE_TIMEOUT_MS" => ""
+      })
+
+    repo_config = config |> Keyword.fetch!(:ptc_manager) |> Keyword.fetch!(PtcManager.Repo)
+    assert repo_config[:busy_timeout] == 15_000
+    assert repo_config[:queue_target] == 15_000
+    assert repo_config[:queue_interval] == 2_000
+    assert repo_config[:timeout] == 50_000
+  end
+
+  test "production runtime rejects a connection deadline that cannot honor the writer wait" do
+    assert_raise RuntimeError, ~r/must cover DBConnection's doubled queue target/, fn ->
+      read_production_runtime(%{
+        "PTC_DATABASE_BUSY_TIMEOUT_MS" => "15000",
+        "PTC_DATABASE_TIMEOUT_MS" => "49999"
+      })
+    end
+  end
+
   test "logs a failed writer acquisition without leaving an open transaction" do
     log =
       capture_log(fn ->
         DatabaseDiagnostics.handle_event(
           [:ptc_manager, :repo, :query],
-          %{total_time: System.convert_time_unit(5, :millisecond, :native)},
+          %{
+            total_time: System.convert_time_unit(5, :millisecond, :native),
+            query_time: System.convert_time_unit(5, :millisecond, :native)
+          },
           %{query: "begin", result: {:error, %Exqlite.Error{message: "database is locked"}}},
           nil
         )
@@ -79,6 +160,24 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
     assert log =~ "SQLite writer acquisition was slow"
     assert log =~ "Exqlite.Error"
     refute log =~ "SQLite transaction was slow"
+  end
+
+  test "reports pool checkout separately from SQLite writer acquisition" do
+    log =
+      capture_log(fn ->
+        DatabaseDiagnostics.handle_event(
+          [:ptc_manager, :repo, :query],
+          %{
+            total_time: System.convert_time_unit(7, :millisecond, :native),
+            queue_time: System.convert_time_unit(7, :millisecond, :native)
+          },
+          %{query: "begin", result: {:error, %DBConnection.ConnectionError{message: "busy"}}},
+          nil
+        )
+      end)
+
+    assert log =~ "SQLite pool checkout was slow"
+    refute log =~ "SQLite writer acquisition was slow"
   end
 
   test "a nested transaction preserves the outer transaction duration" do
@@ -115,5 +214,26 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
 
     assert log =~ "SQLite transaction was slow"
     assert length(Regex.scan(~r/SQLite transaction was slow/, log)) == 1
+  end
+
+  defp read_production_runtime(overrides) do
+    required = %{
+      "DATABASE_PATH" => "/tmp/ptc-manager-runtime-config-test.db",
+      "PTC_MANAGER_PASSWORD" => "runtime-config-password",
+      "SECRET_KEY_BASE" => String.duplicate("s", 64)
+    }
+
+    environment = Map.merge(required, overrides)
+    previous = Map.new(environment, fn {name, _value} -> {name, System.get_env(name)} end)
+
+    try do
+      Enum.each(environment, fn {name, value} -> System.put_env(name, value) end)
+      Config.Reader.read!("config/runtime.exs", env: :prod)
+    after
+      Enum.each(previous, fn
+        {name, nil} -> System.delete_env(name)
+        {name, value} -> System.put_env(name, value)
+      end)
+    end
   end
 end
