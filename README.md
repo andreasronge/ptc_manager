@@ -11,8 +11,9 @@ The console has six views:
 
 - **Planning** — the issue backlog grouped by what you can do next, with
   private summaries, the canonical `ptc:ready`, `ptc:blocked`, and
-  `ptc:needs-decision` labels, `Blocked by #<number>` dependencies, your own
-  triage labels, and the contextual issue actions;
+  `ptc:needs-decision` labels, GitHub's native issue dependencies, your own
+  triage labels, and the contextual issue actions. `ptc:ready` records approval
+  to implement; `ptc:blocked` is an explicit hold that no dependency resolves;
 - **Delivery** — the approval-to-merge Kanban fed by read-only GitHub check,
   status, draft, and mergeability signals, with **Fix**, **Fix and merge**, and
   **Cancel agent** actions and an **Approve for merge** decision bound to the
@@ -746,6 +747,9 @@ catalog contains:
 
 - **Prepare issue**, which rewrites or closes the issue and leaves exactly one
   of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
+  `ptc:ready` is approval to implement, while `ptc:blocked` is an explicit hold
+  that remains until a maintainer removes it. Ordering uses GitHub's native
+  issue dependencies; a `Blocked by #N` body line is only for people and is not read;
 - **Review issue**, which gives a configured Herdr agent a bootstrapped,
   disposable worktree in which it can run tests or create temporary regression
   tests, then asks it to challenge and improve issue readiness and apply the
@@ -1030,10 +1034,12 @@ work. In production the snapshot directory is owned by the coordinator beneath
 the sticky shared-output parent, so the worker can traverse and read it but
 cannot rewrite, rename, or replace it.
 
-For issue dependencies, GitHub remains authoritative. Maintainer actions write
-the canonical `Blocked by #<number>` marker into the dependent issue and apply
-`ptc:blocked`. GitHub synchronization projects those markers into local
-dependency rows for display and safety checks. An unresolved or unknown blocker
+For issue dependencies, GitHub remains authoritative. Ordering between issues
+uses GitHub's native blocked-by relation, which synchronization projects into
+local dependency rows for display and safety checks. A `Blocked by #N` line in
+an issue body is only for people and is not read. `ptc:ready` is the maintainer's
+approval to implement; `ptc:blocked` is an explicit hold that no dependency
+completion removes. An unresolved or unknown blocker
 prevents approval; if it appears after approval, dispatch cancels that stale job
 before starting an agent. An approval freezes the issue's title and body as the
 maintainer saw them: a comment or the console's own assignment after the
@@ -1042,10 +1048,10 @@ decision comment or a retry after an agent stopped does not cancel the job,
 while a changed title or body cancels it and asks for a fresh approval, and a
 label that no longer says ready, an assignment to someone else, or new
 sub-issues refuse dispatch as they refuse approval. The dashboard's card for
-the cancelled job says which in words. Closing every blocker does not
-auto-start the dependent
-issue: the dashboard asks the maintainer to run **Prepare issue** again and make
-a fresh approval decision. At most 100 dependency rows are projected per issue,
+the cancelled job says which in words. Closing every blocker makes a
+`ptc:ready` dependent eligible for automatic admission on the next successful
+repository synchronization, without changing its label. At most 100 dependency
+rows are projected per issue,
 and one repository sync performs at most 100 lookups for blockers that are not
 already known locally. An issue declaring more than 100 blockers gets a visible
 overflow warning and remains ineligible for approval until its dependency list
@@ -1087,8 +1093,11 @@ Under **Configuration**, each repository has **Automatically implement ready
 issues**, off by default. Enable it for `andreasronge/ptc_manager` to authorize
 implementation without a separate approval click for every issue. Other
 repositories remain off unless explicitly enabled. Anyone or any preparation
-agent with permission to apply `ptc:ready` can make an issue eligible under this
-policy. Merge and deployment approval rules are unchanged.
+agent with permission to apply `ptc:ready` can record the maintainer's approval
+to implement under this policy. Ordering uses GitHub's native issue dependency;
+`ptc:blocked` remains an explicit hold until a maintainer removes it, and body
+text such as `Blocked by #N` is not read. Merge and deployment approval rules
+are unchanged.
 
 After a successful GitHub synchronization, deterministic code admits open,
 unassigned `ptc:ready` issues with resolved dependencies and no conflicting

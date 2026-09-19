@@ -3597,6 +3597,14 @@ defmodule PtcManager.Operations do
   def dependencies_resolved?(%Issue{} = issue),
     do: issue_dependencies_resolved(Repo, issue) == :ok
 
+  @doc false
+  def dependencies_resolved?(repo, %Issue{} = issue),
+    do: issue_dependencies_resolved(repo, issue) == :ok
+
+  @doc "Checks that a fresh GitHub snapshot names the same projected dependencies."
+  def dependency_projection_matches?(%Issue{} = issue, remote_issue) when is_map(remote_issue),
+    do: issue_dependency_projection_matches(Repo, issue, remote_issue) == :ok
+
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -5287,22 +5295,23 @@ defmodule PtcManager.Operations do
        do: {:error, :issue_dependencies_unresolved}
 
   defp issue_dependency_projection_matches(repo, issue, remote) do
-    projected_keys =
+    projected_dependencies =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
       |> select(
         [dependency],
-        {dependency.blocking_repository_full_name, dependency.blocking_issue_number}
+        {dependency.blocking_repository_full_name, dependency.blocking_issue_number,
+         dependency.blocking_state, dependency.blocking_state_reason}
       )
       |> repo.all()
       |> Enum.sort()
 
-    remote_keys =
+    remote_dependencies =
       remote.blocking_issues
-      |> Enum.map(&{&1.repository_full_name, &1.number})
+      |> Enum.map(&{&1.repository_full_name, &1.number, &1.state, &1.state_reason})
       |> Enum.sort()
 
-    if projected_keys == remote_keys,
+    if projected_dependencies == remote_dependencies,
       do: :ok,
       else: {:error, :issue_dependencies_unresolved}
   end

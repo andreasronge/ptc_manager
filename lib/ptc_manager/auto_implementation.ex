@@ -52,7 +52,10 @@ defmodule PtcManager.AutoImplementation do
         with {:ok, pulls} <- PtcManager.Gateway.call(client, :list_open, [repository]),
              {:ok, _summary} <-
                PtcManager.Publications.sync_external_open_pull_requests(repository, pulls) do
-          query |> Repo.all() |> Enum.map(&Operations.auto_approve_issue(&1.id))
+          query
+          |> Repo.all()
+          |> Enum.filter(&Operations.dependencies_resolved?/1)
+          |> Enum.map(&Operations.auto_approve_issue(&1.id))
         else
           error ->
             Logger.warning(
@@ -81,6 +84,9 @@ defmodule PtcManager.AutoImplementation do
 
       issue.workflow_label != "ptc:ready" ->
         {:error, :issue_workflow_not_ready}
+
+      not Operations.dependencies_resolved?(repo, issue) ->
+        {:error, :issue_dependencies_unresolved}
 
       repo.exists?(
         from action in AgentAction,
@@ -118,6 +124,9 @@ defmodule PtcManager.AutoImplementation do
 
       remote.sub_issues["total"] > 0 ->
         {:error, :issue_is_collection}
+
+      not Operations.dependency_projection_matches?(job.issue, remote) ->
+        {:error, :issue_dependencies_unresolved}
 
       Issue.claimed_by_other?(remote, job.repository) ->
         {:error, :issue_claimed}
