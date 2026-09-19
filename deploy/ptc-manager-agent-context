@@ -7,11 +7,14 @@ ptc_context_fail() {
   return 1
 }
 
-ptc_context_path=$1
-ptc_context_id=$2
-ptc_agent_memory_high=$3
-ptc_agent_memory_max=$4
-ptc_operation_wrapper=$5
+# Dash does not expose arguments supplied to the `.` builtin. Prefer the
+# explicitly exported pane context while retaining positional arguments for
+# direct operator checks and older coordinators.
+ptc_context_path=${PTC_CONTEXT_PATH:-${1:-}}
+ptc_context_id=${PTC_CONTEXT_ID:-${2:-}}
+ptc_agent_memory_high=${PTC_AGENT_MEMORY_HIGH:-${3:-}}
+ptc_agent_memory_max=${PTC_AGENT_MEMORY_MAX:-${4:-}}
+ptc_operation_wrapper=${PTC_OPERATION_WRAPPER:-${5:-}}
 
 case "$ptc_context_id" in
   *[!A-Za-z0-9_-]*|'') ptc_context_fail "invalid PtcManager context id"; return 1 ;;
@@ -65,6 +68,8 @@ export PTC_OPERATION_WRAPPER="$ptc_operation_wrapper"
 export PTC_AGENT_CGROUP="$ptc_agent_cgroup"
 
 unset ptc_context_path ptc_context_id ptc_agent_memory_high ptc_agent_memory_max
-unset ptc_operation_wrapper ptc_cgroup_relative ptc_current_cgroup
+unset ptc_operation_wrapper PTC_CONTEXT_PATH PTC_CONTEXT_ID
+unset PTC_AGENT_MEMORY_HIGH PTC_AGENT_MEMORY_MAX
+unset ptc_cgroup_relative ptc_current_cgroup
 unset ptc_service_cgroup ptc_agent_cgroup ptc_agent_processes ptc_controllers
 unset -f ptc_context_fail 2>/dev/null || true

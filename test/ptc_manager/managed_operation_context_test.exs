@@ -181,8 +181,58 @@ defmodule PtcManager.ManagedOperationContextTest do
         environment: environment_path
       )
 
-    assert cgroup =~
-             "set -a && . '/protected/pane.env' && set +a && . '/usr/local/libexec/ptc-manager-agent-context'"
+    assert cgroup =~ "set -a && . '/protected/pane.env' && set +a && export"
+    assert cgroup =~ "PTC_CONTEXT_PATH='/protected/pane.json'"
+    assert cgroup =~ "PTC_CONTEXT_ID='context-id'"
+    assert cgroup =~ "&& . '/usr/local/libexec/ptc-manager-agent-context'"
+    refute cgroup =~ "ptc-manager-agent-context' '/protected/pane.json'"
+  end
+
+  test "cgroup pane context is passed through exported variables under dash" do
+    dash = System.find_executable("dash") || flunk("dash is required for the pane-shell contract")
+    directory = Path.join(System.tmp_dir!(), "managed-context-dash-#{System.unique_integer()}")
+    context_script = Path.join(directory, "agent-context")
+    environment_path = Path.join(directory, "pane.env")
+    capture_path = Path.join(directory, "captured")
+    previous = Application.get_env(:ptc_manager, :resource_operation_agent_context)
+
+    File.mkdir_p!(directory)
+
+    File.write!(
+      context_script,
+      """
+      [ -z "${1:-}" ] || exit 41
+      printf '%s|%s|%s|%s|%s' \
+        "$PTC_CONTEXT_PATH" "$PTC_CONTEXT_ID" \
+        "$PTC_AGENT_MEMORY_HIGH" "$PTC_AGENT_MEMORY_MAX" \
+        "$PTC_OPERATION_WRAPPER" >"$PTC_TEST_CAPTURE"
+      """
+    )
+
+    File.write!(
+      environment_path,
+      "PTC_TEST_CAPTURE='#{capture_path}'\nPTC_CONTEXT_ID='untrusted-environment-value'\n"
+    )
+
+    Application.put_env(:ptc_manager, :resource_operation_agent_context, context_script)
+
+    on_exit(fn ->
+      restore_env(:resource_operation_agent_context, previous)
+      File.rm_rf!(directory)
+    end)
+
+    command =
+      ManagedOperationContext.shell_command(
+        "/protected/pane.json",
+        %{"context_id" => "trusted-context", "cgroups" => true},
+        environment: environment_path
+      )
+
+    assert {output, 0} = System.cmd(dash, ["-c", command], stderr_to_stdout: true)
+    assert output =~ "PTC_OPERATION_CONTEXT_READY:trusted-context"
+
+    assert File.read!(capture_path) ==
+             "/protected/pane.json|trusted-context|2684354560|3221225472|/usr/local/bin/ptc-operation"
   end
 
   test "an environment-file write failure prevents implementation dispatch" do

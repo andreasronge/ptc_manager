@@ -678,7 +678,8 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "pragma journal_mode; pragma quick_check;"
     assert script =~ "=== end deployment diagnostics ==="
 
-    assert context =~ "ptc-manager-agent-context: $1"
+    assert context =~ ~S|ptc_context_path=${PTC_CONTEXT_PATH:-${1:-}}|
+    assert context =~ ~S|ptc_context_id=${PTC_CONTEXT_ID:-${2:-}}|
     assert context =~ "membership=$ptc_cgroup_relative"
     assert context =~ "cannot move pane shell $$"
     assert runtime =~ ~S|config_env() == :prod and :os.type() == {:unix, :linux}|
