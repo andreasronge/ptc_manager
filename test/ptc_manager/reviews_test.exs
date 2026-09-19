@@ -282,6 +282,30 @@ defmodule PtcManager.ReviewsTest do
     assert Repo.aggregate(from(o in query, where: o.state == "available"), :count) == 1
   end
 
+  test "sweeper does not duplicate an old active continuation while capacity is full" do
+    job = job!(2)
+    job |> Job.changeset(%{review_state: "resume_pending"}) |> Repo.update!()
+    Reviews.sweep()
+
+    import Ecto.Query
+
+    query =
+      from o in Oban.Job,
+        where:
+          o.worker == "PtcManager.Reviews.ResumeWorker" and
+            o.state in ["available", "scheduled", "executing", "retryable"]
+
+    [queued] = Repo.all(query)
+
+    queued
+    |> Ecto.Changeset.change(inserted_at: DateTime.add(queued.inserted_at, -120))
+    |> Repo.update!()
+
+    Reviews.sweep()
+
+    assert Repo.aggregate(query, :count) == 1
+  end
+
   test "changed linked requirements invalidate cached approval for the same commit" do
     job = job!(3)
     {:ok, first} = request(job, "first-context")

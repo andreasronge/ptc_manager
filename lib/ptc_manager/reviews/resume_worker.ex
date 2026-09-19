@@ -6,7 +6,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
     queue: :automations,
     max_attempts: 3,
     unique: [
-      period: 60,
+      period: :infinity,
       fields: [:worker, :args],
       states: [:available, :scheduled, :executing, :retryable]
     ]
