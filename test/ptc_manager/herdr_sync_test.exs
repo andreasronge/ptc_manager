@@ -1203,6 +1203,27 @@ defmodule PtcManager.HerdrSyncTest do
     assert Operations.worktree_consumes_execution_slot?(reacquired)
   end
 
+  test "a settled identityless snapshot uses a write-only transaction" do
+    %{run: run, worker: worker} =
+      managed_job_fixture("identityless-steady", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    remote = remote_agent("done") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, %{lost_count: 0}} =
+               Sync.sync(client: FakeClient, session: "identityless-steady")
+    end)
+
+    refreshed_worker = Repo.get!(Worker, worker.id)
+    assert refreshed_worker.snapshot_sequence == 0
+    assert refreshed_worker.healthy_snapshot_count == 0
+  end
+
   test "a repeated retained snapshot does not erase worktree attention" do
     repository = repository_fixture()
     issue = issue_fixture(repository)

@@ -170,7 +170,7 @@ defmodule PtcManager.Herdr.Sync do
         )
 
         case apply_steady_snapshot_plan(plan) do
-          {:error, :stale_snapshot_plan} when retries > 0 ->
+          {:error, :stale_snapshot_plan} when retries > 0 and identity != %{} ->
             persist_snapshot_attempt(
               session,
               remote_agents,
@@ -189,6 +189,9 @@ defmodule PtcManager.Herdr.Sync do
           result ->
             result
         end
+
+      reason when reason in [:stale_identityless_snapshot, :projection_raced] ->
+        {:error, :concurrent_state_change}
 
       :complex_snapshot ->
         persist_complex_snapshot(
@@ -268,8 +271,7 @@ defmodule PtcManager.Herdr.Sync do
          snapshot_started_at,
          agent_now,
          lease_now
-       )
-       when identity != %{} do
+       ) do
     consistent_projection(fn revision ->
       build_steady_snapshot_plan(
         session,
@@ -283,16 +285,6 @@ defmodule PtcManager.Herdr.Sync do
     end)
   end
 
-  defp steady_snapshot_plan(
-         _session,
-         _remote_agents,
-         _identity,
-         _snapshot_started_at,
-         _agent_now,
-         _lease_now
-       ),
-       do: :complex_snapshot
-
   defp build_steady_snapshot_plan(
          session,
          remote_agents,
@@ -305,6 +297,7 @@ defmodule PtcManager.Herdr.Sync do
     worker = Repo.get_by(Worker, worker_key: "herdr:#{session}")
 
     with %Worker{} <- worker,
+         :current <- identityless_snapshot_status(worker, identity, snapshot_started_at),
          true <- settled_worker_snapshot?(worker, identity),
          normalized <- Enum.map(remote_agents, &normalize_agent(&1, session, agent_now)),
          {:ok, observations} <-
@@ -326,13 +319,24 @@ defmodule PtcManager.Herdr.Sync do
          observations: observations
        }}
     else
+      :stale -> :stale_identityless_snapshot
       _other -> :complex_snapshot
     end
   end
 
+  defp identityless_snapshot_status(worker, identity, snapshot_started_at)
+       when map_size(identity) == 0 do
+    if match?(%DateTime{}, worker.last_heartbeat_at) and
+         DateTime.compare(worker.last_heartbeat_at, snapshot_started_at) == :gt,
+       do: :stale,
+       else: :current
+  end
+
+  defp identityless_snapshot_status(_worker, _identity, _snapshot_started_at), do: :current
+
   defp consistent_projection(operation, attempts \\ 2)
 
-  defp consistent_projection(_operation, 0), do: :complex_snapshot
+  defp consistent_projection(_operation, 0), do: :projection_raced
 
   defp consistent_projection(operation, attempts) do
     before_revision = Repo.get!(StateRevision, 1).revision
@@ -344,6 +348,11 @@ defmodule PtcManager.Herdr.Sync do
     else
       consistent_projection(operation, attempts - 1)
     end
+  end
+
+  defp settled_worker_snapshot?(worker, identity) when map_size(identity) == 0 do
+    worker.status == "online" and is_nil(worker.worker_incarnation_id) and
+      is_nil(worker.herdr_incarnation_id)
   end
 
   defp settled_worker_snapshot?(worker, identity) do
@@ -398,7 +407,9 @@ defmodule PtcManager.Herdr.Sync do
 
   defp classify_current_observation(_worker, %AgentRun{state: state} = run, job, attrs)
        when state == attrs.state and state in @terminal_states and
-              (is_nil(job) or job.state not in @recoverable_attention_job_states),
+              (is_nil(job) or
+                 (job.state != "pr_open" and
+                    job.state not in @recoverable_attention_job_states)),
        do: %{
          run: run,
          job: job,
@@ -543,28 +554,27 @@ defmodule PtcManager.Herdr.Sync do
 
           if reserved != 1, do: Repo.rollback(:stale_snapshot_plan)
 
-          {updated, _rows} =
+          worker_query =
             Worker
             |> where(
               [candidate],
               candidate.id == ^worker.id and candidate.status == ^worker.status and
-                candidate.healthy_snapshot_count == ^worker.healthy_snapshot_count and
-                candidate.worker_incarnation_id == ^worker.worker_incarnation_id and
-                candidate.herdr_incarnation_id == ^worker.herdr_incarnation_id and
-                candidate.snapshot_sequence == ^worker.snapshot_sequence
+                candidate.healthy_snapshot_count == ^worker.healthy_snapshot_count
             )
-            |> Repo.update_all(
-              set: [
-                status: "online",
-                capabilities:
-                  worker_attrs(worker_session(worker), "online", plan.heartbeat_at, %{}).capabilities,
-                last_heartbeat_at: plan.heartbeat_at,
-                snapshot_sequence: plan.identity.snapshot_sequence,
-                healthy_snapshot_count: max(worker.healthy_snapshot_count, 2),
-                coordinator_incarnation_id: RuntimeIncarnation.current(),
-                updated_at: plan.heartbeat_at
-              ]
-            )
+            |> guard_worker_identity(worker, plan.identity)
+
+          worker_updates =
+            [
+              status: "online",
+              capabilities:
+                worker_attrs(worker_session(worker), "online", plan.heartbeat_at, %{}).capabilities,
+              last_heartbeat_at: plan.heartbeat_at,
+              healthy_snapshot_count: worker_healthy_snapshot_count(worker, plan.identity),
+              coordinator_incarnation_id: RuntimeIncarnation.current(),
+              updated_at: plan.heartbeat_at
+            ] ++ worker_identity_updates(plan.identity)
+
+          {updated, _rows} = Repo.update_all(worker_query, set: worker_updates)
 
           if updated != 1, do: Repo.rollback(:stale_snapshot_plan)
 
@@ -596,17 +606,21 @@ defmodule PtcManager.Herdr.Sync do
             apply_steady_observation(observation, plan.heartbeat_at, plan.lease_now)
           end)
 
-          updated_worker = %{
+          updated_worker =
             worker
-            | status: "online",
-              capabilities:
-                worker_attrs(worker_session(worker), "online", plan.heartbeat_at, %{}).capabilities,
-              last_heartbeat_at: plan.heartbeat_at,
-              snapshot_sequence: plan.identity.snapshot_sequence,
-              healthy_snapshot_count: max(worker.healthy_snapshot_count, 2),
-              coordinator_incarnation_id: RuntimeIncarnation.current(),
-              updated_at: plan.heartbeat_at
-          }
+            |> Map.put(:status, "online")
+            |> Map.put(
+              :capabilities,
+              worker_attrs(worker_session(worker), "online", plan.heartbeat_at, %{}).capabilities
+            )
+            |> Map.put(:last_heartbeat_at, plan.heartbeat_at)
+            |> Map.put(
+              :healthy_snapshot_count,
+              worker_healthy_snapshot_count(worker, plan.identity)
+            )
+            |> Map.put(:coordinator_incarnation_id, RuntimeIncarnation.current())
+            |> Map.put(:updated_at, plan.heartbeat_at)
+            |> apply_worker_identity(plan.identity)
 
           %{
             worker: updated_worker,
@@ -620,6 +634,31 @@ defmodule PtcManager.Herdr.Sync do
 
     result
   end
+
+  defp guard_worker_identity(query, _worker, identity) when map_size(identity) == 0, do: query
+
+  defp guard_worker_identity(query, worker, _identity) do
+    where(
+      query,
+      [candidate],
+      candidate.worker_incarnation_id == ^worker.worker_incarnation_id and
+        candidate.herdr_incarnation_id == ^worker.herdr_incarnation_id and
+        candidate.snapshot_sequence == ^worker.snapshot_sequence
+    )
+  end
+
+  defp worker_identity_updates(identity) when map_size(identity) == 0, do: []
+  defp worker_identity_updates(identity), do: [snapshot_sequence: identity.snapshot_sequence]
+
+  defp worker_healthy_snapshot_count(worker, identity) when map_size(identity) == 0,
+    do: worker.healthy_snapshot_count
+
+  defp worker_healthy_snapshot_count(worker, _identity), do: max(worker.healthy_snapshot_count, 2)
+
+  defp apply_worker_identity(worker, identity) when map_size(identity) == 0, do: worker
+
+  defp apply_worker_identity(worker, identity),
+    do: %{worker | snapshot_sequence: identity.snapshot_sequence}
 
   defp apply_steady_observation(%{skip?: true}, _agent_now, _lease_now), do: :ok
 
