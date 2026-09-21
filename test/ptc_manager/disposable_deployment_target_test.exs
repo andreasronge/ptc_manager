@@ -282,7 +282,8 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       [timestamp]
     )
 
-    target = DisposableDeploymentTarget.migrate_remaining!(target)
+    target =
+      DisposableDeploymentTarget.migrate_remaining!(target, to: 20_260_901_120_000)
 
     assert Repo.query!("SELECT count(*) FROM issue_dependencies").rows == [[0]]
     assert Repo.query!("SELECT dependencies_projected FROM issues WHERE id = 1").rows == [[0]]
