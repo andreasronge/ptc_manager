@@ -299,14 +299,25 @@ defmodule PtcManager.Herdr.Sync do
     with %Worker{} <- worker,
          :current <- identityless_snapshot_status(worker, identity, snapshot_started_at),
          true <- settled_worker_snapshot?(worker, identity),
-         normalized <- Enum.map(remote_agents, &normalize_agent(&1, session, agent_now)),
+         normalized <-
+           Enum.map(remote_agents, fn agent ->
+             agent
+             |> normalize_agent(session, agent_now)
+             |> Map.merge(%{
+               worker_incarnation_id: worker.worker_incarnation_id,
+               herdr_incarnation_id: worker.herdr_incarnation_id,
+               coordinator_incarnation_id: RuntimeIncarnation.current()
+             })
+           end),
          {:ok, observations} <-
            steady_observed_runs(worker, normalized, snapshot_started_at),
          false <-
            live_worker_state?(
              worker,
-             Enum.map(observations, & &1.run.id),
-             observations |> Enum.map(& &1.run.job_id) |> Enum.reject(&is_nil/1)
+             observations |> Enum.map(&(&1.run && &1.run.id)) |> Enum.reject(&is_nil/1),
+             observations
+             |> Enum.map(&(&1.job && &1.job.id))
+             |> Enum.reject(&is_nil/1)
            ) do
       {:ok,
        %{
@@ -378,15 +389,81 @@ defmodule PtcManager.Herdr.Sync do
 
     observations =
       Enum.map(normalized, fn attrs ->
-        classify_steady_observation(
-          worker,
-          Map.get(runs, attrs.external_key),
-          attrs,
-          snapshot_started_at
-        )
+        {entry, attrs} = steady_observation_entry(worker, runs, attrs)
+
+        observation =
+          classify_steady_observation(
+            worker,
+            entry,
+            attrs,
+            snapshot_started_at
+          )
+
+        if is_map(observation) and attrs[:force_identity_update],
+          do: %{observation | transition?: true},
+          else: observation
       end)
 
     if Enum.all?(observations, &is_map/1), do: {:ok, observations}, else: :error
+  end
+
+  defp steady_observation_entry(worker, runs, attrs) do
+    case Map.get(runs, attrs.external_key) do
+      {%AgentRun{}, _job} = entry ->
+        {entry, attrs}
+
+      nil ->
+        attrs =
+          attrs
+          |> maybe_attach_managed_attempt(worker.worker_key)
+          |> maybe_attach_agent_action_attempt(worker)
+
+        case attrs[:managed_run] do
+          %AgentRun{agent_action_id: action_id} when is_integer(action_id) ->
+            {nil, attrs}
+
+          %AgentRun{} = run ->
+            job = run.job_id && Repo.get(Job, run.job_id)
+
+            attrs =
+              Map.put(
+                attrs,
+                :force_identity_update,
+                run.state not in @terminal_states and run.external_key != attrs.external_key
+              )
+
+            {{run, job}, attrs}
+
+          nil ->
+            case attrs do
+              %{job_id: job_id} when is_integer(job_id) ->
+                case Repo.get(Job, job_id) do
+                  %Job{} = job -> {{nil, job}, attrs}
+                  nil -> {nil, attrs}
+                end
+
+              _attrs ->
+                {nil, attrs}
+            end
+        end
+    end
+  end
+
+  defp classify_steady_observation(
+         _worker,
+         {nil, %Job{} = job},
+         %{job_id: job_id, fencing_token: fencing_token} = attrs,
+         _snapshot_started_at
+       )
+       when job_id == job.id and fencing_token == job.fencing_token do
+    %{
+      run: nil,
+      job: job,
+      attrs: attrs,
+      transition?: true,
+      skip?: false,
+      insert?: true
+    }
   end
 
   defp classify_steady_observation(worker, {%AgentRun{} = run, job}, attrs, snapshot_started_at) do
@@ -579,14 +656,14 @@ defmodule PtcManager.Herdr.Sync do
           if updated != 1, do: Repo.rollback(:stale_snapshot_plan)
 
           Enum.each(plan.observations, fn observation ->
-            if observation.transition? do
+            if observation.transition? and observation.run do
               upsert_agent_run(worker, observation.run, observation.attrs)
             end
           end)
 
           plan.observations
           |> Enum.reject(
-            &(&1.skip? or &1.attrs.state in @terminal_states or
+            &(&1.skip? or is_nil(&1.run) or &1.attrs.state in @terminal_states or
                 (&1.run.state in @terminal_states and not &1.transition?))
           )
           |> Enum.group_by(& &1.attrs.state, & &1.run.id)
@@ -603,7 +680,7 @@ defmodule PtcManager.Herdr.Sync do
           end)
 
           Enum.each(plan.observations, fn observation ->
-            apply_steady_observation(observation, plan.heartbeat_at, plan.lease_now)
+            apply_steady_observation(worker, observation, plan.heartbeat_at, plan.lease_now)
           end)
 
           updated_worker =
@@ -660,11 +737,23 @@ defmodule PtcManager.Herdr.Sync do
   defp apply_worker_identity(worker, identity),
     do: %{worker | snapshot_sequence: identity.snapshot_sequence}
 
-  defp apply_steady_observation(%{skip?: true}, _agent_now, _lease_now), do: :ok
+  defp apply_steady_observation(
+         worker,
+         %{insert?: true, run: nil, job: job, attrs: attrs},
+         agent_now,
+         lease_now
+       ) do
+    run = insert_agent_run(worker, attrs)
+    reconcile_worktree_identity(run, attrs, agent_now, job)
+    update_job_from_agent(job, attrs.state, agent_now, lease_now)
+    :ok
+  end
 
-  defp apply_steady_observation(%{settled?: true}, _agent_now, _lease_now), do: :ok
+  defp apply_steady_observation(_worker, %{skip?: true}, _agent_now, _lease_now), do: :ok
 
-  defp apply_steady_observation(observation, agent_now, lease_now) do
+  defp apply_steady_observation(_worker, %{settled?: true}, _agent_now, _lease_now), do: :ok
+
+  defp apply_steady_observation(_worker, observation, agent_now, lease_now) do
     %{run: run, job: job, attrs: attrs} = observation
     reconcile_worktree_identity(run, attrs, agent_now, job)
 
