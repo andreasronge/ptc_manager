@@ -533,6 +533,50 @@ defmodule PtcManager.Herdr.Sync do
          _worker,
          %AgentRun{state: state} = run,
          %Job{state: "pr_open"} = job,
+         %{state: "idle"} = attrs
+       )
+       when state in @terminal_states,
+       do: %{
+         run: run,
+         job: job,
+         attrs: Map.merge(attrs, %{state: "waiting", ended_at: nil}),
+         transition?: true,
+         skip?: false,
+         reactivated?: false
+       }
+
+  defp classify_current_observation(
+         worker,
+         %AgentRun{state: state} = run,
+         job,
+         %{state: "idle"} = attrs
+       )
+       when state in @terminal_states do
+    if active_owned_job?(worker, run, job) do
+      %{
+        run: run,
+        job: job,
+        attrs: attrs,
+        transition?: false,
+        skip?: false,
+        reactivated?: false
+      }
+    else
+      %{
+        run: run,
+        job: job,
+        attrs: Map.put(attrs, :state, run.state),
+        transition?: false,
+        skip?: false,
+        settled?: true
+      }
+    end
+  end
+
+  defp classify_current_observation(
+         _worker,
+         %AgentRun{state: state} = run,
+         %Job{state: "pr_open"} = job,
          attrs
        )
        when state in @terminal_states and attrs.state in ["working", "blocked"],
