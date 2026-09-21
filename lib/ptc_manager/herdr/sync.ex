@@ -6,6 +6,7 @@ defmodule PtcManager.Herdr.Sync do
   alias PtcManager.Clock
   alias PtcManager.DatabaseDiagnostics
   alias PtcManager.Gateway
+  alias PtcManager.Herdr.StateRevision
   alias PtcManager.Operations
   alias PtcManager.RuntimeIncarnation
 
@@ -110,56 +111,25 @@ defmodule PtcManager.Herdr.Sync do
          lease_now
        ) do
     result =
-      Repo.transaction(
-        fn ->
-          case DatabaseDiagnostics.with_phase("worker_acceptance", fn ->
-                 accept_worker_snapshot(session, identity, agent_now, stale_after_ms)
-               end) do
-            {:ignored, worker, reason} ->
-              %{
-                worker: worker,
-                agent_count: 0,
-                lost_count: 0,
-                absent_count: 0,
-                snapshot_ignored: reason
-              }
-
-            {:recovering, worker, reason} ->
-              uncertain_count =
-                DatabaseDiagnostics.with_phase("run_quarantine", fn ->
-                  quarantine_active_attempts(worker, agent_now, lease_now, reason)
-                end)
-
-              %{
-                worker: worker,
-                agent_count: 0,
-                lost_count: 0,
-                absent_count: 0,
-                uncertain_count: uncertain_count,
-                recovery_pending: true
-              }
-
-            {:accepted, worker} ->
-              DatabaseDiagnostics.with_phase("snapshot_reconciliation", fn ->
-                persist_agents_snapshot(
-                  worker,
-                  session,
-                  remote_agents,
-                  snapshot_started_at,
-                  agent_now,
-                  lease_now,
-                  reconcile_after_ms
-                )
-              end)
-          end
-        end,
-        mode: :immediate
+      persist_snapshot_attempt(
+        session,
+        remote_agents,
+        identity,
+        stale_after_ms,
+        reconcile_after_ms,
+        snapshot_started_at,
+        agent_now,
+        lease_now,
+        1
       )
 
     case result do
       {:ok, summary} ->
         Operations.notify_changed(__MODULE__)
         {:ok, summary}
+
+      {:error, reason} when reason in [:database_busy, :concurrent_state_change] ->
+        {:error, reason}
 
       {:error, reason} ->
         mark_degraded(session, reason, stale_after_ms, agent_now, lease_now)
@@ -171,6 +141,514 @@ defmodule PtcManager.Herdr.Sync do
       if RepoTransaction.busy?(error),
         do: {:error, :database_busy},
         else: mark_degraded(session, error, stale_after_ms, agent_now, lease_now)
+  end
+
+  defp persist_snapshot_attempt(
+         session,
+         remote_agents,
+         identity,
+         stale_after_ms,
+         reconcile_after_ms,
+         snapshot_started_at,
+         agent_now,
+         lease_now,
+         retries
+       ) do
+    case steady_snapshot_plan(
+           session,
+           remote_agents,
+           identity,
+           snapshot_started_at,
+           agent_now,
+           lease_now
+         ) do
+      {:ok, plan} ->
+        :telemetry.execute(
+          [:ptc_manager, :herdr, :snapshot, :planned],
+          %{agent_count: plan.agent_count, transition_count: length(plan.observations)},
+          %{session: session}
+        )
+
+        case apply_steady_snapshot_plan(plan) do
+          {:error, :stale_snapshot_plan} when retries > 0 ->
+            persist_snapshot_attempt(
+              session,
+              remote_agents,
+              identity,
+              stale_after_ms,
+              reconcile_after_ms,
+              snapshot_started_at,
+              agent_now,
+              lease_now,
+              retries - 1
+            )
+
+          {:error, :stale_snapshot_plan} ->
+            {:error, :concurrent_state_change}
+
+          result ->
+            result
+        end
+
+      :complex_snapshot ->
+        persist_complex_snapshot(
+          session,
+          remote_agents,
+          identity,
+          stale_after_ms,
+          reconcile_after_ms,
+          snapshot_started_at,
+          agent_now,
+          lease_now
+        )
+    end
+  end
+
+  defp persist_complex_snapshot(
+         session,
+         remote_agents,
+         identity,
+         stale_after_ms,
+         reconcile_after_ms,
+         snapshot_started_at,
+         agent_now,
+         lease_now
+       ) do
+    Repo.transaction(
+      fn ->
+        case DatabaseDiagnostics.with_phase("worker_acceptance", fn ->
+               accept_worker_snapshot(session, identity, agent_now, stale_after_ms)
+             end) do
+          {:ignored, worker, reason} ->
+            %{
+              worker: worker,
+              agent_count: 0,
+              lost_count: 0,
+              absent_count: 0,
+              snapshot_ignored: reason
+            }
+
+          {:recovering, worker, reason} ->
+            uncertain_count =
+              DatabaseDiagnostics.with_phase("run_quarantine", fn ->
+                quarantine_active_attempts(worker, agent_now, lease_now, reason)
+              end)
+
+            %{
+              worker: worker,
+              agent_count: 0,
+              lost_count: 0,
+              absent_count: 0,
+              uncertain_count: uncertain_count,
+              recovery_pending: true
+            }
+
+          {:accepted, worker} ->
+            DatabaseDiagnostics.with_phase("snapshot_reconciliation", fn ->
+              persist_agents_snapshot(
+                worker,
+                session,
+                remote_agents,
+                snapshot_started_at,
+                agent_now,
+                lease_now,
+                reconcile_after_ms
+              )
+            end)
+        end
+      end,
+      mode: :immediate
+    )
+  end
+
+  defp steady_snapshot_plan(
+         session,
+         remote_agents,
+         identity,
+         snapshot_started_at,
+         agent_now,
+         lease_now
+       )
+       when identity != %{} do
+    consistent_projection(fn revision ->
+      build_steady_snapshot_plan(
+        session,
+        remote_agents,
+        identity,
+        snapshot_started_at,
+        agent_now,
+        lease_now,
+        revision
+      )
+    end)
+  end
+
+  defp steady_snapshot_plan(
+         _session,
+         _remote_agents,
+         _identity,
+         _snapshot_started_at,
+         _agent_now,
+         _lease_now
+       ),
+       do: :complex_snapshot
+
+  defp build_steady_snapshot_plan(
+         session,
+         remote_agents,
+         identity,
+         snapshot_started_at,
+         agent_now,
+         lease_now,
+         revision
+       ) do
+    worker = Repo.get_by(Worker, worker_key: "herdr:#{session}")
+
+    with %Worker{} <- worker,
+         true <- settled_worker_snapshot?(worker, identity),
+         normalized <- Enum.map(remote_agents, &normalize_agent(&1, session, agent_now)),
+         {:ok, observations} <-
+           steady_observed_runs(worker, normalized, snapshot_started_at),
+         false <-
+           live_worker_state?(
+             worker,
+             Enum.map(observations, & &1.run.id),
+             observations |> Enum.map(& &1.run.job_id) |> Enum.reject(&is_nil/1)
+           ) do
+      {:ok,
+       %{
+         worker: worker,
+         revision: revision,
+         identity: identity,
+         heartbeat_at: agent_now,
+         agent_count: length(normalized),
+         lease_now: lease_now,
+         observations: observations
+       }}
+    else
+      _other -> :complex_snapshot
+    end
+  end
+
+  defp consistent_projection(operation, attempts \\ 2)
+
+  defp consistent_projection(_operation, 0), do: :complex_snapshot
+
+  defp consistent_projection(operation, attempts) do
+    before_revision = Repo.get!(StateRevision, 1).revision
+    result = operation.(before_revision)
+    after_revision = Repo.get!(StateRevision, 1).revision
+
+    if before_revision == after_revision do
+      result
+    else
+      consistent_projection(operation, attempts - 1)
+    end
+  end
+
+  defp settled_worker_snapshot?(worker, identity) do
+    worker.status == "online" and worker.healthy_snapshot_count >= 2 and
+      worker.worker_incarnation_id == identity.worker_incarnation_id and
+      worker.herdr_incarnation_id == identity.herdr_incarnation_id and
+      identity.snapshot_sequence > worker.snapshot_sequence
+  end
+
+  defp steady_observed_runs(worker, normalized, snapshot_started_at) do
+    keys = Enum.map(normalized, & &1.external_key)
+
+    runs =
+      AgentRun
+      |> where([run], run.worker_id == ^worker.id and run.external_key in ^keys)
+      |> order_by([run], desc: run.inserted_at, desc: run.id)
+      |> join(:left, [run], job in Job, on: job.id == run.job_id)
+      |> select([run, job], {run, job})
+      |> Repo.all()
+      |> Enum.reduce(%{}, fn {run, job}, acc ->
+        Map.put_new(acc, run.external_key, {run, job})
+      end)
+
+    observations =
+      Enum.map(normalized, fn attrs ->
+        classify_steady_observation(
+          worker,
+          Map.get(runs, attrs.external_key),
+          attrs,
+          snapshot_started_at
+        )
+      end)
+
+    if Enum.all?(observations, &is_map/1), do: {:ok, observations}, else: :error
+  end
+
+  defp classify_steady_observation(worker, {%AgentRun{} = run, job}, attrs, snapshot_started_at) do
+    if snapshot_fresh_for_run?(run, snapshot_started_at) do
+      classify_current_observation(worker, run, job, attrs)
+    else
+      %{
+        run: run,
+        job: job,
+        attrs: Map.put(attrs, :state, run.state),
+        transition?: false,
+        skip?: true
+      }
+    end
+  end
+
+  defp classify_steady_observation(_worker, _entry, _attrs, _started), do: nil
+
+  defp classify_current_observation(_worker, %AgentRun{state: state} = run, job, attrs)
+       when state == attrs.state and state in @terminal_states and
+              (is_nil(job) or job.state not in @recoverable_attention_job_states),
+       do: %{
+         run: run,
+         job: job,
+         attrs: attrs,
+         transition?: false,
+         skip?: false,
+         settled?: true
+       }
+
+  defp classify_current_observation(worker, %AgentRun{state: state} = run, job, attrs)
+       when state == attrs.state and state in @terminal_states do
+    if active_owned_job?(worker, run, job) do
+      %{
+        run: run,
+        job: job,
+        attrs: attrs,
+        transition?: false,
+        skip?: false,
+        reactivated?: false
+      }
+    end
+  end
+
+  defp classify_current_observation(
+         _worker,
+         %AgentRun{state: "waiting"} = run,
+         %Job{state: "pr_open"} = job,
+         attrs
+       )
+       when attrs.state in ["idle", "done"],
+       do: %{
+         run: run,
+         job: job,
+         attrs: Map.put(attrs, :state, "waiting"),
+         transition?: false,
+         skip?: false
+       }
+
+  defp classify_current_observation(worker, %AgentRun{state: state} = run, job, attrs)
+       when state == attrs.state,
+       do: stable_active_observation(worker, run, job, attrs)
+
+  defp classify_current_observation(
+         _worker,
+         %AgentRun{state: state} = run,
+         %Job{state: "pr_open"} = job,
+         attrs
+       )
+       when state in @terminal_states and attrs.state in ["working", "blocked"],
+       do: %{
+         run: run,
+         job: job,
+         attrs: Map.put(attrs, :recover_retained, true),
+         transition?: state == "lost",
+         skip?: false,
+         reactivated?: false
+       }
+
+  defp classify_current_observation(worker, %AgentRun{state: state} = run, job, attrs)
+       when state in @terminal_states and attrs.state in @active_agent_states do
+    if active_owned_job?(worker, run, job) do
+      %{
+        run: run,
+        job: job,
+        attrs: attrs,
+        transition?: false,
+        skip?: false,
+        reactivated?: true
+      }
+    end
+  end
+
+  defp classify_current_observation(worker, %AgentRun{} = run, job, attrs)
+       when run.state not in @terminal_states,
+       do: transitioning_active_observation(worker, run, job, attrs)
+
+  defp classify_current_observation(_worker, _run, _job, _attrs), do: nil
+
+  defp stable_active_observation(_worker, %AgentRun{job_id: nil} = run, nil, attrs)
+       when run.state not in @terminal_states,
+       do: %{run: run, job: nil, attrs: attrs, transition?: false, skip?: false}
+
+  defp stable_active_observation(_worker, _run, nil, _attrs), do: nil
+
+  defp stable_active_observation(worker, run, job, attrs) do
+    if run.state not in @terminal_states and job.lease_owner == worker.worker_key and
+         job.fencing_token == run.fencing_token and
+         job.state in ~w(starting working idle blocked reconciling awaiting_reconciliation) do
+      %{run: run, job: job, attrs: attrs, transition?: false, skip?: false}
+    end
+  end
+
+  defp active_owned_job?(worker, run, job) do
+    match?(%Job{}, job) and job.lease_owner == worker.worker_key and
+      job.fencing_token == run.fencing_token and
+      job.state in ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr)
+  end
+
+  defp transitioning_active_observation(_worker, %AgentRun{job_id: nil}, nil, _attrs), do: nil
+
+  defp transitioning_active_observation(worker, run, job, attrs) do
+    if job.lease_owner == worker.worker_key and job.fencing_token == run.fencing_token and
+         job.state in ~w(starting working idle blocked reconciling awaiting_reconciliation) do
+      %{run: run, job: job, attrs: attrs, transition?: true, skip?: false}
+    end
+  end
+
+  defp live_worker_state?(worker, settled_run_ids, observed_job_ids) do
+    active_run? =
+      AgentRun
+      |> where(
+        [run],
+        run.worker_id == ^worker.id and run.id not in ^settled_run_ids and
+          run.state not in ^@terminal_states
+      )
+      |> Repo.exists?()
+
+    reconciling_job? =
+      Job
+      |> where(
+        [job],
+        job.lease_owner == ^worker.worker_key and job.state == "reconciling" and
+          job.id not in ^observed_job_ids
+      )
+      |> Repo.exists?()
+
+    orphaned_action? = worker |> orphaned_action_runs_query() |> Repo.exists?()
+
+    active_run? or reconciling_job? or orphaned_action?
+  end
+
+  defp apply_steady_snapshot_plan(plan) do
+    result =
+      Repo.transaction(
+        fn ->
+          worker = plan.worker
+
+          {reserved, _rows} =
+            StateRevision
+            |> where([revision], revision.id == 1 and revision.revision == ^plan.revision)
+            |> Repo.update_all(inc: [revision: 1])
+
+          if reserved != 1, do: Repo.rollback(:stale_snapshot_plan)
+
+          {updated, _rows} =
+            Worker
+            |> where(
+              [candidate],
+              candidate.id == ^worker.id and candidate.status == ^worker.status and
+                candidate.healthy_snapshot_count == ^worker.healthy_snapshot_count and
+                candidate.worker_incarnation_id == ^worker.worker_incarnation_id and
+                candidate.herdr_incarnation_id == ^worker.herdr_incarnation_id and
+                candidate.snapshot_sequence == ^worker.snapshot_sequence
+            )
+            |> Repo.update_all(
+              set: [
+                status: "online",
+                capabilities:
+                  worker_attrs(worker_session(worker), "online", plan.heartbeat_at, %{}).capabilities,
+                last_heartbeat_at: plan.heartbeat_at,
+                snapshot_sequence: plan.identity.snapshot_sequence,
+                healthy_snapshot_count: max(worker.healthy_snapshot_count, 2),
+                coordinator_incarnation_id: RuntimeIncarnation.current(),
+                updated_at: plan.heartbeat_at
+              ]
+            )
+
+          if updated != 1, do: Repo.rollback(:stale_snapshot_plan)
+
+          Enum.each(plan.observations, fn observation ->
+            if observation.transition? do
+              upsert_agent_run(worker, observation.run, observation.attrs)
+            end
+          end)
+
+          plan.observations
+          |> Enum.reject(
+            &(&1.skip? or &1.attrs.state in @terminal_states or
+                (&1.run.state in @terminal_states and not &1.transition?))
+          )
+          |> Enum.group_by(& &1.attrs.state, & &1.run.id)
+          |> Enum.each(fn {state, run_ids} ->
+            {heartbeat_count, _rows} =
+              AgentRun
+              |> where(
+                [run],
+                run.id in ^run_ids and run.worker_id == ^worker.id and run.state == ^state
+              )
+              |> Repo.update_all(set: [last_heartbeat_at: plan.heartbeat_at])
+
+            if heartbeat_count != length(run_ids), do: Repo.rollback(:stale_snapshot_plan)
+          end)
+
+          Enum.each(plan.observations, fn observation ->
+            apply_steady_observation(observation, plan.heartbeat_at, plan.lease_now)
+          end)
+
+          updated_worker = %{
+            worker
+            | status: "online",
+              capabilities:
+                worker_attrs(worker_session(worker), "online", plan.heartbeat_at, %{}).capabilities,
+              last_heartbeat_at: plan.heartbeat_at,
+              snapshot_sequence: plan.identity.snapshot_sequence,
+              healthy_snapshot_count: max(worker.healthy_snapshot_count, 2),
+              coordinator_incarnation_id: RuntimeIncarnation.current(),
+              updated_at: plan.heartbeat_at
+          }
+
+          %{
+            worker: updated_worker,
+            agent_count: plan.agent_count,
+            lost_count: 0,
+            absent_count: 0
+          }
+        end,
+        mode: :immediate
+      )
+
+    result
+  end
+
+  defp apply_steady_observation(%{skip?: true}, _agent_now, _lease_now), do: :ok
+
+  defp apply_steady_observation(%{settled?: true}, _agent_now, _lease_now), do: :ok
+
+  defp apply_steady_observation(observation, agent_now, lease_now) do
+    %{run: run, job: job, attrs: attrs} = observation
+    reconcile_worktree_identity(run, attrs, agent_now, job)
+
+    cond do
+      Map.get(observation, :reactivated?, false) ->
+        job
+        |> Job.changeset(%{
+          state: "reconciling",
+          lease_expires_at: nil,
+          reconciling_at: lease_now,
+          absence_observed_at: nil,
+          last_error: "A terminal managed agent identity became active again."
+        })
+        |> Repo.update!()
+
+      job && job.state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
+        update_job_from_agent(job, attrs.state, agent_now, lease_now)
+
+      true ->
+        :ok
+    end
+
+    :ok
   end
 
   defp persist_agents_snapshot(
@@ -800,13 +1278,8 @@ defmodule PtcManager.Herdr.Sync do
   # it, and the missing-run check only knows runs with an external key. Left
   # as "unknown" it would hold deployments forever.
   defp mark_orphaned_action_runs_lost(worker, observed_run_ids, now) do
-    AgentRun
-    |> join(:inner, [run], action in assoc(run, :agent_action))
-    |> where(
-      [run, action],
-      run.worker_id == ^worker.id and run.state == "unknown" and is_nil(run.job_id) and
-        action.state in ^@terminal_action_states
-    )
+    worker
+    |> orphaned_action_runs_query()
     |> Repo.all()
     |> Enum.reject(&MapSet.member?(observed_run_ids, &1.id))
     |> Enum.map(fn run ->
@@ -820,6 +1293,16 @@ defmodule PtcManager.Herdr.Sync do
       |> Repo.update!()
     end)
     |> length()
+  end
+
+  defp orphaned_action_runs_query(worker) do
+    AgentRun
+    |> join(:inner, [run], action in assoc(run, :agent_action))
+    |> where(
+      [run, action],
+      run.worker_id == ^worker.id and run.state == "unknown" and is_nil(run.job_id) and
+        action.state in ^@terminal_action_states
+    )
   end
 
   defp upsert_worker(session, status, heartbeat_at, extra_attrs) do
@@ -1432,10 +1915,14 @@ defmodule PtcManager.Herdr.Sync do
     )
   end
 
+  defp reconcile_worktree_identity(run, attrs, now),
+    do: reconcile_worktree_identity(run, attrs, now, nil)
+
   defp reconcile_worktree_identity(
          %AgentRun{job_id: job_id, herdr_workspace: retained_workspace},
          %{herdr_workspace: observed_workspace, state: state} = attrs,
-         now
+         now,
+         job
        )
        when is_integer(job_id) do
     workspace =
@@ -1456,21 +1943,27 @@ defmodule PtcManager.Herdr.Sync do
       )
       |> Repo.update_all(set: [herdr_workspace: workspace, last_used_at: now, updated_at: now])
 
-      reconcile_worktree_state(job_id, state, now, Map.get(attrs, :recover_retained, false))
+      reconcile_worktree_state(
+        job_id,
+        state,
+        now,
+        Map.get(attrs, :recover_retained, false),
+        job
+      )
     end
 
     :ok
   end
 
-  defp reconcile_worktree_identity(_run, _attrs, _now), do: :ok
+  defp reconcile_worktree_identity(_run, _attrs, _now, _job), do: :ok
 
-  defp reconcile_worktree_state(job_id, state, now, recovered_retained?)
+  defp reconcile_worktree_state(job_id, state, now, recovered_retained?, _job)
        when state in ["working", "idle"] do
     mark_worktree_active(job_id, now, recovered_retained?)
   end
 
-  defp reconcile_worktree_state(job_id, "blocked", now, recovered_retained?) do
-    case Repo.get(Job, job_id) do
+  defp reconcile_worktree_state(job_id, "blocked", now, recovered_retained?, projected_job) do
+    case projected_job || Repo.get(Job, job_id) do
       %Job{state: "pr_open"} ->
         transition_observed_worktree(
           job_id,
@@ -1485,7 +1978,7 @@ defmodule PtcManager.Herdr.Sync do
     end
   end
 
-  defp reconcile_worktree_state(job_id, "waiting", now, recovered_retained?) do
+  defp reconcile_worktree_state(job_id, "waiting", now, recovered_retained?, _job) do
     transition_observed_worktree(
       job_id,
       ~w(reserved active awaiting_pr warm waiting reclaimable attention),
@@ -1495,7 +1988,7 @@ defmodule PtcManager.Herdr.Sync do
     )
   end
 
-  defp reconcile_worktree_state(job_id, "done", now, _recovered_retained?) do
+  defp reconcile_worktree_state(job_id, "done", now, _recovered_retained?, _job) do
     transition_observed_worktree(
       job_id,
       ~w(reserved active awaiting_pr warm waiting reclaimable),
@@ -1505,12 +1998,12 @@ defmodule PtcManager.Herdr.Sync do
     )
   end
 
-  defp reconcile_worktree_state(job_id, state, now, _recovered_retained?)
+  defp reconcile_worktree_state(job_id, state, now, _recovered_retained?, _job)
        when state in ["failed", "lost"] do
     mark_worktree_attention(job_id, "The retained Herdr agent ended in state #{state}.", now)
   end
 
-  defp reconcile_worktree_state(_job_id, _state, _now, _recovered_retained?), do: :ok
+  defp reconcile_worktree_state(_job_id, _state, _now, _recovered_retained?, _job), do: :ok
 
   defp mark_worktree_active(job_id, now, recovered_retained?) do
     cutoff = touch_cutoff(now)
