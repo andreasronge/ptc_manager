@@ -4,6 +4,7 @@ defmodule PtcManager.Herdr.Sync do
   import Ecto.Query
 
   alias PtcManager.Clock
+  alias PtcManager.DatabaseDiagnostics
   alias PtcManager.Gateway
   alias PtcManager.Operations
   alias PtcManager.RuntimeIncarnation
@@ -111,7 +112,9 @@ defmodule PtcManager.Herdr.Sync do
     result =
       Repo.transaction(
         fn ->
-          case accept_worker_snapshot(session, identity, agent_now, stale_after_ms) do
+          case DatabaseDiagnostics.with_phase("worker_acceptance", fn ->
+                 accept_worker_snapshot(session, identity, agent_now, stale_after_ms)
+               end) do
             {:ignored, worker, reason} ->
               %{
                 worker: worker,
@@ -122,7 +125,10 @@ defmodule PtcManager.Herdr.Sync do
               }
 
             {:recovering, worker, reason} ->
-              uncertain_count = quarantine_active_attempts(worker, agent_now, lease_now, reason)
+              uncertain_count =
+                DatabaseDiagnostics.with_phase("run_quarantine", fn ->
+                  quarantine_active_attempts(worker, agent_now, lease_now, reason)
+                end)
 
               %{
                 worker: worker,
@@ -134,15 +140,17 @@ defmodule PtcManager.Herdr.Sync do
               }
 
             {:accepted, worker} ->
-              persist_agents_snapshot(
-                worker,
-                session,
-                remote_agents,
-                snapshot_started_at,
-                agent_now,
-                lease_now,
-                reconcile_after_ms
-              )
+              DatabaseDiagnostics.with_phase("snapshot_reconciliation", fn ->
+                persist_agents_snapshot(
+                  worker,
+                  session,
+                  remote_agents,
+                  snapshot_started_at,
+                  agent_now,
+                  lease_now,
+                  reconcile_after_ms
+                )
+              end)
           end
         end,
         mode: :immediate
@@ -184,61 +192,101 @@ defmodule PtcManager.Herdr.Sync do
           herdr_incarnation_id: worker.herdr_incarnation_id,
           coordinator_incarnation_id: worker.coordinator_incarnation_id
         })
-        |> maybe_attach_managed_attempt(worker.worker_key)
-        |> maybe_attach_agent_action_attempt(worker)
       end)
 
-    existing_runs =
-      AgentRun
-      |> where([run], run.worker_id == ^worker.id and not is_nil(run.external_key))
-      |> order_by([run], desc: run.inserted_at, desc: run.id)
-      |> Repo.all()
-      |> Enum.reduce(%{}, &Map.put_new(&2, &1.external_key, &1))
+    {existing_runs, existing_job_states, active_owner_job_ids} =
+      DatabaseDiagnostics.with_phase("existing_run_lookup", fn ->
+        AgentRun
+        |> where([run], run.worker_id == ^worker.id and not is_nil(run.external_key))
+        |> order_by([run], desc: run.inserted_at, desc: run.id)
+        |> join(:left, [run], job in Job, on: job.id == run.job_id)
+        |> select([run, job], {run, job.state})
+        |> Repo.all()
+        |> Enum.reduce(
+          {%{}, %{}, MapSet.new()},
+          fn {run, job_state}, {runs, job_states, active_job_ids} ->
+            runs = Map.put_new(runs, run.external_key, run)
+            job_states = Map.put(job_states, run.id, job_state)
+
+            active_job_ids =
+              if job_state in @recoverable_attention_job_states do
+                MapSet.put(active_job_ids, run.job_id)
+              else
+                active_job_ids
+              end
+
+            {runs, job_states, active_job_ids}
+          end
+        )
+      end)
+
+    normalized =
+      DatabaseDiagnostics.with_phase("snapshot_classification", fn ->
+        Enum.map(normalized, fn attrs ->
+          case Map.get(existing_runs, attrs.external_key) do
+            %AgentRun{} = existing_run ->
+              preserve_existing_attachment(attrs, existing_run, existing_job_states)
+
+            nil ->
+              attrs
+              |> maybe_attach_managed_attempt(worker.worker_key)
+              |> maybe_attach_agent_action_attempt(worker)
+          end
+        end)
+      end)
 
     observed_keys = MapSet.new(normalized, & &1.external_key)
 
     observed_run_ids =
-      Enum.flat_map(normalized, fn attrs ->
-        existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
+      DatabaseDiagnostics.with_phase("run_reconciliation", fn ->
+        Enum.flat_map(normalized, fn attrs ->
+          existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
 
-        cond do
-          not snapshot_fresh_for_run?(existing_run, snapshot_started_at) ->
-            [existing_run.id]
+          cond do
+            not snapshot_fresh_for_run?(existing_run, snapshot_started_at) ->
+              [existing_run.id]
 
-          settled_terminal_snapshot?(existing_run, attrs) ->
-            [existing_run.id]
+            settled_terminal_snapshot?(existing_run, attrs, active_owner_job_ids) ->
+              [existing_run.id]
 
-          true ->
-            run = upsert_agent_run(worker, existing_run, attrs)
-            superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
-            shared_ids = refresh_shared_pane_runs(worker, run, attrs, agent_now)
-            reconcile_worktree_identity(run, attrs, agent_now)
-            reconcile_job(run, attrs.state, agent_now, lease_now)
-            [run.id | superseded_ids ++ shared_ids]
-        end
+            true ->
+              run = upsert_agent_run(worker, existing_run, attrs)
+              superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
+              shared_ids = refresh_shared_pane_runs(worker, run, attrs, agent_now)
+              reconcile_worktree_identity(run, attrs, agent_now)
+              reconcile_job(run, attrs.state, agent_now, lease_now)
+              [run.id | superseded_ids ++ shared_ids]
+          end
+        end)
+        |> MapSet.new()
       end)
-      |> MapSet.new()
 
-    refresh_heartbeats(observed_run_ids, agent_now)
+    DatabaseDiagnostics.with_phase("heartbeat_refresh", fn ->
+      refresh_heartbeats(observed_run_ids, agent_now)
+    end)
 
     lost_count =
-      mark_missing_runs_lost(
-        existing_runs,
-        observed_keys,
-        observed_run_ids,
-        agent_now,
-        snapshot_started_at,
-        lease_now
-      ) + mark_orphaned_action_runs_lost(worker, observed_run_ids, agent_now)
+      DatabaseDiagnostics.with_phase("missing_run_resolution", fn ->
+        mark_missing_runs_lost(
+          existing_runs,
+          observed_keys,
+          observed_run_ids,
+          agent_now,
+          snapshot_started_at,
+          lease_now
+        ) + mark_orphaned_action_runs_lost(worker, observed_run_ids, agent_now)
+      end)
 
     absent_count =
-      resolve_absent_reconciling_jobs(
-        worker,
-        normalized,
-        lease_now,
-        reconcile_after_ms,
-        agent_now
-      )
+      DatabaseDiagnostics.with_phase("absence_resolution", fn ->
+        resolve_absent_reconciling_jobs(
+          worker,
+          normalized,
+          lease_now,
+          reconcile_after_ms,
+          agent_now
+        )
+      end)
 
     %{
       worker: worker,
@@ -695,24 +743,15 @@ defmodule PtcManager.Herdr.Sync do
   # add information. Skipping it avoids two no-op worktree UPDATE statements per
   # retained pane while SQLite's only writer lock is held. An active owner must
   # still reconcile: a terminal pane can report working and then terminal again.
-  defp settled_terminal_snapshot?(%AgentRun{state: state} = run, %{state: state})
+  defp settled_terminal_snapshot?(
+         %AgentRun{state: state, job_id: job_id},
+         %{state: state},
+         active_owner_job_ids
+       )
        when state in @terminal_states,
-       do: terminal_owner_settled?(run)
+       do: not MapSet.member?(active_owner_job_ids, job_id)
 
-  defp settled_terminal_snapshot?(_run, _attrs), do: false
-
-  defp terminal_owner_settled?(%AgentRun{job_id: nil}), do: true
-
-  defp terminal_owner_settled?(%AgentRun{job_id: job_id}) do
-    case Repo.get(Job, job_id) do
-      %Job{state: state}
-      when state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
-        false
-
-      _settled_or_removed ->
-        true
-    end
-  end
+  defp settled_terminal_snapshot?(_run, _attrs, _active_owner_job_ids), do: false
 
   defp mark_missing_runs_lost(
          existing_runs,
@@ -1019,6 +1058,26 @@ defmodule PtcManager.Herdr.Sync do
   defp job_state("failed", _current), do: "failed"
   defp job_state("lost", _current), do: "lost"
   defp job_state(_state, current), do: current
+
+  defp preserve_existing_attachment(attrs, existing_run, existing_job_states) do
+    if Map.get(existing_job_states, existing_run.id) == "pr_open" do
+      attrs = Map.put(attrs, :recover_retained, existing_run.state == "lost")
+
+      if attrs.state in ["done", "idle"] do
+        attrs
+        |> Map.put(:state, "waiting")
+        |> Map.put(:ended_at, nil)
+        |> Map.put(
+          :status_text,
+          "Retained with its PR context; waiting for CI or maintainer action."
+        )
+      else
+        attrs
+      end
+    else
+      attrs
+    end
+  end
 
   defp maybe_attach_managed_attempt(%{agent_name: name} = attrs, worker_key)
        when is_binary(name) do

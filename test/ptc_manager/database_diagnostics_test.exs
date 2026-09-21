@@ -57,6 +57,8 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
     assert log =~ "SQLite transaction was slow"
     assert log =~ "test_workload"
     assert log =~ ~s(source="secrets")
+    assert log =~ "statement=select"
+    assert log =~ "transaction_id="
     refute log =~ "SELECT *"
     refute log =~ "value ="
   end
@@ -139,15 +141,7 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
   test "logs a failed writer acquisition without leaving an open transaction" do
     log =
       capture_log(fn ->
-        DatabaseDiagnostics.handle_event(
-          [:ptc_manager, :repo, :query],
-          %{
-            total_time: System.convert_time_unit(5, :millisecond, :native),
-            query_time: System.convert_time_unit(5, :millisecond, :native)
-          },
-          %{query: "begin", result: {:error, %Exqlite.Error{message: "database is locked"}}},
-          nil
-        )
+        emit_failed_writer_event()
 
         DatabaseDiagnostics.handle_event(
           [:ptc_manager, :repo, :query],
@@ -178,6 +172,65 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
 
     assert log =~ "SQLite pool checkout was slow"
     refute log =~ "SQLite writer acquisition was slow"
+  end
+
+  test "reports other open transaction owners when a writer is blocked" do
+    parent = self()
+
+    holder =
+      spawn(fn ->
+        DatabaseDiagnostics.with_context("snapshot_holder", fn ->
+          DatabaseDiagnostics.handle_event(
+            [:ptc_manager, :repo, :query],
+            %{total_time: 0},
+            %{query: "begin", result: {:ok, %{command: :begin}}},
+            nil
+          )
+
+          DatabaseDiagnostics.with_phase("run_reconciliation", fn ->
+            send(parent, :holder_started)
+            receive do: (:finish -> :ok)
+          end)
+
+          DatabaseDiagnostics.handle_event(
+            [:ptc_manager, :repo, :query],
+            %{total_time: 0},
+            %{query: "rollback", result: {:ok, %{command: :rollback}}},
+            nil
+          )
+        end)
+      end)
+
+    assert_receive :holder_started
+
+    log =
+      capture_log(fn ->
+        DatabaseDiagnostics.with_context("blocked_writer", fn ->
+          emit_failed_writer_event()
+        end)
+      end)
+
+    send(holder, :finish)
+    assert log =~ "open_transactions="
+    assert log =~ "snapshot_holder"
+    assert log =~ "run_reconciliation"
+    refute log =~ "blocked_writer" <> inspect(holder)
+  end
+
+  test "dead transaction owners are removed from diagnostics" do
+    owner =
+      spawn(fn ->
+        DatabaseDiagnostics.handle_event(
+          [:ptc_manager, :repo, :query],
+          %{total_time: 0},
+          %{query: "begin", result: {:ok, %{command: :begin}}},
+          nil
+        )
+      end)
+
+    monitor = Process.monitor(owner)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
+    refute Enum.any?(DatabaseDiagnostics.open_transactions(), &(&1.pid == owner))
   end
 
   test "a nested transaction preserves the outer transaction duration" do
@@ -214,6 +267,17 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
 
     assert log =~ "SQLite transaction was slow"
     assert length(Regex.scan(~r/SQLite transaction was slow/, log)) == 1
+  end
+
+  defp emit_failed_writer_event do
+    duration = System.convert_time_unit(5, :millisecond, :native)
+
+    DatabaseDiagnostics.handle_event(
+      [:ptc_manager, :repo, :query],
+      %{total_time: duration, query_time: duration},
+      %{query: "begin", result: {:error, %Exqlite.Error{message: "database is locked"}}},
+      nil
+    )
   end
 
   defp read_production_runtime(overrides) do
