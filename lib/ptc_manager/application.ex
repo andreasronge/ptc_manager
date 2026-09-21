@@ -11,8 +11,8 @@ defmodule PtcManager.Application do
 
     children = [
       PtcManagerWeb.Telemetry,
-      PtcManager.DatabaseDiagnostics,
       PtcManager.Repo,
+      PtcManager.DatabaseDiagnostics,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:ptc_manager, :ecto_repos), skip: skip_migrations?()},
       PtcManager.CapacitySettings,

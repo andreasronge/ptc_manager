@@ -1333,9 +1333,17 @@ defmodule PtcManager.HerdrSyncTest do
         handler,
         [:ptc_manager, :repo, :query],
         fn _event, _measurements, metadata, pid ->
-          if metadata[:source] == "worktree_allocations" and
-               String.starts_with?(to_string(metadata[:query]), "UPDATE") do
-            send(pid, {:worktree_write, metadata[:query]})
+          cond do
+            metadata[:source] == "worktree_allocations" and
+                String.starts_with?(to_string(metadata[:query]), "UPDATE") ->
+              send(pid, {:worktree_write, metadata[:query]})
+
+            metadata[:source] == "jobs" and
+                String.starts_with?(to_string(metadata[:query]), "SELECT") ->
+              send(pid, :job_read)
+
+            true ->
+              :ok
           end
         end,
         test_pid
@@ -1347,6 +1355,8 @@ defmodule PtcManager.HerdrSyncTest do
     Process.put(:herdr_result, {:ok, [settled_remote]})
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal")
     refute_receive {:worktree_write, _query}
+    assert_receive :job_read
+    refute_receive :job_read
   end
 
   test "a restarted terminal managed identity requires two absent snapshots to release" do
