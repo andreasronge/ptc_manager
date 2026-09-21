@@ -662,6 +662,18 @@ defmodule PtcManager.HerdrSyncTest do
 
     worker = worker_fixture(%{worker_key: "herdr:managed"})
 
+    {:ok, pending_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "starting",
+        agent_name: "impl_j#{job.id}_f1",
+        started_at: now(),
+        last_heartbeat_at: now(),
+        fencing_token: 1
+      })
+
     allocation =
       %WorktreeAllocation{}
       |> WorktreeAllocation.changeset(%{
@@ -684,10 +696,14 @@ defmodule PtcManager.HerdrSyncTest do
        ]}
     )
 
-    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+    end)
 
     run = Repo.one!(from run in AgentRun, where: run.job_id == ^job.id)
+    assert run.id == pending_run.id
     assert run.fencing_token == 1
+    assert run.external_key == "managed:managed-agent"
     assert Repo.get!(Job, job.id).state == "working"
     recovered_allocation = Repo.get!(WorktreeAllocation, allocation.id)
     assert recovered_allocation.herdr_workspace == "recovered-workspace"
