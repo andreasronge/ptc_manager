@@ -59,6 +59,7 @@ defmodule PtcManager.Operations do
     resolve_issue_decision
   )
   @superseded_herdr_status "Superseded duplicate of the action-owned Herdr run."
+  @retained_observation_refresh_ms 300_000
   @topic "operations"
   @github_component ~r/\A[A-Za-z0-9_.-]+\z/
 
@@ -3457,9 +3458,32 @@ defmodule PtcManager.Operations do
              commits >= 0 and
              (is_nil(unpushed) or (is_integer(unpushed) and unpushed >= 0)) do
     now = utc_now()
+    refresh_before = DateTime.add(now, -@retained_observation_refresh_ms, :millisecond)
+
+    unpushed_changed =
+      if is_nil(unpushed) do
+        dynamic([allocation], not is_nil(allocation.retained_unpushed_commits))
+      else
+        dynamic(
+          [allocation],
+          is_nil(allocation.retained_unpushed_commits) or
+            allocation.retained_unpushed_commits != ^unpushed
+        )
+      end
+
+    observation_changed =
+      dynamic(
+        [allocation],
+        is_nil(allocation.retained_observed_at) or
+          allocation.retained_observed_at < ^refresh_before or
+          is_nil(allocation.retained_dirty) or allocation.retained_dirty != ^dirty or
+          is_nil(allocation.retained_local_commits) or
+          allocation.retained_local_commits != ^commits or ^unpushed_changed
+      )
 
     WorktreeAllocation
     |> where([allocation], allocation.id == ^allocation_id and allocation.state == "attention")
+    |> where(^observation_changed)
     |> Repo.update_all(
       set: [
         retained_dirty: dirty,
