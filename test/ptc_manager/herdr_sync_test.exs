@@ -1241,6 +1241,26 @@ defmodule PtcManager.HerdrSyncTest do
     assert refreshed_worker.healthy_snapshot_count == 0
   end
 
+  test "an idle retained pane for a terminal job stays on the write-only path" do
+    %{job: job, run: run} =
+      managed_job_fixture("terminal-idle", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    job |> Job.changeset(%{state: "failed", ended_at: now()}) |> Repo.update!()
+    remote = remote_agent("idle") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, %{lost_count: 0}} = Sync.sync(client: FakeClient, session: "terminal-idle")
+    end)
+
+    assert Repo.get!(AgentRun, run.id).state == "done"
+    assert Repo.get!(Job, job.id).state == "failed"
+  end
+
   test "a repeated retained snapshot does not erase worktree attention" do
     repository = repository_fixture()
     issue = issue_fixture(repository)
