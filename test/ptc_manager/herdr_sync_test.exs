@@ -2,6 +2,7 @@ defmodule PtcManager.HerdrSyncTest do
   use PtcManager.DataCase, async: false
 
   import Ecto.Query
+  import PtcManager.TransactionAssertions
 
   alias PtcManager.Herdr.{Client, Sync}
   alias PtcManager.Operations
@@ -1810,45 +1811,6 @@ defmodule PtcManager.HerdrSyncTest do
 
     {:ok, run} = Operations.create_agent_run(run_attrs)
     %{issue: issue, job: job, run: run, worker: worker}
-  end
-
-  defp assert_no_transaction_reads(operation) do
-    handler = "herdr-transaction-reads-#{System.unique_integer([:positive])}"
-    owner = self()
-    transaction_key = {__MODULE__, handler, :transaction}
-
-    :ok =
-      :telemetry.attach(
-        handler,
-        [:ptc_manager, :repo, :query],
-        &track_transaction_reads/4,
-        {owner, transaction_key}
-      )
-
-    try do
-      operation.()
-      refute_receive {:transaction_read, _source}
-    after
-      :telemetry.detach(handler)
-    end
-  end
-
-  defp track_transaction_reads(_event, _measurements, metadata, {pid, transaction_key}) do
-    query = to_string(metadata[:query])
-
-    case String.downcase(query) do
-      "begin" ->
-        Process.put(transaction_key, true)
-
-      outcome when outcome in ["commit", "rollback"] ->
-        Process.delete(transaction_key)
-
-      _query ->
-        if Process.get(transaction_key) == true and
-             (String.starts_with?(query, "SELECT") or String.starts_with?(query, "PRAGMA")) do
-          send(pid, {:transaction_read, metadata[:source]})
-        end
-    end
   end
 
   defp authoritative_snapshot(agents, sequence) do

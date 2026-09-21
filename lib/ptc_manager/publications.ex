@@ -5,6 +5,7 @@ defmodule PtcManager.Publications do
 
   alias PtcManager.Operations
   alias PtcManager.GitHub.{LinkedIssues, PullRequestClient}
+  alias PtcManager.Herdr.StateRevision
 
   alias PtcManager.Operations.{
     AgentAction,
@@ -909,182 +910,194 @@ defmodule PtcManager.Publications do
 
     outcome =
       if valid_remote_status?(result) do
-        RepoTransaction.immediate(fn ->
-          publication = Repo.get!(PrPublication, publication_id)
-          job = publication.job_id && Repo.get!(Job, publication.job_id)
-          repository = publication_repository!(publication, job)
+        with {:ok, projection} <- remote_status_projection(publication_id) do
+          transaction_result =
+            RepoTransaction.immediate(fn ->
+              reserve_remote_status_projection!(projection)
 
-          cond do
-            PrPublication.external?(publication) ->
-              record_external_remote_status!(publication, repository, result, now)
+              publication = projection.publication
+              job = projection.job
+              repository = projection.repository
 
-            not reconcilable_remote_status?(publication, job) ->
-              Repo.rollback(:publication_not_open)
+              cond do
+                PrPublication.external?(publication) ->
+                  record_external_remote_status!(publication, repository, result, now)
 
-            not intended_base?(result, repository) ->
-              message = "GitHub reports a different pull-request base."
+                not reconcilable_remote_status?(publication, job) ->
+                  Repo.rollback(:publication_not_open)
 
-              publication
-              |> PrPublication.changeset(%{
-                state: "blocked",
-                pr_state: result.state,
-                remote_base_sha: result.base_sha,
-                pr_checked_at: now,
-                last_error: message
-              })
-              |> Repo.update!()
+                not intended_base?(result, repository) ->
+                  message = "GitHub reports a different pull-request base."
 
-              job
-              |> Job.changeset(%{state: "publish_blocked", last_error: message})
-              |> Repo.update!()
-
-              mark_worktree_attention(job.id, message, now)
-
-              insert_status_audit!(publication, "pr_publication.base_changed", result, now)
-              load(publication.id)
-
-            # While an action that pushes to this pull request is queued,
-            # running, or syncing, a head it pushed is verified by that action,
-            # not fenced by the poller; the status still moves so the board
-            # stays current.
-            result.state == "open" and result.head_sha != publication.remote_head_sha and
-                pushing_action_in_flight?(publication.id) ->
-              publication
-              |> PrPublication.changeset(
-                Map.merge(
-                  %{pr_state: "open", remote_base_sha: result.base_sha, pr_checked_at: now},
-                  remote_status_attrs(result)
-                )
-              )
-              |> Repo.update!()
-
-              load(publication.id)
-
-            # A head the console never verified blocks the lineage once per
-            # head: the first poll announces it and parks the job and worktree,
-            # later polls only keep checks and mergeability current.
-            result.state == "open" and result.head_sha != publication.remote_head_sha ->
-              message = "GitHub reports a different pull-request head commit."
-
-              announced? =
-                publication.state == "blocked" and
-                  publication.observed_head_sha == result.head_sha
-
-              publication
-              |> PrPublication.changeset(
-                Map.merge(
-                  %{
+                  publication
+                  |> PrPublication.changeset(%{
                     state: "blocked",
                     pr_state: result.state,
                     remote_base_sha: result.base_sha,
-                    observed_head_sha: result.head_sha,
                     pr_checked_at: now,
                     last_error: message
-                  },
-                  remote_status_attrs(result)
-                )
-              )
-              |> Repo.update!()
+                  })
+                  |> Repo.update!()
 
-              unless announced? do
-                job
-                |> Job.changeset(%{state: "publish_blocked", last_error: message})
-                |> Repo.update!()
+                  job
+                  |> Job.changeset(%{state: "publish_blocked", last_error: message})
+                  |> Repo.update!()
 
-                mark_worktree_attention(job.id, message, now)
-                insert_status_audit!(publication, "pr_publication.head_changed", result, now)
+                  mark_worktree_attention(job.id, message, now)
+
+                  insert_status_audit!(publication, "pr_publication.base_changed", result, now)
+                  :ok
+
+                # While an action that pushes to this pull request is queued,
+                # running, or syncing, a head it pushed is verified by that action,
+                # not fenced by the poller; the status still moves so the board
+                # stays current.
+                result.state == "open" and result.head_sha != publication.remote_head_sha and
+                    projection.pushing_action_in_flight? ->
+                  publication
+                  |> PrPublication.changeset(
+                    Map.merge(
+                      %{pr_state: "open", remote_base_sha: result.base_sha, pr_checked_at: now},
+                      remote_status_attrs(result)
+                    )
+                  )
+                  |> Repo.update!()
+
+                  :ok
+
+                # A head the console never verified blocks the lineage once per
+                # head: the first poll announces it and parks the job and worktree,
+                # later polls only keep checks and mergeability current.
+                result.state == "open" and result.head_sha != publication.remote_head_sha ->
+                  message = "GitHub reports a different pull-request head commit."
+
+                  announced? =
+                    publication.state == "blocked" and
+                      publication.observed_head_sha == result.head_sha
+
+                  publication
+                  |> PrPublication.changeset(
+                    Map.merge(
+                      %{
+                        state: "blocked",
+                        pr_state: result.state,
+                        remote_base_sha: result.base_sha,
+                        observed_head_sha: result.head_sha,
+                        pr_checked_at: now,
+                        last_error: message
+                      },
+                      remote_status_attrs(result)
+                    )
+                  )
+                  |> Repo.update!()
+
+                  unless announced? do
+                    job
+                    |> Job.changeset(%{state: "publish_blocked", last_error: message})
+                    |> Repo.update!()
+
+                    mark_worktree_attention(job.id, message, now)
+                    insert_status_audit!(publication, "pr_publication.head_changed", result, now)
+                  end
+
+                  :ok
+
+                result.state == "open" ->
+                  publication
+                  |> PrPublication.changeset(
+                    Map.merge(
+                      %{
+                        pr_state: "open",
+                        remote_base_sha: result.base_sha,
+                        observed_head_sha: nil,
+                        pr_checked_at: now,
+                        pr_url: result.pr_url,
+                        last_error: nil
+                      },
+                      remote_status_attrs(result)
+                    )
+                  )
+                  |> Repo.update!()
+
+                  WorktreeAllocation
+                  |> where(
+                    [allocation],
+                    allocation.job_id == ^job.id and
+                      allocation.state in ["warm", "waiting", "reclaimable"]
+                  )
+                  |> Repo.update_all(
+                    set: [
+                      state: "waiting",
+                      head_sha: result.head_sha,
+                      pr_url: result.pr_url,
+                      last_used_at: now,
+                      last_error: nil,
+                      updated_at: now
+                    ]
+                  )
+
+                  mark_implementation_agent_waiting(job.id, now)
+
+                  :ok
+
+                result.state in ["merged", "closed"] ->
+                  publication
+                  |> PrPublication.changeset(
+                    Map.merge(
+                      %{
+                        state: "published",
+                        pr_state: result.state,
+                        remote_head_sha: result.head_sha,
+                        remote_base_sha: result.base_sha,
+                        pr_checked_at: now,
+                        pr_url: result.pr_url,
+                        last_error: nil
+                      },
+                      remote_status_attrs(result)
+                    )
+                  )
+                  |> Repo.update!()
+
+                  terminal_state = if result.state == "merged", do: "done", else: "cancelled"
+
+                  job
+                  |> Job.changeset(%{
+                    state: terminal_state,
+                    ended_at: now,
+                    last_error: nil
+                  })
+                  |> Repo.update!()
+
+                  WorktreeAllocation
+                  |> where(
+                    [allocation],
+                    allocation.job_id == ^job.id and
+                      allocation.state not in ["cleaning", "removed"]
+                  )
+                  |> Repo.update_all(
+                    set: [state: "terminal", last_used_at: now, last_error: nil, updated_at: now]
+                  )
+
+                  finish_retained_implementation_agent(job.id, result.state, now)
+
+                  insert_status_audit!(
+                    publication,
+                    "pr_publication.#{result.state}",
+                    result,
+                    now
+                  )
+
+                  :ok
               end
 
-              load(publication.id)
+              publication.id
+            end)
 
-            result.state == "open" ->
-              publication
-              |> PrPublication.changeset(
-                Map.merge(
-                  %{
-                    pr_state: "open",
-                    remote_base_sha: result.base_sha,
-                    observed_head_sha: nil,
-                    pr_checked_at: now,
-                    pr_url: result.pr_url,
-                    last_error: nil
-                  },
-                  remote_status_attrs(result)
-                )
-              )
-              |> Repo.update!()
-
-              WorktreeAllocation
-              |> where(
-                [allocation],
-                allocation.job_id == ^job.id and
-                  allocation.state in ["warm", "waiting", "reclaimable"]
-              )
-              |> Repo.update_all(
-                set: [
-                  state: "waiting",
-                  head_sha: result.head_sha,
-                  pr_url: result.pr_url,
-                  last_used_at: now,
-                  last_error: nil,
-                  updated_at: now
-                ]
-              )
-
-              mark_implementation_agent_waiting(job.id, now)
-
-              load(publication.id)
-
-            result.state in ["merged", "closed"] ->
-              publication
-              |> PrPublication.changeset(
-                Map.merge(
-                  %{
-                    state: "published",
-                    pr_state: result.state,
-                    remote_head_sha: result.head_sha,
-                    remote_base_sha: result.base_sha,
-                    pr_checked_at: now,
-                    pr_url: result.pr_url,
-                    last_error: nil
-                  },
-                  remote_status_attrs(result)
-                )
-              )
-              |> Repo.update!()
-
-              terminal_state = if result.state == "merged", do: "done", else: "cancelled"
-
-              job
-              |> Job.changeset(%{
-                state: terminal_state,
-                ended_at: now,
-                last_error: nil
-              })
-              |> Repo.update!()
-
-              WorktreeAllocation
-              |> where(
-                [allocation],
-                allocation.job_id == ^job.id and
-                  allocation.state not in ["cleaning", "removed"]
-              )
-              |> Repo.update_all(
-                set: [state: "terminal", last_used_at: now, last_error: nil, updated_at: now]
-              )
-
-              finish_retained_implementation_agent(job.id, result.state, now)
-
-              insert_status_audit!(
-                publication,
-                "pr_publication.#{result.state}",
-                result,
-                now
-              )
-
-              load(publication.id)
+          case transaction_result do
+            {:ok, id} -> {:ok, load(id)}
+            error -> error
           end
-        end)
+        end
       else
         {:error, :invalid_pull_request_status}
       end
@@ -1383,12 +1396,58 @@ defmodule PtcManager.Publications do
     publication |> PrPublication.changeset(attrs) |> Repo.update!()
   end
 
-  defp publication_repository!(%PrPublication{repository_id: repository_id}, _job)
-       when is_integer(repository_id),
-       do: Repo.get!(Repository, repository_id)
+  defp remote_status_projection(publication_id, attempts \\ 2)
 
-  defp publication_repository!(_publication, %Job{repository_id: repository_id}),
-    do: Repo.get!(Repository, repository_id)
+  defp remote_status_projection(_publication_id, 0), do: {:error, :concurrent_state_change}
+
+  defp remote_status_projection(publication_id, attempts) do
+    revision = Repo.get!(StateRevision, 1).revision
+    publication = Repo.get!(PrPublication, publication_id)
+    job = publication.job_id && Repo.get!(Job, publication.job_id)
+    repository_id = publication.repository_id || job.repository_id
+
+    projection = %{
+      revision: revision,
+      publication: publication,
+      job: job,
+      repository: Repo.get!(Repository, repository_id),
+      pushing_action_in_flight?: pushing_action_in_flight?(publication.id)
+    }
+
+    if Repo.get!(StateRevision, 1).revision == revision do
+      {:ok, projection}
+    else
+      remote_status_projection(publication_id, attempts - 1)
+    end
+  end
+
+  defp reserve_remote_status_projection!(projection) do
+    {reserved, _rows} =
+      StateRevision
+      |> where(
+        [revision],
+        revision.id == 1 and revision.revision == ^projection.revision
+      )
+      |> Repo.update_all(inc: [revision: 1])
+
+    if reserved != 1, do: Repo.rollback(:concurrent_state_change)
+
+    reserve_projected_row!(PrPublication, projection.publication)
+    reserve_projected_row!(Repository, projection.repository)
+    if projection.job, do: reserve_projected_row!(Job, projection.job)
+  end
+
+  defp reserve_projected_row!(schema, projected) do
+    {reserved, _rows} =
+      schema
+      |> where(
+        [row],
+        row.id == ^projected.id and row.updated_at == ^projected.updated_at
+      )
+      |> Repo.update_all(set: [updated_at: projected.updated_at])
+
+    if reserved != 1, do: Repo.rollback(:concurrent_state_change)
+  end
 
   defp external_key(repository_id, pr_number) do
     "external:#{repository_id}:#{pr_number}"

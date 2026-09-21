@@ -2,6 +2,7 @@ defmodule PtcManager.PublisherTest do
   use PtcManager.DataCase, async: false
 
   import Ecto.Query
+  import PtcManager.TransactionAssertions
 
   alias PtcManager.Operations
 
@@ -990,6 +991,24 @@ defmodule PtcManager.PublisherTest do
              )
 
     assert Repo.aggregate(PrPublication, :count) == 1
+  end
+
+  test "remote status application performs no reads inside its write transaction" do
+    {job, publication, result} = published_publication_fixture()
+
+    remote = %{
+      state: "merged",
+      pr_url: publication.pr_url,
+      head_sha: result.head_sha,
+      base_sha: String.duplicate("a", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, merged} = Publications.record_remote_status(publication.id, remote)
+      assert merged.pr_state == "merged"
+    end)
   end
 
   test "merged and closed PRs leave the active implementation queue" do
