@@ -82,7 +82,7 @@ defmodule PtcManager.TestGitWorkspaceTest do
            ]
 
     assert Enum.drop(start_options, 8) ==
-             ["--model", PtcManager.AgentProfiles.model("codex")] ++
+             ["--model", working.execution_settings["model"]] ++
                PtcManager.CodexTrust.override_args([workspace.repository, allocation.path])
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
