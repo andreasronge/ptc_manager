@@ -1324,6 +1324,29 @@ defmodule PtcManager.HerdrSyncTest do
 
     assert Repo.get!(AgentRun, run.id).state == "done"
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "terminal"
+
+    handler = "settled-terminal-worktree-writes-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ptc_manager, :repo, :query],
+        fn _event, _measurements, metadata, pid ->
+          if metadata[:source] == "worktree_allocations" and
+               String.starts_with?(to_string(metadata[:query]), "UPDATE") do
+            send(pid, {:worktree_write, metadata[:query]})
+          end
+        end,
+        test_pid
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    settled_remote = Map.put(remote, "agent_status", "done")
+    Process.put(:herdr_result, {:ok, [settled_remote]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal")
+    refute_receive {:worktree_write, _query}
   end
 
   test "a restarted terminal managed identity requires two absent snapshots to release" do
@@ -1414,6 +1437,31 @@ defmodule PtcManager.HerdrSyncTest do
 
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "restored-idle")
     assert Repo.get!(Job, job.id).state == "reconciling"
+  end
+
+  test "a terminal pane settles its active owner after briefly reporting working" do
+    %{job: job, run: run} =
+      managed_job_fixture("terminal-reactivation", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    Process.put(
+      :herdr_result,
+      {:ok, [remote_agent("working") |> Map.put("name", run.agent_name)]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal-reactivation")
+    assert Repo.get!(Job, job.id).state == "reconciling"
+
+    Process.put(
+      :herdr_result,
+      {:ok, [remote_agent("done") |> Map.put("name", run.agent_name)]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal-reactivation")
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
   end
 
   test "a held job parked in reconciling settles back to blocked once its agent is not active" do

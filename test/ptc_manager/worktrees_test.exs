@@ -116,6 +116,11 @@ defmodule PtcManager.WorktreesTest do
       assert retained.retained_local_commits == 1
       refute retained.retained_unpushed_commits
       assert retained.retained_observed_at
+
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+      observed_again = Repo.get!(WorktreeAllocation, allocation.id)
+      assert observed_again.retained_observed_at == retained.retained_observed_at
+      assert observed_again.updated_at == retained.updated_at
     end
 
     test "a retained worktree outside the managed root is never touched automatically" do

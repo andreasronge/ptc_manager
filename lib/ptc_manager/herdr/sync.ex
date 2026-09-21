@@ -201,15 +201,20 @@ defmodule PtcManager.Herdr.Sync do
       Enum.flat_map(normalized, fn attrs ->
         existing_run = attrs[:managed_run] || Map.get(existing_runs, attrs.external_key)
 
-        if snapshot_fresh_for_run?(existing_run, snapshot_started_at) do
-          run = upsert_agent_run(worker, existing_run, attrs)
-          superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
-          shared_ids = refresh_shared_pane_runs(worker, run, attrs, agent_now)
-          reconcile_worktree_identity(run, attrs, agent_now)
-          reconcile_job(run, attrs.state, agent_now, lease_now)
-          [run.id | superseded_ids ++ shared_ids]
-        else
-          [existing_run.id]
+        cond do
+          not snapshot_fresh_for_run?(existing_run, snapshot_started_at) ->
+            [existing_run.id]
+
+          settled_terminal_snapshot?(existing_run, attrs) ->
+            [existing_run.id]
+
+          true ->
+            run = upsert_agent_run(worker, existing_run, attrs)
+            superseded_ids = supersede_duplicate_action_runs(worker, run, attrs, agent_now)
+            shared_ids = refresh_shared_pane_runs(worker, run, attrs, agent_now)
+            reconcile_worktree_identity(run, attrs, agent_now)
+            reconcile_job(run, attrs.state, agent_now, lease_now)
+            [run.id | superseded_ids ++ shared_ids]
         end
       end)
       |> MapSet.new()
@@ -684,6 +689,30 @@ defmodule PtcManager.Herdr.Sync do
 
   defp snapshot_fresh_for_run?(%AgentRun{updated_at: updated_at}, snapshot_started_at),
     do: DateTime.compare(updated_at, snapshot_started_at) != :gt
+
+  # Herdr retains completed panes in every snapshot. Once the owning job has
+  # left the agent-driven states, replaying the same terminal observation cannot
+  # add information. Skipping it avoids two no-op worktree UPDATE statements per
+  # retained pane while SQLite's only writer lock is held. An active owner must
+  # still reconcile: a terminal pane can report working and then terminal again.
+  defp settled_terminal_snapshot?(%AgentRun{state: state} = run, %{state: state})
+       when state in @terminal_states,
+       do: terminal_owner_settled?(run)
+
+  defp settled_terminal_snapshot?(_run, _attrs), do: false
+
+  defp terminal_owner_settled?(%AgentRun{job_id: nil}), do: true
+
+  defp terminal_owner_settled?(%AgentRun{job_id: job_id}) do
+    case Repo.get(Job, job_id) do
+      %Job{state: state}
+      when state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
+        false
+
+      _settled_or_removed ->
+        true
+    end
+  end
 
   defp mark_missing_runs_lost(
          existing_runs,
