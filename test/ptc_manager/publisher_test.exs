@@ -170,6 +170,24 @@ defmodule PtcManager.PublisherTest do
            ) == 1
   end
 
+  test "agent publication discovery performs no reads inside its write transaction" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+
+    remote = agent_publication_result(job, publication, result)
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, discovered} = Publications.record_agent_publication(publication.id, remote)
+      assert discovered.state == "published"
+    end)
+  end
+
   test "discovers an agent-created PR only at the exact verified branch and head" do
     previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
     Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
@@ -196,21 +214,10 @@ defmodule PtcManager.PublisherTest do
       })
       |> Repo.insert!()
 
-    Process.put(:publisher_discovery_result, {
-      :ok,
-      %{
-        pr_number: 91,
-        pr_url: "https://github.com/owner/repo/pull/91",
-        state: "open",
-        draft: false,
-        head_sha: result.head_sha,
-        head_ref: publication.branch_name,
-        head_repository: base_repository(job),
-        base_sha: String.duplicate("d", 40),
-        base_ref: "main",
-        base_repository: base_repository(job)
-      }
-    })
+    Process.put(
+      :publisher_discovery_result,
+      {:ok, agent_publication_result(job, publication, result)}
+    )
 
     assert {:ok, discovered} = PublicationStatusReconciler.run_once(client: FakeBroker)
     assert_receive {:discovery_called, publication_id}
@@ -1788,6 +1795,21 @@ defmodule PtcManager.PublisherTest do
       ),
       :count
     )
+  end
+
+  defp agent_publication_result(job, publication, result) do
+    %{
+      pr_number: 91,
+      pr_url: "https://github.com/owner/repo/pull/91",
+      state: "open",
+      draft: false,
+      head_sha: result.head_sha,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: String.duplicate("d", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
   end
 
   defp base_repository(job) do
