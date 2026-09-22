@@ -696,6 +696,31 @@ defmodule PtcManager.PublisherTest do
     assert Publications.next_agent_for_discovery() == nil
   end
 
+  test "agent discovery retry and blocking perform no reads inside write transactions" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {_job, retry_publication, _result} = verified_publication_fixture()
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _publication} =
+               Publications.record_agent_discovery_retry(retry_publication.id, :offline, 60_000)
+    end)
+
+    {_job, blocked_publication, _result} = verified_publication_fixture()
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, blocked} =
+               Publications.block_agent_discovery(blocked_publication.id, :invalid_result)
+
+      assert blocked.state == "blocked"
+    end)
+  end
+
   test "missing agent PR discovery stops at a finite budget and preserves the job" do
     previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
     Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)

@@ -33,52 +33,24 @@ defmodule PtcManager.Publications do
 
     outcome =
       if Enum.all?(pulls, &valid_external_status?/1) do
-        RepoTransaction.immediate(fn ->
-          managed_numbers = managed_pr_numbers(repository.id)
-          managed_heads = managed_pr_heads(repository)
+        with {:ok, projection} <- external_snapshot_projection(repository, pulls) do
+          RepoTransaction.immediate(fn ->
+            reserve_external_snapshot_projection!(projection)
 
-          external_pulls =
-            Enum.reject(pulls, fn pull ->
-              pull.pr_number in managed_numbers or
-                managed_head?(managed_heads, pull.head_repository, pull.head_ref)
+            Enum.each(
+              projection.external_pulls,
+              &apply_external_pull!(projection.repository, &1, projection.existing_by_number, now)
+            )
+
+            Enum.each(projection.first_absences, fn publication ->
+              publication
+              |> PrPublication.changeset(%{last_error: @external_missing_marker})
+              |> Repo.update!()
             end)
 
-          Enum.each(external_pulls, &upsert_external_pull!(repository, &1, now))
-
-          open_numbers = MapSet.new(external_pulls, & &1.pr_number)
-
-          stale_query =
-            PrPublication
-            |> where(
-              [publication],
-              publication.repository_id == ^repository.id and publication.source == "external" and
-                publication.pr_state == "open"
-            )
-
-          stale_query =
-            if MapSet.size(open_numbers) == 0,
-              do: stale_query,
-              else:
-                where(
-                  stale_query,
-                  [publication],
-                  publication.pr_number not in ^MapSet.to_list(open_numbers)
-                )
-
-          first_absence =
-            where(
-              stale_query,
-              [publication],
-              is_nil(publication.last_error) or
-                publication.last_error != ^@external_missing_marker
-            )
-
-          Repo.update_all(first_absence,
-            set: [last_error: @external_missing_marker, updated_at: now]
-          )
-
-          %{open_count: length(external_pulls), closed_count: 0}
-        end)
+            %{open_count: length(projection.external_pulls), closed_count: 0}
+          end)
+        end
       else
         {:error, :invalid_external_pull_request_snapshot}
       end
@@ -705,34 +677,40 @@ defmodule PtcManager.Publications do
     next_attempt_at = DateTime.add(now, delay_ms, :millisecond)
 
     outcome =
-      RepoTransaction.immediate(fn ->
-        publication = Repo.get!(PrPublication, publication_id)
-        job = Repo.get!(Job, publication.job_id)
+      with {:ok, projection} <- agent_discovery_projection(publication_id) do
+        transaction_result =
+          RepoTransaction.immediate(fn ->
+            reserve_remote_status_projection!(projection)
+            publication = projection.publication
+            job = projection.job
 
-        unless publication.source == "agent" and publication.state == "queued" and
-                 job.state == "ready_for_pr",
-               do: Repo.rollback(:invalid_publication_state)
+            unless publication.source == "agent" and publication.state == "queued" and
+                     job.state == "ready_for_pr",
+                   do: Repo.rollback(:invalid_publication_state)
 
-        publication =
-          publication
-          |> PrPublication.changeset(%{
-            attempt_count: publication.attempt_count + 1,
-            next_attempt_at: next_attempt_at,
-            last_error: message
-          })
-          |> Repo.update!()
+            publication =
+              publication
+              |> PrPublication.changeset(%{
+                attempt_count: publication.attempt_count + 1,
+                next_attempt_at: next_attempt_at,
+                last_error: message
+              })
+              |> Repo.update!()
 
-        if publication.attempt_count >=
-             Application.get_env(:ptc_manager, :publication_max_attempts, 5),
-           do:
-             block_agent_discovery!(
-               publication,
-               job,
-               String.slice("PR discovery budget reached: " <> message, 0, 500),
-               now
-             ),
-           else: publication
-      end)
+            if publication.attempt_count >=
+                 Application.get_env(:ptc_manager, :publication_max_attempts, 5),
+               do:
+                 block_agent_discovery!(
+                   publication,
+                   job,
+                   String.slice("PR discovery budget reached: " <> message, 0, 500),
+                   now
+                 ),
+               else: publication.id
+          end)
+
+        load_transaction_result(transaction_result)
+      end
 
     notify(outcome)
   end
@@ -742,17 +720,23 @@ defmodule PtcManager.Publications do
     message = bounded_error(reason)
 
     outcome =
-      RepoTransaction.immediate(fn ->
-        publication = Repo.get!(PrPublication, publication_id)
-        job = Repo.get!(Job, publication.job_id)
+      with {:ok, projection} <- agent_discovery_projection(publication_id) do
+        transaction_result =
+          RepoTransaction.immediate(fn ->
+            reserve_remote_status_projection!(projection)
+            publication = projection.publication
+            job = projection.job
 
-        if publication.source != "agent" or publication.state != "queued" or
-             job.state != "ready_for_pr" do
-          Repo.rollback(:invalid_publication_state)
-        end
+            if publication.source != "agent" or publication.state != "queued" or
+                 job.state != "ready_for_pr" do
+              Repo.rollback(:invalid_publication_state)
+            end
 
-        block_agent_discovery!(publication, job, message, now)
-      end)
+            block_agent_discovery!(publication, job, message, now)
+          end)
+
+        load_transaction_result(transaction_result)
+      end
 
     notify(outcome)
   end
@@ -777,7 +761,7 @@ defmodule PtcManager.Publications do
       details: %{"reason" => message}
     })
 
-    load(publication.id)
+    publication.id
   end
 
   def fail(publication_id, fencing_token, attempt_token, disposition, reason)
@@ -1301,39 +1285,10 @@ defmodule PtcManager.Publications do
 
   defp managed_head?(_heads, _repository, _branch), do: false
 
-  defp upsert_external_pull!(repository, pull, now) do
-    attrs =
-      %{
-        repository_id: repository.id,
-        state: "published",
-        idempotency_key: external_key(repository.id, pull.pr_number),
-        fencing_token: 0,
-        branch_name: pull.head_ref,
-        base_sha: pull.base_sha,
-        head_sha: pull.head_sha,
-        diff_digest: external_version_digest(pull),
-        attempt_count: 0,
-        pr_number: pull.pr_number,
-        pr_url: pull.pr_url,
-        remote_head_sha: pull.head_sha,
-        remote_base_sha: pull.base_sha,
-        published_at: now,
-        pr_state: "open",
-        pr_checked_at: now,
-        source: "external",
-        title: pull.title,
-        author_login: pull.author_login,
-        head_ref: pull.head_ref,
-        head_repository: pull.head_repository,
-        linked_issue_numbers: %{"numbers" => linked_issue_numbers(pull, repository)},
-        last_error: nil
-      }
-      |> Map.merge(remote_status_attrs(pull))
+  defp apply_external_pull!(repository, pull, existing_by_number, now) do
+    attrs = external_pull_attrs(repository, pull, now)
 
-    case Repo.get_by(PrPublication,
-           repository_id: repository.id,
-           pr_number: pull.pr_number
-         ) do
+    case Map.get(existing_by_number, pull.pr_number) do
       nil ->
         %PrPublication{}
         |> PrPublication.changeset(attrs)
@@ -1350,6 +1305,35 @@ defmodule PtcManager.Publications do
       %PrPublication{} = managed ->
         managed
     end
+  end
+
+  defp external_pull_attrs(repository, pull, now) do
+    %{
+      repository_id: repository.id,
+      state: "published",
+      idempotency_key: external_key(repository.id, pull.pr_number),
+      fencing_token: 0,
+      branch_name: pull.head_ref,
+      base_sha: pull.base_sha,
+      head_sha: pull.head_sha,
+      diff_digest: external_version_digest(pull),
+      attempt_count: 0,
+      pr_number: pull.pr_number,
+      pr_url: pull.pr_url,
+      remote_head_sha: pull.head_sha,
+      remote_base_sha: pull.base_sha,
+      published_at: now,
+      pr_state: "open",
+      pr_checked_at: now,
+      source: "external",
+      title: pull.title,
+      author_login: pull.author_login,
+      head_ref: pull.head_ref,
+      head_repository: pull.head_repository,
+      linked_issue_numbers: %{"numbers" => linked_issue_numbers(pull, repository)},
+      last_error: nil
+    }
+    |> Map.merge(remote_status_attrs(pull))
   end
 
   defp preserve_or_reset_health(attrs, publication, pull) do
@@ -1409,6 +1393,94 @@ defmodule PtcManager.Publications do
       |> Map.merge(remote_status_attrs(result))
 
     publication |> PrPublication.changeset(attrs) |> Repo.update!()
+  end
+
+  defp external_snapshot_projection(repository, pulls, attempts \\ 2)
+
+  defp external_snapshot_projection(_repository, _pulls, 0),
+    do: {:error, :concurrent_state_change}
+
+  defp external_snapshot_projection(repository, pulls, attempts) do
+    revision = Repo.get!(StateRevision, 1).revision
+    repository = Repo.get!(Repository, repository.id)
+
+    existing =
+      Repo.all(
+        from publication in PrPublication, where: publication.repository_id == ^repository.id
+      )
+
+    existing_by_number = Map.new(existing, &{&1.pr_number, &1})
+    managed_numbers = managed_pr_numbers(repository.id)
+    managed_heads = managed_pr_heads(repository)
+
+    external_pulls =
+      Enum.reject(pulls, fn pull ->
+        pull.pr_number in managed_numbers or
+          managed_head?(managed_heads, pull.head_repository, pull.head_ref)
+      end)
+
+    open_numbers = MapSet.new(external_pulls, & &1.pr_number)
+
+    first_absences =
+      Enum.filter(existing, fn publication ->
+        publication.source == "external" and publication.pr_state == "open" and
+          not MapSet.member?(open_numbers, publication.pr_number) and
+          publication.last_error != @external_missing_marker
+      end)
+
+    projection = %{
+      revision: revision,
+      repository: repository,
+      existing: existing,
+      existing_by_number: existing_by_number,
+      external_pulls: external_pulls,
+      first_absences: first_absences
+    }
+
+    if Repo.get!(StateRevision, 1).revision == revision do
+      {:ok, projection}
+    else
+      external_snapshot_projection(repository, pulls, attempts - 1)
+    end
+  end
+
+  defp reserve_external_snapshot_projection!(projection) do
+    {reserved, _rows} =
+      StateRevision
+      |> where(
+        [revision],
+        revision.id == 1 and revision.revision == ^projection.revision
+      )
+      |> Repo.update_all(inc: [revision: 1])
+
+    if reserved != 1, do: Repo.rollback(:concurrent_state_change)
+
+    reserve_projected_row!(Repository, projection.repository)
+  end
+
+  defp agent_discovery_projection(publication_id, attempts \\ 2)
+
+  defp agent_discovery_projection(_publication_id, 0),
+    do: {:error, :concurrent_state_change}
+
+  defp agent_discovery_projection(publication_id, attempts) do
+    revision = Repo.get!(StateRevision, 1).revision
+    publication = Repo.get!(PrPublication, publication_id)
+    job = Repo.get!(Job, publication.job_id)
+
+    projection = %{
+      revision: revision,
+      publication: publication,
+      job: job,
+      repository: Repo.get!(Repository, job.repository_id),
+      pushing_action_in_flight?: false
+    }
+
+    if Repo.get!(StateRevision, 1).revision == revision do
+      {:ok, projection}
+    else
+      agent_discovery_projection(publication_id, attempts - 1)
+    end
   end
 
   defp agent_publication_projection(publication_id, result, attempts \\ 2)
@@ -1476,6 +1548,9 @@ defmodule PtcManager.Publications do
       remote_status_projection(publication_id, attempts - 1)
     end
   end
+
+  defp load_transaction_result({:ok, id}), do: {:ok, load(id)}
+  defp load_transaction_result(error), do: error
 
   defp reserve_remote_status_projection!(projection) do
     {reserved, _rows} =
