@@ -756,10 +756,27 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       </issue_data>
       """
 
-    Automations.compose_prompt(job.prompt_instructions, context) <> continuation_instructions(job)
+    Automations.compose_prompt(job.prompt_instructions, context) <>
+      continuation_instructions(job, repository)
   end
 
-  defp continuation_instructions(job) do
+  defp continuation_instructions(
+         %{review_generation: generation, review_resume_mode: "implementation"} = job,
+         repository
+       )
+       when generation > 0 do
+    refresh =
+      """
+
+      Retained-worktree refresh: before validation, fetch the repository remote and integrate the current origin/#{repository.default_branch} into this branch while preserving all retained commits and uncommitted changes. Do not reset, discard, or start over. If integration conflicts cannot be resolved safely, write the stop report and stop. If dependency definitions or locks changed, refresh and compile dependencies before running the required gates.
+      """
+
+    refresh <> maintainer_continuation_instructions(job)
+  end
+
+  defp continuation_instructions(job, _repository), do: maintainer_continuation_instructions(job)
+
+  defp maintainer_continuation_instructions(job) do
     case Map.get(job, :review_continuation_instructions) do
       instructions when is_binary(instructions) and instructions != "" ->
         "\nMaintainer instructions for this continuation (the managed review and publication rules above still apply):\n" <>
