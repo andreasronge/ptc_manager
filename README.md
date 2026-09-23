@@ -2010,10 +2010,13 @@ out of band before enabling the alias.
 
 Every deployment separately provisions a loopback-only forced key, pins it to
 the server's actual SSH host key, and runs `herdr machine add` in an isolated
-configuration. That canary verifies discovery, the worker-owned server socket,
-the pinned Herdr protocol, saved-machine streaming, and rejection of arbitrary
-commands before the PtcManager release is activated. A Herdr version bump must
-first add its protocol contract to the canary.
+configuration with both the running and pinned Herdr clients. That canary
+verifies discovery, the worker-owned server socket, the pinned Herdr protocol,
+saved-machine streaming, and rejection of arbitrary commands before the
+PtcManager release is activated. The forced bridge recognizes the framed
+remote-output probe from Herdr 0.9.1, so a newer local client can attach while
+retained agents keep the server on 0.9.0. A Herdr version bump must first add
+its protocol contract to the canary.
 
 The forced command answers Herdr's bounded platform and binary probes without
 evaluating their shell input, then delegates only server status and the remote

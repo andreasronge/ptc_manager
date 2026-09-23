@@ -91,11 +91,13 @@ defmodule PtcManager.Toolchain.PinBumpTest do
 
   test "freezes Herdr's version, protocol, and digest together", %{repository: repository} do
     digest = String.duplicate("c", 64)
+    current = PtcManager.Toolchain.pinned()["herdr"] |> Version.parse!()
+    next_version = "#{current.major}.#{current.minor}.#{current.patch + 1}"
 
     %Check{}
     |> Check.changeset(%{
       program: "herdr",
-      version: "0.9.1",
+      version: next_version,
       protocol: 23,
       digest: digest,
       status: "ok",
@@ -106,7 +108,7 @@ defmodule PtcManager.Toolchain.PinBumpTest do
     assert {:ok, snapshot} = PinBump.prepare(repository, "herdr")
     assert snapshot["protocol"] == 23
     assert snapshot["digest"] == digest
-    assert snapshot["expected_manifest"] =~ "herdr=0.9.1\n"
+    assert snapshot["expected_manifest"] =~ "herdr=#{next_version}\n"
     assert snapshot["expected_manifest"] =~ "herdr_protocol=23\n"
     assert snapshot["expected_manifest"] =~ "herdr_sha256=#{digest}\n"
 
@@ -115,7 +117,7 @@ defmodule PtcManager.Toolchain.PinBumpTest do
                %{
                  "outcome" => "completed",
                  "program" => "herdr",
-                 "version" => "0.9.1",
+                 "version" => next_version,
                  "digest" => String.duplicate("e", 64),
                  "protocol" => 23,
                  "pr_number" => 42

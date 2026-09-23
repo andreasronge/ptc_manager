@@ -7,6 +7,14 @@ set -eu
 herdr=/usr/local/bin/herdr
 worker_bridge=/usr/local/bin/ptc-manager-herdr-worker-bridge
 original=${SSH_ORIGINAL_COMMAND:-}
+newline='
+'
+output_preamble="printf '\n%s\n' 'herdr-remote-output-ready:1'"
+framed_stream="$output_preamble$newline"'exec /usr/local/bin/herdr remote-client-bridge'
+
+output_ready() {
+  printf '\n%s\n' 'herdr-remote-output-ready:1'
+}
 
 run_worker() {
   exec /usr/bin/sudo -n -H -u ptc-manager-worker -- "$worker_bridge" "$1"
@@ -24,29 +32,58 @@ case "$original" in
   "exec /usr/local/bin/herdr remote-client-bridge")
     run_worker stream
     ;;
+  "$framed_stream")
+    output_ready
+    run_worker stream
+    ;;
+  "$framed_stream --idle-timeout-v1")
+    output_ready
+    run_worker stream-idle
+    ;;
   "/bin/sh -s")
     script=$(dd bs=32769 count=1 2>/dev/null)
     [ "$(printf %s "$script" | wc -c | tr -d ' ')" -le 32768 ] || reject
 
+    # Herdr 0.9.1 frames remote output so SSH login text cannot be mistaken
+    # for a command result. Accept only its exact preamble, then match the
+    # remaining command against the same bounded allowlist as before.
+    framed=false
+    case "$script" in
+      "$output_preamble$newline"*)
+        script=${script#"$output_preamble$newline"}
+        framed=true
+        ;;
+    esac
+
+    frame_output() {
+      if [ "$framed" = true ]; then output_ready; fi
+    }
+
     case "$script" in
       "uname -s
 uname -m")
+        frame_output
         uname -s
         uname -m
         ;;
       "command -v herdr")
+        frame_output
         printf '%s\n' "$herdr"
         ;;
       home=*'emit()'*'/nix/var/nix/profiles/default/bin/herdr'*)
+        frame_output
         printf '%s\n' "$herdr"
         ;;
       "test -x /usr/local/bin/herdr && /usr/local/bin/herdr status client --json")
+        frame_output
         run_worker client-status
         ;;
       "/usr/local/bin/herdr status server --json")
+        frame_output
         run_worker status
         ;;
       "exec /usr/local/bin/herdr remote-client-bridge </dev/null")
+        frame_output
         run_worker stream </dev/null
         ;;
       *)
