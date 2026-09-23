@@ -306,10 +306,16 @@ defmodule PtcManagerWeb.OperationsLive do
         <span>{duration(@now, @run.started_at, @run.ended_at)}</span>
         <span :if={@run.ended_at}>Ended {timestamp(@run.ended_at)}</span>
         <span
-          :if={!@run.ended_at && @run.state != "waiting"}
+          :if={!@run.ended_at && @run.state in ~w(queued starting working unknown)}
           class="inline-flex items-center gap-1.5 text-teal-300"
         >
           <.icon name="hero-arrow-path-mini" class="size-3.5 motion-safe:animate-spin" /> Running now
+        </span>
+        <span :if={!@run.ended_at && @run.state == "idle"} class="text-slate-400">
+          Idle in Herdr
+        </span>
+        <span :if={!@run.ended_at && @run.state == "blocked"} class="text-amber-300">
+          Waiting for input
         </span>
         <span :if={@run.state == "waiting"} class="inline-flex items-center gap-1.5 text-violet-300">
           <.icon name="hero-pause-mini" class="size-3.5" /> Retained with open PR
@@ -425,7 +431,7 @@ defmodule PtcManagerWeb.OperationsLive do
     "#{label} · #{String.replace(action, "_", " ")}"
   end
 
-  def run_task(_run), do: "Repository maintenance"
+  def run_task(_run), do: "Unmanaged Herdr session"
 
   def duration(now, started_at, ended_at), do: TimeFormat.duration(now, started_at, ended_at)
 

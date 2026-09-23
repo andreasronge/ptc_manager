@@ -222,13 +222,13 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   end
 
   defp open_workspace(action, path) do
+    # A checkout may still have a retained agent from a failed action. Open a
+    # fresh shell so this attempt never tries to start in that occupied pane.
     result =
       command().run([
-        "worktree",
-        "open",
+        "workspace",
+        "create",
         "--cwd",
-        path,
-        "--path",
         path,
         "--label",
         "automation-#{action.id}",

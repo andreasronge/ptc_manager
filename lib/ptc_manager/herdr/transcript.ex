@@ -10,9 +10,30 @@ defmodule PtcManager.Herdr.Transcript do
 
   def read(run, command \\ Command)
 
+  # Unmanaged agents have a kind such as "claude" in agent_name, not a unique
+  # Herdr name. A live pane identifies them without guessing between sessions.
+  def read(%AgentRun{job_id: nil, agent_action_id: nil, herdr_pane: pane, ended_at: nil}, command)
+      when is_binary(pane) and pane != "" do
+    read_target(pane, command)
+  end
+
+  def read(%AgentRun{job_id: nil, agent_action_id: nil, herdr_pane: pane}, _command)
+      when is_binary(pane) and pane != "" do
+    {:error, "This agent terminal is no longer available."}
+  end
+
   def read(%AgentRun{agent_name: name}, command)
       when is_binary(name) and name != "" do
-    case command.run(["agent", "read", name, "--lines", Integer.to_string(@line_limit)], @timeout) do
+    read_target(name, command)
+  end
+
+  def read(%AgentRun{}, _command), do: {:error, "This run has no Herdr agent name."}
+
+  defp read_target(target, command) do
+    case command.run(
+           ["agent", "read", target, "--lines", Integer.to_string(@line_limit)],
+           @timeout
+         ) do
       {:ok, output} ->
         {:ok, sanitize(output)}
 
@@ -23,8 +44,6 @@ defmodule PtcManager.Herdr.Transcript do
         {:error, "This agent terminal is no longer available."}
     end
   end
-
-  def read(%AgentRun{}, _command), do: {:error, "This run has no Herdr agent name."}
 
   defp sanitize(output) do
     output

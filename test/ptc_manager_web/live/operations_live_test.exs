@@ -3,7 +3,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
 
   alias PtcManager.{CapacitySettings, MachineUsage, Operations}
   alias PtcManager.ResourceOperations
-  alias PtcManager.Operations.{AgentAction, Job, WorktreeAllocation}
+  alias PtcManager.Operations.{AgentAction, AgentRun, Job, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManagerWeb.OperationsLive
 
@@ -43,6 +43,27 @@ defmodule PtcManagerWeb.OperationsLiveTest do
 
     assert OperationsLive.filter_path("done", true) ==
              "/operations/agents?state=done&maintenance=1"
+  end
+
+  test "idle unmanaged Herdr sessions are labelled as idle" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    run = %AgentRun{
+      agent_name: "claude",
+      job: nil,
+      agent_action: nil,
+      state: "idle",
+      role: "implementer",
+      worker: %{name: "Herdr default"},
+      started_at: DateTime.add(now, -7_200, :second),
+      ended_at: nil,
+      last_heartbeat_at: now
+    }
+
+    html = render_component(&OperationsLive.run_card/1, run: run, now: now, path: "/operations")
+    assert html =~ "Unmanaged Herdr session"
+    assert html =~ "Idle in Herdr"
+    refute html =~ "Running now"
   end
 
   test "timeline runs are grouped by the day they started" do
@@ -214,7 +235,7 @@ defmodule PtcManagerWeb.OperationsLiveTest do
       assert has_element?(
                view,
                "#timeline-run-#{context.maintenance_run.id}",
-               "Repository maintenance"
+               "Unmanaged Herdr session"
              )
 
       view |> element("#timeline-run-#{context.run.id} a") |> render_click()
