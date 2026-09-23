@@ -331,11 +331,16 @@ their workload, process identity, timings, and result class; SQL text and
 parameters are not included. Set `PTC_DATABASE_SLOW_QUERY_MS` to tune that
 diagnostic threshold. In production, writers wait up to 15 seconds by default;
 set `PTC_DATABASE_BUSY_TIMEOUT_MS` to tune that wait and the connection queue's
-target. The queue is sampled every two seconds (or sooner for a shorter custom
-writer wait), and DBConnection may double its target before shedding load.
-`PTC_DATABASE_TIMEOUT_MS` therefore defaults to 50 seconds and must cover the
-doubled queue target, one complete SQLite writer wait, and five seconds for
-cleanup.
+target. SQLite's own busy wait is only 250 ms of it: exqlite holds a
+connection's mutex while that connection waits inside SQLite, and a writer that
+touches such a connection's statement would stall until the wait ended.
+`PtcManager.Repo.Adapter` retries a busy `BEGIN`, or a busy statement outside a
+transaction, for the rest of the wait, so each retried `BEGIN` logs a
+`database is locked` disconnect and the connection reopens. The queue is sampled
+every two seconds (or sooner for a shorter custom writer wait), and DBConnection
+may double its target before shedding load. `PTC_DATABASE_TIMEOUT_MS` therefore
+defaults to 50 seconds and must cover the doubled queue target, one complete
+writer wait, and five seconds for cleanup.
 
 GitHub issue snapshots load existing issues and dependency context before taking
 the writer slot, then reserve a revision that rejects stale projections.

@@ -27,6 +27,7 @@ defmodule PtcManager.DatabaseDiagnostics do
     Logger.info(
       "SQLite diagnostics attached: slow threshold=#{slow_ms()}ms, " <>
         "busy timeout=#{repo_config(:busy_timeout, 0)}ms, " <>
+        "write lock wait=#{repo_config(:write_lock_wait, 0)}ms, " <>
         "request timeout=#{repo_config(:timeout, 0)}ms, " <>
         "queue target=#{repo_config(:queue_target, 0)}ms, " <>
         "queue interval=#{repo_config(:queue_interval, 0)}ms, " <>
