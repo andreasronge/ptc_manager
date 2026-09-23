@@ -1346,6 +1346,7 @@ defmodule PtcManager.OperationsTest do
     defp health_run(attrs) do
       struct!(
         %AgentRun{
+          job_id: 42,
           role: "implementer",
           state: "working",
           started_at: @now,
@@ -1407,6 +1408,19 @@ defmodule PtcManager.OperationsTest do
       assert assessment.label == "Waiting for a person"
       assert assessment.detail =~ "idle for"
       assert assessment.detail =~ "Nothing is watching its session"
+    end
+
+    test "an unmanaged idle Herdr session does not become a maintainer alert" do
+      session =
+        health_run(%{
+          job_id: nil,
+          agent_action_id: nil,
+          state: "idle",
+          state_changed_at: health_minutes_ago(120)
+        })
+
+      assert %{status: :healthy, label: "Idle"} = AgentHealth.assess(session, @now)
+      assert AgentHealth.needing_attention([session], @now) == []
     end
 
     test "a live heartbeat does not hide an agent Herdr stopped reporting" do

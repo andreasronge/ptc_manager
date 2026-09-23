@@ -391,7 +391,7 @@ The authenticated routes are:
   agent on either tab to open a bounded, read-only terminal panel; active
   panels refresh every five seconds and expose no prompt or input controls.
   Unmanaged Herdr sessions are shown as such, and an idle terminal is not
-  labelled as running work;
+  labelled as running work or raised as a managed action needing attention;
 - `/automations` — one row per automation of the selected repository: enabled
   switch, a plain-language "how it runs" summary, agent policy, last run, and
   next run, plus the five latest runs. `/automations/:id` opens one automation:

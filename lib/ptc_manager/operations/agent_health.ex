@@ -22,9 +22,9 @@ defmodule PtcManager.Operations.AgentHealth do
   @doc """
   Milliseconds a run may sit parked before it counts as needing attention.
 
-  This covers `blocked` and `idle` alike. Herdr reports a Codex or Claude agent
-  that ends its turn with a question as idle rather than blocked, and an idle
-  agent that has stopped moving is exactly as stuck as a blocked one.
+  This covers managed `blocked` and `idle` runs alike. Herdr reports a Codex or
+  Claude agent that ends its turn with a question as idle rather than blocked.
+  An unmanaged session has no PtcManager work awaiting its answer.
   """
   def blocked_grace_ms,
     do: Application.get_env(:ptc_manager, :agent_blocked_attention_ms, 600_000)
@@ -48,6 +48,15 @@ defmodule PtcManager.Operations.AgentHealth do
       status: :attention,
       label: attention_label(state),
       detail: "#{attention_detail(state)} since #{ago(run, now)}."
+    }
+  end
+
+  def assess(%AgentRun{job_id: nil, agent_action_id: nil, state: state}, _now)
+      when state in @parked_states do
+    %{
+      status: :healthy,
+      label: parked_label(state),
+      detail: "This unmanaged Herdr session has no PtcManager action waiting on it."
     }
   end
 
