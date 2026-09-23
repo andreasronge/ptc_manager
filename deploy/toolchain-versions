@@ -15,12 +15,12 @@ erlang=29.0.3
 elixir=1.20.2-otp-29
 codex=0.156.1
 claude_code=2.1.280
-cursor_agent=2026.09.02-c22c1a3
+cursor_agent=2026.09.18-9a7762b
 
 # The Cursor CLI publishes no digest of its own, so this one was taken from the
 # pinned archive and holds it still: a deployment refuses an archive whose
 # sha256 differs, and a version bump comes with a new digest.
-cursor_agent_sha256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c
+cursor_agent_sha256=b1308f5a2fc05458b9d8966752986bb23a971bbcc67c842c1df94c4b8132bad9
 
 # Herdr publishes each release and its digest at https://herdr.dev/latest.json.
 # Its remote protocol pin is checked by the deployment bridge canary, so a
