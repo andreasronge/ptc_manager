@@ -45,7 +45,10 @@ defmodule PtcManagerWeb.DeploymentsLive do
          true <- MaintainerActions.enabled?(),
          {:ok, _action} <-
            MaintainerActions.enqueue_toolchain_bump(repository_id, program, socket.assigns.actor) do
-      {:noreply, put_flash(socket, :info, "Draft update PR queued for an agent.")}
+      {:noreply,
+       socket
+       |> put_flash(:info, "Draft update PR queued for an agent.")
+       |> load()}
     else
       {:error, reason} ->
         {:noreply,
@@ -214,6 +217,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
       |> assign(:recent_deployments, Deployments.list_recent())
       |> assign(:toolchain, Toolchain.report())
       |> assign(:upstream_checks, Upstream.list())
+      |> assign(:active_toolchain_bumps, MaintainerActions.active_toolchain_bumps())
       |> assign(:mode, OperationalMode.mode())
       |> assign(:activation, activation())
       |> assign_statuses()
@@ -407,6 +411,15 @@ defmodule PtcManagerWeb.DeploymentsLive do
       _ -> nil
     end
   end
+
+  def toolchain_update_state(active_bumps, statuses, program) do
+    Map.get(active_bumps, {toolchain_update_target(statuses), Atom.to_string(program)})
+  end
+
+  def toolchain_update_label("queued"), do: "Update queued"
+  def toolchain_update_label("running"), do: "Agent working"
+  def toolchain_update_label("sync_pending"), do: "Checking update PR"
+  def toolchain_update_label(nil), do: "Open update PR"
 
   @doc "An exact UTC instant, so a deployment can be matched against host logs."
   def timestamp(nil), do: nil
