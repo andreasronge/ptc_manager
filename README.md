@@ -389,7 +389,9 @@ The authenticated routes are:
   deployment canaries. **Performance** (`/operations/performance`) shows
   expensive-operation statistics and workspace-preparation timings. Select an
   agent on either tab to open a bounded, read-only terminal panel; active
-  panels refresh every five seconds and expose no prompt or input controls;
+  panels refresh every five seconds and expose no prompt or input controls.
+  Unmanaged Herdr sessions are shown as such, and an idle terminal is not
+  labelled as running work;
 - `/automations` — one row per automation of the selected repository: enabled
   switch, a plain-language "how it runs" summary, agent policy, last run, and
   next run, plus the five latest runs. `/automations/:id` opens one automation:
@@ -1846,7 +1848,9 @@ after `mix precommit`; PtcManager verifies the PR base, sole
 changed file, and complete manifest at its head against the approved change.
 The button shows the queued or running state and cannot queue the same update
 again until that action finishes. Agent history on the Operations page shows
-the result if an attempt fails.
+the result if an attempt fails. Each attempt opens a fresh Herdr workspace for
+the configured checkout, so a retained terminal from an earlier attempt cannot
+block a retry.
 The PR still needs human review and a separate deployment. Neither button
 installs software on the host.
 
