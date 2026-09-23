@@ -8,6 +8,136 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
 
   defmodule RevisionSource do
     def latest(_repository), do: {:ok, String.duplicate("b", 40)}
+
+    def content(_repository, _sha, "deploy/toolchain-versions") do
+      case Application.get_env(:ptc_manager, :test_toolchain_content) do
+        nil -> :missing
+        content -> {:ok, content}
+      end
+    end
+  end
+
+  defmodule UpstreamFetcher do
+    def get(_url), do: {:ok, %{"version" => "0.999.0"}}
+  end
+
+  test "checks upstream and queues an eligible draft update PR", %{conn: conn} do
+    with_preview_source(fn _content ->
+      previous_fetcher = Application.get_env(:ptc_manager, :toolchain_upstream_fetcher)
+      previous_enabled = Application.get_env(:ptc_manager, :agent_actions_enabled)
+      Application.put_env(:ptc_manager, :toolchain_upstream_fetcher, UpstreamFetcher)
+      Application.put_env(:ptc_manager, :agent_actions_enabled, true)
+
+      on_exit(fn ->
+        restore(:toolchain_upstream_fetcher, previous_fetcher)
+        restore(:agent_actions_enabled, previous_enabled)
+      end)
+
+      _repository = deployable_repository()
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+      render_async(view, 1_000)
+      render_async(view, 1_000)
+
+      view |> element("#check-toolchain-codex") |> render_click()
+      render_async(view, 1_000)
+      assert has_element?(view, "#program-codex", "0.999.0")
+      assert has_element?(view, "#update-toolchain-codex")
+
+      view |> element("#update-toolchain-codex") |> render_click()
+      assert render(view) =~ "Draft update PR queued"
+    end)
+  end
+
+  test "shows a checked Herdr protocol beside the latest version", %{conn: conn} do
+    alias PtcManager.Toolchain.Check
+
+    %Check{}
+    |> Check.changeset(%{
+      program: "herdr",
+      version: "0.9.1",
+      protocol: 23,
+      digest: String.duplicate("a", 64),
+      status: "ok",
+      checked_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+    assert has_element?(view, "#program-herdr", "Protocol 23")
+  end
+
+  test "previews a changed pin at the next revision", %{conn: conn} do
+    with_preview_source(fn content ->
+      codex = PtcManager.Toolchain.pinned()["codex"]
+
+      Application.put_env(
+        :ptc_manager,
+        :test_toolchain_content,
+        String.replace(content, "codex=#{codex}", "codex=99.1.0")
+      )
+
+      repository = deployable_repository()
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+      render_async(view, 1_000)
+      render_async(view, 1_000)
+
+      assert has_element?(
+               view,
+               "#toolchain-preview-#{repository.id}",
+               "Toolchain in the next deployment"
+             )
+
+      assert has_element?(view, "#toolchain-change-codex", "#{codex} → 99.1.0")
+    end)
+  end
+
+  test "previews no toolchain change", %{conn: conn} do
+    with_preview_source(fn _content ->
+      repository = deployable_repository()
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+      render_async(view, 1_000)
+      render_async(view, 1_000)
+
+      assert has_element?(
+               view,
+               "#toolchain-preview-#{repository.id}",
+               "No toolchain version changes"
+             )
+    end)
+  end
+
+  test "warns that an invalid manifest stops deployment", %{conn: conn} do
+    with_preview_source(fn _content ->
+      Application.put_env(:ptc_manager, :test_toolchain_content, "codex=bad\nnot a pin\n")
+      repository = deployable_repository()
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+      render_async(view, 1_000)
+      render_async(view, 1_000)
+      assert has_element?(view, "#toolchain-preview-#{repository.id}", "deployment will stop")
+    end)
+  end
+
+  test "explains when a Herdr pin takes effect", %{conn: conn} do
+    with_preview_source(fn content ->
+      version = PtcManager.Toolchain.pinned()["herdr"]
+
+      Application.put_env(
+        :ptc_manager,
+        :test_toolchain_content,
+        String.replace(content, "herdr=#{version}", "herdr=99.1.0")
+      )
+
+      _repository = deployable_repository()
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+      render_async(view, 1_000)
+      render_async(view, 1_000)
+
+      assert has_element?(
+               view,
+               "#toolchain-change-herdr",
+               "after a Herdr restart with no retained agents"
+             )
+    end)
   end
 
   test "offers Activate only when nothing else owns the maintenance window", %{conn: conn} do
@@ -193,6 +323,9 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
     suffix = System.unique_integer([:positive, :monotonic])
     owner = "web-deploy-owner-#{suffix}"
     name = "web-deploy-repo-#{suffix}"
+    previous_repository = Application.get_env(:ptc_manager, :toolchain_repository)
+    Application.put_env(:ptc_manager, :toolchain_repository, owner <> "/" <> name)
+    on_exit(fn -> restore(:toolchain_repository, previous_repository) end)
     path = Path.join(System.tmp_dir!(), "#{owner}-#{name}")
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf!(path) end)
@@ -227,6 +360,21 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
 
   defp restore(key, nil), do: Application.delete_env(:ptc_manager, key)
   defp restore(key, value), do: Application.put_env(:ptc_manager, key, value)
+
+  defp with_preview_source(fun) do
+    previous_source = Application.get_env(:ptc_manager, :deployment_revision_source)
+    previous_content = Application.get_env(:ptc_manager, :test_toolchain_content)
+    Application.put_env(:ptc_manager, :deployment_revision_source, RevisionSource)
+    content = File.read!("deploy/toolchain-versions")
+    Application.put_env(:ptc_manager, :test_toolchain_content, content)
+
+    on_exit(fn ->
+      restore(:deployment_revision_source, previous_source)
+      restore(:test_toolchain_content, previous_content)
+    end)
+
+    fun.(content)
+  end
 
   defp authenticated_conn(conn) do
     conn

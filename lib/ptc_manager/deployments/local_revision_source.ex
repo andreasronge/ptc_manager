@@ -13,4 +13,11 @@ defmodule PtcManager.Deployments.LocalRevisionSource do
       {:ok, sha}
     end
   end
+
+  @impl true
+  def content(%Repository{} = repository, sha, path) do
+    with {:ok, checkout} <- Checkout.available_path(repository) do
+      GitProbe.revision_content(checkout, sha, path)
+    end
+  end
 end

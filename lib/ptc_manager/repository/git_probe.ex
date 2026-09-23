@@ -11,6 +11,17 @@ defmodule PtcManager.Repository.GitProbe do
 
   @doc "Reads the bounded repository contract from an immutable commit."
   def repository_contract(path, sha) when is_binary(path) and is_binary(sha) do
+    case revision_content(path, sha, ".ptc-manager.yml") do
+      {:error, :revision_content_missing} -> {:error, :repository_contract_missing}
+      result -> result
+    end
+  end
+
+  def repository_contract(_path, _sha), do: {:error, :invalid_repository_contract_context}
+
+  def revision_content(path, sha, relative_path)
+      when is_binary(path) and is_binary(sha) and
+             relative_path in [".ptc-manager.yml", "deploy/toolchain-versions"] do
     cond do
       Path.type(path) != :absolute or not File.dir?(path) ->
         {:error, :worktree_path_unavailable}
@@ -19,12 +30,12 @@ defmodule PtcManager.Repository.GitProbe do
         {:error, :invalid_sha}
 
       true ->
-        case run_git(path, ["show", "#{sha}:.ptc-manager.yml"], {:collect, @small_output_limit}) do
+        case run_git(path, ["show", "#{sha}:#{relative_path}"], {:collect, @small_output_limit}) do
           {:ok, content} ->
             {:ok, content}
 
           {:error, {:git_failed, "show", _status, _detail}} ->
-            {:error, :repository_contract_missing}
+            {:error, :revision_content_missing}
 
           {:error, reason} ->
             {:error, reason}
@@ -32,7 +43,8 @@ defmodule PtcManager.Repository.GitProbe do
     end
   end
 
-  def repository_contract(_path, _sha), do: {:error, :invalid_repository_contract_context}
+  def revision_content(_path, _sha, _relative_path),
+    do: {:error, :invalid_revision_content_context}
 
   @doc "Verifies that a relative setup entrypoint is a tracked executable regular file."
   def tracked_executable(path, sha, relative_path)

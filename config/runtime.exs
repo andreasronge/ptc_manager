@@ -1,5 +1,9 @@
 import Config
 
+if repository = System.get_env("PTC_TOOLCHAIN_REPOSITORY") do
+  config :ptc_manager, :toolchain_repository, repository
+end
+
 env_default = fn name, default ->
   case System.get_env(name) do
     value when value in [nil, ""] -> default

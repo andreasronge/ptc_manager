@@ -5,5 +5,6 @@ defmodule PtcManager.Deployments.RevisionSource do
 
   @callback latest(Repository.t()) :: {:ok, binary()} | {:error, term()}
   @callback contract(Repository.t(), binary()) :: {:ok, binary()} | {:error, term()}
-  @optional_callbacks contract: 2
+  @callback content(Repository.t(), binary(), binary()) :: {:ok, binary()} | {:error, term()}
+  @optional_callbacks contract: 2, content: 3
 end

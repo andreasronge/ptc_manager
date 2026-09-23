@@ -1401,6 +1401,13 @@ when they differ, and **Up to date** when they match. **Check for updates**
 refreshes the comparison. The private repository is read using the existing
 `GITHUB_READ_TOKEN`; no separate GitHub account is introduced.
 
+For this repository, the page also reads `deploy/toolchain-versions` at that
+exact default-branch commit and previews each pin or digest that the next
+deployment would change. An invalid manifest is shown as a deployment error.
+A Herdr bump is labelled as taking effect only after a restart with no
+retained agents. A fork that deploys itself can set
+`PTC_TOOLCHAIN_REPOSITORY=owner/name` for its own preview and update actions.
+
 **Deploy when safe** records an audited request and enters drain mode: existing
 managed work may finish, but no new work starts. The drain waits only for work
 PtcManager is driving: runs that are queued, starting, or working, and blocked
@@ -1823,6 +1830,22 @@ beside the version `/usr/local/bin` links, so something installed by hand is
 visible without logging in to the machine. It reads link targets rather than
 running any of these programs, and it never changes them: the fix for drift is a
 commit and a deployment, which the same page offers.
+
+**Check for updates** beside each machine program reads its published release
+and records the result and check time. Node stays within its pinned major line.
+Herdr and mise checks capture the published digest, and Herdr's protocol
+number. The Cursor check reads the version from its install script and hashes
+the Linux x64 archive, since Cursor publishes no digest. Erlang and Elixir
+updates are reported but remain manual because they change how the release is
+built. A newer major version is reported for review. For an eligible update in
+the same major line,
+**Open update PR** records the exact checked version and default-branch commit
+as one approved maintainer action. The agent changes one manifest line and
+the matching digest and protocol pins where applicable, then opens a draft PR
+after `mix precommit`; PtcManager verifies the PR base, sole
+changed file, and complete manifest at its head against the approved change.
+The PR still needs human review and a separate deployment. Neither button
+installs software on the host.
 
 pnpm earns its place for repositories that use it: it links a worktree's
 `node_modules` into a shared content-addressed store instead of copying a tree

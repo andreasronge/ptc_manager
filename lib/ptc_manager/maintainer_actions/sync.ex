@@ -8,6 +8,7 @@ defmodule PtcManager.MaintainerActions.Sync do
   alias PtcManager.Publications
   alias PtcManager.Repo
   alias PtcManager.Repository.GitProbe
+  alias PtcManager.Toolchain.PinBump
 
   def sync_action(%{target_type: "issue", target_id: issue_id}) do
     issue = Issue |> Repo.get!(issue_id) |> Repo.preload(:repository)
@@ -98,6 +99,12 @@ defmodule PtcManager.MaintainerActions.Sync do
         ),
       else: {:error, :comment_verification_unavailable}
   end
+
+  def sync_action(%{action_key: "toolchain_pin_bump"} = action, {:ok, result}),
+    do: PinBump.verify(action, result)
+
+  def sync_action(%{action_key: "toolchain_pin_bump"}, {:error, reason}),
+    do: {:terminal_error, reason}
 
   def sync_action(action, _result), do: sync_action(action)
 
