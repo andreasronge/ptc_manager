@@ -8,8 +8,9 @@ defmodule PtcManager.RepoTransaction do
   read began: waiting cannot repair a stale snapshot, only starting over can.
   The refusal therefore surfaces on the writing statement rather than on
   `BEGIN`, which is how it reached supervised processes and terminated them.
-  `BEGIN IMMEDIATE` takes the write lock up front, where `busy_timeout` applies
-  and a waiting writer succeeds instead of failing.
+  `BEGIN IMMEDIATE` takes the write lock up front, where a waiting writer
+  retries until the lock is free instead of failing (see
+  `PtcManager.Repo.Adapter`).
 
   `PtcManager.Repo` now begins every transaction that way by default; this
   module remains for callers that want a busy database reported as a value.

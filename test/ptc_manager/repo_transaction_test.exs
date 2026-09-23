@@ -102,6 +102,103 @@ defmodule PtcManager.RepoTransactionTest do
     end
   end
 
+  describe "waiting for the write lock" do
+    # exqlite finalises a statement under its connection's mutex, and a
+    # connection waiting in SQLite's busy handler holds that mutex for the whole
+    # wait. A process that holds the write lock and garbage-collects a statement
+    # prepared on such a waiter therefore stalls until the waiter gives up; the
+    # waiter can never succeed, because it is waiting for the stalled holder.
+    # In production every such wait ran to its full 15 seconds. Resetting the
+    # statement takes the same mutex as finalising it, without depending on
+    # when the collector drops the last reference.
+    test "a waiting writer does not stall the holder that touches its statement" do
+      repo = start_repo!([pool_size: 2] ++ configured_lock_wait())
+      Repo.put_dynamic_repo(repo)
+      Repo.query!("CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+      test_pid = self()
+
+      holder =
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+
+          Repo.transaction(fn ->
+            Repo.query!("INSERT INTO counters (n) VALUES (1)")
+            send(test_pid, :writer_lock_held)
+            receive do: ({:connection, connection} -> prepare_foreign_statement(connection))
+            send(test_pid, :statement_prepared)
+            receive do: (:touch -> :ok)
+
+            {microseconds, _} =
+              :timer.tc(fn -> Exqlite.Sqlite3.reset(Process.get(:foreign).ref) end)
+
+            div(microseconds, 1_000)
+          end)
+        end)
+
+      assert_receive :writer_lock_held
+
+      # The pool's other connection: the statement is prepared on it, and the
+      # waiter's transaction can only begin on it.
+      Repo.checkout(fn ->
+        send(holder.pid, {:connection, checked_out_connection(repo)})
+        assert_receive :statement_prepared
+      end)
+
+      waiter =
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+          Repo.transaction(fn -> Repo.query!("INSERT INTO counters (n) VALUES (2)") end)
+        end)
+
+      Process.sleep(100)
+      send(holder.pid, :touch)
+
+      assert {:ok, stalled_ms} = Task.await(holder)
+      assert stalled_ms < 1_000
+      assert {:ok, _result} = Task.await(waiter, 10_000)
+      assert %{rows: [[2]]} = Repo.query!("SELECT count(*) FROM counters")
+    end
+
+    test "a writer keeps waiting after SQLite's own busy wait expires" do
+      options = configured_lock_wait()
+      repo = start_repo!([pool_size: 2] ++ options)
+      Repo.put_dynamic_repo(repo)
+      Repo.query!("CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+      test_pid = self()
+
+      holder =
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+
+          Repo.transaction(fn ->
+            Repo.query!("INSERT INTO counters (n) VALUES (1)")
+            send(test_pid, :writer_lock_held)
+            receive do: (:release_writer -> :ok)
+          end)
+        end)
+
+      assert_receive :writer_lock_held
+
+      writers = [
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+          Repo.transaction(fn -> Repo.query!("INSERT INTO counters (n) VALUES (2)") end)
+        end),
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+          Repo.insert_all("counters", [%{n: 3}])
+        end)
+      ]
+
+      Process.sleep(options[:busy_timeout] * 3)
+      send(holder.pid, :release_writer)
+
+      assert {:ok, :ok} = Task.await(holder)
+      assert [{:ok, _transaction}, {1, nil}] = Task.await_many(writers, 10_000)
+      assert %{rows: [[3]]} = Repo.query!("SELECT count(*) FROM counters")
+    end
+  end
+
   describe "recognising a busy database" do
     test "the error BEGIN raises when it cannot take the write lock" do
       assert RepoTransaction.busy?(%Exqlite.Error{
@@ -157,6 +254,27 @@ defmodule PtcManager.RepoTransactionTest do
     end)
 
     repo
+  end
+
+  # The production relationship between SQLite's busy wait and the writer's
+  # overall wait, from the application's own configuration.
+  defp configured_lock_wait do
+    Application.fetch_env!(:ptc_manager, Repo)
+    |> Keyword.take([:busy_timeout, :write_lock_wait])
+  end
+
+  # Ecto keeps the connection a process has checked out under this key.
+  defp checked_out_connection(repo) do
+    %{pid: pool} = Ecto.Adapter.lookup_meta(repo)
+    Process.get({Ecto.Adapters.SQL, pool})
+  end
+
+  # Leaves this process holding the only reference to a statement that belongs
+  # to another process's connection, as a replaced query leaves in a caller.
+  defp prepare_foreign_statement(connection) do
+    statement = DBConnection.prepare!(connection, Exqlite.Query.build(statement: "SELECT 1"))
+    Process.put(:foreign, statement)
+    :ok
   end
 
   defp await_checkout_queue(pool, minimum, attempts \\ 100)

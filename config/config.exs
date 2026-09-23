@@ -29,13 +29,18 @@ config :ptc_manager, Oban,
      ]}
   ]
 
-# Writers wait for SQLite's lock instead of failing after the 2 s default. The
+# Writers wait up to `write_lock_wait` for SQLite's lock. SQLite's own busy wait
+# is only a short slice of it, because a connection holds exqlite's mutex while
+# it waits there; `PtcManager.Repo.Adapter` retries between slices. The
 # connection queue tolerates the same bounded delay so a burst larger than the
 # pool is not rejected while the current writer can still finish. The request
-# deadline covers the queue target after its one adaptive doubling, the SQLite
-# writer wait, and cleanup margin.
+# deadline covers the queue target after its one adaptive doubling, the writer
+# wait, and cleanup margin.
 config :ptc_manager, PtcManager.Repo,
-  busy_timeout: 15_000,
+  # Oban recognises SQLite by adapter module, which the wrapper replaces.
+  migrator: Oban.Migrations.SQLite,
+  busy_timeout: 250,
+  write_lock_wait: 15_000,
   queue_target: 15_000,
   queue_interval: 2_000,
   timeout: 50_000

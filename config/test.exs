@@ -43,7 +43,7 @@ test_partition = System.get_env("MIX_TEST_PARTITION", "")
 
 # The publisher race test asserts that a second writer gives up promptly.
 config :ptc_manager, PtcManager.Repo,
-  busy_timeout: 2_000,
+  write_lock_wait: 2_000,
   database: Path.expand("../ptc_manager_test#{test_partition}.db", __DIR__),
   pool_size: 5,
   pool: Ecto.Adapters.SQL.Sandbox
