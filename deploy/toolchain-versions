@@ -14,7 +14,7 @@ pnpm=10.34.5
 erlang=29.0.3
 elixir=1.20.2-otp-29
 codex=0.153.2
-claude_code=2.1.260
+claude_code=2.1.280
 cursor_agent=2026.09.02-c22c1a3
 
 # The Cursor CLI publishes no digest of its own, so this one was taken from the
