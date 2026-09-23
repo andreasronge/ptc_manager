@@ -257,6 +257,7 @@ defmodule PtcManager.ResourceOperations do
           Map.merge(attrs, %{
             state: state,
             exit_status: exit_status,
+            last_error: finish_error(operation, attrs, exit_status),
             finished_at: at,
             last_heartbeat_at: at,
             run_duration_ms: duration_ms(operation.started_at || at, at)
@@ -265,6 +266,19 @@ defmodule PtcManager.ResourceOperations do
       end
     )
   end
+
+  # Recovery kills the process tree through cgroup.kill, which is a SIGKILL
+  # that no oom_kill counter records. A wrapper that reports that exit before
+  # the sweep releases the row would otherwise leave an unexplained 137.
+  defp finish_error(%ResourceOperation{state: "recovery_pending"}, attrs, exit_status)
+       when exit_status != 0 do
+    Map.get(attrs, :last_error, Map.get(attrs, "last_error")) ||
+      "The wrapper reported exit status #{exit_status} after its heartbeat stopped; " <>
+        "recovery may have terminated the process tree."
+  end
+
+  defp finish_error(_operation, attrs, _exit_status),
+    do: Map.get(attrs, :last_error, Map.get(attrs, "last_error"))
 
   def cancel(id, reason, at \\ now()) do
     result =
