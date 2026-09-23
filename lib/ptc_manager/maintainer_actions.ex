@@ -22,6 +22,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Repository.SourceSnapshot
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Automations
+  alias PtcManager.Toolchain.PinBump
 
   # Actions that operate on one GitHub issue through the worker's `gh` session.
   # Each needs the same treatment: a fresh synchronization and an open-issue
@@ -127,6 +128,19 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  def enqueue_toolchain_bump(repository_id, program, actor)
+      when is_integer(repository_id) and is_binary(program) and is_binary(actor) do
+    with %Repository{} = repository <- Repo.get(Repository, repository_id),
+         {:ok, snapshot} <- PinBump.prepare(repository, program),
+         {:ok, attrs} <-
+           Catalog.build("toolchain_pin_bump", %{repository: repository, snapshot: snapshot}) do
+      enqueue_versioned(repository, "toolchain_pin_bump", attrs, actor)
+    else
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc """
   Puts a stopped implementation's blocker onto its GitHub issue for a decision.
@@ -435,6 +449,22 @@ defmodule PtcManager.MaintainerActions do
           {:ok, deferred} -> {:deferred, deferred}
           {:error, defer_reason} -> {:error, defer_reason}
         end
+    end
+  end
+
+  defp prepare_for_execution(%{action_key: "toolchain_pin_bump"} = action, _adapter, _sync) do
+    case PinBump.preflight(action) do
+      :ok ->
+        {:ok, action}
+
+      {:error, :toolchain_source_moved} ->
+        fail_preflight(action.id, :toolchain_source_moved)
+
+      {:error, :toolchain_repository_mismatch} ->
+        fail_preflight(action.id, :toolchain_repository_mismatch)
+
+      {:error, reason} ->
+        defer_preflight(action.id, reason, action.sync_attempt_count)
     end
   end
 

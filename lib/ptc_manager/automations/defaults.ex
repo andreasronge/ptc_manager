@@ -9,6 +9,21 @@ defmodule PtcManager.Automations.Defaults do
 
   @definitions [
     %{
+      key: "toolchain_pin_bump",
+      name: "Open toolchain update PR",
+      description: "Change one approved toolchain pin and open a draft PR for human review.",
+      target_type: "repository",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "writing",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 1_800,
+      result_type: "toolchain_pin_bump",
+      prompt:
+        "Update only the approved version and its approved digest and protocol pins in deploy/toolchain-versions. Run mix precommit, commit the change, and open a draft pull request for human review. Do not merge or change any other file or pin. Return the pull request number and the exact approved program, version, digest, and protocol values."
+    },
+    %{
       key: "post_cancellation_note",
       name: "Post cancellation explanation",
       description:

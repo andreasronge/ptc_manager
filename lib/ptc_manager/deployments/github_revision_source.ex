@@ -27,6 +27,12 @@ defmodule PtcManager.Deployments.GitHubRevisionSource do
 
   @impl true
   def contract(%Repository{} = repository, sha) when is_binary(sha) do
+    content(repository, sha, ".ptc-manager.yml")
+  end
+
+  @impl true
+  def content(%Repository{} = repository, sha, path)
+      when is_binary(sha) and path in [".ptc-manager.yml", "deploy/toolchain-versions"] do
     owner = URI.encode_www_form(repository.github_owner)
     name = URI.encode_www_form(repository.github_name)
     ref = URI.encode_www_form(sha)
@@ -34,7 +40,7 @@ defmodule PtcManager.Deployments.GitHubRevisionSource do
     with true <- Regex.match?(@sha, sha),
          {:ok, %{"encoding" => "base64", "content" => encoded}} when is_binary(encoded) <-
            Client.get_json(
-             "https://api.github.com/repos/#{owner}/#{name}/contents/.ptc-manager.yml?ref=#{ref}"
+             "https://api.github.com/repos/#{owner}/#{name}/contents/#{path}?ref=#{ref}"
            ),
          {:ok, content} <- Base.decode64(String.replace(encoded, ~r/\s+/, "")) do
       {:ok, content}

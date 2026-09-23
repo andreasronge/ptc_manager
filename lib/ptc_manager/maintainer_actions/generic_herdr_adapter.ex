@@ -629,6 +629,9 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   defp result_schema("daily_digest"),
     do: Application.app_dir(:ptc_manager, "priv/codex/daily_digest_output.schema.json")
 
+  defp result_schema("toolchain_pin_bump"),
+    do: Application.app_dir(:ptc_manager, "priv/codex/toolchain_pin_bump_output.schema.json")
+
   defp result_schema(_action_key),
     do: Application.app_dir(:ptc_manager, "priv/codex/agent_action_output.schema.json")
 

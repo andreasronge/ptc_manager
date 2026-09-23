@@ -70,6 +70,8 @@ defmodule PtcManager.Toolchain do
     }
   ]
 
+  @preview_programs @programs ++ [%{key: :hex, name: "Hex and Rebar3", pin: "hex"}]
+
   # The deployment reads more than the programs listed above: a digest for every
   # download it does not take from npm, and the gate's own build tools. A
   # release that compiled without one of them would only fail on the machine,
@@ -85,6 +87,13 @@ defmodule PtcManager.Toolchain do
 
   @type status :: :matched | :staged | :drifted | :absent
 
+  @digest_keys %{
+    cursor_agent: ["cursor_agent_sha256"],
+    herdr: ["herdr_protocol", "herdr_sha256"],
+    mise: ["mise_sha256"],
+    hex: ["rebar3_sha512"]
+  }
+
   @type program :: %{
           key: atom(),
           name: String.t(),
@@ -98,6 +107,15 @@ defmodule PtcManager.Toolchain do
   @spec pinned() :: %{String.t() => String.t()}
   def pinned, do: @pinned
 
+  @doc "Whether a repository is the one whose toolchain this release deploys."
+  def own_repository?(repository) do
+    configured =
+      Application.get_env(:ptc_manager, :toolchain_repository, "andreasronge/ptc_manager")
+
+    String.downcase(repository.github_owner <> "/" <> repository.github_name) ==
+      String.downcase(configured)
+  end
+
   @doc "Every manifest key a deployment reads, which is every key this release requires."
   @spec required_pins() :: [String.t()]
   def required_pins, do: @required
@@ -108,6 +126,45 @@ defmodule PtcManager.Toolchain do
   """
   @spec report() :: [program()]
   def report, do: Enum.map(@programs, &describe/1)
+
+  @doc "Changes a deployment at the next revision would make to the toolchain."
+  def preview(contents) when is_binary(contents) do
+    try do
+      next = PtcManager.Toolchain.Manifest.parse!(contents)
+      missing = Enum.reject(@required, &Map.has_key?(next, &1))
+
+      if missing != [] do
+        {:error, "missing pins: #{Enum.join(missing, ", ")}"}
+      else
+        changes =
+          @preview_programs
+          |> Enum.flat_map(fn program ->
+            keys = [program.pin | Map.get(@digest_keys, program.key, [])]
+
+            if Enum.any?(keys, &(Map.fetch!(@pinned, &1) != Map.fetch!(next, &1))) do
+              [
+                %{
+                  key: program.key,
+                  name: program.name,
+                  current: Map.fetch!(@pinned, program.pin),
+                  next: Map.fetch!(next, program.pin),
+                  digest_changed?:
+                    Enum.any?(tl(keys), &(Map.fetch!(@pinned, &1) != Map.fetch!(next, &1))),
+                  protocol: if(program.key == :herdr, do: Map.fetch!(next, "herdr_protocol")),
+                  deferred?: Map.get(program, :deferred, false)
+                }
+              ]
+            else
+              []
+            end
+          end)
+
+        {:ok, changes}
+      end
+    rescue
+      error in RuntimeError -> {:error, Exception.message(error)}
+    end
+  end
 
   @doc """
   What the report says about the machine as a whole.

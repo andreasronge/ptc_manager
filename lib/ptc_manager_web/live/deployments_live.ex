@@ -1,7 +1,8 @@
 defmodule PtcManagerWeb.DeploymentsLive do
   use PtcManagerWeb, :live_view
 
-  alias PtcManager.{DeploymentCanary, Deployments, OperationalMode, Toolchain}
+  alias PtcManager.{DeploymentCanary, Deployments, MaintainerActions, OperationalMode, Toolchain}
+  alias PtcManager.Toolchain.Upstream
   alias PtcManager.OperationalMode.Audit
   alias PtcManagerWeb.TimeFormat
 
@@ -18,12 +19,41 @@ defmodule PtcManagerWeb.DeploymentsLive do
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:now, DateTime.utc_now())
      |> assign(:revision_results, %{})
+     |> assign(:preview_results, %{})
+     |> assign(:upstream_checking, [])
      |> load()}
   end
 
   @impl true
   def handle_event("refresh-revisions", _params, socket) do
     {:noreply, load(socket, refresh?: true)}
+  end
+
+  def handle_event("check-toolchain", %{"program" => program}, socket) do
+    if program in Upstream.supported() and program not in socket.assigns.upstream_checking do
+      {:noreply,
+       socket
+       |> update(:upstream_checking, &[program | &1])
+       |> start_async({:check_toolchain, program}, fn -> Upstream.check(program) end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("update-toolchain", %{"program" => program, "repository-id" => id}, socket) do
+    with {repository_id, ""} <- Integer.parse(id),
+         true <- MaintainerActions.enabled?(),
+         {:ok, _action} <-
+           MaintainerActions.enqueue_toolchain_bump(repository_id, program, socket.assigns.actor) do
+      {:noreply, put_flash(socket, :info, "Draft update PR queued for an agent.")}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Update could not be queued: #{reason_text(reason)}")}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Update is not available.")}
+    end
   end
 
   def handle_event("deploy", %{"repository-id" => id}, socket) do
@@ -124,10 +154,40 @@ defmodule PtcManagerWeb.DeploymentsLive do
   end
 
   def handle_async({:latest_revision, repository_id}, {:ok, {:ok, sha}}, socket) do
+    socket =
+      socket
+      |> update(:revision_results, &Map.put(&1, repository_id, {:ok, sha}))
+      |> assign_statuses()
+
+    {:noreply, start_preview(socket, repository_id, sha)}
+  end
+
+  def handle_async({:toolchain_preview, repository_id, sha}, {:ok, result}, socket) do
     {:noreply,
      socket
-     |> update(:revision_results, &Map.put(&1, repository_id, {:ok, sha}))
+     |> update(:preview_results, &Map.put(&1, repository_id, {sha, result}))
      |> assign_statuses()}
+  end
+
+  def handle_async({:toolchain_preview, repository_id, sha}, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> update(:preview_results, &Map.put(&1, repository_id, {sha, {:error, reason}}))
+     |> assign_statuses()}
+  end
+
+  def handle_async({:check_toolchain, program}, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> update(:upstream_checking, &List.delete(&1, program))
+     |> put_flash(:error, "The upstream check could not finish.")}
+  end
+
+  def handle_async({:check_toolchain, program}, _result, socket) do
+    {:noreply,
+     socket
+     |> update(:upstream_checking, &List.delete(&1, program))
+     |> assign(:upstream_checks, Upstream.list())}
   end
 
   def handle_async({:latest_revision, repository_id}, {:ok, {:error, reason}}, socket) do
@@ -153,6 +213,7 @@ defmodule PtcManagerWeb.DeploymentsLive do
       |> assign(:repositories, repositories)
       |> assign(:recent_deployments, Deployments.list_recent())
       |> assign(:toolchain, Toolchain.report())
+      |> assign(:upstream_checks, Upstream.list())
       |> assign(:mode, OperationalMode.mode())
       |> assign(:activation, activation())
       |> assign_statuses()
@@ -241,11 +302,110 @@ defmodule PtcManagerWeb.DeploymentsLive do
         result = Map.get(socket.assigns.revision_results, repository.id, :loading)
         latest_sha = if match?({:ok, _sha}, result), do: elem(result, 1)
 
+        preview = Map.get(socket.assigns.preview_results, repository.id)
+
         Deployments.update_status(repository, latest_sha)
         |> Map.put(:revision_result, result)
+        |> Map.put(
+          :toolchain_preview,
+          if(match?({^latest_sha, _}, preview), do: elem(preview, 1))
+        )
       end)
 
     assign(socket, :deployment_statuses, statuses)
+  end
+
+  defp start_preview(socket, repository_id, sha) do
+    source = Application.fetch_env!(:ptc_manager, :deployment_revision_source)
+    repository = Enum.find(socket.assigns.repositories, &(&1.id == repository_id))
+
+    if repository && Toolchain.own_repository?(repository) && Code.ensure_loaded?(source) &&
+         function_exported?(source, :content, 3) do
+      start_async(socket, {:toolchain_preview, repository_id, sha}, fn ->
+        case PtcManager.Gateway.call(source, :content, [
+               repository,
+               sha,
+               "deploy/toolchain-versions"
+             ]) do
+          {:ok, contents} -> Toolchain.preview(contents)
+          {:error, {:github_http_error, 404, _, _}} -> :missing
+          {:error, :revision_content_missing} -> :missing
+          other -> other
+        end
+      end)
+    else
+      socket
+    end
+  end
+
+  def upstream_check(checks, program), do: Map.get(checks, Atom.to_string(program.key))
+
+  def upstream_protocol(checks, program) do
+    case upstream_check(checks, program) do
+      %{protocol: protocol} when is_integer(protocol) -> protocol
+      _ -> nil
+    end
+  end
+
+  def upstream_status(nil, _pinned), do: "Not checked"
+  def upstream_status(%{status: "failed"}, _pinned), do: "Check failed"
+
+  def upstream_status(%{program: program, version: version} = check, pinned)
+      when program in ["herdr", "mise", "cursor_agent"] and version == pinned do
+    digest_key = program <> "_sha256"
+
+    cond do
+      check.digest != Toolchain.pinned()[digest_key] ->
+        "Digest differs"
+
+      program == "herdr" and to_string(check.protocol) != Toolchain.pinned()["herdr_protocol"] ->
+        "Protocol differs"
+
+      true ->
+        "Current"
+    end
+  end
+
+  def upstream_status(%{program: "cursor_agent", version: version}, pinned) do
+    with [year, month, day] <-
+           Regex.run(~r/\A([0-9]{4})\.([0-9]{2})\.([0-9]{2})-[0-9a-f]+\z/, version,
+             capture: :all_but_first
+           ),
+         [old_year, old_month, old_day] <-
+           Regex.run(~r/\A([0-9]{4})\.([0-9]{2})\.([0-9]{2})-[0-9a-f]+\z/, pinned,
+             capture: :all_but_first
+           ),
+         {:ok, latest} <- Date.from_iso8601("#{year}-#{month}-#{day}"),
+         {:ok, current} <- Date.from_iso8601("#{old_year}-#{old_month}-#{old_day}") do
+      case Date.compare(latest, current) do
+        :gt -> if latest.year > current.year, do: "Major update", else: "Update available"
+        :eq -> if version == pinned, do: "Current", else: "Version found"
+        :lt -> "Pinned is newer"
+      end
+    else
+      _ -> "Version found"
+    end
+  end
+
+  def upstream_status(%{version: version}, pinned) do
+    case {Version.parse(version), Version.parse(pinned)} do
+      {{:ok, latest}, {:ok, current}} ->
+        case Version.compare(latest, current) do
+          :gt -> if latest.major > current.major, do: "Major update", else: "Update available"
+          :eq -> "Current"
+          :lt -> "Pinned is newer"
+        end
+
+      _ ->
+        "Version found"
+    end
+  end
+
+  def toolchain_update_target(statuses) do
+    case Enum.filter(statuses, &match?({:ok, _}, &1.toolchain_preview)) do
+      [status] -> status.repository.id
+      _ -> nil
+    end
   end
 
   @doc "An exact UTC instant, so a deployment can be matched against host logs."
