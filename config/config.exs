@@ -16,6 +16,11 @@ config :ptc_manager, Oban,
   # An executor whose acknowledgement fails on a busy database leaves its row
   # `executing` for good; the lifeline re-runs or discards it after ten minutes.
   lifeline: [rescue_after: {10, :minutes}],
+  # Oban prunes nothing unless configured, and the two every-minute cron
+  # workers alone add about 2,900 rows a day. A week keeps discarded jobs for
+  # diagnosis; every uniqueness window that includes finished states is shorter.
+  # Small batches keep each delete, including the first backlog, a brief write.
+  pruner: [max_age: {7, :days}, limit: 1_000],
   plugins: [
     {Oban.Plugins.Cron,
      crontab: [
