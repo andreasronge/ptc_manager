@@ -45,6 +45,20 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
 
       view |> element("#update-toolchain-codex") |> render_click()
       assert render(view) =~ "Draft update PR queued"
+      assert has_element?(view, "#update-toolchain-codex[disabled]", "Update queued")
+
+      {:ok, reopened, _html} = conn |> authenticated_conn() |> live(~p"/deployments")
+      render_async(reopened, 1_000)
+      render_async(reopened, 1_000)
+      assert has_element?(reopened, "#update-toolchain-codex[disabled]", "Update queued")
+
+      action = Repo.get_by!(PtcManager.Operations.AgentAction, action_key: "toolchain_pin_bump")
+
+      assert {:ok, _cancelled} =
+               PtcManager.Operations.cancel_queued_agent_action(action.id, "andreas")
+
+      send(view.pid, {:operations_changed, :test})
+      assert has_element?(view, "#update-toolchain-codex:not([disabled])", "Open update PR")
     end)
   end
 

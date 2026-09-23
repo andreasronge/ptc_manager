@@ -433,7 +433,7 @@ defmodule PtcManager.HerdrSyncTest do
     assert Enum.map(Operations.list_agent_timeline(), & &1.id) == [action_run.id]
   end
 
-  test "an early idle snapshot preserves an unattached action run in starting state" do
+  test "a managed action stays active between its initialization and work prompts" do
     repository = repository_fixture()
     worker = worker_fixture(%{worker_key: "herdr:early-action-snapshot"})
     now = now()
@@ -495,6 +495,28 @@ defmodule PtcManager.HerdrSyncTest do
     assert rebound.state == "starting"
     assert rebound.external_key == "early-action-snapshot:early-final-session"
     assert Repo.aggregate(AgentRun, :count) == 1
+
+    {:ok, _attached} = Operations.update_agent_run(rebound, %{state: "working"})
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "codex",
+           "name" => "repair_pr1705_a#{action.id}_f1",
+           "agent_status" => "done",
+           "pane_id" => "w8:p1",
+           "workspace_id" => "w8",
+           "agent_session" => %{"value" => "early-final-session"}
+         }
+       ]}
+    )
+
+    assert {:ok, %{agent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "early-action-snapshot")
+
+    assert Repo.get!(AgentRun, action_run.id).state == "idle"
   end
 
   test "operations hides an orphan action duplicate even after Herdr has already stopped" do

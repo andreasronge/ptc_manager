@@ -11,6 +11,7 @@ defmodule PtcManager.Herdr.Sync do
   alias PtcManager.RuntimeIncarnation
 
   alias PtcManager.Operations.{
+    AgentAction,
     AgentRun,
     AuditEvent,
     Job,
@@ -1255,6 +1256,29 @@ defmodule PtcManager.Herdr.Sync do
       |> Map.put(:status_text, run.status_text)
       |> preserve_identity(run)
 
+    update_run!(run, attrs)
+  end
+
+  # Herdr reports `done` after each prompt, including the initialization
+  # prompt. The action coordinator still owns the run until postflight settles.
+  defp upsert_agent_run(
+         _worker,
+         %AgentRun{agent_action_id: action_id, state: run_state} = run,
+         %{state: "done"} = attrs
+       )
+       when is_integer(action_id) and run_state in ["working", "idle", "blocked", "unknown"] do
+    attrs =
+      case Repo.get(AgentAction, action_id) do
+        %AgentAction{state: "running"} ->
+          attrs
+          |> Map.put(:state, "idle")
+          |> Map.put(:ended_at, nil)
+
+        _settled ->
+          attrs
+      end
+
+    attrs = attrs |> Map.put(:started_at, run.started_at) |> preserve_identity(run)
     update_run!(run, attrs)
   end
 

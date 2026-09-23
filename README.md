@@ -1844,6 +1844,9 @@ as one approved maintainer action. The agent changes one manifest line and
 the matching digest and protocol pins where applicable, then opens a draft PR
 after `mix precommit`; PtcManager verifies the PR base, sole
 changed file, and complete manifest at its head against the approved change.
+The button shows the queued or running state and cannot queue the same update
+again until that action finishes. Agent history on the Operations page shows
+the result if an attempt fails.
 The PR still needs human review and a separate deployment. Neither button
 installs software on the host.
 

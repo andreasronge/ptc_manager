@@ -71,6 +71,20 @@ defmodule PtcManager.MaintainerActions do
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
 
+  @doc "Active toolchain updates, keyed by repository and program for the deployments page."
+  def active_toolchain_bumps do
+    AgentAction
+    |> where(
+      [action],
+      action.action_key == "toolchain_pin_bump" and
+        action.state in ^AgentAction.pending_states()
+    )
+    |> Repo.all()
+    |> Map.new(fn action ->
+      {{action.repository_id, action.target_snapshot["program"]}, action.state}
+    end)
+  end
+
   def enqueue(action_key, issue_id, actor)
       when action_key in [
              "private_issue_analysis",
