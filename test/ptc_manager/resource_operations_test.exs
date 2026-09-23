@@ -170,6 +170,34 @@ defmodule PtcManager.ResourceOperationsTest do
     assert {:ok, ^released} = ResourceOperations.finish(first.id, first.attempt_token)
   end
 
+  test "a wrapper that finishes during recovery keeps the stalled heartbeat as the reason" do
+    context = managed_run_fixture()
+    base = ~U[2026-09-01 12:00:00.000000Z]
+
+    {:ok, _operation} = ResourceOperations.request(operation_attrs(context, "killed"), base)
+    {:ok, operation} = ResourceOperations.claim_next(context.worker.id, base)
+
+    {:ok, operation} =
+      ResourceOperations.mark_running(operation.id, operation.attempt_token, %{}, base)
+
+    assert ResourceOperations.mark_stale_recovery_pending(DateTime.add(base, 20, :second)) == 1
+
+    # Recovery writes cgroup.kill, so the wrapper sees SIGKILL and reports
+    # 137 before the sweep can release the row as lost.
+    assert {:ok, finished} =
+             ResourceOperations.finish(
+               operation.id,
+               operation.attempt_token,
+               %{exit_status: 137, last_error: nil},
+               DateTime.add(base, 21, :second)
+             )
+
+    assert finished.state == "failed"
+    assert finished.exit_status == 137
+    assert finished.last_error =~ "heartbeat stopped"
+    assert finished.last_error =~ "recovery"
+  end
+
   test "recovery without cgroup containment keeps the slot fenced for a retry" do
     assert {:retry, :operation_recovery_requires_cgroup_containment} =
              ResourceOperationRecovery.recover(%ResourceOperation{wrapper_pid: 999_999})
