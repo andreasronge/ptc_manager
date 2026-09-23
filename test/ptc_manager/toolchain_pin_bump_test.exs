@@ -62,7 +62,7 @@ defmodule PtcManager.Toolchain.PinBumpTest do
     assert String.contains?(snapshot["expected_manifest"], "codex=0.999.0\n")
 
     action = %{repository: repository, target_snapshot: snapshot}
-    put_head_manifest(snapshot["expected_manifest"])
+    put_manifest(@head_sha, snapshot["expected_manifest"])
     Application.put_env(:ptc_manager, :test_toolchain_pr, pr(repository))
     assert :ok = PinBump.preflight(action)
 
@@ -126,8 +126,13 @@ defmodule PtcManager.Toolchain.PinBumpTest do
   end
 
   test "freezes Cursor's downloaded archive digest with its dated version", %{
-    repository: repository
+    repository: repository,
+    manifest: manifest
   } do
+    source_manifest =
+      Regex.replace(~r/^cursor_agent=[^\n]+$/m, manifest, "cursor_agent=2026.09.02-c22c1a3")
+
+    put_manifest(@base_sha, source_manifest)
     digest = String.duplicate("d", 64)
 
     %Check{}
@@ -141,6 +146,7 @@ defmodule PtcManager.Toolchain.PinBumpTest do
     |> Repo.insert!()
 
     assert {:ok, snapshot} = PinBump.prepare(repository, "cursor_agent")
+    assert snapshot["current"] == "2026.09.02-c22c1a3"
     assert snapshot["expected_manifest"] =~ "cursor_agent=2026.09.18-9a7762b\n"
     assert snapshot["expected_manifest"] =~ "cursor_agent_sha256=#{digest}\n"
   end
@@ -161,7 +167,7 @@ defmodule PtcManager.Toolchain.PinBumpTest do
     checked("codex", "0.999.0")
     {:ok, snapshot} = PinBump.prepare(repository, "codex")
     altered = String.replace(snapshot["expected_manifest"], "pnpm=10.34.5", "pnpm=12.0.0")
-    put_head_manifest(altered)
+    put_manifest(@head_sha, altered)
     Application.put_env(:ptc_manager, :test_toolchain_pr, pr(repository))
 
     assert {:terminal_error, :toolchain_pull_request_mismatch} =
@@ -181,13 +187,13 @@ defmodule PtcManager.Toolchain.PinBumpTest do
     |> Repo.insert!()
   end
 
-  defp put_head_manifest(contents) do
+  defp put_manifest(sha, contents) do
     manifests = Application.fetch_env!(:ptc_manager, :test_toolchain_manifests)
 
     Application.put_env(
       :ptc_manager,
       :test_toolchain_manifests,
-      Map.put(manifests, @head_sha, contents)
+      Map.put(manifests, sha, contents)
     )
   end
 
