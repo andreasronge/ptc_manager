@@ -337,6 +337,9 @@ writer wait), and DBConnection may double its target before shedding load.
 doubled queue target, one complete SQLite writer wait, and five seconds for
 cleanup.
 
+GitHub issue snapshots load existing issues and dependency context before taking
+the writer slot, then reserve a revision that rejects stale projections.
+
 The deterministic state-machine tests run in the normal suite. A sub-second
 socket/process integration test is kept out of the default suite and can be run
 explicitly:
@@ -1672,9 +1675,12 @@ also writes `/etc/ptc_manager/health-snapshot.env` from the coordinator's
 resolved `DATABASE_PATH` and `PTC_HEALTH_OUT`, so collection reads the same
 database and publishes the same path that the running application expects. It
 exports capacity settings,
-record IDs, states and timings, plus counts from at most 10,000 service journal
-lines. Live record lists are limited to 500 rows; a list at that limit may be
-incomplete. The log counts include a limit indicator. Raw journal messages,
+record IDs, states and timings, plus counts from at most 10,000 recent service
+journal entries. Error and warning counts use a separate journal search that
+filters before applying its 10,000-entry limit, so sudo session noise cannot
+hide older database failures. `at_limit` and `diagnostic_at_limit` identify
+truncated samples independently. Live record lists are limited to 500 rows; a
+list at that limit may be incomplete. Raw journal messages,
 agent status text, labels and names stay private because they can contain secrets
 or agent-controlled instructions.
 

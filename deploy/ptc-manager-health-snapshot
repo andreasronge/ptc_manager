@@ -37,6 +37,8 @@ umask 0077
 tmp_dir="$(mktemp -d "${out}.tmp.XXXXXX")" || fail "cannot create private staging directory"
 tmp="$tmp_dir/snapshot.json"
 log="$tmp_dir/journal"
+diagnostics="$tmp_dir/diagnostics"
+diagnostic_error="$tmp_dir/diagnostic-error"
 
 cleanup() {
   rm -rf "$tmp_dir"
@@ -62,8 +64,28 @@ query() {
 
 # Read once, check the actual read, and bound the privileged input. A successful
 # preflight cannot prove this later read succeeded.
-journalctl -u "$unit" --since "$since" -n "$max_log_lines" --no-pager >"$log" 2>/dev/null ||
+journalctl -u "$unit" --since "$since" -n "$max_log_lines" --no-pager \
+  --quiet -o json >"$log" 2>/dev/null ||
   fail "cannot read the journal; leaving the previous snapshot in place"
+
+# Search before applying the line cap. A busy service can otherwise fill the
+# tail with sudo session messages and hide older SQLite failures in the window.
+if journalctl -u "$unit" --since "$since" -n "$max_log_lines" --no-pager \
+  --quiet -o json \
+  -g '\[(error|warning)\]|SQLite|[Dd]atabase (busy|is locked)|\*\* \(|terminating|Function: ' \
+  >"$diagnostics" 2>"$diagnostic_error"; then
+  :
+else
+  status=$?
+  # journalctl returns 1 when --grep has no matches. Quiet mode leaves both
+  # streams empty in that case; a read failure still preserves the old file.
+  if [ "$status" -ne 1 ] || [ -s "$diagnostics" ] || [ -s "$diagnostic_error" ]; then
+    fail "cannot read diagnostic journal lines; leaving the previous snapshot in place"
+  fi
+fi
+
+diagnostic_count="$(jq -s 'length' "$diagnostics")" ||
+  fail "cannot parse diagnostic journal entries; leaving the previous snapshot in place"
 
 live_run_states="'queued','starting','working','idle','blocked','waiting','unknown'"
 
@@ -111,12 +133,14 @@ live_run_states="'queued','starting','working','idle','blocked','waiting','unkno
   # Never export exception text: it may contain SQL parameters, credentials,
   # private summaries, or instructions planted in an agent-controlled value.
   printf ',"service_log_volume":'
-  jq -R -s --arg window "$since" --argjson limit "$max_log_lines" '
-    split("\n") | map(select(length > 0)) |
-    {window: $window, line_limit: $limit, at_limit: (length >= $limit),
-     total_lines: length,
-     session_noise_lines: (map(select(test("sudo\\[|pam_unix"))) | length),
-     error_lines: (map(select(test("\\[(error|warning)\\]|\\*\\* \\(|terminating|Function: "))) | length)}
+  jq -s --arg window "$since" --argjson limit "$max_log_lines" \
+    --argjson diagnostic_count "$diagnostic_count" '
+    map(.MESSAGE // "" | tostring) as $messages |
+    {window: $window, line_limit: $limit, at_limit: ($messages | length >= $limit),
+     total_lines: ($messages | length),
+     session_noise_lines: ($messages | map(select(test("sudo\\[|pam_unix"))) | length),
+     error_lines: $diagnostic_count,
+     diagnostic_at_limit: ($diagnostic_count >= $limit)}
   ' "$log"
 
   printf '}\n'

@@ -79,6 +79,7 @@ defmodule PtcManager.HealthSnapshotEvidence do
            "window" => window,
            "line_limit" => line_limit,
            "at_limit" => at_limit,
+           "diagnostic_at_limit" => diagnostic_at_limit,
            "total_lines" => total_lines,
            "session_noise_lines" => session_noise_lines,
            "error_lines" => error_lines
@@ -86,6 +87,7 @@ defmodule PtcManager.HealthSnapshotEvidence do
          true <- is_binary(window),
          true <- positive_integer?(line_limit),
          true <- is_boolean(at_limit),
+         true <- is_boolean(diagnostic_at_limit),
          true <- non_negative_integer?(total_lines),
          true <- non_negative_integer?(session_noise_lines),
          true <- non_negative_integer?(error_lines) do
