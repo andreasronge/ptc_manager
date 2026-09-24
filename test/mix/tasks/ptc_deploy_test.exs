@@ -11,6 +11,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @herdr_ssh_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-ssh-bridge")
   @herdr_worker_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-worker-bridge")
   @herdr_bridge_canary Path.join(@project_root, "deploy/ptc-manager-herdr-bridge-canary")
+  @herdr_091_preamble "printf '\n%s\n' 'herdr-remote-output-ready:1'"
   @ssh_firewall Path.join(@project_root, "deploy/ptc-manager-ssh-firewall")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
@@ -556,6 +557,12 @@ defmodule Mix.Tasks.PtcDeployTest do
                stderr_to_stdout: true
              )
 
+    assert {"\nherdr-remote-output-ready:1\n/usr/local/bin/herdr\n", 0} =
+             System.cmd(@herdr_ssh_bridge, [],
+               env: [{"SSH_ORIGINAL_COMMAND", @herdr_091_preamble <> "\ncommand -v herdr"}],
+               stderr_to_stdout: true
+             )
+
     assert {output, 126} =
              System.cmd(@herdr_ssh_bridge, [],
                env: [{"SSH_ORIGINAL_COMMAND", "id"}],
@@ -607,7 +614,9 @@ defmodule Mix.Tasks.PtcDeployTest do
   end
 
   test "forced Herdr bridge accepts the 0.9.1 framed platform probe" do
-    probe = "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nuname -s\nuname -m\n"
+    # Bytes captured from Herdr 0.9.1's `machine add`: the preamble's printf
+    # format carries real newlines, not backslash escapes.
+    probe = @herdr_091_preamble <> "\nuname -s\nuname -m\n"
 
     assert {output, 0} =
              System.cmd(
@@ -621,7 +630,7 @@ defmodule Mix.Tasks.PtcDeployTest do
              "\nherdr-remote-output-ready:1\n#{String.trim(System.cmd("uname", ["-s"]) |> elem(0))}\n#{String.trim(System.cmd("uname", ["-m"]) |> elem(0))}\n"
 
     rejected_probe =
-      "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nid\n"
+      @herdr_091_preamble <> "\nid\n"
 
     assert {"ptc-manager-herdr-ssh-bridge: unsupported SSH command\n", 126} =
              System.cmd(
@@ -660,7 +669,7 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     for {flag, expected} <- [{"", "stream\n"}, {" --idle-timeout-v1", "stream-idle\n"}] do
       command =
-        "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec /usr/local/bin/herdr remote-client-bridge#{flag}"
+        @herdr_091_preamble <> "\nexec /usr/local/bin/herdr remote-client-bridge#{flag}"
 
       assert {"\nherdr-remote-output-ready:1\n" <> ^expected, 0} =
                System.cmd(bridge, [], env: [{"SSH_ORIGINAL_COMMAND", command}])
