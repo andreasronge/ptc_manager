@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
 
-[ "$#" -eq 3 ] || { echo "usage: ptc-manager-herdr-bridge-canary VERSION PROTOCOL SESSION" >&2; exit 2; }
+[ "$#" -eq 4 ] || { echo "usage: ptc-manager-herdr-bridge-canary VERSION PROTOCOL SESSION PINNED_HERDR" >&2; exit 2; }
 expected_version=$1
 expected_protocol=$2
 expected_session=$3
+pinned_herdr=$4
 target=ptc-manager-herdr-canary
 herdr=/usr/local/bin/herdr
 
@@ -39,16 +40,29 @@ assert value.get("socket", "").startswith("/var/lib/ptc_manager-worker/")
 printf '%s\n' 'exec /usr/local/bin/herdr remote-client-bridge </dev/null' |
   /usr/bin/timeout 15 /usr/bin/ssh -o BatchMode=yes "$target" /bin/sh -s >/dev/null
 
-home=$(mktemp -d /tmp/ptc-manager-herdr-bridge-canary.XXXXXX)
-cleanup() { rm -rf -- "$home"; }
+# A saved Herdr 0.9.1 connection sends this framed command directly through
+# SSH_ORIGINAL_COMMAND. Check both its base form and the optional idle-cleanup
+# form when the running server advertises that capability.
+framed_stream="printf '\n%s\n' 'herdr-remote-output-ready:1'
+exec /usr/local/bin/herdr remote-client-bridge"
+/usr/bin/timeout 15 /usr/bin/ssh -o BatchMode=yes "$target" "$framed_stream" </dev/null >/dev/null
+if printf '%s' "$status" | jq -e '.capabilities.remote_bridge_idle_timeout == true' >/dev/null; then
+  /usr/bin/timeout 15 /usr/bin/ssh -o BatchMode=yes "$target" \
+    "$framed_stream --idle-timeout-v1" </dev/null >/dev/null
+fi
+
+canary_root=$(mktemp -d /tmp/ptc-manager-herdr-bridge-canary.XXXXXX)
+cleanup() { rm -rf -- "$canary_root"; }
 trap cleanup EXIT HUP INT TERM
-install -d -m 0700 "$home/.config"
-config_path="$home/config.toml"
-HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
-  "$herdr" machine add "$target" --label "Deployment canary" --remote-session "$expected_session" >/dev/null
-listing=$(HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
-  "$herdr" machine list --json)
-printf '%s' "$listing" | /usr/bin/python3 -I -c '
+for client in "$herdr" "$pinned_herdr"; do
+  home="$canary_root/client-$(basename "$(dirname "$client")")"
+  install -d -m 0700 "$home/.config"
+  config_path="$home/config.toml"
+  HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
+    "$client" machine add "$target" --label "Deployment canary" --remote-session "$expected_session" >/dev/null
+  listing=$(HOME=$home XDG_CONFIG_HOME=$home/.config HERDR_CONFIG_PATH=$config_path \
+    "$client" machine list --json)
+  printf '%s' "$listing" | /usr/bin/python3 -I -c '
 import json, sys
 machines = json.load(sys.stdin)
 session = sys.argv[1]
@@ -57,6 +71,7 @@ assert machines[0]["target"] == "ptc-manager-herdr-canary"
 assert machines[0]["session"] == session
 assert machines[0]["enabled"] is True
 ' "$expected_session"
+done
 
 set +e
 /usr/bin/ssh -o BatchMode=yes "$target" id >/dev/null 2>&1

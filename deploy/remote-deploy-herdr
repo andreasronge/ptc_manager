@@ -1984,7 +1984,7 @@ fi
 active_herdr_version=$(sudo -u ptc-manager-worker -H /usr/local/bin/herdr --version | awk '{print $NF}')
 echo "Running the managed Herdr SSH bridge canary..."
 sudo /usr/local/bin/ptc-manager-herdr-bridge-canary \
-  "$active_herdr_version" "$herdr_protocol" "$worker_session"
+  "$active_herdr_version" "$herdr_protocol" "$worker_session" "$worker_herdr_dir/herdr"
 sudo sqlite3 "$database_path" ".backup '$database_backup'"
 sudo chown ptc-manager:ptc-manager "$database_backup"
 sudo chmod 0600 "$database_backup"
