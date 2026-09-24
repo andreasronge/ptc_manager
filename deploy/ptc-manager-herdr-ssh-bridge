@@ -9,7 +9,9 @@ worker_bridge=/usr/local/bin/ptc-manager-herdr-worker-bridge
 original=${SSH_ORIGINAL_COMMAND:-}
 newline='
 '
-output_preamble="printf '\n%s\n' 'herdr-remote-output-ready:1'"
+# Herdr 0.9.1 sends this preamble with real newlines inside the printf format,
+# not backslash escapes.
+output_preamble="printf '$newline%s$newline' 'herdr-remote-output-ready:1'"
 framed_stream="$output_preamble$newline"'exec /usr/local/bin/herdr remote-client-bridge'
 
 output_ready() {
@@ -27,6 +29,10 @@ reject() {
 
 case "$original" in
   "command -v herdr")
+    printf '%s\n' "$herdr"
+    ;;
+  "$output_preamble${newline}command -v herdr")
+    output_ready
     printf '%s\n' "$herdr"
     ;;
   "exec /usr/local/bin/herdr remote-client-bridge")

@@ -43,7 +43,9 @@ printf '%s\n' 'exec /usr/local/bin/herdr remote-client-bridge </dev/null' |
 # A saved Herdr 0.9.1 connection sends this framed command directly through
 # SSH_ORIGINAL_COMMAND. Check both its base form and the optional idle-cleanup
 # form when the running server advertises that capability.
-framed_stream="printf '\n%s\n' 'herdr-remote-output-ready:1'
+framed_stream="printf '
+%s
+' 'herdr-remote-output-ready:1'
 exec /usr/local/bin/herdr remote-client-bridge"
 /usr/bin/timeout 15 /usr/bin/ssh -o BatchMode=yes "$target" "$framed_stream" </dev/null >/dev/null
 if printf '%s' "$status" | jq -e '.capabilities.remote_bridge_idle_timeout == true' >/dev/null; then
