@@ -12,6 +12,52 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
              System.cmd(wrapper, ["run", "--label", "test", "--", "/bin/echo", "direct"])
   end
 
+  test "operation cgroup applies the verify soft limit and retains the hard limit" do
+    wrapper = Path.expand("deploy/ptc-operation")
+
+    python = """
+    import importlib.machinery
+    import importlib.util
+    import io
+    import json
+    import sys
+    from unittest.mock import patch
+
+    loader = importlib.machinery.SourceFileLoader('ptc_operation', sys.argv[1])
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    context = {
+        'cgroups': True,
+        'operation_memory_high_bytes': 2147483648,
+        'verify_operation_memory_high_bytes': 2577399808,
+        'verify_agent_memory_high_bytes': 2952790016,
+        'operation_memory_max_bytes': 2684354560,
+    }
+    writes = []
+    with patch.object(module.platform, 'system', return_value='Linux'), \
+         patch.object(module.os.path, 'exists', return_value=True), \
+         patch('builtins.open', side_effect=lambda *args, **kwargs: io.StringIO('0::/ptc-agent-test/processes\\n')), \
+         patch.object(module.os, 'mkdir'), \
+         patch.object(module, 'read_text', return_value='2684354560'), \
+         patch.object(module, 'write_text', side_effect=lambda path, value: writes.append((path, value))):
+        module.create_operation_cgroup(context, 77, 'lease', 'verify')
+        module.create_operation_cgroup(context, 78, 'lease', 'test')
+        del context['verify_operation_memory_high_bytes']
+        del context['verify_agent_memory_high_bytes']
+        module.create_operation_cgroup(context, 79, 'lease', 'verify')
+    print(json.dumps([value for path, value in writes if '/operation-' in path and path.endswith('/memory.high')]))
+    print(json.dumps([value for path, value in writes if path.endswith('/ptc-agent-test/memory.high')]))
+    print(json.dumps([value for path, value in writes if path.endswith('/memory.max')]))
+    """
+
+    assert {output, 0} = System.cmd("python3", ["-c", python, wrapper])
+    assert [high, agent_high, max] = String.split(String.trim(output), "\n")
+    assert Jason.decode!(high) == [2_577_399_808, 2_147_483_648, 2_577_399_808]
+    assert Jason.decode!(agent_high) == [2_952_790_016, 2_952_790_016]
+    assert Jason.decode!(max) == [2_684_354_560, 2_684_354_560, 2_684_354_560]
+  end
+
   test "wrapper uses the generic socket protocol and preserves child output" do
     root = Path.join(System.tmp_dir!(), "ptc-operation-e2e-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
