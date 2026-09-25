@@ -1103,6 +1103,15 @@ mix ecto.reset
 
 ### Automatically implementing ready issues
 
+For the public `ptc_manager` repository, issue creation is restricted to
+collaborators in GitHub settings. Existing issues are locked, and
+`.github/workflows/lock-issues.yml` locks newly opened or reopened issues.
+The owner and agents using an account with write access can still comment on
+locked issues. Keep the repository's collaborator list limited to trusted
+accounts: collaborators can also apply `ptc:ready`. These settings are
+repository-specific; managed repositories such as `ptc_runner` can continue
+accepting public issues and comments.
+
 Under **Configuration**, each repository has **Automatically implement ready
 issues**, off by default. Enable it for `andreasronge/ptc_manager` to authorize
 implementation without a separate approval click for every issue. Other
