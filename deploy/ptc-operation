@@ -104,7 +104,7 @@ def write_text(path, value):
         value_file.write(f"{value}\n")
 
 
-def create_operation_cgroup(context, operation_id, attempt_token):
+def create_operation_cgroup(context, operation_id, attempt_token, label):
     if not context.get("cgroups"):
         return None
     if platform.system() != "Linux" or not os.path.exists(
@@ -129,12 +129,25 @@ def create_operation_cgroup(context, operation_id, attempt_token):
         raise RuntimeError("managed agent cgroup is unavailable")
 
     agent_root = os.path.dirname(current)
+    if label == "verify":
+        # Retained panes keep their original parent cgroup after a deploy.
+        # Lift its soft ceiling once; the existing hard ceiling is unchanged.
+        agent_high_path = os.path.join(agent_root, "memory.high")
+        agent_high = read_text(agent_high_path)
+        verify_agent_high = context.get("verify_agent_memory_high_bytes", 2_952_790_016)
+        if agent_high != "max" and int(agent_high) < verify_agent_high:
+            write_text(agent_high_path, verify_agent_high)
+
     safe_token = attempt_token[:12]
     operation_path = os.path.join(agent_root, f"operation-{operation_id}-{safe_token}")
     os.mkdir(operation_path)
     write_text(
         os.path.join(operation_path, "memory.high"),
-        context["operation_memory_high_bytes"],
+        (
+            context.get("verify_operation_memory_high_bytes", 2_577_399_808)
+            if label == "verify"
+            else context["operation_memory_high_bytes"]
+        ),
     )
     write_text(
         os.path.join(operation_path, "memory.max"),
@@ -270,7 +283,7 @@ def managed_run(args, context):
 
     cgroup_path = None
     try:
-        cgroup_path = create_operation_cgroup(context, operation_id, attempt_token)
+        cgroup_path = create_operation_cgroup(context, operation_id, attempt_token, args.label)
     except Exception as error:
         broker_request_with_retry(
             context,

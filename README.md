@@ -316,6 +316,33 @@ keeps the Herdr server in a separate leaf; each managed pane then receives an
 agent memory boundary and each coordinated command a child cgroup. That makes
 unwrapped agent commands remain bounded and lets PtcManager measure the complete
 command process tree.
+The `verify` operation has a 2,458 MiB `memory.high` (set by
+`PTC_VERIFY_OPERATION_MEMORY_HIGH_BYTES`); other labels retain 2 GiB. All labels
+retain the 2.5 GiB `memory.max`. Managed agent panes use at least 2.75 GiB
+`memory.high` (set by `PTC_VERIFY_AGENT_MEMORY_HIGH_BYTES`) and retain their
+3 GiB `memory.max`; the higher floor applies even when an existing environment
+file still sets `PTC_AGENT_MEMORY_HIGH_BYTES=2684354560`. The operation capacity
+remains one. A verify command also lifts the soft limit on a retained pane's
+existing agent cgroup, so a deploy does not leave that pane throttled at its
+older parent limit. The
+verify allowance comes from a production-shaped ptc_runner pre-push measurement
+on the 4-core, 7.6 GiB worker: serial core tests, ExDoc, static analysis,
+Dialyzer, and Viewer sampled 1,520, 1,044, 1,714, 2,048, and 341 MiB in the
+cold run. Only Dialyzer's cold project PLT build hit `memory.high` (1,101
+events); it also hit the limit with warm caches (588 events). Repeating the
+cold full sequence at 2,458 MiB completed with a 2,322 MiB peak and zero
+operation high events, but its 2.5 GiB parent recorded 466 local high events.
+Repeating the cold project PLT build with the parent at 2.75 GiB recorded zero
+high events in both cgroups. At measurement time retained Herdr agent cgroups used about
+2.6 GiB in total, including the measuring agent, and the console used about
+0.65 GiB. The new soft allowance adds 410 MiB of reclaim-free headroom for
+one operation and up to 256 MiB per agent pane. For the one heavy and two
+light admitted sessions, all reaching their soft limits would add 768 MiB of
+soft headroom; retained panes are included in the measured usage above. No hard
+memory claim or slot capacity increases. At the operation's hard claim,
+roughly 2.7 GiB of the host's RAM remains beyond other retained agents and
+the console. [Issue #194](https://github.com/andreasronge/ptc_manager/issues/194)
+records the per-phase timings and cache comparison.
 If a wrapper or worker disappears, the broker first fences the stale attempt,
 then the root-owned bounded recovery helper terminates that exact child cgroup
 before releasing its operation slot. Waiting wrappers send heartbeats and are
