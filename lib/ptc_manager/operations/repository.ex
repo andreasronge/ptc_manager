@@ -10,6 +10,7 @@ defmodule PtcManager.Operations.Repository do
     field :default_branch, :string, default: "main"
     field :enabled, :boolean, default: true
     field :auto_fix_issues, :boolean, default: false
+    field :auto_fix_daily_limit, :integer, default: 5
     field :local_path, :string
     field :sync_status, :string, default: "never"
     field :last_synced_at, :utc_datetime_usec
@@ -40,6 +41,7 @@ defmodule PtcManager.Operations.Repository do
       :default_branch,
       :enabled,
       :auto_fix_issues,
+      :auto_fix_daily_limit,
       :local_path,
       :sync_status,
       :last_synced_at,
@@ -56,6 +58,10 @@ defmodule PtcManager.Operations.Repository do
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,
       less_than_or_equal_to: 3
+    )
+    |> validate_number(:auto_fix_daily_limit,
+      greater_than_or_equal_to: 1,
+      less_than_or_equal_to: 50
     )
     |> validate_change(:local_path, fn :local_path, path ->
       if Path.type(path) == :absolute,

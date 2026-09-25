@@ -158,6 +158,29 @@ defmodule PtcManagerWeb.ConfigurationLive do
   def handle_event("set-auto-fix", _params, socket),
     do: {:noreply, put_flash(socket, :error, "Could not save automatic implementation setting.")}
 
+  def handle_event("set-auto-fix-daily-limit", %{"auto_fix" => params}, socket) do
+    with {repository_id, ""} <- Integer.parse(params["repository_id"] || ""),
+         {limit, ""} <- Integer.parse(params["daily_limit"] || ""),
+         {:ok, _repository} <-
+           PtcManager.AutoImplementation.configure_daily_limit(
+             repository_id,
+             limit,
+             socket.assigns.actor
+           ) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Automatic implementation daily limit saved.")
+       |> load_configuration()}
+    else
+      _invalid -> handle_event("set-auto-fix-daily-limit", %{}, socket)
+    end
+  end
+
+  def handle_event("set-auto-fix-daily-limit", _params, socket),
+    do:
+      {:noreply,
+       put_flash(socket, :error, "The daily limit must be a whole number from 1 to 50.")}
+
   def handle_event("add-maintainer-label", %{"label" => params}, socket) do
     with {repository_id, ""} <- Integer.parse(params["repository_id"] || ""),
          %Repository{} = repository <- Operations.get_repository(repository_id),

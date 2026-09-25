@@ -202,6 +202,36 @@ defmodule PtcManager.AutoImplementationTest do
     assert Repo.aggregate(Job, :count) == 5
   end
 
+  test "the configured daily limit replaces the default and can be raised the same day" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    for _ <- 1..4, do: issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    assert {:ok, %{auto_fix_daily_limit: 2}} =
+             AutoImplementation.configure_daily_limit(repository.id, 2, "andreas")
+
+    assert Repo.get_by!(AuditEvent, action: "repository.auto_fix_updated").details ==
+             %{"enabled" => true, "daily_limit" => 2}
+
+    results = AutoImplementation.reconcile(repository.id)
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 2
+    assert {:error, :auto_fix_daily_limit} in results
+
+    {:ok, _} = AutoImplementation.configure_daily_limit(repository.id, 3, "andreas")
+    assert Enum.count(AutoImplementation.reconcile(repository.id), &match?({:ok, _}, &1)) == 1
+    assert Repo.aggregate(Job, :count) == 3
+  end
+
+  test "rejects a daily limit outside 1 to 50" do
+    repository = repository_fixture()
+
+    for limit <- [0, 51] do
+      assert {:error, %Ecto.Changeset{}} =
+               AutoImplementation.configure_daily_limit(repository.id, limit, "andreas")
+    end
+
+    assert Repo.get!(PtcManager.Operations.Repository, repository.id).auto_fix_daily_limit == 5
+  end
+
   test "does not admit work when pull request discovery fails" do
     repository = repository_fixture(%{auto_fix_issues: true})
     issue_fixture(repository, %{workflow_label: "ptc:ready"})

@@ -6,29 +6,42 @@ defmodule PtcManager.AutoImplementation do
   alias PtcManager.{Operations, Repo, RepoTransaction}
   alias PtcManager.Operations.{AgentAction, Approval, Issue, Job, PrPublication, Repository}
 
-  @daily_limit 5
+  def configure(repository_id, enabled, actor) when is_boolean(enabled),
+    do: update_policy(repository_id, %{auto_fix_issues: enabled}, actor)
 
-  def configure(repository_id, enabled, actor) when is_boolean(enabled) do
+  # Counts only jobs admitted automatically since 00:00 UTC.
+  def configure_daily_limit(repository_id, limit, actor) when is_integer(limit),
+    do: update_policy(repository_id, %{auto_fix_daily_limit: limit}, actor)
+
+  defp update_policy(repository_id, attrs, actor) do
     result =
       RepoTransaction.immediate(fn ->
         repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
 
-        updated =
-          repository |> Repository.changeset(%{auto_fix_issues: enabled}) |> Repo.update!()
+        case repository |> Repository.changeset(attrs) |> Repo.update() do
+          {:ok, updated} ->
+            PtcManager.ExecutionProfiles.audit(
+              actor,
+              "repository.auto_fix_updated",
+              repository_id,
+              %{enabled: updated.auto_fix_issues, daily_limit: updated.auto_fix_daily_limit},
+              "repository"
+            )
 
-        PtcManager.ExecutionProfiles.audit(
-          actor,
-          "repository.auto_fix_updated",
-          repository_id,
-          %{enabled: enabled, daily_limit: @daily_limit},
-          "repository"
-        )
+            updated
 
-        updated
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
       end)
 
     Operations.notify_changed(Operations)
-    if enabled and match?({:ok, _}, result), do: PtcManager.GitHub.Poller.wake()
+
+    # Enabling or raising the limit admits waiting ready issues without
+    # waiting for the next poll.
+    if match?({:ok, %Repository{auto_fix_issues: true}}, result),
+      do: PtcManager.GitHub.Poller.wake()
+
     result
   end
 
@@ -103,7 +116,7 @@ defmodule PtcManager.AutoImplementation do
       linked_publication?(repo, issue) ->
         {:error, :issue_has_pull_request}
 
-      daily_count(repo, repository.id) >= @daily_limit ->
+      daily_count(repo, repository.id) >= repository.auto_fix_daily_limit ->
         {:error, :auto_fix_daily_limit}
 
       true ->

@@ -1138,9 +1138,11 @@ or a known linked pull request prevents automatic admission. Open pull requests
 are refreshed before admission; unavailable PR discovery defers automatic work. Retrying requires
 an explicit manual action; removing/reapplying the label, editing the issue, or
 disabling/re-enabling the setting does not reset its history. Admission and job
-creation share one write transaction. At most five automatic jobs per repository
-are admitted per UTC day, including failed and cancelled jobs; subsequent syncs
-pick up the remaining backlog after the budget resets. Existing capacity limits
+creation share one write transaction. Each repository's daily limit (five by
+default, 1–50, set next to the toggle) caps automatic jobs admitted per UTC day,
+including failed and cancelled jobs; manual approvals do not count. Subsequent
+syncs pick up the remaining backlog after the budget resets or the limit is
+raised. Existing capacity limits
 bound how many run concurrently.
 
 Dispatch re-reads GitHub and checks the frozen issue version, readiness,
