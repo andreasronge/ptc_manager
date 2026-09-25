@@ -1,5 +1,9 @@
 # PtcManager
 
+> **Personal project.** PtcManager is built for its author's own repositories
+> and machine. The source is public for reference only: it is not supported,
+> and issues and pull requests from others are not accepted.
+
 PtcManager is a private maintainer console for GitHub repositories and the
 Codex or Claude agents working on them. A maintainer reads plain-language
 summaries of issues and pull requests, presses one named button to start
