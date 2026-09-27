@@ -1650,6 +1650,29 @@ defmodule PtcManager.OperationsTest do
   end
 
   describe "resume_from_worktree/2" do
+    test "refuses a retained-worktree resume when the viewer claims the issue" do
+      %{job: job, run: run} = running_job_fixture("failed")
+
+      run
+      |> Ecto.Changeset.change(agent_name: "impl_j#{job.id}_f1", state: "failed")
+      |> Repo.update!()
+
+      issue = Repo.get!(Issue, job.issue_id)
+      repository = Repo.get!(PtcManager.Operations.Repository, job.repository_id)
+
+      repository
+      |> PtcManager.Operations.Repository.changeset(%{github_viewer_login: "maintainer"})
+      |> Repo.update!()
+
+      issue
+      |> Issue.changeset(%{github_assignees: %{"logins" => ["maintainer"]}})
+      |> Repo.update!()
+
+      assert {:error, :issue_claimed} = Operations.resume_from_worktree(job.id, "andreas")
+      assert Repo.get!(Job, job.id).state == "failed"
+      refute Repo.get_by(AuditEvent, action: "job.resumed_from_worktree", target_id: job.id)
+    end
+
     test "approves afresh and hands a failed job to the retained continuation" do
       %{job: job, run: run, allocation: allocation} = running_job_fixture("failed")
 

@@ -1094,7 +1094,14 @@ defmodule PtcManager.Operations do
 
         unless retained_worktree?(job), do: Repo.rollback(:worktree_not_retained)
         unless continuable_run?(job), do: Repo.rollback(:no_session_to_continue)
-        unless Repo.get!(Issue, job.issue_id).state == "open", do: Repo.rollback(:issue_not_open)
+        issue = Repo.get!(Issue, job.issue_id)
+        unless issue.state == "open", do: Repo.rollback(:issue_not_open)
+
+        case issue_unclaimed(issue, Repo.get!(Repository, job.repository_id)) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
         unless is_nil(job.review_recovery_expires_at), do: Repo.rollback(:recovery_busy)
 
         if Repo.exists?(

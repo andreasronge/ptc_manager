@@ -1076,7 +1076,8 @@ GitHub synchronization.
 GitHub assignment is projected as the advisory work claim. Planning and active
 job cards show `Taken by @login`, and PtcManager will not approve or dispatch
 implementation while any assignee remains, including the repository's viewer
-account. An assignment during a running job is shown but does not cancel it.
+account. Retained-worktree resume checks the claim again before relaunch. An
+assignment during a running job is shown but does not cancel it.
 PtcManager's own claim is the job record; implementation agents do not assign
 issues. The periodic issue sync does not need to fetch every comment. Rows
 that predate this projection remain approval-ineligible until their first
