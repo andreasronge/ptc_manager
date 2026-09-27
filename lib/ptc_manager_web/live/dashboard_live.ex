@@ -62,6 +62,12 @@ defmodule PtcManagerWeb.DashboardLive do
        |> put_flash(:info, "Resuming on the retained worktree with a fresh approval.")
        |> load_dashboard()}
     else
+      {:error, :issue_claimed} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, Operations.rejection_words(:issue_claimed))
+         |> load_dashboard()}
+
       {:error, reason} ->
         {:noreply,
          socket

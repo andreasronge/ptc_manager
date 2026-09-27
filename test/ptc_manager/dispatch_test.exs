@@ -373,12 +373,20 @@ defmodule PtcManager.DispatchTest do
     )
   end
 
-  test "an assignment to someone else refuses dispatch" do
-    refuse_dispatch!(
-      %{"assignees" => [%{"login" => "someone-else"}]},
-      :issue_claimed,
-      "assigned to someone else"
+  test "an assignment to the viewer refuses dispatch" do
+    repository =
+      repository_fixture(%{local_path: "/tmp/repository", github_viewer_login: "maintainer"})
+
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture(repository)
+
+    Process.put(
+      :dispatch_github_result,
+      {:ok, Map.put(remote, "assignees", [%{"login" => "maintainer"}])}
     )
+
+    assert {:error, :issue_claimed} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    refute_receive {:dispatch_context, _context}
+    assert Repo.get!(Job, job.id).last_error =~ "assigned on GitHub"
   end
 
   test "sub-issues that make the issue a collection refuse dispatch" do
@@ -974,6 +982,7 @@ defmodule PtcManager.DispatchTest do
     assert prompt =~ "Maximum independent review rounds: 1"
     assert prompt =~ "Read the issue, its comments, linked issues"
     assert prompt =~ "Push this branch and create a pull request. Do not merge."
+    refute prompt =~ "Assign the issue to yourself"
     refute prompt =~ "fencing_token"
     refute prompt =~ "result="
   end

@@ -289,8 +289,7 @@ defmodule PtcManager.CollectionsTest do
                  | github_assignees: %{"logins" => ["x"]}
                })
 
-      # The console's own agent assigns the issue while it works; that claim
-      # must not stop the console from running the issue again.
+      # The repository's viewer identity is also a maintainer claim.
       repository =
         repository
         |> PtcManager.Operations.Repository.changeset(%{github_viewer_login: "console-bot"})
@@ -298,7 +297,7 @@ defmodule PtcManager.CollectionsTest do
 
       job = %{job | repository: repository}
 
-      assert :ok =
+      assert {:error, :issue_claimed} =
                PtcManager.AutoImplementation.dispatch_allowed(job, %{
                  remote
                  | github_assignees: %{"logins" => ["console-bot"]}
@@ -505,8 +504,8 @@ defmodule PtcManager.CollectionsTest do
       })
       |> Repo.update!()
 
-      # The stop asks the question on the issue; the agent labels it and, as
-      # every agent does, assigns it to the console's own identity.
+      # The stop asks the question on the issue. A maintainer assignment holds
+      # the issue until the maintainer removes it.
       :ok = Collections.reconcile(repository.id)
       assert [%AgentAction{} = ask] = collection_actions(repository)
       finish_action(ask, "needs-decision")
@@ -525,7 +524,11 @@ defmodule PtcManager.CollectionsTest do
       # The maintainer answers and marks the issue ready again.
       Issue
       |> Repo.get!(first.id)
-      |> Issue.changeset(%{workflow_label: "ptc:ready", content_digest: "answered"})
+      |> Issue.changeset(%{
+        workflow_label: "ptc:ready",
+        github_assignees: %{"logins" => []},
+        content_digest: "answered"
+      })
       |> Repo.update!()
 
       :ok = Collections.reconcile(repository.id)

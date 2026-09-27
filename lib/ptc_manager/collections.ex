@@ -282,7 +282,7 @@ defmodule PtcManager.Collections do
       remote.sub_issues["total"] > 0 ->
         {:error, :issue_is_collection}
 
-      Issue.claimed_by_other?(remote, job.repository) ->
+      Issue.claimed?(remote) ->
         {:error, :issue_claimed}
 
       linked_publication?(Repo, job.issue) ->

@@ -2,7 +2,7 @@ defmodule PtcManager.AutoImplementationTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.{AutoImplementation, Operations}
-  alias PtcManager.Operations.{Approval, AuditEvent, Issue, Job}
+  alias PtcManager.Operations.{AgentRun, Approval, AuditEvent, Issue, Job}
 
   defmodule PullClient do
     def list_open(_repository), do: Process.get(:auto_fix_pulls, {:ok, []})
@@ -77,6 +77,40 @@ defmodule PtcManager.AutoImplementationTest do
     assert {:ok, _manual_retry} = Operations.approve_issue_directly(issue.id, "andreas")
   end
 
+  test "a cancelled job with no agent run can be admitted again" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    assert {:ok, first} = Operations.auto_approve_issue(issue.id)
+    first |> Job.changeset(%{state: "cancelled"}) |> Repo.update!()
+
+    assert [{:ok, second}] = AutoImplementation.reconcile(repository.id, issue.number)
+    assert second.id != first.id
+  end
+
+  test "a cancelled job with an agent run cannot be admitted again" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    assert {:ok, first} = Operations.auto_approve_issue(issue.id)
+    worker = worker_fixture()
+    now = DateTime.utc_now()
+
+    %AgentRun{}
+    |> AgentRun.changeset(%{
+      worker_id: worker.id,
+      job_id: first.id,
+      role: "implementer",
+      state: "working",
+      started_at: now,
+      last_heartbeat_at: now
+    })
+    |> Repo.insert!()
+
+    first |> Job.changeset(%{state: "cancelled"}) |> Repo.update!()
+
+    assert [{:error, :already_attempted}] =
+             AutoImplementation.reconcile(repository.id, issue.number)
+  end
+
   test "does not reuse a stale complexity assessment" do
     repository = repository_fixture(%{auto_fix_issues: true})
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
@@ -87,11 +121,11 @@ defmodule PtcManager.AutoImplementationTest do
   end
 
   test "rejects closed, assigned, conflicting, blocked and unprojected issues" do
-    repository = repository_fixture(%{auto_fix_issues: true})
+    repository = repository_fixture(%{auto_fix_issues: true, github_viewer_login: "maintainer"})
 
     for attrs <- [
           %{state: "closed"},
-          %{github_assignees: %{"logins" => ["someone"]}},
+          %{github_assignees: %{"logins" => ["maintainer"]}},
           %{workflow_label_conflict: true},
           %{workflow_label: "ptc:blocked"},
           %{workflow_label: nil},

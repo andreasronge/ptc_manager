@@ -322,6 +322,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   defp resume_refusal(:no_session_to_continue), do: "no agent session is left to continue."
   defp resume_refusal(:newer_job_exists), do: "a newer job exists for the issue."
   defp resume_refusal(:issue_not_open), do: "the issue is closed."
+  defp resume_refusal(:issue_claimed), do: "the issue is assigned on GitHub."
+  defp resume_refusal(:issue_claim_unknown), do: "the issue's assignment needs sync."
   defp resume_refusal(:recovery_busy), do: "a recovery is already running."
   defp resume_refusal(reason), do: inspect(reason)
 

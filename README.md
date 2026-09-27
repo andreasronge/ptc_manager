@@ -1056,11 +1056,10 @@ approval to implement; `ptc:blocked` is an explicit hold that no dependency
 completion removes. An unresolved or unknown blocker
 prevents approval; if it appears after approval, dispatch cancels that stale job
 before starting an agent. An approval freezes the issue's title and body as the
-maintainer saw them: a comment or the console's own assignment after the
-approval re-freezes the approval to the current issue at dispatch, so a
-decision comment or a retry after an agent stopped does not cancel the job,
-while a changed title or body cancels it and asks for a fresh approval, and a
-label that no longer says ready, an assignment to someone else, or new
+maintainer saw them. A comment after approval re-freezes it to the current issue
+at dispatch, so a decision comment or a retry after an agent stopped does not
+cancel the job. A changed title or body cancels it and asks for fresh approval;
+a label that no longer says ready, any assignment, or new
 sub-issues refuse dispatch as they refuse approval. The dashboard's card for
 the cancelled job says which in words. Closing every blocker makes a
 `ptc:ready` dependent eligible for automatic admission on the next successful
@@ -1074,12 +1073,13 @@ is simplified. Definitive missing or pull-request references remain visible as
 projection remain approval- and dispatch-ineligible until their first successful
 GitHub synchronization.
 
-GitHub assignment is projected as the advisory work claim. Issue cards show
-`Taken by @login`, and PtcManager will not approve duplicate implementation
-while any assignee remains. Implementation agents that publish their own pull
-request are told to assign the issue to themselves before work begins, and
-`ptc_runner`'s worktree helper does the same for work started by hand; the
-periodic issue sync therefore does not need to fetch every comment. Rows
+GitHub assignment is projected as the advisory work claim. Planning and active
+job cards show `Taken by @login`, and PtcManager will not approve or dispatch
+implementation while any assignee remains, including the repository's viewer
+account. Retained-worktree resume checks the claim again before relaunch. An
+assignment during a running job is shown but does not cancel it.
+PtcManager's own claim is the job record; implementation agents do not assign
+issues. The periodic issue sync does not need to fetch every comment. Rows
 that predate this projection remain approval-ineligible until their first
 successful GitHub synchronization confirms the assignment state.
 
@@ -1133,8 +1133,9 @@ risk; an absent or stale assessment uses the existing `standard` fallback.
 Models, review budgets, publication, and worker capacity follow the existing
 implementation pipeline.
 
-Any previous implementation job (including a manual, failed, or cancelled job)
-or a known linked pull request prevents automatic admission. Open pull requests
+Any previous implementation job that ran, any failed job, or a known linked pull
+request prevents automatic admission. A job cancelled before any agent run was
+recorded does not consume eligibility. Open pull requests
 are refreshed before admission; unavailable PR discovery defers automatic work. Retrying requires
 an explicit manual action; removing/reapplying the label, editing the issue, or
 disabling/re-enabling the setting does not reset its history. Admission and job
