@@ -86,8 +86,8 @@ defmodule PtcManager.AutoImplementation do
   # Runs inside the approval's immediate transaction, serializing checks with
   # job creation and policy updates. Pending issue actions must finish storing
   # their analysis before admission freezes a profile, including postflight recovery.
-  # Any previous job consumes automatic eligibility,
-  # including failed/cancelled/manual jobs; label toggles never reset it.
+  # A cancelled job that never recorded an agent run did no work, so it does
+  # not consume eligibility. Every other job does, including failed jobs.
   def eligible(repo, issue) do
     repository = repo.get!(Repository, issue.repository_id)
 
@@ -110,7 +110,11 @@ defmodule PtcManager.AutoImplementation do
       ) ->
         {:error, :issue_action_active}
 
-      repo.exists?(from job in Job, where: job.issue_id == ^issue.id) ->
+      repo.exists?(
+        from job in Job,
+          left_join: run in assoc(job, :agent_runs),
+          where: job.issue_id == ^issue.id and (job.state != "cancelled" or not is_nil(run.id))
+      ) ->
         {:error, :already_attempted}
 
       linked_publication?(repo, issue) ->
@@ -141,7 +145,7 @@ defmodule PtcManager.AutoImplementation do
       not Operations.dependency_projection_matches?(job.issue, remote) ->
         {:error, :issue_dependencies_unresolved}
 
-      Issue.claimed_by_other?(remote, job.repository) ->
+      Issue.claimed?(remote) ->
         {:error, :issue_claimed}
 
       linked_publication?(Repo, job.issue) ->

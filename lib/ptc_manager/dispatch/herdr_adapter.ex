@@ -730,7 +730,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
     github_instruction =
       if job.publication_source == "agent" do
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
+        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request. Do not merge."
       else
         "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END. Do not push, create a pull request, or merge."
       end

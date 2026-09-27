@@ -88,17 +88,13 @@ defmodule PtcManager.Operations.Issue do
   end
 
   @doc """
-  True when someone other than the repository's own GitHub identity is
-  assigned. The console's agents assign the issue to that identity while they
-  work, so their own claim must not stop the console from running it again.
+  True when GitHub reports any assignee. Assignment is the maintainer's work
+  claim, including when the assignee is the repository's viewer identity.
   """
-  def claimed_by_other?(%{github_assignees: %{"logins" => logins}}, %{
-        github_viewer_login: viewer
-      })
-      when is_list(logins),
-      do: Enum.any?(logins, &(&1 != viewer))
+  def claimed?(%{github_assignees: %{"logins" => logins}}) when is_list(logins),
+    do: logins != []
 
-  def claimed_by_other?(_issue, _repository), do: true
+  def claimed?(_issue), do: true
 
   @doc "True when GitHub reports at least one sub-issue, the one definition of a collection."
   def collection?(%{sub_issues: %{"total" => total}}) when is_integer(total), do: total > 0
