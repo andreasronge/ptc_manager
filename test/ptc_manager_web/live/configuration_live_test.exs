@@ -20,6 +20,31 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     refute Repo.get!(Repository, repository.id).auto_fix_issues
   end
 
+  test "edits the automatic implementation daily limit per repository", %{conn: conn} do
+    repository = repository_fixture()
+    other = repository_fixture()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    assert view
+           |> form("#auto-fix-daily-limit-#{repository.id}", %{auto_fix: %{daily_limit: "12"}})
+           |> render_submit() =~ "Automatic implementation daily limit saved."
+
+    assert Repo.get!(Repository, repository.id).auto_fix_daily_limit == 12
+    assert Repo.get!(Repository, other.id).auto_fix_daily_limit == 5
+
+    for params <- [
+          %{"auto_fix" => %{"repository_id" => "#{repository.id}", "daily_limit" => "0"}},
+          %{"auto_fix" => %{"repository_id" => "#{repository.id}", "daily_limit" => "x"}},
+          %{"auto_fix" => %{"repository_id" => "invalid", "daily_limit" => "3"}},
+          %{}
+        ] do
+      assert render_submit(view, "set-auto-fix-daily-limit", params) =~
+               "The daily limit must be a whole number from 1 to 50."
+    end
+
+    assert Repo.get!(Repository, repository.id).auto_fix_daily_limit == 12
+  end
+
   test "malformed auto-fix events leave the configuration view running", %{conn: conn} do
     {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/configuration")
 

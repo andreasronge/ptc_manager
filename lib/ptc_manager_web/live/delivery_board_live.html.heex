@@ -73,6 +73,12 @@
           <h3 class="mt-1.5 text-sm font-semibold leading-5 text-slate-100">
             {item.title}
           </h3>
+          <p
+            :for={login <- (item.issue && item.issue.github_assignees["logins"]) || []}
+            class="mt-1 text-xs text-amber-300"
+          >
+            Taken by @{login}
+          </p>
 
           <div
             :if={linked_issues(item) != []}

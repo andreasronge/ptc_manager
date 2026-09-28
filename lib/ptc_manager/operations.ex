@@ -1094,7 +1094,14 @@ defmodule PtcManager.Operations do
 
         unless retained_worktree?(job), do: Repo.rollback(:worktree_not_retained)
         unless continuable_run?(job), do: Repo.rollback(:no_session_to_continue)
-        unless Repo.get!(Issue, job.issue_id).state == "open", do: Repo.rollback(:issue_not_open)
+        issue = Repo.get!(Issue, job.issue_id)
+        unless issue.state == "open", do: Repo.rollback(:issue_not_open)
+
+        case issue_unclaimed(issue, Repo.get!(Repository, job.repository_id)) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
         unless is_nil(job.review_recovery_expires_at), do: Repo.rollback(:recovery_busy)
 
         if Repo.exists?(
@@ -3928,11 +3935,11 @@ defmodule PtcManager.Operations do
 
   # The gates an approval passed are checked again against the issue GitHub
   # reports now, for every kind of approval: a label that no longer says
-  # ready, an assignment to someone else, or sub-issues that make the issue a
+  # ready, an assignment, or sub-issues that make the issue a
   # collection all refuse dispatch, as the frozen digest used to. A snapshot
   # from GitHub always carries these fields; a field a caller did not report
   # is not judged.
-  defp remote_issue_still_approvable(remote, repository) do
+  defp remote_issue_still_approvable(remote, _repository) do
     cond do
       Map.get(remote, :state, "open") != "open" ->
         {:error, :issue_closed}
@@ -3944,7 +3951,7 @@ defmodule PtcManager.Operations do
           Map.get(remote, :workflow_label) not in [nil, "ptc:ready"] ->
         {:error, :issue_workflow_not_ready}
 
-      Map.has_key?(remote, :github_assignees) and Issue.claimed_by_other?(remote, repository) ->
+      Map.has_key?(remote, :github_assignees) and Issue.claimed?(remote) ->
         {:error, :issue_claimed}
 
       Issue.collection?(remote) ->
@@ -3957,8 +3964,8 @@ defmodule PtcManager.Operations do
 
   # An approval freezes the issue as the maintainer saw it. The digest it
   # freezes covers comments, labels, and assignees as well as the text, so a
-  # decision comment or the console's own assignment used to make every later
-  # dispatch stale. What the maintainer approved is the title and body, which
+  # later update can make dispatch stale. What the maintainer approved is the
+  # title and body, which
   # the job snapshot carries: while those are unchanged the approval is
   # re-frozen to the current issue; a changed title or body is a changed
   # requirement and needs a fresh approval. A job without a snapshot keeps
@@ -5159,7 +5166,7 @@ defmodule PtcManager.Operations do
         "so the agent could not start from a known state."
 
   def rejection_words(:issue_claimed),
-    do: "The issue is assigned to someone else on GitHub."
+    do: "The issue is assigned on GitHub."
 
   def rejection_words(:issue_has_pull_request),
     do: "A pull request already references the issue."
@@ -5248,10 +5255,10 @@ defmodule PtcManager.Operations do
   defp issue_unclaimed(
          %Issue{github_assignment_projected: true, github_assignees: %{"logins" => logins}} =
            issue,
-         repository
+         _repository
        )
        when is_list(logins) do
-    if Issue.claimed_by_other?(issue, repository),
+    if Issue.claimed?(issue),
       do: {:error, :issue_claimed},
       else: :ok
   end

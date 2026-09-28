@@ -145,11 +145,11 @@ defmodule PtcManager.OperationsTest do
     end
 
     test "does not approve an issue assigned on GitHub" do
-      repository = repository_fixture()
+      repository = repository_fixture(%{github_viewer_login: "maintainer"})
 
       issue =
         issue_fixture(repository, %{
-          github_assignees: %{"logins" => ["outside-agent"]}
+          github_assignees: %{"logins" => ["maintainer"]}
         })
 
       proposal_fixture(issue)
@@ -910,6 +910,11 @@ defmodule PtcManager.OperationsTest do
     test "a retry passes the gates a fresh approval passes" do
       assert {:ok, stopped} = stop_job()
       issue = Repo.get!(Issue, stopped.issue_id)
+      repository = Repo.get!(PtcManager.Operations.Repository, issue.repository_id)
+
+      repository
+      |> PtcManager.Operations.Repository.changeset(%{github_viewer_login: "maintainer"})
+      |> Repo.update!()
 
       issue |> Ecto.Changeset.change(workflow_label: "ptc:blocked") |> Repo.update!()
 
@@ -919,7 +924,7 @@ defmodule PtcManager.OperationsTest do
       Repo.get!(Issue, issue.id)
       |> Ecto.Changeset.change(
         workflow_label: "ptc:ready",
-        github_assignees: %{"logins" => ["someone-else"]}
+        github_assignees: %{"logins" => [repository.github_viewer_login]}
       )
       |> Repo.update!()
 
@@ -1645,6 +1650,29 @@ defmodule PtcManager.OperationsTest do
   end
 
   describe "resume_from_worktree/2" do
+    test "refuses a retained-worktree resume when the viewer claims the issue" do
+      %{job: job, run: run} = running_job_fixture("failed")
+
+      run
+      |> Ecto.Changeset.change(agent_name: "impl_j#{job.id}_f1", state: "failed")
+      |> Repo.update!()
+
+      issue = Repo.get!(Issue, job.issue_id)
+      repository = Repo.get!(PtcManager.Operations.Repository, job.repository_id)
+
+      repository
+      |> PtcManager.Operations.Repository.changeset(%{github_viewer_login: "maintainer"})
+      |> Repo.update!()
+
+      issue
+      |> Issue.changeset(%{github_assignees: %{"logins" => ["maintainer"]}})
+      |> Repo.update!()
+
+      assert {:error, :issue_claimed} = Operations.resume_from_worktree(job.id, "andreas")
+      assert Repo.get!(Job, job.id).state == "failed"
+      refute Repo.get_by(AuditEvent, action: "job.resumed_from_worktree", target_id: job.id)
+    end
+
     test "approves afresh and hands a failed job to the retained continuation" do
       %{job: job, run: run, allocation: allocation} = running_job_fixture("failed")
 
