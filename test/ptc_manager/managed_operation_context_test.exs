@@ -105,6 +105,28 @@ defmodule PtcManager.ManagedOperationContextTest do
     :ok
   end
 
+  test "issued context reserves a higher soft memory limit for verify" do
+    assert {:ok, context} =
+             ManagedOperationContext.issue(%{
+               owner_type: "job",
+               owner_id: 1,
+               repository_id: 1,
+               worker_id: 1,
+               pane_id: "verify:pane",
+               fencing_token: 1
+             })
+
+    assert context.payload["verify_operation_memory_high_bytes"] == 2_577_399_808
+    assert context.payload["verify_agent_memory_high_bytes"] == 2_952_790_016
+    assert context.payload["operation_memory_max_bytes"] == 2_684_354_560
+
+    assert context.payload["verify_operation_memory_high_bytes"] <
+             Application.fetch_env!(:ptc_manager, :verify_agent_memory_high_bytes)
+
+    assert Application.fetch_env!(:ptc_manager, :verify_agent_memory_high_bytes) ==
+             2_952_790_016
+  end
+
   test "retries the output wait without rerunning the pane command" do
     assert {:ok, context} =
              ManagedOperationContext.prepare_job(TransientPaneCommand, "w9:p1", job())
@@ -232,7 +254,7 @@ defmodule PtcManager.ManagedOperationContextTest do
     assert output =~ "PTC_OPERATION_CONTEXT_READY:trusted-context"
 
     assert File.read!(capture_path) ==
-             "/protected/pane.json|trusted-context|2684354560|3221225472|/usr/local/bin/ptc-operation"
+             "/protected/pane.json|trusted-context|2952790016|3221225472|/usr/local/bin/ptc-operation"
   end
 
   test "an environment-file write failure prevents implementation dispatch" do

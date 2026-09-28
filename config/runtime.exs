@@ -234,10 +234,15 @@ config :ptc_manager,
     ),
   agent_memory_high_bytes:
     System.get_env("PTC_AGENT_MEMORY_HIGH_BYTES", "2684354560") |> String.to_integer(),
+  verify_agent_memory_high_bytes:
+    System.get_env("PTC_VERIFY_AGENT_MEMORY_HIGH_BYTES", "2952790016") |> String.to_integer(),
   agent_memory_max_bytes:
     System.get_env("PTC_AGENT_MEMORY_MAX_BYTES", "3221225472") |> String.to_integer(),
   operation_memory_high_bytes:
     System.get_env("PTC_OPERATION_MEMORY_HIGH_BYTES", "2147483648") |> String.to_integer(),
+  verify_operation_memory_high_bytes:
+    System.get_env("PTC_VERIFY_OPERATION_MEMORY_HIGH_BYTES", "2577399808")
+    |> String.to_integer(),
   operation_memory_max_bytes:
     System.get_env("PTC_OPERATION_MEMORY_MAX_BYTES", "2684354560") |> String.to_integer(),
   agent_action_timeout_ms:
