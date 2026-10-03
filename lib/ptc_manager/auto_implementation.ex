@@ -184,6 +184,12 @@ defmodule PtcManager.AutoImplementation do
   # it, so it may start once more. Setting a stop aside without touching the
   # issue keeps it aside, and an agent that called the work unsafe is never
   # restarted unattended, as Try again refuses it.
+  #
+  # The set-aside must answer the job's latest failure: Resume and review
+  # continuation reuse the job and keep the answered report, so a continued
+  # attempt that fails later ends after it. A question asked on the issue must
+  # also have finished, and only a change after it counts: its own comment is
+  # not an answer, and a failed ask may have left the issue `ptc:ready`.
   defp admission_renewed?(repo, issue) do
     latest =
       from(job in Job,
@@ -201,16 +207,46 @@ defmodule PtcManager.AutoImplementation do
       nil ->
         true
 
-      %Job{state: "failed", stop_reported_at: %DateTime{}, stop_acknowledged_at: %DateTime{}} =
-          job ->
+      %Job{
+        state: "failed",
+        stop_reported_at: %DateTime{},
+        stop_acknowledged_at: %DateTime{} = set_aside,
+        ended_at: %DateTime{} = ended
+      } = job ->
         StopReport.allows?(job.stop_report, :retry) and
-          match?(%DateTime{}, issue.github_updated_at) and
-          DateTime.after?(issue.github_updated_at, job.stop_acknowledged_at)
+          not DateTime.before?(set_aside, ended) and
+          case answered_at(repo, issue, job) do
+            {:ok, answered} -> changed_after?(issue, answered)
+            :pending -> false
+          end
 
       _attempted ->
         false
     end
   end
+
+  defp answered_at(repo, issue, job) do
+    questions =
+      from(action in AgentAction,
+        where:
+          action.target_type == "issue" and action.target_id == ^issue.id and
+            action.action_key == "report_issue_blocker" and
+            action.requested_at >= ^job.stop_reported_at,
+        select: {action.state, action.ended_at}
+      )
+      |> repo.all()
+
+    if Enum.all?(questions, &match?({"done", %DateTime{}}, &1)) do
+      {:ok, Enum.max([job.stop_acknowledged_at | Enum.map(questions, &elem(&1, 1))], DateTime)}
+    else
+      :pending
+    end
+  end
+
+  defp changed_after?(%Issue{github_updated_at: %DateTime{} = updated}, answered),
+    do: DateTime.after?(updated, answered)
+
+  defp changed_after?(_issue, _answered), do: false
 
   defp daily_count(repo, repository_id) do
     midnight = DateTime.new!(Date.utc_today(), ~T[00:00:00], "Etc/UTC")

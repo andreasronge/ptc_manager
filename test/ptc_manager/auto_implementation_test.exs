@@ -132,6 +132,67 @@ defmodule PtcManager.AutoImplementationTest do
                AutoImplementation.reconcile(context.repository.id, context.issue.number)
     end
 
+    test "waits for a question asked on the issue to finish", context do
+      stop!(context.job, "ambiguous_requirement", acknowledged: false)
+
+      assert {:ok, action} =
+               PtcManager.MaintainerActions.enqueue_blocked_issue_review(
+                 context.job.id,
+                 "andreas"
+               )
+
+      # The agent commented, then failed before moving the label.
+      finish_action!(action, "failed", DateTime.utc_now())
+      refresh_issue!(context.issue, DateTime.add(DateTime.utc_now(), 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is admitted again once the issue changes after the question finished", context do
+      stop!(context.job, "ambiguous_requirement", acknowledged: false)
+
+      assert {:ok, action} =
+               PtcManager.MaintainerActions.enqueue_blocked_issue_review(
+                 context.job.id,
+                 "andreas"
+               )
+
+      finished = DateTime.add(DateTime.utc_now(), 30)
+      finish_action!(action, "done", finished)
+      refresh_issue!(context.issue, DateTime.add(finished, -5))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+
+      refresh_issue!(context.issue, DateTime.add(finished, 60))
+
+      assert [{:ok, _second}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is not admitted again when a resumed attempt fails later", context do
+      set_aside = stop!(context.job, "missing_prerequisite")
+
+      # Resume reuses the job and keeps the answered report; this failure was
+      # never set aside.
+      context.job
+      |> Repo.reload!()
+      |> Ecto.Changeset.change(ended_at: DateTime.add(set_aside, 5))
+      |> Repo.update!()
+
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    defp finish_action!(action, state, ended_at) do
+      action
+      |> Ecto.Changeset.change(state: state, ended_at: ended_at)
+      |> Repo.update!()
+    end
+
     defp stop!(job, reason_code, opts \\ []) do
       now = DateTime.utc_now()
 
@@ -145,6 +206,7 @@ defmodule PtcManager.AutoImplementationTest do
           "progress" => "none"
         },
         stop_reported_at: DateTime.add(now, -10),
+        ended_at: DateTime.add(now, -10),
         stop_acknowledged_at: if(Keyword.get(opts, :acknowledged, true), do: now)
       )
       |> Repo.update!()
