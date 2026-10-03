@@ -4,7 +4,17 @@ defmodule PtcManager.AutoImplementation do
   require Logger
 
   alias PtcManager.{Operations, Repo, RepoTransaction}
-  alias PtcManager.Operations.{AgentAction, Approval, Issue, Job, PrPublication, Repository}
+
+  alias PtcManager.Operations.{
+    AgentAction,
+    AgentRun,
+    Approval,
+    Issue,
+    Job,
+    PrPublication,
+    Repository,
+    StopReport
+  }
 
   def configure(repository_id, enabled, actor) when is_boolean(enabled),
     do: update_policy(repository_id, %{auto_fix_issues: enabled}, actor)
@@ -87,7 +97,8 @@ defmodule PtcManager.AutoImplementation do
   # job creation and policy updates. Pending issue actions must finish storing
   # their analysis before admission freezes a profile, including postflight recovery.
   # A cancelled job that never recorded an agent run did no work, so it does
-  # not consume eligibility. Every other job does, including failed jobs.
+  # not consume eligibility. Every other job does, including failed jobs, with
+  # one exception: see `admission_renewed?/2`.
   def eligible(repo, issue) do
     repository = repo.get!(Repository, issue.repository_id)
 
@@ -110,11 +121,7 @@ defmodule PtcManager.AutoImplementation do
       ) ->
         {:error, :issue_action_active}
 
-      repo.exists?(
-        from job in Job,
-          left_join: run in assoc(job, :agent_runs),
-          where: job.issue_id == ^issue.id and (job.state != "cancelled" or not is_nil(run.id))
-      ) ->
+      not admission_renewed?(repo, issue) ->
         {:error, :already_attempted}
 
       linked_publication?(repo, issue) ->
@@ -169,6 +176,40 @@ defmodule PtcManager.AutoImplementation do
     )
     |> repo.all()
     |> Enum.any?(fn links -> issue.number in Map.get(links, "numbers", []) end)
+  end
+
+  # An attempt whose agent stopped, that the maintainer set aside, on an issue
+  # changed on GitHub since — a comment, an edit, or a relabel back to
+  # `ptc:ready` — is answered: the issue is still approved and someone touched
+  # it, so it may start once more. Setting a stop aside without touching the
+  # issue keeps it aside, and an agent that called the work unsafe is never
+  # restarted unattended, as Try again refuses it.
+  defp admission_renewed?(repo, issue) do
+    latest =
+      from(job in Job,
+        as: :job,
+        where: job.issue_id == ^issue.id,
+        where:
+          job.state != "cancelled" or
+            exists(from run in AgentRun, where: run.job_id == parent_as(:job).id, select: 1),
+        order_by: [desc: job.id],
+        limit: 1
+      )
+      |> repo.one()
+
+    case latest do
+      nil ->
+        true
+
+      %Job{state: "failed", stop_reported_at: %DateTime{}, stop_acknowledged_at: %DateTime{}} =
+          job ->
+        StopReport.allows?(job.stop_report, :retry) and
+          match?(%DateTime{}, issue.github_updated_at) and
+          DateTime.after?(issue.github_updated_at, job.stop_acknowledged_at)
+
+      _attempted ->
+        false
+    end
   end
 
   defp daily_count(repo, repository_id) do

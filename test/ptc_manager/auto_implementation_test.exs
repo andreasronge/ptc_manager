@@ -77,6 +77,88 @@ defmodule PtcManager.AutoImplementationTest do
     assert {:ok, _manual_retry} = Operations.approve_issue_directly(issue.id, "andreas")
   end
 
+  describe "an issue whose agent stopped" do
+    setup do
+      repository = repository_fixture(%{auto_fix_issues: true})
+      issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+      {:ok, job} = Operations.auto_approve_issue(issue.id)
+      %{repository: repository, issue: issue, job: job}
+    end
+
+    test "is admitted again once set aside and changed on GitHub", context do
+      set_aside = stop!(context.job, "ambiguous_requirement")
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:ok, second}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+
+      assert second.id != context.job.id
+    end
+
+    test "is not admitted again while its stop is unanswered", context do
+      stop!(context.job, "missing_prerequisite", acknowledged: false)
+      refresh_issue!(context.issue, DateTime.add(DateTime.utc_now(), 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "stays set aside until the issue changes", context do
+      set_aside = stop!(context.job, "missing_prerequisite")
+      refresh_issue!(context.issue, DateTime.add(set_aside, -60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is never admitted again after the agent called the work unsafe", context do
+      set_aside = stop!(context.job, "unsafe_to_proceed")
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is admitted only once for one change", context do
+      set_aside = stop!(context.job, "missing_prerequisite")
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:ok, second}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+
+      second |> Job.changeset(%{state: "failed"}) |> Repo.update!()
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    defp stop!(job, reason_code, opts \\ []) do
+      now = DateTime.utc_now()
+
+      job
+      |> Ecto.Changeset.change(
+        state: "failed",
+        stop_report: %{
+          "reason_code" => reason_code,
+          "summary" => "The agent stopped.",
+          "detail" => "It stopped.",
+          "progress" => "none"
+        },
+        stop_reported_at: DateTime.add(now, -10),
+        stop_acknowledged_at: if(Keyword.get(opts, :acknowledged, true), do: now)
+      )
+      |> Repo.update!()
+
+      now
+    end
+
+    defp refresh_issue!(issue, updated_at) do
+      issue
+      |> Ecto.Changeset.change(github_updated_at: updated_at)
+      |> Repo.update!()
+    end
+  end
+
   test "a cancelled job with no agent run can be admitted again" do
     repository = repository_fixture(%{auto_fix_issues: true})
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})

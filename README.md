@@ -951,7 +951,10 @@ technical branch error, until you answer it with one of three buttons:
   back through Planning's **Needs your decision** group and its existing
   decision form;
 - **Stop** sets the card aside. The worktree stays on Operations until you
-  discard it.
+  discard it. With auto-fix on, an issue that is still `ptc:ready` starts again
+  on its own once it changes on GitHub after you set it aside: a comment, an
+  edit, or a relabel back to `ptc:ready` after a decision. Until then it stays
+  aside, and an agent that called the work unsafe is never restarted this way.
 
 A fourth button, **Resume**, appears on any failed or lost job whose worktree
 is still on the worker and whose agent left a session to continue from,
@@ -1165,7 +1168,11 @@ request prevents automatic admission. A job cancelled before any agent run was
 recorded does not consume eligibility. Open pull requests
 are refreshed before admission; unavailable PR discovery defers automatic work. Retrying requires
 an explicit manual action; removing/reapplying the label, editing the issue, or
-disabling/re-enabling the setting does not reset its history. Admission and job
+disabling/re-enabling the setting does not reset its history. The one exception
+is an attempt whose agent stopped with a report you set aside with **Stop**: an
+issue still `ptc:ready` that changes on GitHub after that — a comment, an edit,
+or a relabel after a decision — is admitted once more, unless the agent called
+the work unsafe. Admission and job
 creation share one write transaction. Each repository's daily limit (five by
 default, 1–50, set next to the toggle) caps automatic jobs admitted per UTC day,
 including failed and cancelled jobs; manual approvals do not count. Subsequent

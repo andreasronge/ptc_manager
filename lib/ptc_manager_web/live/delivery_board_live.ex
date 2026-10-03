@@ -225,7 +225,11 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
          {:ok, _job} <- Operations.acknowledge_job_stop(job_id, socket.assigns.actor) do
       {:noreply,
        socket
-       |> put_flash(:info, "Set aside. Its worktree is still on Operations if you need it.")
+       |> put_flash(
+         :info,
+         "Set aside. Its worktree is still on Operations if you need it. " <>
+           "Under auto-fix, a later change to the issue on GitHub starts it again while it is ptc:ready."
+       )
        |> load_board()}
     else
       _error ->
