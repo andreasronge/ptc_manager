@@ -44,6 +44,9 @@ defmodule PtcManager.MixProject do
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.13"},
       {:ecto_sqlite3, ">= 0.0.0"},
+      # 0.42.0 stops a dropped statement from waiting on a connection that is
+      # inside SQLite's busy handler, which stalled the write-lock holder.
+      {:exqlite, ">= 0.42.0"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.1.0"},
