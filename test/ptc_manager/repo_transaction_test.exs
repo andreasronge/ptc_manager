@@ -112,50 +112,14 @@ defmodule PtcManager.RepoTransactionTest do
     # every such wait ran to its full 15 seconds. Ecto leaves such statements
     # in any process that queried on another pool connection, but whether a
     # collection reaches one there varies, so this drives the driver directly.
-    # Against the old driver it stalls in most runs, not all.
+    # Against the old driver one run stalls most of the time, not always, and
+    # no call can confirm the waiter is inside the busy handler without taking
+    # the same mutex, so the test repeats the run.
     test "a waiting writer does not stall the holder that drops its statement" do
-      alias Exqlite.Sqlite3
-
-      database =
-        Path.join(System.tmp_dir!(), "ptc-manager-drop-#{System.unique_integer([:positive])}.db")
-
-      on_exit(fn -> for suffix <- ["", "-shm", "-wal"], do: File.rm(database <> suffix) end)
-
-      {:ok, setup} = Sqlite3.open(database)
-      :ok = Sqlite3.execute(setup, "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER)")
-      {:ok, holder_db} = Sqlite3.open(database)
-      {:ok, waiter_db} = Sqlite3.open(database)
-      :ok = Sqlite3.set_busy_timeout(waiter_db, 2_000)
-      test_pid = self()
-
-      holder =
-        Task.async(fn ->
-          # Kept reachable until the drop, so no earlier collection frees it.
-          {:ok, foreign} = Sqlite3.prepare(waiter_db, "SELECT 1")
-          Process.put(:foreign, foreign)
-          :ok = Sqlite3.execute(holder_db, "BEGIN IMMEDIATE")
-          send(test_pid, :writer_lock_held)
-          receive do: (:drop -> :ok)
-
-          {microseconds, _} =
-            :timer.tc(fn ->
-              Process.delete(:foreign)
-              :erlang.garbage_collect()
-              {:ok, statement} = Sqlite3.prepare(holder_db, "SELECT count(*) FROM t")
-              Sqlite3.step(holder_db, statement)
-            end)
-
-          :ok = Sqlite3.execute(holder_db, "COMMIT")
-          div(microseconds, 1_000)
-        end)
-
-      assert_receive :writer_lock_held
-      waiter = Task.async(fn -> Sqlite3.execute(waiter_db, "BEGIN IMMEDIATE") end)
-      Process.sleep(200)
-      send(holder.pid, :drop)
-
-      assert Task.await(holder) < 1_000
-      assert :ok = Task.await(waiter)
+      for _run <- 1..3 do
+        assert {stalled_ms, :ok} = drop_waiters_statement_while_holding()
+        assert stalled_ms < 1_000
+      end
     end
 
     test "waiting writers take the lock once the holder commits" do
@@ -258,6 +222,52 @@ defmodule PtcManager.RepoTransactionTest do
   defp configured_busy_timeout do
     Application.fetch_env!(:ptc_manager, Repo)
     |> Keyword.take([:busy_timeout])
+  end
+
+  # Returns how long the write-lock holder took to drop a statement prepared on
+  # a waiting connection and run its next statement, and the waiter's result.
+  defp drop_waiters_statement_while_holding do
+    alias Exqlite.Sqlite3
+
+    database =
+      Path.join(System.tmp_dir!(), "ptc-manager-drop-#{System.unique_integer([:positive])}.db")
+
+    on_exit(fn -> for suffix <- ["", "-shm", "-wal"], do: File.rm(database <> suffix) end)
+
+    {:ok, setup} = Sqlite3.open(database)
+    :ok = Sqlite3.execute(setup, "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER)")
+    {:ok, holder_db} = Sqlite3.open(database)
+    {:ok, waiter_db} = Sqlite3.open(database)
+    :ok = Sqlite3.set_busy_timeout(waiter_db, 2_000)
+    test_pid = self()
+
+    holder =
+      Task.async(fn ->
+        # Kept reachable until the drop, so no earlier collection frees it.
+        {:ok, foreign} = Sqlite3.prepare(waiter_db, "SELECT 1")
+        Process.put(:foreign, foreign)
+        :ok = Sqlite3.execute(holder_db, "BEGIN IMMEDIATE")
+        send(test_pid, :writer_lock_held)
+        receive do: (:drop -> :ok)
+
+        {microseconds, _} =
+          :timer.tc(fn ->
+            Process.delete(:foreign)
+            :erlang.garbage_collect()
+            {:ok, statement} = Sqlite3.prepare(holder_db, "SELECT count(*) FROM t")
+            Sqlite3.step(holder_db, statement)
+          end)
+
+        :ok = Sqlite3.execute(holder_db, "COMMIT")
+        div(microseconds, 1_000)
+      end)
+
+    assert_receive :writer_lock_held
+    waiter = Task.async(fn -> Sqlite3.execute(waiter_db, "BEGIN IMMEDIATE") end)
+    Process.sleep(200)
+    send(holder.pid, :drop)
+
+    {Task.await(holder), Task.await(waiter)}
   end
 
   defp await_checkout_queue(pool, minimum, attempts \\ 100)
