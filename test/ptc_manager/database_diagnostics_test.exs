@@ -95,13 +95,10 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
       |> Keyword.fetch!(:ptc_manager)
       |> Keyword.fetch!(PtcManager.Repo)
 
-    assert repo_config[:write_lock_wait] >= 15_000
-    assert repo_config[:queue_target] == repo_config[:write_lock_wait]
-    assert repo_config[:queue_interval] <= div(repo_config[:write_lock_wait], 4)
-    assert repo_config[:timeout] >= repo_config[:write_lock_wait] * 3 + 5_000
-    # A connection holds exqlite's mutex while it waits inside SQLite, so that
-    # wait stays a short slice of the writer's wait.
-    assert repo_config[:busy_timeout] <= 250
+    assert repo_config[:busy_timeout] >= 15_000
+    assert repo_config[:queue_target] == repo_config[:busy_timeout]
+    assert repo_config[:queue_interval] <= div(repo_config[:busy_timeout], 4)
+    assert repo_config[:timeout] >= repo_config[:busy_timeout] * 3 + 5_000
   end
 
   test "production runtime pairs custom SQLite and connection timeouts" do
@@ -112,7 +109,7 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
       })
 
     repo_config = config |> Keyword.fetch!(:ptc_manager) |> Keyword.fetch!(PtcManager.Repo)
-    assert repo_config[:write_lock_wait] == 23_000
+    assert repo_config[:busy_timeout] == 23_000
     assert repo_config[:queue_target] == 23_000
     assert repo_config[:queue_interval] == 2_000
     assert repo_config[:timeout] == 74_000
@@ -126,7 +123,7 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
       })
 
     repo_config = config |> Keyword.fetch!(:ptc_manager) |> Keyword.fetch!(PtcManager.Repo)
-    assert repo_config[:write_lock_wait] == 15_000
+    assert repo_config[:busy_timeout] == 15_000
     assert repo_config[:queue_target] == 15_000
     assert repo_config[:queue_interval] == 2_000
     assert repo_config[:timeout] == 50_000
