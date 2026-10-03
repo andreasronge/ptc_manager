@@ -1174,7 +1174,8 @@ issue still `ptc:ready` that changes on GitHub after that — a comment, an edit
 or a relabel after a decision — is admitted once more, unless the agent called
 the work unsafe. After **Ask on the issue**, only a change made once that
 question has finished counts, and a question that failed keeps the issue aside.
-A resumed attempt that fails again needs its own **Stop**. Admission and job
+A resumed attempt that fails again without a new report is not restarted this
+way; use its card's recovery buttons. Admission and job
 creation share one write transaction. Each repository's daily limit (five by
 default, 1–50, set next to the toggle) caps automatic jobs admitted per UTC day,
 including failed and cancelled jobs; manual approvals do not count. Subsequent

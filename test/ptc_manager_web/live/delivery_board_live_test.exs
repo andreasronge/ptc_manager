@@ -672,9 +672,14 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#retry-stopped-#{stopped.id}")
     refute has_element?(view, "#ask-on-issue-#{stopped.id}")
 
+    # Automatic admission never restarts an unsafe stop, so Stop must not
+    # promise that it will.
+    refute view |> element("#acknowledge-stop-#{stopped.id}") |> render() =~ "starts it again"
+
     view |> element("#acknowledge-stop-#{stopped.id}") |> render_click()
 
     assert render(view) =~ "Set aside"
+    refute render(view) =~ "starts it again"
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 

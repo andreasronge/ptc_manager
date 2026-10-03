@@ -222,14 +222,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   def handle_event("acknowledge-stop", %{"job-id" => job_id}, socket) do
     with {job_id, ""} <- Integer.parse(job_id),
-         {:ok, _job} <- Operations.acknowledge_job_stop(job_id, socket.assigns.actor) do
+         {:ok, job} <- Operations.acknowledge_job_stop(job_id, socket.assigns.actor) do
       {:noreply,
        socket
-       |> put_flash(
-         :info,
-         "Set aside. Its worktree is still on Operations if you need it. " <>
-           "Under auto-fix, a later change to the issue on GitHub starts it again while it is ptc:ready."
-       )
+       |> put_flash(:info, set_aside_message(job))
        |> load_board()}
     else
       _error ->
@@ -379,6 +375,16 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
 
   @doc "Whether this recovery may be offered at all for that reason."
   def recovery_offered?(report, action), do: StopReport.allows?(report, action)
+
+  # Automatic admission restarts a set-aside stop only when its report allows a
+  # retry, so only then does the message promise it.
+  defp set_aside_message(job) do
+    if StopReport.allows?(job.stop_report, :retry),
+      do:
+        "Set aside. Its worktree is still on Operations if you need it. " <>
+          "Under auto-fix, a later change to the issue on GitHub starts it again while it is ptc:ready.",
+      else: "Set aside. Its worktree is still on Operations if you need it."
+  end
 
   @doc "Every recovery offered for this report; empty means a person must read it."
   def recoveries(report), do: StopReport.recoveries(report)

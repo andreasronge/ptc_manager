@@ -355,7 +355,12 @@
                 id={"acknowledge-stop-#{item.active_job.id}"}
                 phx-click="acknowledge-stop"
                 phx-value-job-id={item.active_job.id}
-                title="Set this aside; its worktree stays on Operations. Under auto-fix, a later change to the still-ready issue starts it again."
+                title={
+                  if recovery_offered?(report, :retry),
+                    do:
+                      "Set this aside; its worktree stays on Operations. Under auto-fix, a later change to the still-ready issue starts it again.",
+                    else: "Set this aside; its worktree stays on Operations"
+                }
                 class="rounded-lg border border-white/15 px-3 py-2 font-semibold text-slate-400 hover:bg-white/5"
               >
                 Stop
