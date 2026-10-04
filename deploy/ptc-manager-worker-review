@@ -14,6 +14,7 @@ import time
 import uuid
 import glob
 import shutil
+import fcntl
 
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
 
@@ -75,8 +76,6 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
         if prompt:
             input_file.write(prompt.encode())
         input_file.seek(0)
-        process = subprocess.Popen(command, stdin=input_file, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
         stdout, stderr = bytearray(), bytearray()
         artifact_files = {}
         artifact_state = {name: {"coverage": "complete", "bytes": 0, "sha256": hashlib.sha256()}
@@ -85,15 +84,19 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
             try:
                 artifact_directory = os.path.join(artifact_directory, "run-" + str(uuid.uuid4()))
                 ensure_shared_directory(artifact_directory, artifact_root)
-                artifact_files = {"stdout": open(os.path.join(artifact_directory, "stdout.log"), "xb", buffering=0),
-                                  "stderr": open(os.path.join(artifact_directory, "stderr.log"), "xb", buffering=0)}
-            except OSError:
+                for name in ("stdout", "stderr"):
+                    artifact_files[name] = open(os.path.join(artifact_directory, name + ".log"), "xb", buffering=0)
+            except (OSError, RuntimeError):
                 for output in artifact_files.values():
                     output.close()
                 artifact_files = {}
+                artifact_directory = None
+                print("review artifact initialization failed; capture unavailable", file=sys.stderr)
                 for state in artifact_state.values():
                     state["coverage"] = "error"
                     state["diagnostic"] = "artifact initialization failed"
+        process = subprocess.Popen(command, stdin=input_file, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
         captured = 0
         completed_normally = False
         events = CodexSessionEvents() if session_events else None
@@ -443,29 +446,77 @@ def archive_session(kind, session_id, destination, max_bytes, artifact_root):
     for pattern in homes[kind]:
         candidates += glob.glob(os.path.join(os.path.expanduser("~"), pattern), recursive=True)
     matches = [path for path in candidates if session_id in os.path.basename(path)]
-    ensure_shared_directory(destination, artifact_root)
-    manifest = {"schema_version": 1, "kind": "provider_session", "provider": kind, "session_id": session_id,
-                "coverage": "unavailable", "streams": {}}
-    if len(matches) == 1:
-        source, target = matches[0], os.path.join(destination, "session.jsonl")
-        size = os.path.getsize(source)
-        if size <= max_bytes:
-            with open(source, "rb") as input_file, open(target, "xb") as output:
-                shutil.copyfileobj(input_file, output, 65536)
-            manifest["coverage"] = "complete"
-            manifest["streams"] = {"session": {"path": "session.jsonl", "bytes": size,
-                                                 "sha256": file_digest(target),
-                                                 "coverage": "complete"}}
+    if os.path.dirname(destination) != os.path.abspath(artifact_root):
+        ensure_shared_directory(os.path.dirname(destination), artifact_root)
+    lock_fd = os.open(destination + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o660)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # The lock outlives no process: after interruption, only this capture's
+        # abandoned staging directories can be removed before retrying.
+        for abandoned in glob.glob(destination + ".staging-*"):
+            if os.path.islink(abandoned):
+                raise RuntimeError("unsafe session staging directory")
+            if os.path.isdir(abandoned):
+                os.chmod(abandoned, 0o2770)
+                shutil.rmtree(abandoned)
+        archive_session_locked(kind, session_id, destination, max_bytes, artifact_root, matches)
+    finally:
+        os.close(lock_fd)
+
+
+def archive_session_locked(kind, session_id, destination, max_bytes, artifact_root, matches):
+    if os.path.lexists(destination):
+        if os.path.islink(destination):
+            raise RuntimeError("unsafe session archive")
+        with open(os.path.join(destination, "manifest.json")) as existing:
+            sealed = json.load(existing)
+        if sealed.get("provider") != kind or sealed.get("session_id") != session_id:
+            raise RuntimeError("session archive identity changed")
+        return
+    staging = destination + ".staging-" + str(uuid.uuid4())
+    ensure_shared_directory(staging, artifact_root)
+    try:
+        manifest = {"schema_version": 1, "kind": "provider_session", "provider": kind, "session_id": session_id,
+                    "coverage": "unavailable", "streams": {}}
+        if len(matches) == 1:
+            source, target = matches[0], os.path.join(staging, "session.jsonl")
+            size = os.path.getsize(source)
+            if size <= max_bytes:
+                with open(source, "rb") as input_file, open(target, "xb") as output:
+                    shutil.copyfileobj(input_file, output, 65536)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if os.path.getsize(target) != size or os.path.getsize(source) != size:
+                    raise RuntimeError("provider session changed during archival")
+                manifest["coverage"] = "complete"
+                manifest["streams"] = {"session": {"path": "session.jsonl", "bytes": size,
+                                                     "sha256": file_digest(target),
+                                                     "coverage": "complete"}}
+            else:
+                manifest["coverage"] = "partial"
+                manifest["diagnostic"] = "provider session exceeded configured file budget"
+        elif len(matches) > 1:
+            manifest["coverage"] = "error"
+            manifest["diagnostic"] = "provider session association was ambiguous"
         else:
-            manifest["coverage"] = "partial"
-            manifest["diagnostic"] = "provider session exceeded configured file budget"
-    elif len(matches) > 1:
-        manifest["coverage"] = "error"
-        manifest["diagnostic"] = "provider session association was ambiguous"
-    else:
-        manifest["diagnostic"] = "provider has no associated durable session artifact"
-    with open(os.path.join(destination, "manifest.json"), "x") as output:
-        json.dump(manifest, output, separators=(",", ":"), sort_keys=True)
+            manifest["diagnostic"] = "provider has no associated durable session artifact"
+        with open(os.path.join(staging, "manifest.json"), "x") as output:
+            json.dump(manifest, output, separators=(",", ":"), sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        for filename in os.listdir(staging):
+            os.chmod(os.path.join(staging, filename), 0o440)
+        os.chmod(staging, 0o2750)
+        os.rename(staging, destination)
+        parent_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        if os.path.isdir(staging):
+            os.chmod(staging, 0o2770)
+            shutil.rmtree(staging)
 
 
 def file_digest(path):

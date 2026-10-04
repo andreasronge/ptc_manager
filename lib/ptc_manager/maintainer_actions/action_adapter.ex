@@ -98,6 +98,24 @@ defmodule PtcManager.MaintainerActions.ActionAdapter do
     end
   end
 
+  def validate_result(
+        %{
+          "outcome" => "completed",
+          "program" => program,
+          "version" => version,
+          "digest" => digest,
+          "protocol" => protocol,
+          "pr_number" => number
+        } = result,
+        "toolchain_pin_bump",
+        %{"program" => program, "version" => version, "digest" => digest, "protocol" => protocol}
+      )
+      when is_integer(number) and number > 0 and map_size(result) == 6,
+      do: :ok
+
+  def validate_result(_result, "toolchain_pin_bump", _snapshot),
+    do: {:error, :toolchain_result_mismatch}
+
   def validate_result(result, action_key, _snapshot), do: validate_result(result, action_key)
 
   defp validate_normalized_result(

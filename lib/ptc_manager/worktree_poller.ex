@@ -14,8 +14,9 @@ defmodule PtcManager.WorktreePoller do
   def handle_info(:cleanup, %{task_ref: nil} = state) do
     if enabled?() do
       task =
-        Task.Supervisor.async_nolink(
+        PtcManager.DatabaseDiagnostics.async_nolink(
           PtcManager.TaskSupervisor,
+          "worktree_cleanup",
           &Worktrees.cleanup_once/0
         )
 

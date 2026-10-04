@@ -1,0 +1,19 @@
+name: Keep maintainer issues private to collaborators
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  issues: write
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Limit comments to collaborators
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh api -X PUT "repos/$GH_REPO/issues/$ISSUE_NUMBER/lock"

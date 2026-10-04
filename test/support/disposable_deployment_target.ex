@@ -107,7 +107,8 @@ defmodule PtcManager.DisposableDeploymentTarget do
     end
   end
 
-  def migrate_remaining!(%__MODULE__{} = target), do: migrate!(target, all: true)
+  def migrate_remaining!(%__MODULE__{} = target, opts \\ [all: true]),
+    do: migrate!(target, opts)
 
   def rollback!(%__MODULE__{} = target, opts \\ [step: 1]) do
     run_migrations!(target, :down, opts)

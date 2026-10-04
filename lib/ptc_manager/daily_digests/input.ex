@@ -33,7 +33,9 @@ defmodule PtcManager.DailyDigests.Input do
          }
        }}
     else
-      _ -> {:error, :daily_digest_projection_invalid_or_oversized}
+      {:error, :encoded_byte_limit} -> {:error, :daily_digest_evidence_too_large}
+      {:error, :invalid_byte_limit} -> {:error, :daily_digest_invalid_byte_limit}
+      {:error, reason} -> {:error, {:daily_digest_projection_invalid, reason}}
     end
   end
 

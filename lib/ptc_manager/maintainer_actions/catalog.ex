@@ -26,7 +26,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
   <collection_protocol>
   A collection is a GitHub issue with sub-issues. PtcManager reads only native relations:
   - make an issue a sub-issue: `gh api -X POST repos/{owner}/{repo}/issues/{parent_number}/sub_issues -F sub_issue_id={child_database_id}`
-  - record an ordering: `gh api -X POST repos/{owner}/{repo}/issues/{blocked_number}/dependencies/blocked_by -F issue_id={blocker_database_id}`
+  - record an ordering with GitHub's native issue dependency, which PtcManager reads: `gh api -X POST repos/{owner}/{repo}/issues/{blocked_number}/dependencies/blocked_by -F issue_id={blocker_database_id}`; a `Blocked by #N` line in the body is only for people and is not read
   - a database id comes from `gh api repos/{owner}/{repo}/issues/{number} --jq .id`
   Every member must be in this repository, must not have sub-issues of its own, and while open must carry exactly one of `ptc:ready`, `ptc:blocked`, `ptc:needs-decision`. Blockers of a member must be members or closed issues; orderings must not form a cycle. The parent never carries `ptc:ready`.
   </collection_protocol>
@@ -40,6 +40,12 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
     prompt =
       case action_key do
+        "toolchain_pin_bump" ->
+          configured_preview(
+            "Approved example: update codex from 0.153.2 to 0.156.1 at one exact repository commit, then open a draft PR for human review.",
+            instructions
+          )
+
         "private_issue_analysis" ->
           configured_preview(private_issue_analysis_prompt(repository, issue), instructions)
 
@@ -197,6 +203,40 @@ defmodule PtcManager.MaintainerActions.Catalog do
        target_label: "#{repository.github_owner}/#{repository.github_name}##{issue.number}",
        prompt_version: @prompt_version,
        prompt: configured("prepare_issue", prepare_issue_prompt(repository, issue))
+     }}
+  end
+
+  def build("toolchain_pin_bump", %{repository: repository, snapshot: snapshot}) do
+    %{"program" => program, "current" => current, "version" => version, "source_sha" => sha} =
+      snapshot
+
+    extra =
+      [
+        if(snapshot["protocol"], do: "herdr_protocol=#{snapshot["protocol"]}"),
+        if(snapshot["digest"], do: "#{program}_sha256=#{snapshot["digest"]}")
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("; ")
+
+    {:ok,
+     %{
+       repository_id: repository.id,
+       target_type: "repository",
+       target_id: repository.id,
+       target_label:
+         "#{repository.github_owner}/#{repository.github_name} #{program} #{current} → #{version}",
+       prompt_version: @prompt_version,
+       target_snapshot: snapshot,
+       prompt: """
+       <toolchain_pin_bump>
+       Repository: #{repository.github_owner}/#{repository.github_name}
+       Base commit: #{sha}
+       Approved manifest change: #{program}=#{current} to #{program}=#{version}
+       Additional approved pins: #{extra}
+       Use a branch from that base commit. The draft PR must target #{repository.default_branch}.
+       The result must match the dedicated schema, with outcome completed, program #{program}, version #{version}, digest #{inspect(snapshot["digest"])}, protocol #{inspect(snapshot["protocol"])}, and pr_number.
+       </toolchain_pin_bump>
+       """
      }}
   end
 

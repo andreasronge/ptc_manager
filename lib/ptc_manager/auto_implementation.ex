@@ -4,31 +4,54 @@ defmodule PtcManager.AutoImplementation do
   require Logger
 
   alias PtcManager.{Operations, Repo, RepoTransaction}
-  alias PtcManager.Operations.{AgentAction, Approval, Issue, Job, PrPublication, Repository}
 
-  @daily_limit 5
+  alias PtcManager.Operations.{
+    AgentAction,
+    AgentRun,
+    Approval,
+    Issue,
+    Job,
+    PrPublication,
+    Repository,
+    StopReport
+  }
 
-  def configure(repository_id, enabled, actor) when is_boolean(enabled) do
+  def configure(repository_id, enabled, actor) when is_boolean(enabled),
+    do: update_policy(repository_id, %{auto_fix_issues: enabled}, actor)
+
+  # Counts only jobs admitted automatically since 00:00 UTC.
+  def configure_daily_limit(repository_id, limit, actor) when is_integer(limit),
+    do: update_policy(repository_id, %{auto_fix_daily_limit: limit}, actor)
+
+  defp update_policy(repository_id, attrs, actor) do
     result =
       RepoTransaction.immediate(fn ->
         repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
 
-        updated =
-          repository |> Repository.changeset(%{auto_fix_issues: enabled}) |> Repo.update!()
+        case repository |> Repository.changeset(attrs) |> Repo.update() do
+          {:ok, updated} ->
+            PtcManager.ExecutionProfiles.audit(
+              actor,
+              "repository.auto_fix_updated",
+              repository_id,
+              %{enabled: updated.auto_fix_issues, daily_limit: updated.auto_fix_daily_limit},
+              "repository"
+            )
 
-        PtcManager.ExecutionProfiles.audit(
-          actor,
-          "repository.auto_fix_updated",
-          repository_id,
-          %{enabled: enabled, daily_limit: @daily_limit},
-          "repository"
-        )
+            updated
 
-        updated
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
       end)
 
     Operations.notify_changed(Operations)
-    if enabled and match?({:ok, _}, result), do: PtcManager.GitHub.Poller.wake()
+
+    # Enabling or raising the limit admits waiting ready issues without
+    # waiting for the next poll.
+    if match?({:ok, %Repository{auto_fix_issues: true}}, result),
+      do: PtcManager.GitHub.Poller.wake()
+
     result
   end
 
@@ -52,7 +75,10 @@ defmodule PtcManager.AutoImplementation do
         with {:ok, pulls} <- PtcManager.Gateway.call(client, :list_open, [repository]),
              {:ok, _summary} <-
                PtcManager.Publications.sync_external_open_pull_requests(repository, pulls) do
-          query |> Repo.all() |> Enum.map(&Operations.auto_approve_issue(&1.id))
+          query
+          |> Repo.all()
+          |> Enum.filter(&Operations.dependencies_resolved?/1)
+          |> Enum.map(&Operations.auto_approve_issue(&1.id))
         else
           error ->
             Logger.warning(
@@ -70,8 +96,9 @@ defmodule PtcManager.AutoImplementation do
   # Runs inside the approval's immediate transaction, serializing checks with
   # job creation and policy updates. Pending issue actions must finish storing
   # their analysis before admission freezes a profile, including postflight recovery.
-  # Any previous job consumes automatic eligibility,
-  # including failed/cancelled/manual jobs; label toggles never reset it.
+  # A cancelled job that never recorded an agent run did no work, so it does
+  # not consume eligibility. Every other job does, including failed jobs, with
+  # one exception: see `admission_renewed?/2`.
   def eligible(repo, issue) do
     repository = repo.get!(Repository, issue.repository_id)
 
@@ -82,6 +109,9 @@ defmodule PtcManager.AutoImplementation do
       issue.workflow_label != "ptc:ready" ->
         {:error, :issue_workflow_not_ready}
 
+      not Operations.dependencies_resolved?(repo, issue) ->
+        {:error, :issue_dependencies_unresolved}
+
       repo.exists?(
         from action in AgentAction,
           where:
@@ -91,13 +121,13 @@ defmodule PtcManager.AutoImplementation do
       ) ->
         {:error, :issue_action_active}
 
-      repo.exists?(from job in Job, where: job.issue_id == ^issue.id) ->
+      not admission_renewed?(repo, issue) ->
         {:error, :already_attempted}
 
       linked_publication?(repo, issue) ->
         {:error, :issue_has_pull_request}
 
-      daily_count(repo, repository.id) >= @daily_limit ->
+      daily_count(repo, repository.id) >= repository.auto_fix_daily_limit ->
         {:error, :auto_fix_daily_limit}
 
       true ->
@@ -119,7 +149,10 @@ defmodule PtcManager.AutoImplementation do
       remote.sub_issues["total"] > 0 ->
         {:error, :issue_is_collection}
 
-      Issue.claimed_by_other?(remote, job.repository) ->
+      not Operations.dependency_projection_matches?(job.issue, remote) ->
+        {:error, :issue_dependencies_unresolved}
+
+      Issue.claimed?(remote) ->
         {:error, :issue_claimed}
 
       linked_publication?(Repo, job.issue) ->
@@ -144,6 +177,76 @@ defmodule PtcManager.AutoImplementation do
     |> repo.all()
     |> Enum.any?(fn links -> issue.number in Map.get(links, "numbers", []) end)
   end
+
+  # An attempt whose agent stopped, that the maintainer set aside, on an issue
+  # changed on GitHub since — a comment, an edit, or a relabel back to
+  # `ptc:ready` — is answered: the issue is still approved and someone touched
+  # it, so it may start once more. Setting a stop aside without touching the
+  # issue keeps it aside, and an agent that called the work unsafe is never
+  # restarted unattended, as Try again refuses it.
+  #
+  # The set-aside must answer the job's latest failure: Resume and review
+  # continuation reuse the job and keep the answered report, so a continued
+  # attempt that fails later ends after it. A question asked on the issue must
+  # also have finished, and only a change after it counts: its own comment is
+  # not an answer, and a failed ask may have left the issue `ptc:ready`.
+  defp admission_renewed?(repo, issue) do
+    latest =
+      from(job in Job,
+        as: :job,
+        where: job.issue_id == ^issue.id,
+        where:
+          job.state != "cancelled" or
+            exists(from run in AgentRun, where: run.job_id == parent_as(:job).id, select: 1),
+        order_by: [desc: job.id],
+        limit: 1
+      )
+      |> repo.one()
+
+    case latest do
+      nil ->
+        true
+
+      %Job{
+        state: "failed",
+        stop_reported_at: %DateTime{},
+        stop_acknowledged_at: %DateTime{} = set_aside,
+        ended_at: %DateTime{} = ended
+      } = job ->
+        StopReport.allows?(job.stop_report, :retry) and
+          not DateTime.before?(set_aside, ended) and
+          case answered_at(repo, issue, job) do
+            {:ok, answered} -> changed_after?(issue, answered)
+            :pending -> false
+          end
+
+      _attempted ->
+        false
+    end
+  end
+
+  defp answered_at(repo, issue, job) do
+    questions =
+      from(action in AgentAction,
+        where:
+          action.target_type == "issue" and action.target_id == ^issue.id and
+            action.action_key == "report_issue_blocker" and
+            action.requested_at >= ^job.stop_reported_at,
+        select: {action.state, action.ended_at}
+      )
+      |> repo.all()
+
+    if Enum.all?(questions, &match?({"done", %DateTime{}}, &1)) do
+      {:ok, Enum.max([job.stop_acknowledged_at | Enum.map(questions, &elem(&1, 1))], DateTime)}
+    else
+      :pending
+    end
+  end
+
+  defp changed_after?(%Issue{github_updated_at: %DateTime{} = updated}, answered),
+    do: DateTime.after?(updated, answered)
+
+  defp changed_after?(_issue, _answered), do: false
 
   defp daily_count(repo, repository_id) do
     midnight = DateTime.new!(Date.utc_today(), ~T[00:00:00], "Etc/UTC")

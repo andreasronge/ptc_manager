@@ -19,6 +19,49 @@ context = review.__globals__
 
 
 class ReviewerContract(unittest.TestCase):
+    def test_capture_initialization_failure_does_not_change_command_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch.dict(context, ensure_shared_directory=lambda *a: (_ for _ in ()).throw(RuntimeError("unsafe artifact root"))):
+                self.assertEqual(context['run']([sys.executable, '-c', 'print("finished")'],
+                    artifact_directory=root), 'finished\n')
+
+    def test_session_archive_retries_after_interrupted_copy(self):
+        with tempfile.TemporaryDirectory() as root:
+            session = '0199a213-81c0-7800-8aa1-bbab2a035a53'
+            source = Path(root) / (session + '.jsonl')
+            source.write_bytes(b'full session\n')
+            destination = str(Path(root) / 'archive')
+            abandoned = Path(destination + '.staging-interrupted')
+            abandoned.mkdir()
+            (abandoned / 'session.jsonl').write_bytes(b'interrupted')
+            real_glob = context['glob'].glob
+            def session_glob(pattern, **kwargs):
+                return real_glob(pattern, **kwargs) if '.staging-' in pattern else [str(source)]
+            with patch.object(context['glob'], 'glob', side_effect=session_glob):
+                with patch.object(context['shutil'], 'copyfileobj', side_effect=OSError('interrupted')):
+                    with self.assertRaises(OSError):
+                        context['archive_session']('codex', session, destination, 1000000, root)
+                context['archive_session']('codex', session, destination, 1000000, root)
+                context['archive_session']('codex', session, destination, 1000000, root)
+            self.assertFalse(abandoned.exists())
+            self.assertEqual((Path(destination) / 'session.jsonl').read_bytes(), source.read_bytes())
+            self.assertEqual(json.loads((Path(destination) / 'manifest.json').read_text())['coverage'], 'complete')
+
+    def test_multi_megabyte_interleaved_reviewer_events_are_retained(self):
+        event = json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'}) + '\n'
+        stdout = event.encode() + b'{"progress":"' + b'x' * 2000000 + b'"}\n'
+        stderr = b'y' * 2000000
+        with tempfile.TemporaryDirectory() as root:
+            script = ('import os; os.write(1, ' + repr(event.encode()) + '); '
+                      'os.write(1,b\'{"progress":"\'); '
+                      '[(os.write(1,b"x"*10000),os.write(2,b"y"*10000)) for _ in range(200)]; '
+                      'os.write(1,b\'"}\\n\')')
+            context['run']([sys.executable, '-c', script], session_events=True,
+                           artifact_directory=os.path.join(root, 'review'))
+            run = next(Path(root).glob('review/run-*'))
+            self.assertEqual((run / 'stdout.log').read_bytes(), stdout)
+            self.assertEqual((run / 'stderr.log').read_bytes(), stderr)
+
     def test_full_reviewer_streams_are_sealed_before_parsing(self):
         with tempfile.TemporaryDirectory() as root:
             output = context['run'](

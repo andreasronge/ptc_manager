@@ -60,6 +60,27 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
              "complete"
   end
 
+  test "finalization failure records error coverage without changing the command result" do
+    fixture = workspace_fixture("printf 'finished\\n'\nrm -f ../setup-artifact/combined.log\n")
+    on_exit(fn -> File.rm_rf!(fixture.root) end)
+    artifact = Path.join(fixture.root, "setup-artifact")
+
+    assert ExUnit.CaptureLog.capture_log(fn ->
+             assert {:ok, %{exit_status: 0, output: "finished\n"}} =
+                      WorkspaceSetup.Runner.run(
+                        fixture.worktree,
+                        "scripts/ptc/setup-worktree",
+                        5_000,
+                        artifact
+                      )
+           end) =~ "Workspace capture finalization failed"
+
+    manifest = Jason.decode!(File.read!(Path.join(artifact, "manifest.json")))
+    assert manifest["coverage"] == "error"
+    assert manifest["diagnostic"] =~ "finalization failed"
+    assert manifest["streams"] == %{}
+  end
+
   test "ignores malformed or unknown setup metrics" do
     fixture =
       workspace_fixture(

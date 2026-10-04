@@ -11,6 +11,7 @@ defmodule Mix.Tasks.PtcDeployTest do
   @herdr_ssh_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-ssh-bridge")
   @herdr_worker_bridge Path.join(@project_root, "deploy/ptc-manager-herdr-worker-bridge")
   @herdr_bridge_canary Path.join(@project_root, "deploy/ptc-manager-herdr-bridge-canary")
+  @herdr_091_preamble "printf '\n%s\n' 'herdr-remote-output-ready:1'"
   @ssh_firewall Path.join(@project_root, "deploy/ptc-manager-ssh-firewall")
   @claude_trust Path.join(@project_root, "deploy/ptc-manager-worker-claude-trust")
   @codex_arm Path.join(@project_root, "deploy/ptc-manager-worker-codex-arm")
@@ -526,7 +527,9 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert script =~ "deploy/ptc-manager-herdr-worker-bridge"
     assert script =~ "deploy/ptc-manager-herdr-bridge-canary"
     assert script =~ ~s|read_environment_setting HERDR_SESSION "$worker_environment_file"|
-    assert script =~ ~s|"$active_herdr_version" "$herdr_protocol" "$worker_session"|
+
+    assert script =~
+             ~s|"$active_herdr_version" "$herdr_protocol" "$worker_session" "$worker_herdr_dir/herdr"|
 
     assert bridge =~ ~s(original=${SSH_ORIGINAL_COMMAND:-})
 
@@ -541,14 +544,22 @@ defmodule Mix.Tasks.PtcDeployTest do
     canary = File.read!(@herdr_bridge_canary)
 
     assert canary =~
-             ~s|"$herdr" machine add "$target" --label "Deployment canary" --remote-session "$expected_session"|
+             ~s|"$client" machine add "$target" --label "Deployment canary" --remote-session "$expected_session"|
 
+    assert canary =~ ~s|for client in "$herdr" "$pinned_herdr"; do|
     assert canary =~ "exec /usr/local/bin/herdr remote-client-bridge </dev/null"
+    assert canary =~ ~s|"$framed_stream --idle-timeout-v1"|
     refute bridge =~ ~r/^\s*eval\s/m
 
     assert {"/usr/local/bin/herdr\n", 0} =
              System.cmd(@herdr_ssh_bridge, [],
                env: [{"SSH_ORIGINAL_COMMAND", "command -v herdr"}],
+               stderr_to_stdout: true
+             )
+
+    assert {"\nherdr-remote-output-ready:1\n/usr/local/bin/herdr\n", 0} =
+             System.cmd(@herdr_ssh_bridge, [],
+               env: [{"SSH_ORIGINAL_COMMAND", @herdr_091_preamble <> "\ncommand -v herdr"}],
                stderr_to_stdout: true
              )
 
@@ -594,9 +605,75 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert {"--session managed-session remote-client-bridge\n", 0} =
              System.cmd(bridge, ["stream"])
 
+    assert {"--session managed-session remote-client-bridge --idle-timeout-v1\n", 0} =
+             System.cmd(bridge, ["stream-idle"])
+
     assert {_output, 126} = System.cmd(bridge, ["shell"])
     File.write!(session_file, "managed session\n")
     assert {_output, 126} = System.cmd(bridge, ["status"])
+  end
+
+  test "forced Herdr bridge accepts the 0.9.1 framed platform probe" do
+    # Bytes captured from Herdr 0.9.1's `machine add`: the preamble's printf
+    # format carries real newlines, not backslash escapes.
+    probe = @herdr_091_preamble <> "\nuname -s\nuname -m\n"
+
+    assert {output, 0} =
+             System.cmd(
+               "sh",
+               ["-c", "printf '%s' \"$1\" | \"$2\"", "sh", probe, @herdr_ssh_bridge],
+               env: [{"SSH_ORIGINAL_COMMAND", "/bin/sh -s"}],
+               stderr_to_stdout: true
+             )
+
+    assert output ==
+             "\nherdr-remote-output-ready:1\n#{String.trim(System.cmd("uname", ["-s"]) |> elem(0))}\n#{String.trim(System.cmd("uname", ["-m"]) |> elem(0))}\n"
+
+    rejected_probe =
+      @herdr_091_preamble <> "\nid\n"
+
+    assert {"ptc-manager-herdr-ssh-bridge: unsupported SSH command\n", 126} =
+             System.cmd(
+               "sh",
+               ["-c", "printf '%s' \"$1\" | \"$2\"", "sh", rejected_probe, @herdr_ssh_bridge],
+               env: [{"SSH_ORIGINAL_COMMAND", "/bin/sh -s"}],
+               stderr_to_stdout: true
+             )
+  end
+
+  test "forced Herdr bridge streams a framed saved-machine connection" do
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-herdr-framed-bridge-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+    worker = Path.join(directory, "worker")
+    bridge = Path.join(directory, "bridge")
+    File.write!(worker, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n")
+
+    source =
+      @herdr_ssh_bridge
+      |> File.read!()
+      |> String.replace("/usr/local/bin/ptc-manager-herdr-worker-bridge", worker)
+      |> String.replace(
+        "exec /usr/bin/sudo -n -H -u ptc-manager-worker -- \"$worker_bridge\" \"$1\"",
+        "exec \"$worker_bridge\" \"$1\""
+      )
+
+    File.write!(bridge, source)
+    File.chmod!(worker, 0o700)
+    File.chmod!(bridge, 0o700)
+
+    for {flag, expected} <- [{"", "stream\n"}, {" --idle-timeout-v1", "stream-idle\n"}] do
+      command =
+        @herdr_091_preamble <> "\nexec /usr/local/bin/herdr remote-client-bridge#{flag}"
+
+      assert {"\nherdr-remote-output-ready:1\n" <> ^expected, 0} =
+               System.cmd(bridge, [], env: [{"SSH_ORIGINAL_COMMAND", command}])
+    end
   end
 
   test "remote deployment installs the Tailscale-only SSH firewall operator" do
@@ -648,6 +725,43 @@ defmodule Mix.Tasks.PtcDeployTest do
     refute helper =~ ~s(exec 8>>"$lock_path")
     assert helper =~ "cannot open operation slot lock"
     assert helper =~ "exit 74"
+  end
+
+  test "remote deployment verifies cgroups and emits bounded failure diagnostics" do
+    script = File.read!(@remote_script)
+    context = File.read!(Path.join(@project_root, "deploy/ptc-manager-agent-context"))
+    runtime = File.read!(Path.join(@project_root, "config/runtime.exs"))
+
+    assert script =~ "verify_operation_cgroup_prerequisites"
+    assert script =~ ~s(if [ "$configured_operation_cgroups" = true ])
+    assert script =~ "Operation cgroup prerequisites passed"
+    assert script =~ "deploy/ptc_manager-herdr.service"
+    assert script =~ "/etc/systemd/system/ptc_manager-herdr.service"
+    assert script =~ "configured_operation_wrapper"
+    assert script =~ "configured_operation_agent_context"
+    assert script =~ "configured_operation_recovery_command"
+    assert script =~ "configured_operation_recovery_helper"
+
+    assert script =~
+             "production deployment requires the versioned operation wrapper, context, recovery command, and helper paths"
+
+    assert script =~
+             "Skipping operation cgroup prerequisite check because PTC_OPERATION_CGROUPS=false"
+
+    assert script =~ "Herdr launcher is not isolated in its delegated server leaf"
+    assert script =~ "deployment_diagnostics"
+    assert script =~ "=== PtcManager deployment diagnostics ==="
+    assert script =~ ~s(journalctl -u "$service_name" -n 160)
+    assert script =~ "pragma journal_mode; pragma quick_check;"
+    assert script =~ "=== end deployment diagnostics ==="
+
+    assert context =~ ~S|ptc_context_path=${PTC_CONTEXT_PATH:-${1:-}}|
+    assert context =~ ~S|ptc_context_id=${PTC_CONTEXT_ID:-${2:-}}|
+    assert context =~ "membership=$ptc_cgroup_relative"
+    assert context =~ "cannot move pane shell $$"
+    assert runtime =~ ~S|config_env() == :prod and :os.type() == {:unix, :linux}|
+    assert runtime =~ ~S|env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default)|
+    assert runtime =~ ~S|env_default.("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo")|
   end
 
   test "deployment failure policy classifies the effect boundary" do

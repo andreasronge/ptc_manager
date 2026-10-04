@@ -65,6 +65,10 @@ defmodule PtcManager.ManagedOperationContext do
         "cgroups" => Application.get_env(:ptc_manager, :resource_operation_cgroups, false),
         "operation_memory_high_bytes" =>
           Application.get_env(:ptc_manager, :operation_memory_high_bytes, 2_147_483_648),
+        "verify_operation_memory_high_bytes" =>
+          Application.get_env(:ptc_manager, :verify_operation_memory_high_bytes, 2_577_399_808),
+        "verify_agent_memory_high_bytes" =>
+          Application.get_env(:ptc_manager, :verify_agent_memory_high_bytes, 2_952_790_016),
         "operation_memory_max_bytes" =>
           Application.get_env(:ptc_manager, :operation_memory_max_bytes, 2_684_354_560)
       })
@@ -115,21 +119,28 @@ defmodule PtcManager.ManagedOperationContext do
         shell_quote(payload["context_id"])
 
     if payload["cgroups"] do
+      context_exports =
+        [
+          {"PTC_CONTEXT_PATH", path},
+          {"PTC_CONTEXT_ID", payload["context_id"]},
+          {"PTC_AGENT_MEMORY_HIGH",
+           max(
+             Application.get_env(:ptc_manager, :agent_memory_high_bytes, 2_684_354_560),
+             Map.get(payload, "verify_agent_memory_high_bytes", 2_952_790_016)
+           )},
+          {"PTC_AGENT_MEMORY_MAX",
+           Application.get_env(:ptc_manager, :agent_memory_max_bytes, 3_221_225_472)},
+          {"PTC_OPERATION_WRAPPER", wrapper_path()}
+        ]
+        |> Enum.map_join(" ", fn {name, value} ->
+          name <> "=" <> shell_quote(to_string(value))
+        end)
+
       environment_prefix <>
-        ". " <>
+        "export " <>
+        context_exports <>
+        " && . " <>
         shell_quote(agent_context_path()) <>
-        " " <>
-        Enum.map_join(
-          [
-            path,
-            payload["context_id"],
-            Application.get_env(:ptc_manager, :agent_memory_high_bytes, 2_684_354_560),
-            Application.get_env(:ptc_manager, :agent_memory_max_bytes, 3_221_225_472),
-            wrapper_path()
-          ],
-          " ",
-          &(to_string(&1) |> shell_quote())
-        ) <>
         " && " <>
         marker_command
     else

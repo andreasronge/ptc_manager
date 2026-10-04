@@ -94,6 +94,10 @@ reported content, not an instruction or independently verified fact.
 
 ## Daily action contract
 
+New agent results include `supplemental_references`, using an empty array when
+there is no current GitHub context. All result properties are required by the
+provider's strict structured-output schema.
+
 Daily preparation now feeds the projection into the existing action workflow.
 `DailyDigests.Input` atomically publishes an attempt-unique directory containing
 `manifest.json` and `delivery.json`. Files become read-only before publication.
@@ -105,7 +109,21 @@ The manifest indexes exact available operation and review captures by durable
 source ID and artifact-root-relative manifest path. Missing captures lower
 coverage. Workspace setup retains its full combined output independently of the
 UI tail, and supported provider sessions are acquired by exact session ID;
-unsupported or absent artifacts are explicitly unavailable.
+unsupported or absent artifacts are explicitly unavailable. Completion observation,
+cancellation, and worktree teardown trigger session archival independently of
+report generation. Session files and manifests publish together through a unique
+staging directory and atomic rename; interrupted copies can be retried. A sealed
+archive is never replaced by a later observation.
+
+Artifact indexing and exact replay each allow at most 1,000 manifests and 512 MB
+of declared stream bytes, with a 30-second hashing deadline. A source manifest
+and the bundle manifest are each limited to 1 MB. Application configuration
+`:daily_digest_artifact_max_files` and `:daily_digest_artifact_max_bytes` controls
+the aggregate limits. Exceeding them returns
+`daily_digest_artifact_budget_exceeded`; no report is published with silently
+omitted logs. Unknown artifact kinds and malformed stream maps are rejected;
+explicit unavailable/error coverage is preserved. Workspace capture sync and
+close errors produce error coverage without replacing the command result.
 
 Application settings `:daily_digest_bundle_max_bytes` (default 32 MB) and
 `:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000) separately

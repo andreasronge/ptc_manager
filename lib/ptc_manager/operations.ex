@@ -59,6 +59,7 @@ defmodule PtcManager.Operations do
     resolve_issue_decision
   )
   @superseded_herdr_status "Superseded duplicate of the action-owned Herdr run."
+  @retained_observation_refresh_ms 300_000
   @topic "operations"
   @github_component ~r/\A[A-Za-z0-9_.-]+\z/
 
@@ -769,8 +770,12 @@ defmodule PtcManager.Operations do
   defp close_cancelled_pane(job, %AgentRun{herdr_pane: pane})
        when is_binary(pane) and pane != "" do
     case Gateway.call(Application.fetch_env!(:ptc_manager, :herdr_client), :close_pane, [pane]) do
-      :ok -> {:ok, job}
-      {:error, reason} -> {:ok, job, {:pane_close_failed, reason}}
+      :ok ->
+        PtcManager.ExecutionArtifacts.archive_job(job.id)
+        {:ok, job}
+
+      {:error, reason} ->
+        {:ok, job, {:pane_close_failed, reason}}
     end
   end
 
@@ -1093,7 +1098,14 @@ defmodule PtcManager.Operations do
 
         unless retained_worktree?(job), do: Repo.rollback(:worktree_not_retained)
         unless continuable_run?(job), do: Repo.rollback(:no_session_to_continue)
-        unless Repo.get!(Issue, job.issue_id).state == "open", do: Repo.rollback(:issue_not_open)
+        issue = Repo.get!(Issue, job.issue_id)
+        unless issue.state == "open", do: Repo.rollback(:issue_not_open)
+
+        case issue_unclaimed(issue, Repo.get!(Repository, job.repository_id)) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
         unless is_nil(job.review_recovery_expires_at), do: Repo.rollback(:recovery_busy)
 
         if Repo.exists?(
@@ -3457,9 +3469,32 @@ defmodule PtcManager.Operations do
              commits >= 0 and
              (is_nil(unpushed) or (is_integer(unpushed) and unpushed >= 0)) do
     now = utc_now()
+    refresh_before = DateTime.add(now, -@retained_observation_refresh_ms, :millisecond)
+
+    unpushed_changed =
+      if is_nil(unpushed) do
+        dynamic([allocation], not is_nil(allocation.retained_unpushed_commits))
+      else
+        dynamic(
+          [allocation],
+          is_nil(allocation.retained_unpushed_commits) or
+            allocation.retained_unpushed_commits != ^unpushed
+        )
+      end
+
+    observation_changed =
+      dynamic(
+        [allocation],
+        is_nil(allocation.retained_observed_at) or
+          allocation.retained_observed_at < ^refresh_before or
+          is_nil(allocation.retained_dirty) or allocation.retained_dirty != ^dirty or
+          is_nil(allocation.retained_local_commits) or
+          allocation.retained_local_commits != ^commits or ^unpushed_changed
+      )
 
     WorktreeAllocation
     |> where([allocation], allocation.id == ^allocation_id and allocation.state == "attention")
+    |> where(^observation_changed)
     |> Repo.update_all(
       set: [
         retained_dirty: dirty,
@@ -3596,6 +3631,14 @@ defmodule PtcManager.Operations do
   @doc "True when every projected blocker of the issue is closed as completed and no cycle exists."
   def dependencies_resolved?(%Issue{} = issue),
     do: issue_dependencies_resolved(Repo, issue) == :ok
+
+  @doc false
+  def dependencies_resolved?(repo, %Issue{} = issue),
+    do: issue_dependencies_resolved(repo, issue) == :ok
+
+  @doc "Checks that a fresh GitHub snapshot names the same projected dependencies."
+  def dependency_projection_matches?(%Issue{} = issue, remote_issue) when is_map(remote_issue),
+    do: issue_dependency_projection_matches(Repo, issue, remote_issue) == :ok
 
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -3896,11 +3939,11 @@ defmodule PtcManager.Operations do
 
   # The gates an approval passed are checked again against the issue GitHub
   # reports now, for every kind of approval: a label that no longer says
-  # ready, an assignment to someone else, or sub-issues that make the issue a
+  # ready, an assignment, or sub-issues that make the issue a
   # collection all refuse dispatch, as the frozen digest used to. A snapshot
   # from GitHub always carries these fields; a field a caller did not report
   # is not judged.
-  defp remote_issue_still_approvable(remote, repository) do
+  defp remote_issue_still_approvable(remote, _repository) do
     cond do
       Map.get(remote, :state, "open") != "open" ->
         {:error, :issue_closed}
@@ -3912,7 +3955,7 @@ defmodule PtcManager.Operations do
           Map.get(remote, :workflow_label) not in [nil, "ptc:ready"] ->
         {:error, :issue_workflow_not_ready}
 
-      Map.has_key?(remote, :github_assignees) and Issue.claimed_by_other?(remote, repository) ->
+      Map.has_key?(remote, :github_assignees) and Issue.claimed?(remote) ->
         {:error, :issue_claimed}
 
       Issue.collection?(remote) ->
@@ -3925,8 +3968,8 @@ defmodule PtcManager.Operations do
 
   # An approval freezes the issue as the maintainer saw it. The digest it
   # freezes covers comments, labels, and assignees as well as the text, so a
-  # decision comment or the console's own assignment used to make every later
-  # dispatch stale. What the maintainer approved is the title and body, which
+  # later update can make dispatch stale. What the maintainer approved is the
+  # title and body, which
   # the job snapshot carries: while those are unchanged the approval is
   # re-frozen to the current issue; a changed title or body is a changed
   # requirement and needs a fresh approval. A job without a snapshot keeps
@@ -5127,7 +5170,7 @@ defmodule PtcManager.Operations do
         "so the agent could not start from a known state."
 
   def rejection_words(:issue_claimed),
-    do: "The issue is assigned to someone else on GitHub."
+    do: "The issue is assigned on GitHub."
 
   def rejection_words(:issue_has_pull_request),
     do: "A pull request already references the issue."
@@ -5216,10 +5259,10 @@ defmodule PtcManager.Operations do
   defp issue_unclaimed(
          %Issue{github_assignment_projected: true, github_assignees: %{"logins" => logins}} =
            issue,
-         repository
+         _repository
        )
        when is_list(logins) do
-    if Issue.claimed_by_other?(issue, repository),
+    if Issue.claimed?(issue),
       do: {:error, :issue_claimed},
       else: :ok
   end
@@ -5287,22 +5330,23 @@ defmodule PtcManager.Operations do
        do: {:error, :issue_dependencies_unresolved}
 
   defp issue_dependency_projection_matches(repo, issue, remote) do
-    projected_keys =
+    projected_dependencies =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
       |> select(
         [dependency],
-        {dependency.blocking_repository_full_name, dependency.blocking_issue_number}
+        {dependency.blocking_repository_full_name, dependency.blocking_issue_number,
+         dependency.blocking_state, dependency.blocking_state_reason}
       )
       |> repo.all()
       |> Enum.sort()
 
-    remote_keys =
+    remote_dependencies =
       remote.blocking_issues
-      |> Enum.map(&{&1.repository_full_name, &1.number})
+      |> Enum.map(&{&1.repository_full_name, &1.number, &1.state, &1.state_reason})
       |> Enum.sort()
 
-    if projected_keys == remote_keys,
+    if projected_dependencies == remote_dependencies,
       do: :ok,
       else: {:error, :issue_dependencies_unresolved}
   end

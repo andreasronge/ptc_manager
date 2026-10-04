@@ -17,10 +17,10 @@ defmodule PtcManager.AutomationsTest do
     end
   end
 
-  defmodule RejectedOpenCommand do
-    def run(["worktree", "open" | _args]) do
-      send(self(), {:workspace_event, :rejected_open})
-      {:error, :open_failed}
+  defmodule RejectedWorkspaceCommand do
+    def run(["workspace", "create" | _args]) do
+      send(self(), {:workspace_event, :rejected_create})
+      {:error, :workspace_create_failed}
     end
   end
 
@@ -44,8 +44,8 @@ defmodule PtcManager.AutomationsTest do
   defmodule GenericHerdrCommand do
     def run(args, _timeout \\ nil) do
       cond do
-        Enum.take(args, 2) == ["worktree", "open"] ->
-          send(self(), {:workspace_event, :open})
+        Enum.take(args, 2) == ["workspace", "create"] ->
+          send(self(), {:workspace_event, :created})
           workspace_path = Enum.at(args, Enum.find_index(args, &(&1 == "--cwd")) + 1)
           Process.put({__MODULE__, :workspace_path}, workspace_path)
 
@@ -336,7 +336,7 @@ defmodule PtcManager.AutomationsTest do
     repository = repository_fixture()
 
     definitions = Automations.list_definitions(repository)
-    assert length(definitions) == 18
+    assert length(definitions) == 19
     assert Enum.all?(definitions, &match?(%DefinitionVersion{version: 1}, &1.current_version))
 
     assert Enum.all?(definitions, fn definition ->
@@ -345,7 +345,7 @@ defmodule PtcManager.AutomationsTest do
            end)
 
     assert :ok = Automations.ensure_defaults(repository)
-    assert length(Automations.list_definitions(repository)) == 18
+    assert length(Automations.list_definitions(repository)) == 19
 
     review = Automations.get_definition(repository, "review_issue")
     assert review.current_version.execution_profile == "ephemeral_investigation"
@@ -1321,7 +1321,7 @@ defmodule PtcManager.AutomationsTest do
     assert run.herdr_workspace == "generic-workspace"
   end
 
-  test "a snapshot is Git-trusted before Herdr opens it and trust is revoked after" do
+  test "a snapshot is Git-trusted before Herdr creates a workspace and trust is revoked after" do
     keys = [
       :dispatch_enabled,
       :generic_herdr_command,
@@ -1433,7 +1433,7 @@ defmodule PtcManager.AutomationsTest do
     assert first_event ==
              {:git, ["config", "--global", "--add", "safe.directory", workspace_path]}
 
-    assert_receive {:workspace_event, :open}
+    assert_receive {:workspace_event, :created}
 
     assert_receive {:workspace_event,
                     {:git,
@@ -1450,15 +1450,15 @@ defmodule PtcManager.AutomationsTest do
     assert_receive {:claude_trust, ["revoke", ^workspace_path]}
     assert Repo.get!(Invocation, invocation.id).selected_agent_kind == "claude"
 
-    Application.put_env(:ptc_manager, :generic_herdr_command, RejectedOpenCommand)
+    Application.put_env(:ptc_manager, :generic_herdr_command, RejectedWorkspaceCommand)
 
-    assert {:error, :open_failed} =
+    assert {:error, :workspace_create_failed} =
              PtcManager.MaintainerActions.GenericHerdrAdapter.run(action)
 
     assert_receive {:workspace_event,
                     {:git, ["config", "--global", "--add", "safe.directory", ^workspace_path]}}
 
-    assert_receive {:workspace_event, :rejected_open}
+    assert_receive {:workspace_event, :rejected_create}
 
     assert_receive {:workspace_event,
                     {:git,

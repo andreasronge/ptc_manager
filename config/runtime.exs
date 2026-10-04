@@ -1,5 +1,9 @@
 import Config
 
+if repository = System.get_env("PTC_TOOLCHAIN_REPOSITORY") do
+  config :ptc_manager, :toolchain_repository, repository
+end
+
 env_default = fn name, default ->
   case System.get_env(name) do
     value when value in [nil, ""] -> default
@@ -10,6 +14,28 @@ end
 config :ptc_manager,
   health_snapshot_path:
     env_default.("PTC_HEALTH_OUT", "/var/lib/ptc_manager-output/ptc-health.json")
+
+if config_env() == :prod do
+  database_busy_timeout_ms =
+    env_default.("PTC_DATABASE_BUSY_TIMEOUT_MS", "15000") |> String.to_integer()
+
+  database_timeout_ms =
+    env_default.("PTC_DATABASE_TIMEOUT_MS", "50000") |> String.to_integer()
+
+  database_queue_interval_ms =
+    database_busy_timeout_ms |> div(4) |> min(2_000) |> max(1)
+
+  if database_busy_timeout_ms <= 0 or
+       database_timeout_ms < database_busy_timeout_ms * 3 + 5_000 do
+    raise "PTC_DATABASE_TIMEOUT_MS must cover DBConnection's doubled queue target, a positive PTC_DATABASE_BUSY_TIMEOUT_MS wait, and 5000"
+  end
+
+  config :ptc_manager, PtcManager.Repo,
+    busy_timeout: database_busy_timeout_ms,
+    queue_target: database_busy_timeout_ms,
+    queue_interval: database_queue_interval_ms,
+    timeout: database_timeout_ms
+end
 
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
@@ -118,6 +144,9 @@ pr_reconcile_enabled =
 
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
+operation_cgroups_default =
+  if config_env() == :prod and :os.type() == {:unix, :linux}, do: "true", else: "false"
+
 implementation_agent_kind = System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex")
 
 implementation_agent_args =
@@ -149,6 +178,8 @@ agent_profiles =
 
 config :ptc_manager,
   operational_mode: operational_mode,
+  database_slow_query_ms:
+    System.get_env("PTC_DATABASE_SLOW_QUERY_MS", "1000") |> String.to_integer(),
   demo_mode: demo_mode,
   github_read_token: if(demo_mode, do: nil, else: System.get_env("GITHUB_READ_TOKEN")),
   github_sync_interval_ms: github_sync_interval_ms,
@@ -181,31 +212,37 @@ config :ptc_manager,
       )
     ),
   resource_operation_wrapper:
-    System.get_env("PTC_OPERATION_WRAPPER", "/usr/local/bin/ptc-operation"),
+    env_default.("PTC_OPERATION_WRAPPER", "/usr/local/bin/ptc-operation"),
   resource_operation_context_dir:
     System.get_env(
       "PTC_OPERATION_CONTEXT_DIR",
       "/var/lib/ptc_manager-worker/agent-results/operation-contexts"
     ),
-  resource_operation_cgroups: System.get_env("PTC_OPERATION_CGROUPS", "false") == "true",
+  resource_operation_cgroups:
+    env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default) == "true",
   resource_operation_agent_context:
-    System.get_env(
+    env_default.(
       "PTC_OPERATION_AGENT_CONTEXT",
       "/usr/local/libexec/ptc-manager-agent-context"
     ),
   resource_operation_recovery_command:
-    System.get_env("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo"),
+    env_default.("PTC_OPERATION_RECOVERY_COMMAND", "/usr/bin/sudo"),
   resource_operation_recovery_helper:
-    System.get_env(
+    env_default.(
       "PTC_OPERATION_RECOVERY_HELPER",
       "/usr/local/bin/ptc-manager-operation-recover"
     ),
   agent_memory_high_bytes:
     System.get_env("PTC_AGENT_MEMORY_HIGH_BYTES", "2684354560") |> String.to_integer(),
+  verify_agent_memory_high_bytes:
+    System.get_env("PTC_VERIFY_AGENT_MEMORY_HIGH_BYTES", "2952790016") |> String.to_integer(),
   agent_memory_max_bytes:
     System.get_env("PTC_AGENT_MEMORY_MAX_BYTES", "3221225472") |> String.to_integer(),
   operation_memory_high_bytes:
     System.get_env("PTC_OPERATION_MEMORY_HIGH_BYTES", "2147483648") |> String.to_integer(),
+  verify_operation_memory_high_bytes:
+    System.get_env("PTC_VERIFY_OPERATION_MEMORY_HIGH_BYTES", "2577399808")
+    |> String.to_integer(),
   operation_memory_max_bytes:
     System.get_env("PTC_OPERATION_MEMORY_MAX_BYTES", "2684354560") |> String.to_integer(),
   execution_artifact_root:

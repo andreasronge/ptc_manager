@@ -59,6 +59,124 @@ defmodule PtcManager.GitHubSyncTest do
     assert Repo.get!(Repository, repository.id).sync_status == "ok"
   end
 
+  test "full snapshot does not read the database while holding the writer slot" do
+    repository = repository_fixture()
+    Process.put(:github_result, {:ok, [remote_issue(44, "A real issue")]})
+    handler = "github-snapshot-reads-#{System.unique_integer([:positive])}"
+    observer = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ptc_manager, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if self() == observer do
+            query = metadata[:query] |> to_string() |> String.trim_leading() |> String.upcase()
+
+            cond do
+              String.starts_with?(query, "BEGIN") ->
+                Process.put(:github_sync_in_transaction, true)
+
+              String.starts_with?(query, "COMMIT") or String.starts_with?(query, "ROLLBACK") ->
+                Process.delete(:github_sync_in_transaction)
+
+              Process.get(:github_sync_in_transaction) == true and
+                  (String.starts_with?(query, "SELECT") or String.starts_with?(query, "PRAGMA")) ->
+                send(observer, {:transaction_read, metadata[:source]})
+
+              true ->
+                :ok
+            end
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, %{changed_count: 1}} =
+             Sync.sync_repository(repository, client: FakeClient, admit: false)
+
+    refute_receive {:transaction_read, _source}
+
+    Process.put(:github_issue_result, {:ok, remote_issue(45, "One issue")})
+
+    assert {:ok, %{changed?: true}} =
+             Sync.sync_issue(repository, 45, client: FakeClient, admit: false)
+
+    refute_receive {:transaction_read, _source}
+  end
+
+  @tag sandbox: false
+  test "single issue sync retries when another writer inserts the projected issue" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-manager-github-sync-race-#{System.unique_integer([:positive])}.db"
+      )
+
+    File.cp!(Repo.config()[:database], database)
+
+    {:ok, race_repo} =
+      Repo.start_link(
+        name: nil,
+        database: database,
+        pool_size: 3,
+        pool: DBConnection.ConnectionPool
+      )
+
+    Process.unlink(race_repo)
+    Repo.put_dynamic_repo(race_repo)
+
+    on_exit(fn ->
+      if Process.alive?(race_repo), do: Supervisor.stop(race_repo)
+      File.rm(database)
+      File.rm(database <> "-shm")
+      File.rm(database <> "-wal")
+    end)
+
+    repository = repository_fixture()
+    observer = self()
+    handler = "github-sync-race-#{System.unique_integer([:positive])}"
+    revision_reads = :atomics.new(1, signed: false)
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ptc_manager, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if metadata[:source] == "github_sync_state_revisions" and
+               String.starts_with?(to_string(metadata[:query]), "SELECT") and
+               :atomics.add_get(revision_reads, 1, 1) == 2 do
+            send(observer, {:projection_read, self()})
+
+            receive do
+              :continue_sync -> :ok
+            end
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    task =
+      Task.async(fn ->
+        Repo.put_dynamic_repo(race_repo)
+        Process.put(:github_issue_result, {:ok, remote_issue(44, "Remote")})
+        Sync.sync_issue(repository, 44, client: FakeClient, admit: false)
+      end)
+
+    assert_receive {:projection_read, syncing}, 5_000
+
+    attrs = IssueSnapshot.normalize!(remote_issue(44, "Concurrent"), repository)
+    %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
+
+    send(syncing, :continue_sync)
+    assert {:ok, %{changed?: true}} = Task.await(task, 5_000)
+    assert Repo.get_by!(Issue, repository_id: repository.id, number: 44).title == "Remote"
+  end
+
   test "records when GitHub says the issue was opened without changing the digest" do
     repository = repository_fixture()
 

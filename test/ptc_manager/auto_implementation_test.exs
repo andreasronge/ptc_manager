@@ -2,7 +2,7 @@ defmodule PtcManager.AutoImplementationTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.{AutoImplementation, Operations}
-  alias PtcManager.Operations.{Approval, AuditEvent, Issue, Job}
+  alias PtcManager.Operations.{AgentRun, Approval, AuditEvent, Issue, Job}
 
   defmodule PullClient do
     def list_open(_repository), do: Process.get(:auto_fix_pulls, {:ok, []})
@@ -77,6 +77,184 @@ defmodule PtcManager.AutoImplementationTest do
     assert {:ok, _manual_retry} = Operations.approve_issue_directly(issue.id, "andreas")
   end
 
+  describe "an issue whose agent stopped" do
+    setup do
+      repository = repository_fixture(%{auto_fix_issues: true})
+      issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+      {:ok, job} = Operations.auto_approve_issue(issue.id)
+      %{repository: repository, issue: issue, job: job}
+    end
+
+    test "is admitted again once set aside and changed on GitHub", context do
+      set_aside = stop!(context.job, "ambiguous_requirement")
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:ok, second}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+
+      assert second.id != context.job.id
+    end
+
+    test "is not admitted again while its stop is unanswered", context do
+      stop!(context.job, "missing_prerequisite", acknowledged: false)
+      refresh_issue!(context.issue, DateTime.add(DateTime.utc_now(), 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "stays set aside until the issue changes", context do
+      set_aside = stop!(context.job, "missing_prerequisite")
+      refresh_issue!(context.issue, DateTime.add(set_aside, -60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is never admitted again after the agent called the work unsafe", context do
+      set_aside = stop!(context.job, "unsafe_to_proceed")
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is admitted only once for one change", context do
+      set_aside = stop!(context.job, "missing_prerequisite")
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:ok, second}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+
+      second |> Job.changeset(%{state: "failed"}) |> Repo.update!()
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "waits for a question asked on the issue to finish", context do
+      stop!(context.job, "ambiguous_requirement", acknowledged: false)
+
+      assert {:ok, action} =
+               PtcManager.MaintainerActions.enqueue_blocked_issue_review(
+                 context.job.id,
+                 "andreas"
+               )
+
+      # The agent commented, then failed before moving the label.
+      finish_action!(action, "failed", DateTime.utc_now())
+      refresh_issue!(context.issue, DateTime.add(DateTime.utc_now(), 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is admitted again once the issue changes after the question finished", context do
+      stop!(context.job, "ambiguous_requirement", acknowledged: false)
+
+      assert {:ok, action} =
+               PtcManager.MaintainerActions.enqueue_blocked_issue_review(
+                 context.job.id,
+                 "andreas"
+               )
+
+      finished = DateTime.add(DateTime.utc_now(), 30)
+      finish_action!(action, "done", finished)
+      refresh_issue!(context.issue, DateTime.add(finished, -5))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+
+      refresh_issue!(context.issue, DateTime.add(finished, 60))
+
+      assert [{:ok, _second}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    test "is not admitted again when a resumed attempt fails later", context do
+      set_aside = stop!(context.job, "missing_prerequisite")
+
+      # Resume reuses the job and keeps the answered report; this failure was
+      # never set aside.
+      context.job
+      |> Repo.reload!()
+      |> Ecto.Changeset.change(ended_at: DateTime.add(set_aside, 5))
+      |> Repo.update!()
+
+      refresh_issue!(context.issue, DateTime.add(set_aside, 60))
+
+      assert [{:error, :already_attempted}] =
+               AutoImplementation.reconcile(context.repository.id, context.issue.number)
+    end
+
+    defp finish_action!(action, state, ended_at) do
+      action
+      |> Ecto.Changeset.change(state: state, ended_at: ended_at)
+      |> Repo.update!()
+    end
+
+    defp stop!(job, reason_code, opts \\ []) do
+      now = DateTime.utc_now()
+
+      job
+      |> Ecto.Changeset.change(
+        state: "failed",
+        stop_report: %{
+          "reason_code" => reason_code,
+          "summary" => "The agent stopped.",
+          "detail" => "It stopped.",
+          "progress" => "none"
+        },
+        stop_reported_at: DateTime.add(now, -10),
+        ended_at: DateTime.add(now, -10),
+        stop_acknowledged_at: if(Keyword.get(opts, :acknowledged, true), do: now)
+      )
+      |> Repo.update!()
+
+      now
+    end
+
+    defp refresh_issue!(issue, updated_at) do
+      issue
+      |> Ecto.Changeset.change(github_updated_at: updated_at)
+      |> Repo.update!()
+    end
+  end
+
+  test "a cancelled job with no agent run can be admitted again" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    assert {:ok, first} = Operations.auto_approve_issue(issue.id)
+    first |> Job.changeset(%{state: "cancelled"}) |> Repo.update!()
+
+    assert [{:ok, second}] = AutoImplementation.reconcile(repository.id, issue.number)
+    assert second.id != first.id
+  end
+
+  test "a cancelled job with an agent run cannot be admitted again" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+    assert {:ok, first} = Operations.auto_approve_issue(issue.id)
+    worker = worker_fixture()
+    now = DateTime.utc_now()
+
+    %AgentRun{}
+    |> AgentRun.changeset(%{
+      worker_id: worker.id,
+      job_id: first.id,
+      role: "implementer",
+      state: "working",
+      started_at: now,
+      last_heartbeat_at: now
+    })
+    |> Repo.insert!()
+
+    first |> Job.changeset(%{state: "cancelled"}) |> Repo.update!()
+
+    assert [{:error, :already_attempted}] =
+             AutoImplementation.reconcile(repository.id, issue.number)
+  end
+
   test "does not reuse a stale complexity assessment" do
     repository = repository_fixture(%{auto_fix_issues: true})
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
@@ -87,11 +265,11 @@ defmodule PtcManager.AutoImplementationTest do
   end
 
   test "rejects closed, assigned, conflicting, blocked and unprojected issues" do
-    repository = repository_fixture(%{auto_fix_issues: true})
+    repository = repository_fixture(%{auto_fix_issues: true, github_viewer_login: "maintainer"})
 
     for attrs <- [
           %{state: "closed"},
-          %{github_assignees: %{"logins" => ["someone"]}},
+          %{github_assignees: %{"logins" => ["maintainer"]}},
           %{workflow_label_conflict: true},
           %{workflow_label: "ptc:blocked"},
           %{workflow_label: nil},
@@ -105,6 +283,92 @@ defmodule PtcManager.AutoImplementationTest do
     assert Repo.aggregate(Job, :count) == 0
   end
 
+  test "unresolved native dependencies prevent admission and automatic eligibility" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    blocker = issue_fixture(repository)
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    issue_dependency_fixture(issue, %{
+      blocking_issue: blocker,
+      blocking_repository: repository
+    })
+
+    assert AutoImplementation.reconcile(repository.id) == []
+    assert {:error, :issue_dependencies_unresolved} = AutoImplementation.eligible(Repo, issue)
+    assert {:error, :issue_dependencies_unresolved} = Operations.auto_approve_issue(issue.id)
+  end
+
+  test "dependency projection failures and explicit holds prevent admission" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+
+    for attrs <- [
+          %{dependencies_projected: false},
+          %{dependency_overflow: true},
+          %{dependency_unknown_count: 1}
+        ] do
+      issue = issue_fixture(repository, Map.merge(%{workflow_label: "ptc:ready"}, attrs))
+      assert AutoImplementation.reconcile(repository.id, issue.number) == []
+    end
+
+    held = issue_fixture(repository, %{workflow_label: "ptc:blocked"})
+
+    issue_dependency_fixture(held, %{
+      blocking_repository: repository,
+      blocking_issue_number: 919,
+      blocking_state: "closed",
+      blocking_state_reason: "completed"
+    })
+
+    assert AutoImplementation.reconcile(repository.id, held.number) == []
+
+    assert Repo.aggregate(Job, :count) == 0
+  end
+
+  test "repository sync admits a ready dependent after its native blocker completes" do
+    repository =
+      repository_fixture(%{
+        auto_fix_issues: true,
+        github_owner: "example",
+        github_name: "project"
+      })
+
+    blocker = remote_issue(920, "Build the prerequisite", "open", nil)
+
+    dependent =
+      remote_issue(921, "Use the prerequisite", "open", nil)
+      |> Map.put("blocked_by", [native_blocker(blocker)])
+
+    Process.put(:auto_fix_remote, {:ok, [blocker, dependent]})
+    assert {:ok, _} = PtcManager.GitHub.Sync.sync_repository(repository, client: IssueClient)
+
+    assert [%Job{issue_id: first_issue_id}] = Repo.all(Job)
+    assert Repo.get_by!(Issue, repository_id: repository.id, number: 920).id == first_issue_id
+
+    completed = remote_issue(920, "Build the prerequisite", "closed", "completed")
+    dependent = Map.put(dependent, "blocked_by", [native_blocker(completed)])
+    Process.put(:auto_fix_remote, {:ok, [dependent]})
+    Process.put(:auto_fix_remote_single, {:ok, completed})
+
+    assert {:ok, _} = PtcManager.GitHub.Sync.sync_repository(repository, client: IssueClient)
+    dependent_issue = Repo.get_by!(Issue, repository_id: repository.id, number: 921)
+    assert dependent_issue.workflow_label == "ptc:ready"
+    assert Repo.get_by!(Job, issue_id: dependent_issue.id)
+  end
+
+  test "a blocker closed as not planned does not admit its ready dependent" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    issue_dependency_fixture(issue, %{
+      blocking_repository: repository,
+      blocking_issue_number: 930,
+      blocking_state: "closed",
+      blocking_state_reason: "not_planned"
+    })
+
+    assert AutoImplementation.reconcile(repository.id) == []
+  end
+
   test "daily budget survives failed jobs and applies across synchronizations" do
     repository = repository_fixture(%{auto_fix_issues: true})
     for _ <- 1..6, do: issue_fixture(repository, %{workflow_label: "ptc:ready"})
@@ -114,6 +378,36 @@ defmodule PtcManager.AutoImplementationTest do
     Repo.update_all(Job, set: [state: "failed"])
     assert {:error, :auto_fix_daily_limit} in AutoImplementation.reconcile(repository.id)
     assert Repo.aggregate(Job, :count) == 5
+  end
+
+  test "the configured daily limit replaces the default and can be raised the same day" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    for _ <- 1..4, do: issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    assert {:ok, %{auto_fix_daily_limit: 2}} =
+             AutoImplementation.configure_daily_limit(repository.id, 2, "andreas")
+
+    assert Repo.get_by!(AuditEvent, action: "repository.auto_fix_updated").details ==
+             %{"enabled" => true, "daily_limit" => 2}
+
+    results = AutoImplementation.reconcile(repository.id)
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 2
+    assert {:error, :auto_fix_daily_limit} in results
+
+    {:ok, _} = AutoImplementation.configure_daily_limit(repository.id, 3, "andreas")
+    assert Enum.count(AutoImplementation.reconcile(repository.id), &match?({:ok, _}, &1)) == 1
+    assert Repo.aggregate(Job, :count) == 3
+  end
+
+  test "rejects a daily limit outside 1 to 50" do
+    repository = repository_fixture()
+
+    for limit <- [0, 51] do
+      assert {:error, %Ecto.Changeset{}} =
+               AutoImplementation.configure_daily_limit(repository.id, limit, "andreas")
+    end
+
+    assert Repo.get!(PtcManager.Operations.Repository, repository.id).auto_fix_daily_limit == 5
   end
 
   test "does not admit work when pull request discovery fails" do
@@ -294,15 +588,70 @@ defmodule PtcManager.AutoImplementationTest do
     issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
     {:ok, job} = Operations.auto_approve_issue(issue.id)
     job = Repo.preload(job, [:approval, :repository, :issue])
-    assert :ok = AutoImplementation.dispatch_allowed(job, issue)
+    remote = issue |> Map.from_struct() |> Map.put(:blocking_issues, [])
+    assert :ok = AutoImplementation.dispatch_allowed(job, remote)
 
     assert {:error, :issue_workflow_not_ready} =
-             AutoImplementation.dispatch_allowed(job, %{issue | workflow_label: nil})
+             AutoImplementation.dispatch_allowed(job, %{remote | workflow_label: nil})
 
     assert {:error, :issue_claimed} =
              AutoImplementation.dispatch_allowed(job, %{
-               issue
+               remote
                | github_assignees: %{"logins" => ["other"]}
              })
+  end
+
+  test "dispatch refuses when a completed native blocker is reopened remotely" do
+    repository = repository_fixture(%{auto_fix_issues: true})
+    issue = issue_fixture(repository, %{workflow_label: "ptc:ready"})
+
+    issue_dependency_fixture(issue, %{
+      blocking_repository: repository,
+      blocking_issue_number: 999,
+      blocking_state: "closed",
+      blocking_state_reason: "completed"
+    })
+
+    {:ok, job} = Operations.auto_approve_issue(issue.id)
+    job = Repo.preload(job, [:approval, :repository, :issue])
+
+    remote =
+      issue
+      |> Map.from_struct()
+      |> Map.put(:blocking_issues, [
+        %{
+          repository_full_name:
+            String.downcase("#{repository.github_owner}/#{repository.github_name}"),
+          number: 999,
+          state: "open",
+          state_reason: nil
+        }
+      ])
+
+    assert {:error, :issue_dependencies_unresolved} =
+             AutoImplementation.dispatch_allowed(job, remote)
+  end
+
+  defp remote_issue(number, title, state, state_reason) do
+    %{
+      "number" => number,
+      "title" => title,
+      "html_url" => "https://github.com/example/project/issues/#{number}",
+      "body" => "Issue body #{number}",
+      "state" => state,
+      "state_reason" => state_reason,
+      "updated_at" => "2026-09-18T09:21:00Z",
+      "labels" => [%{"name" => "ptc:ready"}],
+      "parent" => nil,
+      "sub_issues" => %{"nodes" => [], "total" => 0, "overflow" => false},
+      "structure_projected" => true
+    }
+  end
+
+  defp native_blocker(blocker) do
+    blocker
+    |> Map.put("id", blocker["number"] + 10_000)
+    |> Map.put("node_id", "ISSUE_#{blocker["number"]}")
+    |> Map.put("repository", %{"full_name" => "example/project"})
   end
 end

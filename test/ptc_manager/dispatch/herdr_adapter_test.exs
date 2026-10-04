@@ -2,6 +2,7 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Dispatch.HerdrAdapter
+  alias PtcManager.Operations.Job
   alias PtcManager.TestGitWorkspace
   alias PtcManager.TestScenario
 
@@ -28,11 +29,53 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
     def run(%__MODULE__{}, args, _timeout), do: {:error, {:unexpected_test_herdr_command, args}}
   end
 
+  defmodule IssueReadStub do
+    def get_issue(_repository, _number), do: Process.get(:resume_issue_result)
+  end
+
   setup do
     workspace = TestGitWorkspace.configure_dispatch!("ptc-manager-herdr-adapter")
     scenario = start_supervised!(TestScenario) |> TestScenario.gateway()
 
     %{scenario: scenario, workspace: workspace}
+  end
+
+  test "implementation continuation rechecks GitHub assignment before relaunch" do
+    old_client = Application.fetch_env!(:ptc_manager, :github_client)
+    Application.put_env(:ptc_manager, :github_client, IssueReadStub)
+    on_exit(fn -> Application.put_env(:ptc_manager, :github_client, old_client) end)
+
+    repository = repository_fixture(%{github_viewer_login: "maintainer"})
+    issue = issue_fixture(repository)
+
+    remote = %{
+      "number" => issue.number,
+      "title" => issue.title,
+      "body" => issue.body,
+      "updated_at" => DateTime.to_iso8601(issue.github_updated_at),
+      "assignees" => [%{"login" => "maintainer"}]
+    }
+
+    Process.put(:resume_issue_result, {:ok, remote})
+
+    job = %Job{
+      review_resume_mode: "implementation",
+      repository: repository,
+      issue: issue,
+      agent_runs: [],
+      fencing_token: 1
+    }
+
+    assert {:error, {:continuation_not_started, :issue_claimed}} =
+             HerdrAdapter.resume_review_job(job)
+
+    Process.put(:resume_issue_result, {:ok, Map.put(remote, "assignees", [])})
+    assert {:error, :retained_workspace_not_ready} = HerdrAdapter.resume_review_job(job)
+
+    Process.put(:resume_issue_result, {:error, :unavailable})
+
+    assert {:error, {:continuation_not_started, :issue_claim_unknown}} =
+             HerdrAdapter.resume_review_job(job)
   end
 
   describe "discarding a retained worktree" do

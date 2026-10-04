@@ -1,6 +1,8 @@
 defmodule PtcManager.ExternalPullRequestsTest do
   use PtcManager.DataCase, async: false
 
+  import PtcManager.TransactionAssertions
+
   alias PtcManager.MaintainerActions.Catalog
   alias PtcManager.MaintainerActions.FreshWorktreeRepairAdapter
   alias PtcManager.MaintainerActions
@@ -168,6 +170,18 @@ defmodule PtcManager.ExternalPullRequestsTest do
              )
 
     assert Repo.get!(PrPublication, publication.id).pr_state == "closed"
+  end
+
+  test "external snapshot application performs no reads inside its write transaction" do
+    repository = repository_fixture()
+    pull = external_pr_status(repository, 97, String.duplicate("a", 40))
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, %{open_count: 1}} =
+               Publications.sync_external_open_pull_requests(repository, [pull])
+    end)
+
+    assert Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 97)
   end
 
   test "does not import an agent PR before its managed publication row exists" do

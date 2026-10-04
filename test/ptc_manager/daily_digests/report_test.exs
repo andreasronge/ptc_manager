@@ -5,7 +5,28 @@ defmodule PtcManager.DailyDigests.ReportTest do
 
   test "schema example satisfies application validation" do
     result = File.read!("test/fixtures/daily_digest_output.json") |> Jason.decode!()
+    schema = File.read!("priv/codex/daily_digest_output.schema.json") |> Jason.decode!()
+    assert Enum.sort(schema["required"]) == Enum.sort(Map.keys(schema["properties"]))
+    assert Enum.sort(schema["required"]) == Enum.sort(Map.keys(result))
     assert :ok = Report.validate(result)
+  end
+
+  test "supplemental destinations cannot inject Markdown" do
+    result = File.read!("test/fixtures/daily_digest_output.json") |> Jason.decode!()
+
+    for url <- [
+          "https://github.com/o/r/pull/1)\n\n## Health\nfalse",
+          "https://github.com/o/r/a b"
+        ] do
+      reference = %{
+        "url" => url,
+        "observed_at" => "2026-09-17T00:00:00Z",
+        "context" => "Observed"
+      }
+
+      assert {:error, :invalid_daily_digest_output} =
+               Report.validate(Map.put(result, "supplemental_references", [reference]))
+    end
   end
 
   setup do
@@ -21,6 +42,31 @@ defmodule PtcManager.DailyDigests.ReportTest do
       })
 
     %{repository: repository, digest: digest}
+  end
+
+  test "projection diagnostics distinguish size and configuration failures", %{
+    repository: repository,
+    digest: digest
+  } do
+    previous = Application.get_env(:ptc_manager, :daily_digest_bundle_max_bytes)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, previous),
+        else: Application.delete_env(:ptc_manager, :daily_digest_bundle_max_bytes)
+    end)
+
+    selection = DailyDigestFixtures.selection(repository, digest)
+    observed_at = DateTime.add(digest.window_ended_at, 1)
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1)
+
+    assert {:error, :daily_digest_evidence_too_large} =
+             Input.prepare(repository, digest, selection, observed_at)
+
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, "invalid")
+
+    assert {:error, :daily_digest_invalid_byte_limit} =
+             Input.prepare(repository, digest, selection, observed_at)
   end
 
   test "multi-megabyte evidence is file-backed while the handoff stays small", %{
@@ -162,6 +208,61 @@ defmodule PtcManager.DailyDigests.ReportTest do
 
     assert entry["source_id"] == "operation:42"
     assert entry["manifest_path"] =~ "operation-42-token/manifest.json"
+
+    for invalid <- [
+          %{"kind" => "bogus", "coverage" => "complete", "streams" => %{}},
+          %{"kind" => "operation", "coverage" => "complete", "streams" => %{"stdout" => "bad"}},
+          %{"kind" => "provider_session", "coverage" => "complete", "streams" => %{}}
+        ] do
+      File.write!(Path.join(directory, "manifest.json"), Jason.encode!(invalid))
+
+      assert {:ok, invalid_bundle} =
+               Bundle.publish(repository, digest, evidence, snapshot, %{
+                 action_id: digest.agent_action.id,
+                 attempt: digest.agent_action.attempt_count
+               })
+
+      assert "operation:42" in invalid_bundle.manifest["execution_artifacts"][
+               "missing_source_ids"
+             ]
+
+      assert invalid_bundle.manifest["coverage"]["execution_logs"] == "partial"
+    end
+
+    File.write!(
+      Path.join(directory, "manifest.json"),
+      Jason.encode!(%{
+        "kind" => "operation",
+        "coverage" => "error",
+        "streams" => %{}
+      })
+    )
+
+    assert {:ok, error_bundle} =
+             Bundle.publish(repository, digest, evidence, snapshot, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
+    assert Enum.find(
+             error_bundle.manifest["execution_artifacts"]["data"],
+             &(&1["source_id"] == "operation:42")
+           )["coverage"] == "error"
+
+    previous_limit = Application.get_env(:ptc_manager, :daily_digest_artifact_max_bytes)
+    Application.put_env(:ptc_manager, :daily_digest_artifact_max_bytes, 1)
+
+    try do
+      assert {:error, :daily_digest_artifact_budget_exceeded} =
+               Bundle.publish(repository, digest, evidence, snapshot, %{
+                 action_id: digest.agent_action.id,
+                 attempt: digest.agent_action.attempt_count
+               })
+    after
+      if previous_limit,
+        do: Application.put_env(:ptc_manager, :daily_digest_artifact_max_bytes, previous_limit),
+        else: Application.delete_env(:ptc_manager, :daily_digest_artifact_max_bytes)
+    end
   end
 
   test "quiet days publish without invented work or lessons", %{digest: digest} do

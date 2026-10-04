@@ -35,7 +35,9 @@ defmodule PtcManager.DailyDigests.Report do
          } = reference
        ) do
     map_size(reference) == 3 and
-      byte_size(url) <= 500 and iso?(observed_at) and text?(context, 500)
+      byte_size(url) <= 500 and
+      Regex.match?(~r/\Ahttps:\/\/github\.com\/[A-Za-z0-9_.~\/%?#=&:+-]+\z/, url) and
+      iso?(observed_at) and text?(context, 500)
   end
 
   defp supplemental_reference?(_), do: false

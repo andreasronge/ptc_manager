@@ -5,7 +5,7 @@ defmodule PtcManager.GitHub.Sync do
 
   alias PtcManager.Operations
   alias PtcManager.Gateway
-  alias PtcManager.GitHub.IssueSnapshot
+  alias PtcManager.GitHub.{IssueSnapshot, SyncRevision}
   alias PtcManager.Operations.{Issue, IssueDependency, Repository}
   alias PtcManager.Repo
 
@@ -85,60 +85,36 @@ defmodule PtcManager.GitHub.Sync do
        ) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
+    normalized =
+      Enum.map(remote_issues ++ missing_issues, &IssueSnapshot.normalize!(&1, repository))
+
     result =
-      Repo.transaction(fn ->
-        normalized =
-          Enum.map(remote_issues ++ missing_issues, &IssueSnapshot.normalize!(&1, repository))
+      with_projection(repository, normalized, fn projection ->
+        Repo.transaction(fn ->
+          reserve_projection!(projection)
+          {changed_count, synchronized_issues, context} = apply_issues(projection)
+          apply_dependencies(projection, synchronized_issues, context)
 
-        existing_issues =
-          Issue
-          |> where([issue], issue.repository_id == ^repository.id)
-          |> Repo.all()
+          synced_repository =
+            projection.repository
+            |> Repository.changeset(
+              %{
+                sync_status: "ok",
+                last_synced_at: now,
+                last_sync_error: nil,
+                github_viewer_login: viewer_login || projection.repository.github_viewer_login
+              }
+              |> put_label_names(label_names, now)
+            )
+            |> Repo.update!()
 
-        issues_by_number = Map.new(existing_issues, &{&1.number, &1})
-
-        changed_count =
-          Enum.count(normalized, fn attrs ->
-            upsert_issue(Map.get(issues_by_number, attrs.number), attrs) == :changed
-          end)
-
-        synchronized_issues =
-          Issue
-          |> where([issue], issue.repository_id == ^repository.id)
-          |> Repo.all()
-          |> Map.new(&{&1.number, &1})
-
-        dependency_context = dependency_context()
-
-        Enum.each(normalized, fn attrs ->
-          replace_dependencies(
-            Map.fetch!(synchronized_issues, attrs.number),
-            attrs.blocking_issues,
-            dependency_context
-          )
+          %{
+            repository: synced_repository,
+            issue_count: length(remote_issues),
+            changed_count: changed_count,
+            closed_count: Enum.count(missing_issues, &(&1["state"] == "closed"))
+          }
         end)
-
-        closed_count = Enum.count(missing_issues, &(&1["state"] == "closed"))
-
-        synced_repository =
-          repository
-          |> Repository.changeset(
-            %{
-              sync_status: "ok",
-              last_synced_at: now,
-              last_sync_error: nil,
-              github_viewer_login: viewer_login || repository.github_viewer_login
-            }
-            |> put_label_names(label_names, now)
-          )
-          |> Repo.update!()
-
-        %{
-          repository: synced_repository,
-          issue_count: length(remote_issues),
-          changed_count: changed_count,
-          closed_count: closed_count
-        }
       end)
 
     case result do
@@ -176,26 +152,21 @@ defmodule PtcManager.GitHub.Sync do
   end
 
   defp persist_issue(repository, remote_issue, opts) do
+    attrs = IssueSnapshot.normalize!(remote_issue, repository)
+
     result =
-      Repo.transaction(fn ->
-        attrs = IssueSnapshot.normalize!(remote_issue, repository)
+      with_projection(repository, [attrs], fn projection ->
+        Repo.transaction(fn ->
+          reserve_projection!(projection)
+          {changed_count, synchronized_issues, context} = apply_issues(projection)
+          apply_dependencies(projection, synchronized_issues, context)
 
-        existing = Repo.get_by(Issue, repository_id: repository.id, number: attrs.number)
-        changed? = upsert_issue(existing, attrs) == :changed
-
-        synchronized_issues =
-          Issue
-          |> where([issue], issue.repository_id == ^repository.id)
-          |> Repo.all()
-          |> Map.new(&{&1.number, &1})
-
-        replace_dependencies(
-          Map.fetch!(synchronized_issues, attrs.number),
-          attrs.blocking_issues,
-          dependency_context()
-        )
-
-        %{repository: repository, issue_number: attrs.number, changed?: changed?}
+          %{
+            repository: projection.repository,
+            issue_number: attrs.number,
+            changed?: changed_count == 1
+          }
+        end)
       end)
 
     case result do
@@ -224,9 +195,101 @@ defmodule PtcManager.GitHub.Sync do
     :structure_projected
   ]
 
+  defp with_projection(repository, attrs, write, attempts \\ 3)
+
+  defp with_projection(_repository, _attrs, _write, 0),
+    do: {:error, :concurrent_state_change}
+
+  defp with_projection(repository, attrs, write, attempts) do
+    case snapshot_projection(repository, attrs) do
+      {:ok, projection} ->
+        case write.(projection) do
+          {:error, :concurrent_state_change} ->
+            with_projection(repository, attrs, write, attempts - 1)
+
+          result ->
+            result
+        end
+
+      {:error, :concurrent_state_change} ->
+        with_projection(repository, attrs, write, attempts - 1)
+    end
+  end
+
+  defp snapshot_projection(repository, attrs) do
+    revision = Repo.get!(SyncRevision, 1).revision
+    current_repository = Repo.get!(Repository, repository.id)
+
+    existing_issues =
+      Issue
+      |> where([issue], issue.repository_id == ^repository.id)
+      |> Repo.all()
+
+    issues_by_number = Map.new(existing_issues, &{&1.number, &1})
+
+    dependencies_by_issue =
+      IssueDependency
+      |> join(:inner, [dependency], issue in Issue, on: dependency.issue_id == issue.id)
+      |> where([_dependency, issue], issue.repository_id == ^repository.id)
+      |> Repo.all()
+      |> Enum.group_by(& &1.issue_id)
+
+    projection = %{
+      revision: revision,
+      repository: current_repository,
+      attrs: attrs,
+      issues_by_number: issues_by_number,
+      dependencies_by_issue: dependencies_by_issue,
+      context: dependency_context()
+    }
+
+    if Repo.get!(SyncRevision, 1).revision == revision,
+      do: {:ok, projection},
+      else: {:error, :concurrent_state_change}
+  end
+
+  defp reserve_projection!(projection) do
+    {reserved, _rows} =
+      SyncRevision
+      |> where([revision], revision.id == 1 and revision.revision == ^projection.revision)
+      |> Repo.update_all(inc: [revision: 1])
+
+    if reserved != 1, do: Repo.rollback(:concurrent_state_change)
+  end
+
+  defp apply_issues(projection) do
+    {changed_count, issues_by_number} =
+      Enum.reduce(projection.attrs, {0, projection.issues_by_number}, fn attrs,
+                                                                         {changed_count, issues} ->
+        {status, issue} = upsert_issue(Map.get(issues, attrs.number), attrs)
+        changed_count = changed_count + if(status == :changed, do: 1, else: 0)
+        {changed_count, Map.put(issues, attrs.number, issue)}
+      end)
+
+    context =
+      Enum.reduce(issues_by_number, projection.context, fn {number, issue}, context ->
+        put_in(context, [:issues, {issue.repository_id, number}], issue)
+      end)
+
+    {changed_count, issues_by_number, context}
+  end
+
+  defp apply_dependencies(projection, issues_by_number, context) do
+    Enum.each(projection.attrs, fn attrs ->
+      issue = Map.fetch!(issues_by_number, attrs.number)
+
+      replace_dependencies(
+        issue,
+        attrs.blocking_issues,
+        context,
+        Map.get(projection.dependencies_by_issue, issue.id, [])
+      )
+    end)
+  end
+
   defp upsert_issue(nil, attrs) do
-    %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
-    :changed
+    issue = %Issue{} |> Issue.changeset(attrs) |> Repo.insert!()
+    {:changed, issue}
   end
 
   defp upsert_issue(%Issue{} = issue, attrs) do
@@ -234,11 +297,10 @@ defmodule PtcManager.GitHub.Sync do
       # No content change, so this is not a change a maintainer has to look at.
       # The projection still has to land, or a row written before those columns
       # existed would keep its defaults until GitHub happened to touch it.
-      persist_projection(issue, attrs)
-      :unchanged
+      {:unchanged, persist_projection(issue, attrs)}
     else
-      issue |> Issue.changeset(attrs) |> Repo.update!()
-      :changed
+      updated = issue |> Issue.changeset(attrs) |> Repo.update!()
+      {:changed, updated}
     end
   end
 
@@ -269,17 +331,16 @@ defmodule PtcManager.GitHub.Sync do
 
     if Enum.any?(projection, fn {field, value} -> Map.fetch!(issue, field) != value end) do
       issue |> Issue.changeset(projection) |> Repo.update!()
+    else
+      issue
     end
-
-    :ok
   end
 
-  defp replace_dependencies(issue, blockers, context) do
+  defp replace_dependencies(issue, blockers, context, projected_dependencies) do
     existing =
-      IssueDependency
-      |> where([dependency], dependency.issue_id == ^issue.id)
-      |> Repo.all()
-      |> Map.new(&{{&1.blocking_repository_full_name, &1.blocking_issue_number}, &1})
+      Map.new(projected_dependencies, fn dependency ->
+        {{dependency.blocking_repository_full_name, dependency.blocking_issue_number}, dependency}
+      end)
 
     blocker_keys = MapSet.new(blockers, &{&1.repository_full_name, &1.number})
 

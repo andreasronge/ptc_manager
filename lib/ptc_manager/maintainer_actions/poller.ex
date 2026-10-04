@@ -24,6 +24,7 @@ defmodule PtcManager.MaintainerActions.Poller do
   end
 
   def wake do
+    PtcManager.MaintainerActions.HousekeepingPoller.wake()
     Enum.each(1..16, &wake(name(:planning, &1)))
     Enum.each(1..16, &wake(name(:writing, &1)))
 
@@ -32,7 +33,8 @@ defmodule PtcManager.MaintainerActions.Poller do
 
   @impl true
   def init({lane, index}) when lane in [:planning, :writing] do
-    {:ok, schedule(%{lane: lane, index: index, task_ref: nil, timer_ref: nil}, 0)}
+    state = %{lane: lane, index: index, task_ref: nil, timer_ref: nil}
+    {:ok, schedule(state, initial_delay(lane, index, interval()))}
   end
 
   @impl true
@@ -40,9 +42,15 @@ defmodule PtcManager.MaintainerActions.Poller do
     if enabled?() and admitted?(state) do
       task =
         Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, fn ->
-          MaintainerActions.run_once(
-            lane: state.lane,
-            resource_class: resource_class(state.lane, state.index)
+          PtcManager.DatabaseDiagnostics.with_context(
+            "maintainer_actions:#{state.lane}:#{state.index}",
+            fn ->
+              MaintainerActions.run_once(
+                lane: state.lane,
+                resource_class: resource_class(state.lane, state.index),
+                housekeeping: false
+              )
+            end
           )
         end)
 
@@ -64,8 +72,8 @@ defmodule PtcManager.MaintainerActions.Poller do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def handle_cast(:wake, %{task_ref: nil} = state) do
-    {:noreply, schedule(state, 0)}
+  def handle_cast(:wake, %{task_ref: nil, timer_ref: nil} = state) do
+    {:noreply, schedule(state, initial_delay(state.lane, state.index, interval()))}
   end
 
   def handle_cast(:wake, state), do: {:noreply, state}
@@ -102,6 +110,18 @@ defmodule PtcManager.MaintainerActions.Poller do
       when lane in [:planning, :writing] and is_integer(index) and index > 0 do
     if index <= configured_capacity(:light), do: "light", else: "heavy"
   end
+
+  @doc false
+  def initial_delay(lane, index, interval_ms)
+      when lane in [:planning, :writing] and is_integer(index) and index > 0 and
+             is_integer(interval_ms) and interval_ms > 0 do
+    capacity = max(lane_capacity(lane), 1)
+    lane_offset = if lane == :planning, do: 0, else: 1
+    slot = rem((index - 1) * 2 + lane_offset, capacity * 2)
+    div(interval_ms * slot, capacity * 2)
+  end
+
+  def initial_delay(_lane, _index, _interval_ms), do: 0
 
   defp configured_capacity(:light),
     do: Application.get_env(:ptc_manager, :light_agent_capacity, 2)

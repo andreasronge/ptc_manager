@@ -7,6 +7,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   alias PtcManager.AgentProfiles
   alias PtcManager.Automations
   alias PtcManager.Gateway
+  alias PtcManager.GitHub.IssueSnapshot
+  alias PtcManager.Operations.Issue
   alias PtcManager.Operations.StopReport
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.WorkerAgentLogin
@@ -45,7 +47,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     args = remove_worktree_args(allocation)
     command = Keyword.get(opts, :command, Command)
 
-    worktree_removal_result(run_with(command, args), allocation)
+    result = worktree_removal_result(run_with(command, args), allocation)
+    if result == :ok, do: PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
+    result
   end
 
   def remove_worktree(allocation, _opts) do
@@ -60,10 +64,14 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       when is_binary(workspace) and workspace != "" and is_list(opts) do
     command = Keyword.get(opts, :command, Command)
 
-    worktree_removal_result(
-      run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]),
-      allocation
-    )
+    result =
+      worktree_removal_result(
+        run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]),
+        allocation
+      )
+
+    if result == :ok, do: PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
+    result
   end
 
   def discard_worktree(allocation, _opts), do: remove_worktree(allocation, [])
@@ -730,7 +738,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
     github_instruction =
       if job.publication_source == "agent" do
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Assign the issue to yourself before you start. Push this branch and create a pull request. Do not merge."
+        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request. Do not merge."
       else
         "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END. Do not push, create a pull request, or merge."
       end
@@ -756,10 +764,27 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       </issue_data>
       """
 
-    Automations.compose_prompt(job.prompt_instructions, context) <> continuation_instructions(job)
+    Automations.compose_prompt(job.prompt_instructions, context) <>
+      continuation_instructions(job, repository)
   end
 
-  defp continuation_instructions(job) do
+  defp continuation_instructions(
+         %{review_generation: generation, review_resume_mode: "implementation"} = job,
+         repository
+       )
+       when generation > 0 do
+    refresh =
+      """
+
+      Retained-worktree refresh: before validation, fetch the repository remote and integrate the current origin/#{repository.default_branch} into this branch while preserving all retained commits and uncommitted changes. Do not reset, discard, or start over. If integration conflicts cannot be resolved safely, write the stop report and stop. If dependency definitions or locks changed, refresh and compile dependencies before running the required gates.
+      """
+
+    refresh <> maintainer_continuation_instructions(job)
+  end
+
+  defp continuation_instructions(job, _repository), do: maintainer_continuation_instructions(job)
+
+  defp maintainer_continuation_instructions(job) do
     case Map.get(job, :review_continuation_instructions) do
       instructions when is_binary(instructions) and instructions != "" ->
         "\nMaintainer instructions for this continuation (the managed review and publication rules above still apply):\n" <>
@@ -812,7 +837,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
         true ->
           case Command.run(["pane", "close", pane]) do
-            {:ok, _} -> :ok
+            {:ok, _} -> PtcManager.ExecutionArtifacts.archive_job(job.id)
             error -> error
           end
       end
@@ -837,7 +862,8 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   def resume_review_job(job) do
     run = Enum.find(job.agent_runs, &(&1.fencing_token == job.fencing_token))
 
-    with %{agent_name: name, herdr_pane: old_pane} when is_binary(name) and is_binary(old_pane) <-
+    with :ok <- continuation_issue_unclaimed(job),
+         %{agent_name: name, herdr_pane: old_pane} when is_binary(name) and is_binary(old_pane) <-
            run,
          %{path: path} when is_binary(path) <- job.worktree_allocation,
          true <- File.dir?(path),
@@ -924,6 +950,24 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       _ -> {:error, :retained_workspace_not_ready}
     end
   end
+
+  defp continuation_issue_unclaimed(%{review_resume_mode: "implementation"} = job) do
+    github = Application.fetch_env!(:ptc_manager, :github_client)
+
+    with {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
+         %{state: "open"} = issue <- IssueSnapshot.normalize!(remote, job.repository),
+         false <- Issue.claimed?(issue) do
+      :ok
+    else
+      true -> {:error, {:continuation_not_started, :issue_claimed}}
+      %{state: _} -> {:error, {:continuation_not_started, :issue_not_open}}
+      {:error, _} -> {:error, {:continuation_not_started, :issue_claim_unknown}}
+    end
+  rescue
+    _ -> {:error, {:continuation_not_started, :issue_claim_unknown}}
+  end
+
+  defp continuation_issue_unclaimed(_job), do: :ok
 
   # A full snapshot distinguishes an absent retained agent from an unavailable
   # Herdr server. Never start a second writer while the old agent is working.

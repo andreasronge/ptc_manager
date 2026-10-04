@@ -16,6 +16,11 @@ config :ptc_manager, Oban,
   # An executor whose acknowledgement fails on a busy database leaves its row
   # `executing` for good; the lifeline re-runs or discards it after ten minutes.
   lifeline: [rescue_after: {10, :minutes}],
+  # Oban prunes nothing unless configured, and the two every-minute cron
+  # workers alone add about 2,900 rows a day. A week keeps discarded jobs for
+  # diagnosis; every uniqueness window that includes finished states is shorter.
+  # Small batches keep each delete, including the first backlog, a brief write.
+  pruner: [max_age: {7, :days}, limit: 1_000],
   plugins: [
     {Oban.Plugins.Cron,
      crontab: [
@@ -24,10 +29,18 @@ config :ptc_manager, Oban,
      ]}
   ]
 
-# Writers wait for SQLite's lock instead of failing after the 2 s default; the
-# console's pollers commit every few seconds, a failed write drops the
-# connection, and a swapping host can hold a commit for seconds.
-config :ptc_manager, PtcManager.Repo, busy_timeout: 5_000
+# Writers wait for SQLite's lock instead of failing after the 2 s default. The
+# connection queue tolerates the same bounded delay so a burst larger than the
+# pool is not rejected while the current writer can still finish. The request
+# deadline covers the queue target after its one adaptive doubling, the SQLite
+# writer wait, and cleanup margin.
+config :ptc_manager, PtcManager.Repo,
+  busy_timeout: 15_000,
+  queue_target: 15_000,
+  queue_interval: 2_000,
+  timeout: 50_000
+
+config :ptc_manager, :database_slow_query_ms, 1_000
 
 config :ptc_manager,
   operational_mode: :active,
@@ -69,8 +82,10 @@ config :ptc_manager,
   resource_operation_recovery_command: "/usr/bin/sudo",
   resource_operation_recovery_helper: "/usr/local/bin/ptc-manager-operation-recover",
   agent_memory_high_bytes: 2_684_354_560,
+  verify_agent_memory_high_bytes: 2_952_790_016,
   agent_memory_max_bytes: 3_221_225_472,
   operation_memory_high_bytes: 2_147_483_648,
+  verify_operation_memory_high_bytes: 2_577_399_808,
   operation_memory_max_bytes: 2_684_354_560,
   agent_action_timeout_ms: 1_800_000,
   agent_action_sync_retry_base_ms: 5_000,

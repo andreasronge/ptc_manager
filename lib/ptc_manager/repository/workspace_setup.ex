@@ -389,7 +389,12 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
     defp seal_artifact(artifact, result) do
       artifact = Process.delete({__MODULE__, artifact.path}) || artifact
-      File.close(artifact.io)
+      sync_result = :file.sync(artifact.io)
+      close_result = File.close(artifact.io)
+
+      coverage =
+        if sync_result == :ok and close_result == :ok, do: artifact.coverage, else: "error"
+
       bytes = File.stat!(artifact.path).size
 
       digest =
@@ -408,14 +413,16 @@ defmodule PtcManager.Repository.WorkspaceSetup do
       manifest = %{
         schema_version: 1,
         kind: "workspace_setup",
-        coverage: artifact.coverage,
+        coverage: coverage,
+        diagnostic:
+          if(coverage == "error", do: "workspace capture write or finalization failed", else: nil),
         exit_status: status,
         streams: %{
           combined: %{
             path: "combined.log",
             bytes: bytes,
             sha256: digest,
-            coverage: artifact.coverage
+            coverage: coverage
           }
         }
       }
@@ -428,7 +435,22 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
       :ok
     rescue
-      _ -> :ok
+      _ ->
+        require Logger
+        Logger.warning("Workspace capture finalization failed; output may be incomplete")
+
+        File.write(
+          Path.join(Path.dirname(artifact.path), "manifest.json"),
+          Jason.encode!(%{
+            schema_version: 1,
+            kind: "workspace_setup",
+            coverage: "error",
+            diagnostic: "workspace capture finalization failed",
+            streams: %{}
+          })
+        )
+
+        :ok
     end
 
     @doc false

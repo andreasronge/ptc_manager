@@ -9,27 +9,7 @@ defmodule PtcManager.RepoTransactionTest do
     # A deferred transaction is refused at that point; an immediate one already
     # holds the lock, so the second writer waits for it instead.
     test "a transaction that reads and then writes survives a concurrent commit" do
-      database =
-        Path.join(
-          System.tmp_dir!(),
-          "ptc-manager-immediate-#{System.unique_integer([:positive])}.db"
-        )
-
-      {:ok, repo} =
-        Repo.start_link(
-          name: nil,
-          database: database,
-          pool_size: 3,
-          pool: DBConnection.ConnectionPool,
-          busy_timeout: 2_000
-        )
-
-      Process.unlink(repo)
-
-      on_exit(fn ->
-        if Process.alive?(repo), do: Supervisor.stop(repo)
-        for suffix <- ["", "-shm", "-wal"], do: File.rm(database <> suffix)
-      end)
+      repo = start_repo!(pool_size: 3, busy_timeout: 2_000)
 
       Repo.put_dynamic_repo(repo)
       Repo.query!("CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
@@ -67,6 +47,118 @@ defmodule PtcManager.RepoTransactionTest do
       assert :committed = Task.await(concurrent_writer)
       assert %{rows: [[2]]} = Repo.query!("SELECT count(*) FROM counters")
     end
+
+    test "a writer burst larger than the pool waits for the current writer" do
+      repo =
+        start_repo!(
+          pool_size: 2,
+          busy_timeout: 300,
+          queue_target: 100,
+          queue_interval: 20,
+          timeout: 800
+        )
+
+      Repo.put_dynamic_repo(repo)
+      Repo.query!("CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+      test_pid = self()
+
+      holder =
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+
+          Repo.transaction(fn ->
+            Repo.query!("INSERT INTO counters (n) VALUES (1)")
+            send(test_pid, :writer_lock_held)
+
+            receive do
+              :release_writer -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :writer_lock_held
+
+      queued_writers =
+        for value <- [2, 3] do
+          Task.async(fn ->
+            Repo.put_dynamic_repo(repo)
+            Repo.query!("INSERT INTO counters (n) VALUES (?)", [value])
+          end)
+        end
+
+      {DBConnection.ConnectionPool, pool, :worker, _modules} =
+        Enum.find(Supervisor.which_children(repo), fn {id, _pid, _type, _modules} ->
+          id == DBConnection.ConnectionPool
+        end)
+
+      await_checkout_queue(pool, 1)
+      Process.sleep(150)
+      refute Enum.any?(queued_writers, &match?({:ok, _}, Task.yield(&1, 0)))
+      send(holder.pid, :release_writer)
+
+      assert {:ok, :ok} = Task.await(holder)
+      Enum.each(queued_writers, &Task.await/1)
+      assert %{rows: [[3]]} = Repo.query!("SELECT count(*) FROM counters")
+    end
+  end
+
+  describe "waiting for the write lock" do
+    # A connection waiting in SQLite's busy handler holds exqlite's connection
+    # mutex for the whole wait. Before exqlite 0.42.0, dropping the last
+    # reference to a statement prepared on that connection finalised it under
+    # the same mutex, so a write-lock holder that garbage-collected a waiter's
+    # statement stalled until the waiter gave up; the waiter could never
+    # succeed, because it was waiting for the stalled holder. In production
+    # every such wait ran to its full 15 seconds. Ecto leaves such statements
+    # in any process that queried on another pool connection, but whether a
+    # collection reaches one there varies, so this drives the driver directly.
+    # Against the old driver one run stalls most of the time, not always, and
+    # no call can confirm the waiter is inside the busy handler without taking
+    # the same mutex, so the test repeats the run.
+    test "a waiting writer does not stall the holder that drops its statement" do
+      for _run <- 1..3 do
+        assert {stalled_ms, :ok} = drop_waiters_statement_while_holding()
+        assert stalled_ms < 1_000
+      end
+    end
+
+    test "waiting writers take the lock once the holder commits" do
+      repo = start_repo!([pool_size: 3] ++ configured_busy_timeout())
+      Repo.put_dynamic_repo(repo)
+      Repo.query!("CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+      test_pid = self()
+
+      holder =
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+
+          Repo.transaction(fn ->
+            Repo.query!("INSERT INTO counters (n) VALUES (1)")
+            send(test_pid, :writer_lock_held)
+            receive do: (:release_writer -> :ok)
+          end)
+        end)
+
+      assert_receive :writer_lock_held
+
+      writers = [
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+          Repo.transaction(fn -> Repo.query!("INSERT INTO counters (n) VALUES (2)") end)
+        end),
+        Task.async(fn ->
+          Repo.put_dynamic_repo(repo)
+          Repo.insert_all("counters", [%{n: 3}])
+        end)
+      ]
+
+      Process.sleep(300)
+      send(holder.pid, :release_writer)
+
+      assert {:ok, :ok} = Task.await(holder)
+      assert [{:ok, _transaction}, {1, nil}] = Task.await_many(writers, 10_000)
+      assert %{rows: [[3]]} = Repo.query!("SELECT count(*) FROM counters")
+    end
   end
 
   describe "recognising a busy database" do
@@ -101,6 +193,95 @@ defmodule PtcManager.RepoTransactionTest do
              })
 
       refute RepoTransaction.busy?(%RuntimeError{message: "database is locked"})
+    end
+  end
+
+  defp start_repo!(options) do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-manager-immediate-#{System.unique_integer([:positive])}.db"
+      )
+
+    {:ok, repo} =
+      Repo.start_link(
+        [name: nil, database: database, pool: DBConnection.ConnectionPool] ++ options
+      )
+
+    Process.unlink(repo)
+
+    on_exit(fn ->
+      if Process.alive?(repo), do: Supervisor.stop(repo)
+      for suffix <- ["", "-shm", "-wal"], do: File.rm(database <> suffix)
+    end)
+
+    repo
+  end
+
+  # The writer wait from the application's own configuration.
+  defp configured_busy_timeout do
+    Application.fetch_env!(:ptc_manager, Repo)
+    |> Keyword.take([:busy_timeout])
+  end
+
+  # Returns how long the write-lock holder took to drop a statement prepared on
+  # a waiting connection and run its next statement, and the waiter's result.
+  defp drop_waiters_statement_while_holding do
+    alias Exqlite.Sqlite3
+
+    database =
+      Path.join(System.tmp_dir!(), "ptc-manager-drop-#{System.unique_integer([:positive])}.db")
+
+    on_exit(fn -> for suffix <- ["", "-shm", "-wal"], do: File.rm(database <> suffix) end)
+
+    {:ok, setup} = Sqlite3.open(database)
+    :ok = Sqlite3.execute(setup, "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER)")
+    {:ok, holder_db} = Sqlite3.open(database)
+    {:ok, waiter_db} = Sqlite3.open(database)
+    :ok = Sqlite3.set_busy_timeout(waiter_db, 2_000)
+    test_pid = self()
+
+    holder =
+      Task.async(fn ->
+        # Kept reachable until the drop, so no earlier collection frees it.
+        {:ok, foreign} = Sqlite3.prepare(waiter_db, "SELECT 1")
+        Process.put(:foreign, foreign)
+        :ok = Sqlite3.execute(holder_db, "BEGIN IMMEDIATE")
+        send(test_pid, :writer_lock_held)
+        receive do: (:drop -> :ok)
+
+        {microseconds, _} =
+          :timer.tc(fn ->
+            Process.delete(:foreign)
+            :erlang.garbage_collect()
+            {:ok, statement} = Sqlite3.prepare(holder_db, "SELECT count(*) FROM t")
+            Sqlite3.step(holder_db, statement)
+          end)
+
+        :ok = Sqlite3.execute(holder_db, "COMMIT")
+        div(microseconds, 1_000)
+      end)
+
+    assert_receive :writer_lock_held
+    waiter = Task.async(fn -> Sqlite3.execute(waiter_db, "BEGIN IMMEDIATE") end)
+    Process.sleep(200)
+    send(holder.pid, :drop)
+
+    {Task.await(holder), Task.await(waiter)}
+  end
+
+  defp await_checkout_queue(pool, minimum, attempts \\ 100)
+
+  defp await_checkout_queue(_pool, _minimum, 0), do: flunk("writer never entered pool queue")
+
+  defp await_checkout_queue(pool, minimum, attempts) do
+    [%{checkout_queue_length: length}] = DBConnection.get_connection_metrics(pool)
+
+    if length >= minimum do
+      :ok
+    else
+      Process.sleep(5)
+      await_checkout_queue(pool, minimum, attempts - 1)
     end
   end
 end

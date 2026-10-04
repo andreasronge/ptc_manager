@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "program", "version", "digest", "protocol", "pr_number"],
+  "properties": {
+    "outcome": {"const": "completed"},
+    "program": {"enum": ["codex", "claude_code", "pnpm", "node", "herdr", "mise", "cursor_agent"]},
+    "version": {"type": "string", "minLength": 1},
+    "digest": {"type": ["string", "null"]},
+    "protocol": {"type": ["integer", "null"]},
+    "pr_number": {"type": "integer", "minimum": 1}
+  }
+}

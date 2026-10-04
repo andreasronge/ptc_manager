@@ -22,6 +22,7 @@ defmodule PtcManager.MaintainerActions do
   alias PtcManager.Repository.SourceSnapshot
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Automations
+  alias PtcManager.Toolchain.PinBump
 
   # Actions that operate on one GitHub issue through the worker's `gh` session.
   # Each needs the same treatment: a fresh synchronization and an open-issue
@@ -57,7 +58,9 @@ defmodule PtcManager.MaintainerActions do
     github_pull_request_merge_identity_unavailable
     unexpected_github_commit_date
     invalid_github_head_sha
-    daily_digest_projection_invalid_or_oversized
+    daily_digest_invalid_byte_limit
+    daily_digest_artifact_budget_exceeded
+    daily_digest_manifest_too_large
     daily_digest_legacy_contract_cancelled
   )a
 
@@ -70,6 +73,20 @@ defmodule PtcManager.MaintainerActions do
   def terminal_daily_digest_evidence_errors, do: @terminal_daily_digest_evidence_errors
 
   def enabled?, do: Application.get_env(:ptc_manager, :agent_actions_enabled, false)
+
+  @doc "Active toolchain updates, keyed by repository and program for the deployments page."
+  def active_toolchain_bumps do
+    AgentAction
+    |> where(
+      [action],
+      action.action_key == "toolchain_pin_bump" and
+        action.state in ^AgentAction.pending_states()
+    )
+    |> Repo.all()
+    |> Map.new(fn action ->
+      {{action.repository_id, action.target_snapshot["program"]}, action.state}
+    end)
+  end
 
   def enqueue(action_key, issue_id, actor)
       when action_key in [
@@ -128,6 +145,19 @@ defmodule PtcManager.MaintainerActions do
   end
 
   def enqueue(_action_key, _target_id, _actor), do: {:error, :unknown_agent_action}
+
+  def enqueue_toolchain_bump(repository_id, program, actor)
+      when is_integer(repository_id) and is_binary(program) and is_binary(actor) do
+    with %Repository{} = repository <- Repo.get(Repository, repository_id),
+         {:ok, snapshot} <- PinBump.prepare(repository, program),
+         {:ok, attrs} <-
+           Catalog.build("toolchain_pin_bump", %{repository: repository, snapshot: snapshot}) do
+      enqueue_versioned(repository, "toolchain_pin_bump", attrs, actor)
+    else
+      nil -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc """
   Puts a stopped implementation's blocker onto its GitHub issue for a decision.
@@ -270,15 +300,21 @@ defmodule PtcManager.MaintainerActions do
     sync = Keyword.get(opts, :sync, ActionSync)
     lane = Keyword.get(opts, :lane, :any)
     resource_class = Keyword.get(opts, :resource_class, :any)
-    Operations.expire_agent_action_attempts()
 
-    if lane in [:planning, :any], do: reap_planning_worktrees()
+    if Keyword.get(opts, :housekeeping, true), do: run_housekeeping()
 
     case Operations.next_agent_action_sync_pending_for_lane(lane) do
       nil -> execute_next(adapter, sync, lane, resource_class)
       action -> reconcile_action(action, sync)
     end
     |> tap(&reconcile_collections/1)
+  end
+
+  @doc false
+  def run_housekeeping do
+    Operations.expire_agent_action_attempts()
+    reap_planning_worktrees()
+    :ok
   end
 
   # A finished action may have merged a member, handed off, or asked; the run
@@ -430,6 +466,22 @@ defmodule PtcManager.MaintainerActions do
           {:ok, deferred} -> {:deferred, deferred}
           {:error, defer_reason} -> {:error, defer_reason}
         end
+    end
+  end
+
+  defp prepare_for_execution(%{action_key: "toolchain_pin_bump"} = action, _adapter, _sync) do
+    case PinBump.preflight(action) do
+      :ok ->
+        {:ok, action}
+
+      {:error, :toolchain_source_moved} ->
+        fail_preflight(action.id, :toolchain_source_moved)
+
+      {:error, :toolchain_repository_mismatch} ->
+        fail_preflight(action.id, :toolchain_repository_mismatch)
+
+      {:error, reason} ->
+        defer_preflight(action.id, reason, action.sync_attempt_count)
     end
   end
 
@@ -836,6 +888,12 @@ defmodule PtcManager.MaintainerActions do
 
   defp handle_daily_digest_preflight_error(action, {:invalid_github_json, _reason}),
     do: fail_preflight(action.id, :invalid_github_json)
+
+  defp handle_daily_digest_preflight_error(
+         action,
+         {:daily_digest_projection_invalid, _} = reason
+       ),
+       do: fail_preflight(action.id, reason)
 
   defp handle_daily_digest_preflight_error(action, reason) do
     case Operations.defer_agent_action_source_preflight(

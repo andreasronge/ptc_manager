@@ -88,6 +88,20 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#board-job-#{job.id}", "Review findings and decide")
   end
 
+  test "an assignment during a running job is visible without cancelling it", %{conn: conn} do
+    job = approved_job("Work claimed during implementation") |> set_job_state("working")
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/board")
+    issue = Repo.get!(PtcManager.Operations.Issue, job.issue_id)
+
+    issue
+    |> PtcManager.Operations.Issue.changeset(%{github_assignees: %{"logins" => ["maintainer"]}})
+    |> Repo.update!()
+
+    Operations.notify_changed(:test)
+    assert has_element?(view, "#board-job-#{job.id}", "Taken by @maintainer")
+    assert Repo.get!(Job, job.id).state == "working"
+  end
+
   test "separates queued, working, and blocked deliveries", %{conn: conn} do
     queued = approved_job("Queue this change")
     working = approved_job("Implement this change") |> set_job_state("working")
@@ -658,9 +672,14 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#retry-stopped-#{stopped.id}")
     refute has_element?(view, "#ask-on-issue-#{stopped.id}")
 
+    # Automatic admission never restarts an unsafe stop, so Stop must not
+    # promise that it will.
+    refute view |> element("#acknowledge-stop-#{stopped.id}") |> render() =~ "starts it again"
+
     view |> element("#acknowledge-stop-#{stopped.id}") |> render_click()
 
     assert render(view) =~ "Set aside"
+    refute render(view) =~ "starts it again"
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 

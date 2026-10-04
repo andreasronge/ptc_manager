@@ -33,6 +33,6 @@
 1243	test/ptc_manager_web/live/daily_digest_live_test.exs
 3549	test/ptc_manager_web/live/dashboard_live_test.exs
 3831	test/ptc_manager_web/live/delivery_board_live_test.exs
-2963	test/ptc_manager_web/live/deployments_live_test.exs
+4500	test/ptc_manager_web/live/deployments_live_test.exs
 1023	test/scripts/duplication_gate_test.exs
 2773	test/scripts/test_suite_test.exs

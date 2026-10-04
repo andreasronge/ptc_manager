@@ -21,6 +21,9 @@ case "$1" in
   stream)
     exec "$herdr" --session "$session" remote-client-bridge
     ;;
+  stream-idle)
+    exec "$herdr" --session "$session" remote-client-bridge --idle-timeout-v1
+    ;;
   *)
     exit 126
     ;;

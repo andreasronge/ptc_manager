@@ -80,6 +80,7 @@ defmodule PtcManager.HealthSnapshotEvidenceTest do
         "window" => "-6 hours",
         "line_limit" => 10_000,
         "at_limit" => false,
+        "diagnostic_at_limit" => false,
         "total_lines" => 0,
         "session_noise_lines" => 0,
         "error_lines" => 0

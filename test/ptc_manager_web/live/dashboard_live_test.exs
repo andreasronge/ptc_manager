@@ -736,12 +736,12 @@ defmodule PtcManagerWeb.DashboardLiveTest do
   end
 
   test "shows an advisory GitHub claim and disables duplicate approval", %{conn: conn} do
-    repository = repository_fixture()
+    repository = repository_fixture(%{github_viewer_login: "maintainer"})
 
     issue =
       issue_fixture(repository, %{
         title: "Work already started elsewhere",
-        github_assignees: %{"logins" => ["outside-agent"]}
+        github_assignees: %{"logins" => ["maintainer"]}
       })
 
     proposal_fixture(issue)
@@ -750,7 +750,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert has_element?(
              view,
              "#issue-#{issue.id}-claimed",
-             "Taken by @outside-agent"
+             "Taken by @maintainer"
            )
 
     assert has_element?(view, "#approve-issue-#{issue.id}[disabled]")

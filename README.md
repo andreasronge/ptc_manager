@@ -1,5 +1,9 @@
 # PtcManager
 
+> **Personal project.** PtcManager is built for its author's own repositories
+> and machine. The source is public for reference only: it is not supported,
+> and issues and pull requests from others are not accepted.
+
 PtcManager is a private maintainer console for GitHub repositories and the
 Codex or Claude agents working on them. A maintainer reads plain-language
 summaries of issues and pull requests, presses one named button to start
@@ -11,8 +15,9 @@ The console has six views:
 
 - **Planning** — the issue backlog grouped by what you can do next, with
   private summaries, the canonical `ptc:ready`, `ptc:blocked`, and
-  `ptc:needs-decision` labels, `Blocked by #<number>` dependencies, your own
-  triage labels, and the contextual issue actions;
+  `ptc:needs-decision` labels, GitHub's native issue dependencies, your own
+  triage labels, and the contextual issue actions. `ptc:ready` records approval
+  to implement; `ptc:blocked` is an explicit hold that no dependency resolves;
 - **Delivery** — the approval-to-merge Kanban fed by read-only GitHub check,
   status, draft, and mergeability signals, with **Fix**, **Fix and merge**, and
   **Cancel agent** actions and an **Approve for merge** decision bound to the
@@ -304,21 +309,67 @@ page shows the waiting or running phase, timings, success rate, percentiles, and
 peak memory. If the coordinator is unavailable in an explicitly managed pane,
 the wrapper exits with status 75 instead of silently bypassing the limit.
 
-Linux cgroup-v2 containment is optional and off unless
-`PTC_OPERATION_CGROUPS=true`. The checked-in Herdr systemd unit delegates only
-the memory and process controllers. Its launcher keeps the Herdr server in a
-separate leaf; each managed pane then receives an agent memory boundary and
-each coordinated command a child cgroup. That makes unwrapped agent commands
-remain bounded and lets PtcManager measure the complete command process tree.
+Linux production releases enable cgroup-v2 containment by default;
+`PTC_OPERATION_CGROUPS=false` is the explicit escape hatch. The checked-in Herdr
+systemd unit delegates only the memory and process controllers. Its launcher
+keeps the Herdr server in a separate leaf; each managed pane then receives an
+agent memory boundary and each coordinated command a child cgroup. That makes
+unwrapped agent commands remain bounded and lets PtcManager measure the complete
+command process tree.
+The `verify` operation has a 2,458 MiB `memory.high` (set by
+`PTC_VERIFY_OPERATION_MEMORY_HIGH_BYTES`); other labels retain 2 GiB. All labels
+retain the 2.5 GiB `memory.max`. Managed agent panes use at least 2.75 GiB
+`memory.high` (set by `PTC_VERIFY_AGENT_MEMORY_HIGH_BYTES`) and retain their
+3 GiB `memory.max`; the higher floor applies even when an existing environment
+file still sets `PTC_AGENT_MEMORY_HIGH_BYTES=2684354560`. The operation capacity
+remains one. A verify command also lifts the soft limit on a retained pane's
+existing agent cgroup, so a deploy does not leave that pane throttled at its
+older parent limit. The
+verify allowance comes from a production-shaped ptc_runner pre-push measurement
+on the 4-core, 7.6 GiB worker: serial core tests, ExDoc, static analysis,
+Dialyzer, and Viewer sampled 1,520, 1,044, 1,714, 2,048, and 341 MiB in the
+cold run. Only Dialyzer's cold project PLT build hit `memory.high` (1,101
+events); it also hit the limit with warm caches (588 events). Repeating the
+cold full sequence at 2,458 MiB completed with a 2,322 MiB peak and zero
+operation high events, but its 2.5 GiB parent recorded 466 local high events.
+Repeating the cold project PLT build with the parent at 2.75 GiB recorded zero
+high events in both cgroups. At measurement time retained Herdr agent cgroups used about
+2.6 GiB in total, including the measuring agent, and the console used about
+0.65 GiB. The new soft allowance adds 410 MiB of reclaim-free headroom for
+one operation and up to 256 MiB per agent pane. For the one heavy and two
+light admitted sessions, all reaching their soft limits would add 768 MiB of
+soft headroom; retained panes are included in the measured usage above. No hard
+memory claim or slot capacity increases. At the operation's hard claim,
+roughly 2.7 GiB of the host's RAM remains beyond other retained agents and
+the console. [Issue #194](https://github.com/andreasronge/ptc_manager/issues/194)
+records the per-phase timings and cache comparison.
 If a wrapper or worker disappears, the broker first fences the stale attempt,
 then the root-owned bounded recovery helper terminates that exact child cgroup
 before releasing its operation slot. Waiting wrappers send heartbeats and are
 cancelled when they disappear, so abandoned queue rows cannot consume capacity.
 When cgroup containment is disabled, crash recovery deliberately keeps the slot
-fenced for maintainer attention because wrapper disappearance cannot prove that
-its child process tree stopped.
-Enable this only after installing the versioned Herdr unit, launcher, and
-sourceable agent-context helper. It is never enabled on the Mac.
+fenced for a grace period so a delayed heartbeat can restore the live operation;
+it then enters maintenance because wrapper disappearance cannot prove that its
+child process tree stopped. The production default requires the versioned Herdr
+unit, launcher, and sourceable agent-context helper installed by deployment. It
+is never enabled by default on the Mac.
+
+SQLite permits one writer. High-frequency Herdr and maintainer-action work is
+phase-shifted, and only one housekeeping poller runs shared action expiry and
+cleanup work. Queries that spend at least one second waiting, and transactions
+that hold the writer slot for at least one second, emit bounded warnings with
+their workload, process identity, timings, and result class; SQL text and
+parameters are not included. Set `PTC_DATABASE_SLOW_QUERY_MS` to tune that
+diagnostic threshold. In production, writers wait up to 15 seconds by default;
+set `PTC_DATABASE_BUSY_TIMEOUT_MS` to tune that wait and the connection queue's
+target. The queue is sampled every two seconds (or sooner for a shorter custom
+writer wait), and DBConnection may double its target before shedding load.
+`PTC_DATABASE_TIMEOUT_MS` therefore defaults to 50 seconds and must cover the
+doubled queue target, one complete SQLite writer wait, and five seconds for
+cleanup.
+
+GitHub issue snapshots load existing issues and dependency context before taking
+the writer slot, then reserve a revision that rejects stale projections.
 
 The deterministic state-machine tests run in the normal suite. A sub-second
 socket/process integration test is kept out of the default suite and can be run
@@ -369,7 +420,9 @@ The authenticated routes are:
   deployment canaries. **Performance** (`/operations/performance`) shows
   expensive-operation statistics and workspace-preparation timings. Select an
   agent on either tab to open a bounded, read-only terminal panel; active
-  panels refresh every five seconds and expose no prompt or input controls;
+  panels refresh every five seconds and expose no prompt or input controls.
+  Unmanaged Herdr sessions are shown as such, and an idle terminal is not
+  labelled as running work or raised as a managed action needing attention;
 - `/automations` — one row per automation of the selected repository: enabled
   switch, a plain-language "how it runs" summary, agent policy, last run, and
   next run, plus the five latest runs. `/automations/:id` opens one automation:
@@ -730,6 +783,9 @@ catalog contains:
 
 - **Prepare issue**, which rewrites or closes the issue and leaves exactly one
   of `ptc:ready`, `ptc:blocked`, or `ptc:needs-decision` on an open issue;
+  `ptc:ready` is approval to implement, while `ptc:blocked` is an explicit hold
+  that remains until a maintainer removes it. Ordering uses GitHub's native
+  issue dependencies; a `Blocked by #N` body line is only for people and is not read;
 - **Review issue**, which gives a configured Herdr agent a bootstrapped,
   disposable worktree in which it can run tests or create temporary regression
   tests, then asks it to challenge and improve issue readiness and apply the
@@ -890,7 +946,10 @@ technical branch error, until you answer it with one of three buttons:
   back through Planning's **Needs your decision** group and its existing
   decision form;
 - **Stop** sets the card aside. The worktree stays on Operations until you
-  discard it.
+  discard it. With auto-fix on, an issue that is still `ptc:ready` starts again
+  on its own once it changes on GitHub after you set it aside: a comment, an
+  edit, or a relabel back to `ptc:ready` after a decision. Until then it stays
+  aside, and an agent that called the work unsafe is never restarted this way.
 
 A fourth button, **Resume**, appears on any failed or lost job whose worktree
 is still on the worker and whose agent left a session to continue from,
@@ -989,7 +1048,15 @@ and streams, workspace setup output, and supported provider session JSONL use
 the same root. Daily manifests index exact available artifacts by source ID and
 artifact-root-relative path. Capture manifests record coverage, sizes, hashes,
 and exit status without claiming a total ordering between streams. Defaults are
-256 MB per command stream and 32 MB per daily bundle. Capture failure is surfaced
+256 MB per command stream and 32 MB per delivery JSON. Daily artifact indexing
+and replay verification fail explicitly above 1,000 artifact manifests, 512 MB
+of retained bytes, a 1 MB bundle manifest, or 30 seconds of hashing. The aggregate
+file and byte budgets use `daily_digest_artifact_max_files` and
+`daily_digest_artifact_max_bytes` application configuration. Exceeding a budget
+fails the capture rather than silently omitting evidence. Provider sessions are
+sealed at terminal-run observation and after provider shutdown during workspace
+removal or cancellation, while provider-owned session files remain available. Session archives publish through unique staging
+directories, so interrupted copies can be retried without overwriting sealed inputs. Capture failure is surfaced
 without replacing the command result or retaining its resource slot. Finalized,
 unreferenced artifacts expire after 90 days by default; active and daily-bundle-
 referenced captures are protected. Queued inline-contract daily actions are
@@ -1027,22 +1094,23 @@ work. In production the snapshot directory is owned by the coordinator beneath
 the sticky shared-output parent, so the worker can traverse and read it but
 cannot rewrite, rename, or replace it.
 
-For issue dependencies, GitHub remains authoritative. Maintainer actions write
-the canonical `Blocked by #<number>` marker into the dependent issue and apply
-`ptc:blocked`. GitHub synchronization projects those markers into local
-dependency rows for display and safety checks. An unresolved or unknown blocker
+For issue dependencies, GitHub remains authoritative. Ordering between issues
+uses GitHub's native blocked-by relation, which synchronization projects into
+local dependency rows for display and safety checks. A `Blocked by #N` line in
+an issue body is only for people and is not read. `ptc:ready` is the maintainer's
+approval to implement; `ptc:blocked` is an explicit hold that no dependency
+completion removes. An unresolved or unknown blocker
 prevents approval; if it appears after approval, dispatch cancels that stale job
 before starting an agent. An approval freezes the issue's title and body as the
-maintainer saw them: a comment or the console's own assignment after the
-approval re-freezes the approval to the current issue at dispatch, so a
-decision comment or a retry after an agent stopped does not cancel the job,
-while a changed title or body cancels it and asks for a fresh approval, and a
-label that no longer says ready, an assignment to someone else, or new
+maintainer saw them. A comment after approval re-freezes it to the current issue
+at dispatch, so a decision comment or a retry after an agent stopped does not
+cancel the job. A changed title or body cancels it and asks for fresh approval;
+a label that no longer says ready, any assignment, or new
 sub-issues refuse dispatch as they refuse approval. The dashboard's card for
-the cancelled job says which in words. Closing every blocker does not
-auto-start the dependent
-issue: the dashboard asks the maintainer to run **Prepare issue** again and make
-a fresh approval decision. At most 100 dependency rows are projected per issue,
+the cancelled job says which in words. Closing every blocker makes a
+`ptc:ready` dependent eligible for automatic admission on the next successful
+repository synchronization, without changing its label. At most 100 dependency
+rows are projected per issue,
 and one repository sync performs at most 100 lookups for blockers that are not
 already known locally. An issue declaring more than 100 blockers gets a visible
 overflow warning and remains ineligible for approval until its dependency list
@@ -1051,12 +1119,13 @@ is simplified. Definitive missing or pull-request references remain visible as
 projection remain approval- and dispatch-ineligible until their first successful
 GitHub synchronization.
 
-GitHub assignment is projected as the advisory work claim. Issue cards show
-`Taken by @login`, and PtcManager will not approve duplicate implementation
-while any assignee remains. Implementation agents that publish their own pull
-request are told to assign the issue to themselves before work begins, and
-`ptc_runner`'s worktree helper does the same for work started by hand; the
-periodic issue sync therefore does not need to fetch every comment. Rows
+GitHub assignment is projected as the advisory work claim. Planning and active
+job cards show `Taken by @login`, and PtcManager will not approve or dispatch
+implementation while any assignee remains, including the repository's viewer
+account. Retained-worktree resume checks the claim again before relaunch. An
+assignment during a running job is shown but does not cancel it.
+PtcManager's own claim is the job record; implementation agents do not assign
+issues. The periodic issue sync does not need to fetch every comment. Rows
 that predate this projection remain approval-ineligible until their first
 successful GitHub synchronization confirms the assignment state.
 
@@ -1080,12 +1149,24 @@ mix ecto.reset
 
 ### Automatically implementing ready issues
 
+For the public `ptc_manager` repository, issue creation is restricted to
+collaborators in GitHub settings. Existing issues are locked, and
+`.github/workflows/lock-issues.yml` locks newly opened or reopened issues.
+The owner and agents using an account with write access can still comment on
+locked issues. Keep the repository's collaborator list limited to trusted
+accounts: collaborators can also apply `ptc:ready`. These settings are
+repository-specific; managed repositories such as `ptc_runner` can continue
+accepting public issues and comments.
+
 Under **Configuration**, each repository has **Automatically implement ready
 issues**, off by default. Enable it for `andreasronge/ptc_manager` to authorize
 implementation without a separate approval click for every issue. Other
 repositories remain off unless explicitly enabled. Anyone or any preparation
-agent with permission to apply `ptc:ready` can make an issue eligible under this
-policy. Merge and deployment approval rules are unchanged.
+agent with permission to apply `ptc:ready` can record the maintainer's approval
+to implement under this policy. Ordering uses GitHub's native issue dependency;
+`ptc:blocked` remains an explicit hold until a maintainer removes it, and body
+text such as `Blocked by #N` is not read. Merge and deployment approval rules
+are unchanged.
 
 After a successful GitHub synchronization, deterministic code admits open,
 unassigned `ptc:ready` issues with resolved dependencies and no conflicting
@@ -1098,14 +1179,24 @@ risk; an absent or stale assessment uses the existing `standard` fallback.
 Models, review budgets, publication, and worker capacity follow the existing
 implementation pipeline.
 
-Any previous implementation job (including a manual, failed, or cancelled job)
-or a known linked pull request prevents automatic admission. Open pull requests
+Any previous implementation job that ran, any failed job, or a known linked pull
+request prevents automatic admission. A job cancelled before any agent run was
+recorded does not consume eligibility. Open pull requests
 are refreshed before admission; unavailable PR discovery defers automatic work. Retrying requires
 an explicit manual action; removing/reapplying the label, editing the issue, or
-disabling/re-enabling the setting does not reset its history. Admission and job
-creation share one write transaction. At most five automatic jobs per repository
-are admitted per UTC day, including failed and cancelled jobs; subsequent syncs
-pick up the remaining backlog after the budget resets. Existing capacity limits
+disabling/re-enabling the setting does not reset its history. The one exception
+is an attempt whose agent stopped with a report you set aside with **Stop**: an
+issue still `ptc:ready` that changes on GitHub after that — a comment, an edit,
+or a relabel after a decision — is admitted once more, unless the agent called
+the work unsafe. After **Ask on the issue**, only a change made once that
+question has finished counts, and a question that failed keeps the issue aside.
+A resumed attempt that fails again without a new report is not restarted this
+way; use its card's recovery buttons. Admission and job
+creation share one write transaction. Each repository's daily limit (five by
+default, 1–50, set next to the toggle) caps automatic jobs admitted per UTC day,
+including failed and cancelled jobs; manual approvals do not count. Subsequent
+syncs pick up the remaining backlog after the budget resets or the limit is
+raised. Existing capacity limits
 bound how many run concurrently.
 
 Dispatch re-reads GitHub and checks the frozen issue version, readiness,
@@ -1386,6 +1477,13 @@ when they differ, and **Up to date** when they match. **Check for updates**
 refreshes the comparison. The private repository is read using the existing
 `GITHUB_READ_TOKEN`; no separate GitHub account is introduced.
 
+For this repository, the page also reads `deploy/toolchain-versions` at that
+exact default-branch commit and previews each pin or digest that the next
+deployment would change. An invalid manifest is shown as a deployment error.
+A Herdr bump is labelled as taking effect only after a restart with no
+retained agents. A fork that deploys itself can set
+`PTC_TOOLCHAIN_REPOSITORY=owner/name` for its own preview and update actions.
+
 **Deploy when safe** records an audited request and enters drain mode: existing
 managed work may finish, but no new work starts. The drain waits only for work
 PtcManager is driving: runs that are queued, starting, or working, and blocked
@@ -1547,6 +1645,18 @@ verifies `/health` in canary mode,
 removes the persistent systemd maintenance override, and makes exact canary
 activation its final transition. Only then do ordinary queues resume.
 
+When operation cgroups are enabled, deployment verifies before the release swap
+that the Herdr service has the delegated memory and process controllers, that
+its launcher is in the isolated server leaf, and that the operation context and
+recovery helpers are installed.
+The managed deployment owns their default paths and rejects production path
+overrides, so its prerequisite check always verifies the same versioned files
+that it installed.
+Any deployment failure prints a bounded diagnostic bundle before rollback or
+forward repair: deployment phase and commit, coordinator and worker status,
+health output, SQLite quick-check/WAL state, delegated cgroup layout, and recent
+coordinator and worker journal lines. The bundle never prints environment files.
+
 Before the canary starts, a failure can safely restore both the previous
 release and the SQLite backup. The canary itself is the effect boundary because
 it records a durable run and proposal. A failure at or after that point never
@@ -1648,9 +1758,12 @@ also writes `/etc/ptc_manager/health-snapshot.env` from the coordinator's
 resolved `DATABASE_PATH` and `PTC_HEALTH_OUT`, so collection reads the same
 database and publishes the same path that the running application expects. It
 exports capacity settings,
-record IDs, states and timings, plus counts from at most 10,000 service journal
-lines. Live record lists are limited to 500 rows; a list at that limit may be
-incomplete. The log counts include a limit indicator. Raw journal messages,
+record IDs, states and timings, plus counts from at most 10,000 recent service
+journal entries. Error and warning counts use a separate journal search that
+filters before applying its 10,000-entry limit, so sudo session noise cannot
+hide older database failures. `at_limit` and `diagnostic_at_limit` identify
+truncated samples independently. Live record lists are limited to 500 rows; a
+list at that limit may be incomplete. Raw journal messages,
 agent status text, labels and names stay private because they can contain secrets
 or agent-controlled instructions.
 
@@ -1793,6 +1906,27 @@ beside the version `/usr/local/bin` links, so something installed by hand is
 visible without logging in to the machine. It reads link targets rather than
 running any of these programs, and it never changes them: the fix for drift is a
 commit and a deployment, which the same page offers.
+
+**Check for updates** beside each machine program reads its published release
+and records the result and check time. Node stays within its pinned major line.
+Herdr and mise checks capture the published digest, and Herdr's protocol
+number. The Cursor check reads the version from its install script and hashes
+the Linux x64 archive, since Cursor publishes no digest. Erlang and Elixir
+updates are reported but remain manual because they change how the release is
+built. A newer major version is reported for review. For an eligible update in
+the same major line,
+**Open update PR** records the exact checked version and default-branch commit
+as one approved maintainer action. The agent changes one manifest line and
+the matching digest and protocol pins where applicable, then opens a draft PR
+after `mix precommit`; PtcManager verifies the PR base, sole
+changed file, and complete manifest at its head against the approved change.
+The button shows the queued or running state and cannot queue the same update
+again until that action finishes. Agent history on the Operations page shows
+the result if an attempt fails. Each attempt opens a fresh Herdr workspace for
+the configured checkout, so a retained terminal from an earlier attempt cannot
+block a retry.
+The PR still needs human review and a separate deployment. Neither button
+installs software on the host.
 
 pnpm earns its place for repositories that use it: it links a worktree's
 `node_modules` into a shared content-addressed store instead of copying a tree
@@ -1945,10 +2079,13 @@ out of band before enabling the alias.
 
 Every deployment separately provisions a loopback-only forced key, pins it to
 the server's actual SSH host key, and runs `herdr machine add` in an isolated
-configuration. That canary verifies discovery, the worker-owned server socket,
-the pinned Herdr protocol, saved-machine streaming, and rejection of arbitrary
-commands before the PtcManager release is activated. A Herdr version bump must
-first add its protocol contract to the canary.
+configuration with both the running and pinned Herdr clients. That canary
+verifies discovery, the worker-owned server socket, the pinned Herdr protocol,
+saved-machine streaming, and rejection of arbitrary commands before the
+PtcManager release is activated. The forced bridge recognizes the framed
+remote-output probe from Herdr 0.9.1, so a newer local client can attach while
+retained agents keep the server on 0.9.0. A Herdr version bump must first add
+its protocol contract to the canary.
 
 The forced command answers Herdr's bounded platform and binary probes without
 evaluating their shell input, then delegates only server status and the remote

@@ -9,6 +9,21 @@ defmodule PtcManager.Automations.Defaults do
 
   @definitions [
     %{
+      key: "toolchain_pin_bump",
+      name: "Open toolchain update PR",
+      description: "Change one approved toolchain pin and open a draft PR for human review.",
+      target_type: "repository",
+      execution_profile: "generic_ephemeral",
+      github_access: "trusted_direct",
+      queue_lane: "writing",
+      resource_class: "light",
+      lock_policy: %{"type" => "target"},
+      timeout_seconds: 1_800,
+      result_type: "toolchain_pin_bump",
+      prompt:
+        "Update only the approved version and its approved digest and protocol pins in deploy/toolchain-versions. Run mix precommit, commit the change, and open a draft pull request for human review. Do not merge or change any other file or pin. Return the pull request number and the exact approved program, version, digest, and protocol values."
+    },
+    %{
       key: "post_cancellation_note",
       name: "Post cancellation explanation",
       description:
@@ -67,7 +82,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "issue_maintenance",
       prompt:
-        "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), rejected by closing it, or split (`split`) when it cannot be delivered as one reviewable pull request: more than one independently reviewable deliverable, more than one subsystem, or a change too large for one review pass. Splitting means turning the plan into GitHub sub-issues with native blocked-by ordering as described in the runtime context, never marking the parent ready. Do not implement it, and explain the result simply."
+        "Prepare the issue for implementation. Re-read the issue and relevant code, then update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), rejected by closing it, or split (`split`) when it cannot be delivered as one reviewable pull request: more than one independently reviewable deliverable, more than one subsystem, or a change too large for one review pass. Splitting means turning the plan into GitHub sub-issues with native blocked-by ordering as described in the runtime context, never marking the parent ready. When another issue is the only obstacle, record a native blocked-by relation and label this issue `ptc:ready` if it is otherwise fully specified. Use `ptc:blocked` only for a hold no issue captures. Do not implement it, and explain the result simply."
     },
     %{
       key: "report_issue_blocker",
@@ -97,7 +112,7 @@ defmodule PtcManager.Automations.Defaults do
       timeout_seconds: 1_800,
       result_type: "issue_maintenance",
       prompt:
-        "Review whether the issue is genuinely ready to implement. Use the disposable workspace to run relevant tests and create temporary reproduction tests when useful. Improve the issue and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), rejected by closing it, or split (`split`) when it cannot be delivered as one reviewable pull request: more than one independently reviewable deliverable, more than one subsystem, or a change too large for one review pass. Splitting means turning the plan into GitHub sub-issues with native blocked-by ordering as described in the runtime context, never marking the parent ready. Exploratory source changes will be discarded: do not implement the fix, commit, push, or open a pull request. Explain the result simply."
+        "Review whether the issue is genuinely ready to implement. Use the disposable workspace to run relevant tests and create temporary reproduction tests when useful. Improve the issue and update GitHub with one outcome: ready (`ptc:ready`), blocked (`ptc:blocked`), needs a maintainer decision (`ptc:needs-decision`), rejected by closing it, or split (`split`) when it cannot be delivered as one reviewable pull request: more than one independently reviewable deliverable, more than one subsystem, or a change too large for one review pass. Splitting means turning the plan into GitHub sub-issues with native blocked-by ordering as described in the runtime context, never marking the parent ready. When another issue is the only obstacle, record a native blocked-by relation and label this issue `ptc:ready` if it is otherwise fully specified. Use `ptc:blocked` only for a hold no issue captures. Exploratory source changes will be discarded: do not implement the fix, commit, push, or open a pull request. Explain the result simply."
     },
     %{
       key: "structure_collection",

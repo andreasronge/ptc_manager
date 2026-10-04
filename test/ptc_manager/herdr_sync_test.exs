@@ -2,6 +2,7 @@ defmodule PtcManager.HerdrSyncTest do
   use PtcManager.DataCase, async: false
 
   import Ecto.Query
+  import PtcManager.TransactionAssertions
 
   alias PtcManager.Herdr.{Client, Sync}
   alias PtcManager.Operations
@@ -432,7 +433,7 @@ defmodule PtcManager.HerdrSyncTest do
     assert Enum.map(Operations.list_agent_timeline(), & &1.id) == [action_run.id]
   end
 
-  test "an early idle snapshot preserves an unattached action run in starting state" do
+  test "a managed action stays active between its initialization and work prompts" do
     repository = repository_fixture()
     worker = worker_fixture(%{worker_key: "herdr:early-action-snapshot"})
     now = now()
@@ -494,6 +495,28 @@ defmodule PtcManager.HerdrSyncTest do
     assert rebound.state == "starting"
     assert rebound.external_key == "early-action-snapshot:early-final-session"
     assert Repo.aggregate(AgentRun, :count) == 1
+
+    {:ok, _attached} = Operations.update_agent_run(rebound, %{state: "working"})
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "codex",
+           "name" => "repair_pr1705_a#{action.id}_f1",
+           "agent_status" => "done",
+           "pane_id" => "w8:p1",
+           "workspace_id" => "w8",
+           "agent_session" => %{"value" => "early-final-session"}
+         }
+       ]}
+    )
+
+    assert {:ok, %{agent_count: 1}} =
+             Sync.sync(client: FakeClient, session: "early-action-snapshot")
+
+    assert Repo.get!(AgentRun, action_run.id).state == "idle"
   end
 
   test "operations hides an orphan action duplicate even after Herdr has already stopped" do
@@ -661,6 +684,18 @@ defmodule PtcManager.HerdrSyncTest do
 
     worker = worker_fixture(%{worker_key: "herdr:managed"})
 
+    {:ok, pending_run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "starting",
+        agent_name: "impl_j#{job.id}_f1",
+        started_at: now(),
+        last_heartbeat_at: now(),
+        fencing_token: 1
+      })
+
     allocation =
       %WorktreeAllocation{}
       |> WorktreeAllocation.changeset(%{
@@ -683,10 +718,14 @@ defmodule PtcManager.HerdrSyncTest do
        ]}
     )
 
-    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+    end)
 
     run = Repo.one!(from run in AgentRun, where: run.job_id == ^job.id)
+    assert run.id == pending_run.id
     assert run.fencing_token == 1
+    assert run.external_key == "managed:managed-agent"
     assert Repo.get!(Job, job.id).state == "working"
     recovered_allocation = Repo.get!(WorktreeAllocation, allocation.id)
     assert recovered_allocation.herdr_workspace == "recovered-workspace"
@@ -1129,7 +1168,17 @@ defmodule PtcManager.HerdrSyncTest do
     issue = issue_fixture(repository)
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
-    worker = worker_fixture(%{worker_key: "herdr:missing-retained"})
+
+    worker =
+      worker_fixture(%{
+        worker_key: "herdr:missing-retained",
+        worker_incarnation_id: "terminal-worker",
+        herdr_incarnation_id: "terminal-herdr",
+        snapshot_sequence: 1,
+        healthy_snapshot_count: 2,
+        coordinator_incarnation_id: RuntimeIncarnation.current()
+      })
+
     now = now()
 
     job
@@ -1167,7 +1216,7 @@ defmodule PtcManager.HerdrSyncTest do
         fencing_token: 1
       })
 
-    Process.put(:herdr_result, {:ok, []})
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([], 2)})
     assert {:ok, %{lost_count: 1}} = Sync.sync(client: FakeClient, session: "missing-retained")
 
     assert Repo.get!(AgentRun, run.id).state == "lost"
@@ -1181,13 +1230,57 @@ defmodule PtcManager.HerdrSyncTest do
       |> Map.put("name", run.agent_name)
       |> Map.put("workspace_id", "missing-retained-workspace")
 
-    Process.put(:herdr_result, {:ok, [remote]})
-    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "missing-retained")
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([remote], 3)})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "missing-retained")
+    end)
 
     assert Repo.get!(AgentRun, run.id).state == "working"
     reacquired = Repo.get!(WorktreeAllocation, allocation.id) |> Repo.preload(:job)
     assert reacquired.state == "active"
     assert Operations.worktree_consumes_execution_slot?(reacquired)
+  end
+
+  test "a settled identityless snapshot uses a write-only transaction" do
+    %{run: run, worker: worker} =
+      managed_job_fixture("identityless-steady", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    remote = remote_agent("done") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, %{lost_count: 0}} =
+               Sync.sync(client: FakeClient, session: "identityless-steady")
+    end)
+
+    refreshed_worker = Repo.get!(Worker, worker.id)
+    assert refreshed_worker.snapshot_sequence == 0
+    assert refreshed_worker.healthy_snapshot_count == 0
+  end
+
+  test "an idle retained pane for a terminal job stays on the write-only path" do
+    %{job: job, run: run} =
+      managed_job_fixture("terminal-idle", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    job |> Job.changeset(%{state: "failed", ended_at: now()}) |> Repo.update!()
+    remote = remote_agent("idle") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, %{lost_count: 0}} = Sync.sync(client: FakeClient, session: "terminal-idle")
+    end)
+
+    assert Repo.get!(AgentRun, run.id).state == "done"
+    assert Repo.get!(Job, job.id).state == "failed"
   end
 
   test "a repeated retained snapshot does not erase worktree attention" do
@@ -1273,7 +1366,17 @@ defmodule PtcManager.HerdrSyncTest do
     issue = issue_fixture(repository)
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
-    worker = worker_fixture(%{worker_key: "herdr:terminal"})
+
+    worker =
+      worker_fixture(%{
+        worker_key: "herdr:terminal",
+        worker_incarnation_id: "terminal-worker",
+        herdr_incarnation_id: "terminal-herdr",
+        snapshot_sequence: 1,
+        healthy_snapshot_count: 2,
+        coordinator_incarnation_id: RuntimeIncarnation.current()
+      })
+
     now = now()
 
     job =
@@ -1319,11 +1422,47 @@ defmodule PtcManager.HerdrSyncTest do
       |> Map.put("name", run.agent_name)
       |> Map.put("workspace_id", "terminal-workspace")
 
-    Process.put(:herdr_result, {:ok, [remote]})
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([remote], 2)})
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal")
 
     assert Repo.get!(AgentRun, run.id).state == "done"
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "terminal"
+
+    handler = "settled-terminal-worktree-writes-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ptc_manager, :repo, :query],
+        fn event, measurements, metadata, {pid, _transaction_key} = config ->
+          track_transaction_reads(event, measurements, metadata, config)
+          query = to_string(metadata[:query])
+
+          cond do
+            metadata[:source] == "worktree_allocations" and
+                String.starts_with?(query, "UPDATE") ->
+              send(pid, {:worktree_write, query})
+
+            metadata[:source] == "jobs" and String.starts_with?(query, "SELECT") ->
+              send(pid, :job_read)
+
+            true ->
+              :ok
+          end
+        end,
+        {test_pid, {__MODULE__, handler, :transaction}}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    settled_remote = Map.put(remote, "agent_status", "done")
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([settled_remote], 3)})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal")
+    refute_receive {:worktree_write, _query}
+    refute_receive {:transaction_read, _source}
+    assert_receive :job_read
+    refute_receive :job_read
   end
 
   test "a restarted terminal managed identity requires two absent snapshots to release" do
@@ -1416,6 +1555,43 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.get!(Job, job.id).state == "reconciling"
   end
 
+  test "a terminal pane settles its active owner after briefly reporting working" do
+    %{job: job, run: run, worker: worker} =
+      managed_job_fixture("terminal-reactivation", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    worker
+    |> Worker.changeset(%{
+      worker_incarnation_id: "terminal-worker",
+      herdr_incarnation_id: "terminal-herdr",
+      snapshot_sequence: 1,
+      healthy_snapshot_count: 2,
+      coordinator_incarnation_id: RuntimeIncarnation.current()
+    })
+    |> Repo.update!()
+
+    working = remote_agent("working") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([working], 2)})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal-reactivation")
+    end)
+
+    assert Repo.get!(Job, job.id).state == "reconciling"
+
+    done = remote_agent("done") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([done], 3)})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "terminal-reactivation")
+    end)
+
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+  end
+
   test "a held job parked in reconciling settles back to blocked once its agent is not active" do
     %{job: job, run: run} =
       managed_job_fixture("held-settle", %{
@@ -1462,9 +1638,96 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.get!(Job, job.id).state == "reconciling"
   end
 
+  test "an active attempt reaches reconciliation without reads under the writer lock" do
+    %{job: job, run: run, worker: worker} =
+      managed_job_fixture("write-only-terminal", %{agent_name: :deterministic})
+
+    worker
+    |> Worker.changeset(%{
+      worker_incarnation_id: "terminal-worker",
+      herdr_incarnation_id: "terminal-herdr",
+      snapshot_sequence: 1,
+      healthy_snapshot_count: 2,
+      coordinator_incarnation_id: RuntimeIncarnation.current()
+    })
+    |> Repo.update!()
+
+    remote = remote_agent("done") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([remote], 2)})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "write-only-terminal")
+    end)
+
+    assert Repo.get!(AgentRun, run.id).state == "done"
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+  end
+
+  test "a steady plan cannot overwrite a job changed after projection" do
+    %{job: job, run: run, worker: worker} =
+      managed_job_fixture("planned-race", %{agent_name: :deterministic})
+
+    worker
+    |> Worker.changeset(%{
+      worker_incarnation_id: "terminal-worker",
+      herdr_incarnation_id: "terminal-herdr",
+      snapshot_sequence: 1,
+      healthy_snapshot_count: 2,
+      coordinator_incarnation_id: RuntimeIncarnation.current()
+    })
+    |> Repo.update!()
+
+    remote = remote_agent("working") |> Map.put("name", run.agent_name)
+    Application.put_env(:ptc_manager, :paused_herdr_test_pid, self())
+    on_exit(fn -> Application.delete_env(:ptc_manager, :paused_herdr_test_pid) end)
+
+    handler = "herdr-planned-race-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ptc_manager, :herdr, :snapshot, :planned],
+        fn _event, _measurements, _metadata, owner ->
+          send(owner, {:snapshot_planned, self()})
+          receive do: (:apply_snapshot -> :ok)
+        end,
+        parent
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    task = Task.async(fn -> Sync.sync(client: PausedClient, session: "planned-race") end)
+    assert_receive {:herdr_snapshot_requested, sync_pid}
+    send(sync_pid, {:return_herdr_snapshot, {:ok, authoritative_snapshot([remote], 2)}})
+    assert_receive {:snapshot_planned, ^sync_pid}
+
+    job
+    |> Job.changeset(%{state: "working", fencing_token: 2, last_error: "newer attempt"})
+    |> Repo.update!()
+
+    send(sync_pid, :apply_snapshot)
+    assert {:ok, _summary} = Task.await(task)
+
+    unchanged = Repo.get!(Job, job.id)
+    assert unchanged.fencing_token == 2
+    assert unchanged.last_error == "newer attempt"
+  end
+
   test "an unchanged snapshot refreshes heartbeats without rewriting runs or allocations" do
     %{job: job, run: run, worker: worker} =
       managed_job_fixture("steady", %{agent_name: :deterministic})
+
+    worker =
+      worker
+      |> Worker.changeset(%{
+        worker_incarnation_id: "terminal-worker",
+        herdr_incarnation_id: "terminal-herdr",
+        snapshot_sequence: 1,
+        healthy_snapshot_count: 2,
+        coordinator_incarnation_id: RuntimeIncarnation.current()
+      })
+      |> Repo.update!()
 
     allocation =
       %WorktreeAllocation{}
@@ -1483,13 +1746,17 @@ defmodule PtcManager.HerdrSyncTest do
       |> Map.put("name", run.agent_name)
       |> Map.put("workspace_id", "steady-workspace")
 
-    Process.put(:herdr_result, {:ok, [remote]})
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([remote], 2)})
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "steady")
 
     settled_run = Repo.get!(AgentRun, run.id)
     settled_allocation = Repo.get!(WorktreeAllocation, allocation.id)
 
-    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "steady")
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([remote], 3)})
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "steady")
+    end)
 
     refreshed_run = Repo.get!(AgentRun, run.id)
     assert DateTime.compare(refreshed_run.last_heartbeat_at, settled_run.last_heartbeat_at) == :gt
@@ -1602,6 +1869,15 @@ defmodule PtcManager.HerdrSyncTest do
 
     {:ok, run} = Operations.create_agent_run(run_attrs)
     %{issue: issue, job: job, run: run, worker: worker}
+  end
+
+  defp authoritative_snapshot(agents, sequence) do
+    %{
+      "agents" => agents,
+      "worker_incarnation_id" => "terminal-worker",
+      "herdr_incarnation_id" => "terminal-herdr",
+      "snapshot_sequence" => sequence
+    }
   end
 
   defp remote_agent(state) do

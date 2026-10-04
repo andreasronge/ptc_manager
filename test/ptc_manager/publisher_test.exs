@@ -2,6 +2,7 @@ defmodule PtcManager.PublisherTest do
   use PtcManager.DataCase, async: false
 
   import Ecto.Query
+  import PtcManager.TransactionAssertions
 
   alias PtcManager.Operations
 
@@ -169,6 +170,24 @@ defmodule PtcManager.PublisherTest do
            ) == 1
   end
 
+  test "agent publication discovery performs no reads inside its write transaction" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {job, publication, result} = verified_publication_fixture()
+
+    remote = agent_publication_result(job, publication, result)
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, discovered} = Publications.record_agent_publication(publication.id, remote)
+      assert discovered.state == "published"
+    end)
+  end
+
   test "discovers an agent-created PR only at the exact verified branch and head" do
     previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
     Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
@@ -195,21 +214,10 @@ defmodule PtcManager.PublisherTest do
       })
       |> Repo.insert!()
 
-    Process.put(:publisher_discovery_result, {
-      :ok,
-      %{
-        pr_number: 91,
-        pr_url: "https://github.com/owner/repo/pull/91",
-        state: "open",
-        draft: false,
-        head_sha: result.head_sha,
-        head_ref: publication.branch_name,
-        head_repository: base_repository(job),
-        base_sha: String.duplicate("d", 40),
-        base_ref: "main",
-        base_repository: base_repository(job)
-      }
-    })
+    Process.put(
+      :publisher_discovery_result,
+      {:ok, agent_publication_result(job, publication, result)}
+    )
 
     assert {:ok, discovered} = PublicationStatusReconciler.run_once(client: FakeBroker)
     assert_receive {:discovery_called, publication_id}
@@ -688,6 +696,31 @@ defmodule PtcManager.PublisherTest do
     assert Publications.next_agent_for_discovery() == nil
   end
 
+  test "agent discovery retry and blocking perform no reads inside write transactions" do
+    previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
+    Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, previous)
+    end)
+
+    {_job, retry_publication, _result} = verified_publication_fixture()
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, _publication} =
+               Publications.record_agent_discovery_retry(retry_publication.id, :offline, 60_000)
+    end)
+
+    {_job, blocked_publication, _result} = verified_publication_fixture()
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, blocked} =
+               Publications.block_agent_discovery(blocked_publication.id, :invalid_result)
+
+      assert blocked.state == "blocked"
+    end)
+  end
+
   test "missing agent PR discovery stops at a finite budget and preserves the job" do
     previous = Application.get_env(:ptc_manager, :implementation_agent_publishes_pr)
     Application.put_env(:ptc_manager, :implementation_agent_publishes_pr, true)
@@ -990,6 +1023,24 @@ defmodule PtcManager.PublisherTest do
              )
 
     assert Repo.aggregate(PrPublication, :count) == 1
+  end
+
+  test "remote status application performs no reads inside its write transaction" do
+    {job, publication, result} = published_publication_fixture()
+
+    remote = %{
+      state: "merged",
+      pr_url: publication.pr_url,
+      head_sha: result.head_sha,
+      base_sha: String.duplicate("a", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
+
+    assert_no_transaction_reads(fn ->
+      assert {:ok, merged} = Publications.record_remote_status(publication.id, remote)
+      assert merged.pr_state == "merged"
+    end)
   end
 
   test "merged and closed PRs leave the active implementation queue" do
@@ -1769,6 +1820,21 @@ defmodule PtcManager.PublisherTest do
       ),
       :count
     )
+  end
+
+  defp agent_publication_result(job, publication, result) do
+    %{
+      pr_number: 91,
+      pr_url: "https://github.com/owner/repo/pull/91",
+      state: "open",
+      draft: false,
+      head_sha: result.head_sha,
+      head_ref: publication.branch_name,
+      head_repository: base_repository(job),
+      base_sha: String.duplicate("d", 40),
+      base_ref: "main",
+      base_repository: base_repository(job)
+    }
   end
 
   defp base_repository(job) do

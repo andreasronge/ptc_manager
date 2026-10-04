@@ -15,7 +15,13 @@ defmodule PtcManager.PublisherPoller do
   @impl true
   def handle_info(:publish, %{task_ref: nil} = state) do
     if enabled?() do
-      task = Task.Supervisor.async_nolink(PtcManager.TaskSupervisor, &Publisher.run_once/0)
+      task =
+        PtcManager.DatabaseDiagnostics.async_nolink(
+          PtcManager.TaskSupervisor,
+          "publication",
+          &Publisher.run_once/0
+        )
+
       {:noreply, %{state | task_ref: task.ref, timer_ref: nil}}
     else
       {:noreply, %{state | timer_ref: nil}}

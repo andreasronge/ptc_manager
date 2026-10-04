@@ -1,5 +1,10 @@
 """Offline cgroup telemetry contract: no agents, network or privileged writes."""
 import runpy
+import json
+import io
+import os
+import threading
+import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -8,6 +13,45 @@ wrapper = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'deploy/ptc-o
 metrics = wrapper['resource_metrics']
 
 class ResourceMetrics(unittest.TestCase):
+    def test_short_progress_is_forwarded_before_stream_closes(self):
+        for artifact_type in ('OperationArtifact', 'PassthroughArtifact'):
+            with self.subTest(artifact_type=artifact_type), tempfile.TemporaryDirectory() as directory:
+                forwarded = threading.Event()
+                class LiveOutput(io.BytesIO):
+                    def flush(self):
+                        forwarded.set()
+                live = LiveOutput()
+                read_fd, write_fd = os.pipe()
+                source = os.fdopen(read_fd, 'rb')
+                artifact = wrapper[artifact_type].__new__(wrapper[artifact_type])
+                artifact.directory, artifact.limit, artifact.records = directory, 1000000, {}
+                args = ('stdout', source, live) if artifact_type == 'OperationArtifact' else (source, live)
+                thread = threading.Thread(target=artifact._pump, args=args, daemon=True)
+                thread.start()
+                try:
+                    os.write(write_fd, b'progress\n')
+                    observed_live = forwarded.wait(1)
+                finally:
+                    os.close(write_fd)
+                    thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertTrue(observed_live, 'short output was buffered until EOF')
+                self.assertEqual(live.getvalue(), b'progress\n')
+
+    def test_operation_manifest_declares_aggregate_stream_coverage(self):
+        for states, expected in [(('complete', 'complete'), 'complete'),
+                                 (('complete', 'partial'), 'partial'),
+                                 (('partial', 'error'), 'error')]:
+            with tempfile.TemporaryDirectory() as directory:
+                artifact = wrapper['OperationArtifact'].__new__(wrapper['OperationArtifact'])
+                artifact.directory = directory
+                artifact.records = {name: {'coverage': state, 'path': name + '.log'}
+                                    for name, state in zip(('stdout', 'stderr'), states)}
+                artifact.seal(23)
+                manifest = json.loads(Path(directory, 'manifest.json').read_text())
+                self.assertEqual(manifest['coverage'], expected)
+                self.assertEqual(manifest['exit_status'], 23)
+
     def test_descendant_cpu_memory_and_io_counters_and_ancestor_limits(self):
         root='/sys/fs/cgroup/agent/operation'
         files={root+'/cpu.stat':'usage_usec 180000000\nuser_usec 170000000\nsystem_usec 10000000\nthrottled_usec 5000',root+'/memory.events':'high 2\noom_kill 1',root+'/io.stat':'8:0 rbytes=100 wbytes=20\n8:1 rbytes=50 wbytes=10',root+'/cpu.max':'max 100000',root+'/memory.max':'8589934592','/sys/fs/cgroup/agent/cpu.max':'200000 100000','/sys/fs/cgroup/agent/memory.max':'4294967296'}

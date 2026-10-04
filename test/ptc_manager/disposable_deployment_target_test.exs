@@ -22,6 +22,10 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     target = DisposableDeploymentTarget.start!(Map.get(context, :migration_opts, []))
     on_exit(fn -> DisposableDeploymentTarget.close!(target) end)
 
+    if version = Map.get(context, :replay_migration) do
+      replay_migration!(version, :down)
+    end
+
     {:ok, target: target}
   end
 
@@ -282,7 +286,8 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       [timestamp]
     )
 
-    target = DisposableDeploymentTarget.migrate_remaining!(target)
+    target =
+      DisposableDeploymentTarget.migrate_remaining!(target, to: 20_260_901_120_000)
 
     assert Repo.query!("SELECT count(*) FROM issue_dependencies").rows == [[0]]
     assert Repo.query!("SELECT dependencies_projected FROM issues WHERE id = 1").rows == [[0]]
@@ -421,7 +426,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
              """).rows
   end
 
-  @tag migration_opts: [to: 20_260_915_173_000]
+  @tag replay_migration: 20_260_916_093_000
   test "daily update retirement disables triggers and cancels only queued legacy work", %{
     target: target
   } do
@@ -501,7 +506,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       })
       |> Repo.insert!()
 
-    target = DisposableDeploymentTarget.migrate_remaining!(target)
+    _target = DisposableDeploymentTarget.migrate_remaining!(target)
 
     retired = PtcManager.Automations.get_definition(repository, "daily_digest")
     refute retired.enabled
@@ -519,7 +524,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     assert PtcManager.DailyDigests.status(PtcManager.DailyDigests.get_digest(digest.id)) ==
              "cancelled"
 
-    _target = DisposableDeploymentTarget.rollback!(target, to: 20_260_916_093_000)
+    replay_migration!(20_260_916_093_000, :down)
     rolled_back = PtcManager.Automations.get_definition(repository, "daily_digest")
     assert rolled_back.enabled
     refute Enum.any?(rolled_back.triggers, & &1.enabled)
@@ -527,7 +532,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     assert Repo.get!(PtcManager.Automations.Invocation, invocation.id).state == "cancelled"
   end
 
-  @tag migration_opts: [to: 20_260_916_093_000]
+  @tag replay_migration: 20_260_917_090_000
   test "daily contract prompt migration preserves custom prompts and paused triggers", %{
     target: target
   } do
@@ -548,7 +553,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
         {repository, version}
       end
 
-    target = DisposableDeploymentTarget.migrate_remaining!(target)
+    _target = DisposableDeploymentTarget.migrate_remaining!(target)
 
     for {repository, version} <- versions do
       definition = PtcManager.Automations.get_definition(repository, "daily_digest")
@@ -559,13 +564,15 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       if version.created_by == "system:built-in",
         do:
           assert(
-            "For #{repository.github_owner}/#{repository.github_name}: " <> actual.prompt ==
-              PtcManager.Automations.Defaults.get(repository, "daily_digest").prompt
+            String.starts_with?(
+              actual.prompt,
+              "Write a concise daily update from the supplied delivery evidence."
+            )
           ),
         else: assert(actual.prompt == old)
     end
 
-    _target = DisposableDeploymentTarget.rollback!(target, to: 20_260_917_090_000)
+    replay_migration!(20_260_917_090_000, :down)
 
     for {repository, version} <- versions do
       definition = PtcManager.Automations.get_definition(repository, "daily_digest")
@@ -575,7 +582,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     end
   end
 
-  @tag migration_opts: [to: 20_260_917_090_000]
+  @tag replay_migration: 20_260_918_090_000
   test "daily voice migration replaces only exact built-in prompts and rolls back safely", %{
     target: target
   } do
@@ -596,7 +603,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       |> Ecto.Changeset.change(%{prompt: prompt, created_by: author})
       |> Repo.update!()
 
-      migrated = DisposableDeploymentTarget.migrate_remaining!(target)
+      _migrated = DisposableDeploymentTarget.migrate_remaining!(target)
       actual = Repo.get!(PtcManager.Automations.DefinitionVersion, definition.current_version.id)
       expected = PtcManager.Automations.Defaults.get(repository, "daily_digest").prompt
 
@@ -614,9 +621,31 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
       refute paused.enabled
       refute Enum.any?(paused.triggers, & &1.enabled)
 
-      DisposableDeploymentTarget.rollback!(migrated, to: 20_260_918_090_000)
+      replay_migration!(20_260_918_090_000, :down)
       assert Repo.get!(PtcManager.Automations.DefinitionVersion, actual.id).prompt == prompt
     end
+  end
+
+  defp replay_migration!(version, direction) do
+    migration =
+      case version do
+        20_260_916_093_000 -> PtcManager.Repo.Migrations.DisableDailyDigests
+        20_260_917_090_000 -> PtcManager.Repo.Migrations.UpdateDailyDeliveryPrompt
+        20_260_918_090_000 -> PtcManager.Repo.Migrations.RefineDailyDeliveryVoice
+      end
+
+    unless Code.ensure_loaded?(migration) do
+      migration_file =
+        case version do
+          20_260_916_093_000 -> "20260916093000_disable_daily_digests.exs"
+          20_260_917_090_000 -> "20260917090000_update_daily_delivery_prompt.exs"
+          20_260_918_090_000 -> "20260918090000_refine_daily_delivery_voice.exs"
+        end
+
+      Code.require_file(Path.join("priv/repo/migrations", migration_file))
+    end
+
+    assert :ok = apply(Ecto.Migrator, direction, [Repo, version, migration, [log: false]])
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:ptc_manager, key)

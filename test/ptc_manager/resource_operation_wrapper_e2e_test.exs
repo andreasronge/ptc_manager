@@ -12,9 +12,57 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
              System.cmd(wrapper, ["run", "--label", "test", "--", "/bin/echo", "direct"])
   end
 
-  test "wrapper uses the generic socket protocol and preserves child output" do
+  test "operation cgroup applies the verify soft limit and retains the hard limit" do
+    wrapper = Path.expand("deploy/ptc-operation")
+
+    python = """
+    import importlib.machinery
+    import importlib.util
+    import io
+    import json
+    import sys
+    from unittest.mock import patch
+
+    loader = importlib.machinery.SourceFileLoader('ptc_operation', sys.argv[1])
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    context = {
+        'cgroups': True,
+        'operation_memory_high_bytes': 2147483648,
+        'verify_operation_memory_high_bytes': 2577399808,
+        'verify_agent_memory_high_bytes': 2952790016,
+        'operation_memory_max_bytes': 2684354560,
+    }
+    writes = []
+    with patch.object(module.platform, 'system', return_value='Linux'), \
+         patch.object(module.os.path, 'exists', return_value=True), \
+         patch('builtins.open', side_effect=lambda *args, **kwargs: io.StringIO('0::/ptc-agent-test/processes\\n')), \
+         patch.object(module.os, 'mkdir'), \
+         patch.object(module, 'read_text', return_value='2684354560'), \
+         patch.object(module, 'write_text', side_effect=lambda path, value: writes.append((path, value))):
+        module.create_operation_cgroup(context, 77, 'lease', 'verify')
+        module.create_operation_cgroup(context, 78, 'lease', 'test')
+        del context['verify_operation_memory_high_bytes']
+        del context['verify_agent_memory_high_bytes']
+        module.create_operation_cgroup(context, 79, 'lease', 'verify')
+    print(json.dumps([value for path, value in writes if '/operation-' in path and path.endswith('/memory.high')]))
+    print(json.dumps([value for path, value in writes if path.endswith('/ptc-agent-test/memory.high')]))
+    print(json.dumps([value for path, value in writes if path.endswith('/memory.max')]))
+    """
+
+    assert {output, 0} = System.cmd("python3", ["-c", python, wrapper])
+    assert [high, agent_high, max] = String.split(String.trim(output), "\n")
+    assert Jason.decode!(high) == [2_577_399_808, 2_147_483_648, 2_577_399_808]
+    assert Jason.decode!(agent_high) == [2_952_790_016, 2_952_790_016]
+    assert Jason.decode!(max) == [2_684_354_560, 2_684_354_560, 2_684_354_560]
+  end
+
+  @tag :nightly
+  test "wrapper uses the generic socket protocol and preserves multi-megabyte child output" do
     root = Path.join(System.tmp_dir!(), "ptc-operation-e2e-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
+    File.mkdir!(Path.join(root, "artifacts"))
     socket_path = Path.join(root, "broker.sock")
     context_path = Path.join(root, "context.json")
 
@@ -38,7 +86,7 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
         "socket_path" => socket_path,
         "lock_directory" => root,
         "artifact_root" => Path.join(root, "artifacts"),
-        "artifact_max_bytes" => 1_000_000,
+        "artifact_max_bytes" => 8_000_000,
         "repository_id" => 12,
         "owner_type" => "job",
         "owner_id" => 34
@@ -55,9 +103,10 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
                  "--label",
                  "test",
                  "--",
-                 "/bin/sh",
+                 "/usr/bin/python3",
                  "-c",
-                 "printf 'managed:%s\\n' \"$PTC_OPERATION_ACTIVE\"; printf 'diagnostic\\n' >&2"
+                 "import os; os.write(1, ('managed:' + os.environ['PTC_OPERATION_ACTIVE'] + '\\n').encode()); " <>
+                   "[(os.write(1, b'x' * 10000), os.write(2, b'y' * 10000)) for _ in range(220)]"
                ],
                env: [
                  {"PTC_MANAGED_OPERATION_CONTEXT", context_path},
@@ -76,8 +125,11 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
     [artifact] =
       Path.wildcard(Path.join(root, "artifacts/repository-12/job-34/operation-77-*/"))
 
-    assert File.read!(Path.join(artifact, "stdout.log")) == "managed:77\n"
-    assert File.read!(Path.join(artifact, "stderr.log")) == "diagnostic\n"
+    assert File.read!(Path.join(artifact, "stdout.log")) ==
+             "managed:77\n" <> String.duplicate("x", 2_200_000)
+
+    assert File.read!(Path.join(artifact, "stderr.log")) == String.duplicate("y", 2_200_000)
+    assert byte_size(output) >= 4_400_000
 
     manifest = Path.join(artifact, "manifest.json") |> File.read!() |> Jason.decode!()
     assert manifest["streams"]["stdout"]["coverage"] == "complete"

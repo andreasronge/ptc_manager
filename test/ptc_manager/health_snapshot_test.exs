@@ -26,7 +26,7 @@ defmodule PtcManager.HealthSnapshotTest do
     executable(
       ctx.root,
       "journalctl",
-      "echo '[error] private-secret from an agent-controlled exception'"
+      "echo '{\"MESSAGE\":\"[error] private-secret from an agent-controlled exception\"}'"
     )
 
     executable(
@@ -42,8 +42,55 @@ defmodule PtcManager.HealthSnapshotTest do
     assert Jason.decode!(snapshot)["freshness_budget_seconds"] == 3600
   end
 
+  test "counts database failures beyond a journal tail full of session noise", ctx do
+    executable(
+      ctx.root,
+      "journalctl",
+      "case \"$*\" in *'-g '*) echo '{\"MESSAGE\":\"SQLite transaction was slow: database is locked\"}';; *'-n 1 '*) exit 0;; *) i=0; while [ \"$i\" -lt 10000 ]; do echo '{\"MESSAGE\":\"sudo[123]: pam_unix session\"}'; i=$((i + 1)); done;; esac"
+    )
+
+    assert {_output, 0} = run(ctx)
+    volume = Jason.decode!(File.read!(ctx.out))["service_log_volume"]
+    assert volume["at_limit"]
+    refute volume["diagnostic_at_limit"]
+    assert volume["session_noise_lines"] == 10_000
+    assert volume["error_lines"] == 1
+  end
+
+  test "a quiet journal window produces a fresh snapshot with zero diagnostics", ctx do
+    executable(
+      ctx.root,
+      "journalctl",
+      "case \"$*\" in *'-g '*) exit 1;; *) echo '{\"MESSAGE\":\"ordinary activity\"}';; esac"
+    )
+
+    assert {_output, 0} = run(ctx)
+    volume = Jason.decode!(File.read!(ctx.out))["service_log_volume"]
+    assert volume["error_lines"] == 0
+    refute volume["diagnostic_at_limit"]
+  end
+
+  test "counts multiline exceptions by journal entry and retains BEAM headers", ctx do
+    executable(
+      ctx.root,
+      "journalctl",
+      "case \"$*\" in *'-g '*) printf '%s\\n' '{\"MESSAGE\":\"** (RuntimeError) failure\\nsecond line\"}' '{\"MESSAGE\":\"[warning] multiline\\nsecond line\"}';; *) printf '%s\\n' '{\"MESSAGE\":\"ordinary activity\\nsecond line\"}';; esac"
+    )
+
+    assert {_output, 0} = run(ctx)
+    volume = Jason.decode!(File.read!(ctx.out))["service_log_volume"]
+    assert volume["error_lines"] == 2
+    assert volume["total_lines"] == 1
+    refute volume["at_limit"]
+  end
+
   test "an agent-created output symlink is replaced rather than followed", ctx do
-    executable(ctx.root, "journalctl", "echo '[warning] fixture'")
+    executable(
+      ctx.root,
+      "journalctl",
+      "echo '{\"MESSAGE\":\"[warning] fixture\"}'"
+    )
+
     outside = Path.join(ctx.root, "outside")
     File.mkdir!(outside)
     File.ln_s!(outside, ctx.out)
