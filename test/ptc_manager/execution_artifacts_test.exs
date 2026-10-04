@@ -9,7 +9,16 @@ defmodule PtcManager.ExecutionArtifactsTest do
   end
 
   defmodule RetryCapture do
-    def run(_helper, _args), do: {"", Process.get(:capture_status, 1)}
+    def run(_helper, _args) do
+      if id = Process.delete(:change_capture_identity) do
+        PtcManager.Repo.get!(AgentRun, id)
+        |> Ecto.Changeset.change(external_key: "default:corrected-native")
+        |> PtcManager.Repo.update!()
+      end
+
+      {"", Process.get(:capture_status, 1)}
+    end
+
     def run(["workspace", "close", "generic-workspace"]), do: {:ok, "closed"}
   end
 
@@ -59,9 +68,35 @@ defmodule PtcManager.ExecutionArtifactsTest do
              ExecutionArtifacts.cleanup_terminal_once()
 
     Process.put(:capture_status, 0)
+    Process.put(:change_capture_identity, run.id)
+
+    assert {:error, :provider_session_identity_changed} =
+             ExecutionArtifacts.cleanup_terminal_once()
+
+    refute Repo.get!(AgentRun, run.id).provider_sessions_archived
     assert :ok = ExecutionArtifacts.cleanup_terminal_once()
     assert :ok = ExecutionArtifacts.cleanup_terminal_once()
     assert Repo.get!(AgentRun, run.id).provider_sessions_archived
+  end
+
+  test "sync-discovered native sessions preserve provider history and reopen archival" do
+    run =
+      AgentRun.changeset(%AgentRun{}, %{external_key: "default:pane", provider_kind: "codex"})
+      |> Ecto.Changeset.apply_changes()
+
+    run = %{run | provider_kind: nil, provider_sessions_archived: true}
+
+    synced =
+      AgentRun.changeset(run, %{external_key: "default:native"}) |> Ecto.Changeset.apply_changes()
+
+    assert synced.provider_sessions == %{"pane" => "codex", "native" => "codex"}
+    refute synced.provider_sessions_archived
+
+    continued =
+      AgentRun.changeset(synced, %{external_key: "default:next", provider_kind: "claude"})
+      |> Ecto.Changeset.apply_changes()
+
+    assert continued.provider_sessions["native"] == "codex"
   end
 
   test "continuations preserve every exact provider session in the reused run" do

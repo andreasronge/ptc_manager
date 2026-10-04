@@ -123,24 +123,31 @@ defmodule PtcManager.Operations.AgentRun do
   end
 
   defp remember_provider_session(changeset) do
-    case {get_field(changeset, :external_key), get_field(changeset, :provider_kind)} do
-      {key, kind} when is_binary(key) and is_binary(kind) ->
-        session = key |> String.split(":") |> List.last()
+    remembered = get_field(changeset, :provider_sessions) || %{}
+    previous_session = session_identity(changeset.data.external_key)
 
-        remembered = get_field(changeset, :provider_sessions) || %{}
+    kind =
+      get_field(changeset, :provider_kind) || Map.get(remembered, previous_session) || "unknown"
 
+    case session_identity(get_field(changeset, :external_key)) do
+      nil ->
+        changeset
+
+      session ->
         if Map.get(remembered, session) == kind do
-          changeset
+          if changed?(changeset, :external_key),
+            do: put_change(changeset, :provider_sessions_archived, false),
+            else: changeset
         else
           changeset
           |> put_change(:provider_sessions, Map.put(remembered, session, kind))
           |> put_change(:provider_sessions_archived, false)
         end
-
-      _ ->
-        changeset
     end
   end
+
+  defp session_identity(key) when is_binary(key), do: key |> String.split(":") |> List.last()
+  defp session_identity(_), do: nil
 
   # Every writer records when the run entered its current state, so a caller
   # never has to remember to. A Herdr snapshot rewrites the same state every

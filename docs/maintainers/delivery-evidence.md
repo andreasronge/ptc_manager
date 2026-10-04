@@ -209,3 +209,7 @@ The worktree cleanup poller also retries provider archival for terminal generic 
 without source snapshots. A persisted completion flag prevents repeated scans; a new
 provider session clears it. Pane fallback IDs never select native session files and
 are sealed as unavailable when no verified native session association exists.
+
+Native session identities learned during Herdr synchronization join the durable history
+and reopen archival. Completion is conditional on the exact history and current external
+identity remaining unchanged throughout the copy.

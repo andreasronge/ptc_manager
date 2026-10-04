@@ -165,16 +165,21 @@ defmodule PtcManager.ExecutionArtifacts do
 
         case result do
           :ok ->
-            Repo.update_all(
-              where(
-                AgentRun,
-                [r],
-                r.id == ^run.id and r.provider_sessions == ^run.provider_sessions
-              ),
-              set: [provider_sessions_archived: true]
-            )
+            {updated, _} =
+              Repo.update_all(
+                where(
+                  AgentRun,
+                  [r],
+                  r.id == ^run.id and
+                    r.provider_sessions == ^run.provider_sessions and
+                    fragment("? IS ?", r.external_key, ^run.external_key)
+                ),
+                set: [provider_sessions_archived: true]
+              )
 
-            {:cont, :ok}
+            if updated == 1,
+              do: {:cont, :ok},
+              else: {:halt, {:error, :provider_session_identity_changed}}
 
           {:error, _} = error ->
             {:halt, error}
