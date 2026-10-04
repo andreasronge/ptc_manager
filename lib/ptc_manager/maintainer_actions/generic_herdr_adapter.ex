@@ -78,40 +78,8 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
 
   defp archive_remembered_session(action) do
     case Process.delete({__MODULE__, :provider_session}) do
-      {kind, session_id} -> archive_provider_session(action, kind, session_id)
+      {kind, session_id} -> PtcManager.ExecutionArtifacts.archive_action(action, kind, session_id)
       nil -> :ok
-    end
-  end
-
-  defp archive_provider_session(action, kind, session_id) do
-    root = Application.get_env(:ptc_manager, :execution_artifact_root)
-
-    if is_binary(root) and root != "" and kind in ~w(codex claude cursor) and
-         is_binary(session_id) do
-      destination =
-        Path.join([
-          root,
-          "repository-#{action.repository_id}",
-          "action-#{action.id}",
-          "agent-run-#{action.attempt_count}"
-        ])
-
-      max_bytes = Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
-      helper = "/usr/local/bin/ptc-manager-worker-review"
-
-      case PtcManager.Repository.WorkerHelper.run(helper, [
-             "archive-session",
-             kind,
-             session_id,
-             destination,
-             Integer.to_string(max_bytes),
-             root
-           ]) do
-        {_output, 0} -> :ok
-        _ -> :ok
-      end
-    else
-      :ok
     end
   end
 

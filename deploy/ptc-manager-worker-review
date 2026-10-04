@@ -438,12 +438,12 @@ def archive_session(kind, session_id, destination, max_bytes, artifact_root):
     session_id = checked_session_id(session_id)
     allowed = os.path.abspath(artifact_root) + os.sep
     destination = os.path.abspath(destination)
-    if not destination.startswith(allowed) or kind not in BINARIES or not 1_000_000 <= max_bytes <= 2_000_000_000:
+    if not destination.startswith(allowed) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", kind) or not 1_000_000 <= max_bytes <= 2_000_000_000:
         raise RuntimeError("invalid_session_archive_target")
     homes = {"codex": (".codex/sessions/**/*.jsonl",),
              "claude": (".claude/projects/**/*.jsonl",), "cursor": ()}
     candidates = []
-    for pattern in homes[kind]:
+    for pattern in homes.get(kind, ()):
         candidates += glob.glob(os.path.join(os.path.expanduser("~"), pattern), recursive=True)
     matches = [path for path in candidates if session_id in os.path.basename(path)]
     if os.path.dirname(destination) != os.path.abspath(artifact_root):

@@ -2084,6 +2084,7 @@ defmodule PtcManager.Operations do
             herdr_pane: dispatch.pane_id,
             herdr_session: dispatch.session,
             external_key: dispatch.external_key,
+            provider_kind: Map.get(dispatch, :agent_kind),
             fencing_token: fencing_token,
             worker_incarnation_id: worker.worker_incarnation_id,
             herdr_incarnation_id: worker.herdr_incarnation_id,
@@ -2385,7 +2386,8 @@ defmodule PtcManager.Operations do
               herdr_workspace: dispatch.workspace_id,
               herdr_pane: dispatch.pane_id,
               herdr_session: dispatch.session,
-              external_key: dispatch.external_key
+              external_key: dispatch.external_key,
+              provider_kind: Map.get(dispatch, :agent_kind)
             })
             |> Repo.update!()
           else

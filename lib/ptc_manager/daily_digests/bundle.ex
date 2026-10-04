@@ -100,17 +100,24 @@ defmodule PtcManager.DailyDigests.Bundle do
         ["repository-*/*/*/manifest.json", "reviews/round-*/run-*/manifest.json"]
         |> Enum.flat_map(&Path.wildcard(Path.join(root, &1)))
         |> Enum.each(fn manifest ->
-          case File.stat(manifest, time: :posix) do
+          stat =
+            with :ok <- safe_regular_file(manifest, root), do: File.lstat(manifest, time: :posix)
+
+          case stat do
             {:ok, %{mtime: mtime}} when mtime < cutoff ->
               relative = Path.relative_to(manifest, root)
 
               unless MapSet.member?(referenced, relative) do
-                case File.rm_rf(Path.dirname(manifest)) do
-                  {:ok, _} ->
+                helper = Application.app_dir(:ptc_manager, "priv/execution_artifact_cleanup.py")
+
+                case System.cmd("python3", [helper, root, Path.dirname(relative)],
+                       stderr_to_stdout: true
+                     ) do
+                  {_, 0} ->
                     :ok
 
-                  {:error, reason, _} ->
-                    Logger.warning("Execution artifact cleanup failed: #{inspect(reason)}")
+                  {_, status} ->
+                    Logger.warning("Execution artifact cleanup refused or failed: exit #{status}")
                 end
               end
 
@@ -302,8 +309,19 @@ defmodule PtcManager.DailyDigests.Bundle do
       if jobs == [],
         do: [],
         else:
-          Repo.all(from r in AgentRun, where: r.job_id in ^jobs, select: r.id)
-          |> Enum.map(&{:agent_run, &1})
+          Repo.all(from r in AgentRun, where: r.job_id in ^jobs)
+          |> Enum.flat_map(fn run ->
+            tokens =
+              run
+              |> PtcManager.ExecutionArtifacts.sessions()
+              |> Map.keys()
+              |> Enum.map(&PtcManager.ExecutionArtifacts.session_token/1)
+
+            Enum.map(
+              if(tokens == [], do: ["unavailable"], else: tokens),
+              &{:agent_run, "#{run.id}-#{&1}"}
+            )
+          end)
 
     Enum.uniq(artifact_source_ids(evidence) ++ runs)
   end
@@ -400,6 +418,7 @@ defmodule PtcManager.DailyDigests.Bundle do
          {:ok, manifest} when is_map(manifest) <- Jason.decode(bytes),
          true <- manifest["kind"] in ~w(operation review workspace_setup provider_session),
          true <- manifest["kind"] == expected_kind(source_id),
+         true <- session_identity_matches?(manifest, path),
          true <- manifest["coverage"] in ~w(complete partial unavailable error),
          {:ok, streams, stream_coverage} <-
            verify_streams(path, manifest["kind"], manifest["streams"], deadline) do
@@ -423,6 +442,17 @@ defmodule PtcManager.DailyDigests.Bundle do
   defp expected_kind("setup:" <> _), do: "workspace_setup"
   defp expected_kind("agent_run:" <> _), do: "provider_session"
   defp expected_kind(_), do: nil
+
+  defp session_identity_matches?(%{"kind" => "provider_session", "session_id" => session}, path)
+       when is_binary(session) do
+    String.ends_with?(
+      Path.basename(Path.dirname(path)),
+      "-" <> PtcManager.ExecutionArtifacts.session_token(session)
+    )
+  end
+
+  defp session_identity_matches?(%{"kind" => "provider_session"}, _), do: false
+  defp session_identity_matches?(_, _), do: true
 
   defp verify_streams(_manifest_path, _kind, streams, _deadline) when not is_map(streams),
     do: {:error, :invalid_streams}

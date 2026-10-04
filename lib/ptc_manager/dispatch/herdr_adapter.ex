@@ -901,6 +901,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
             agent_name: new_name,
             herdr_pane: pane,
             external_key: "#{session}:#{key}",
+            provider_kind: kind,
             last_heartbeat_at: DateTime.utc_now()
           })
           |> PtcManager.Repo.update!()

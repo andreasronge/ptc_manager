@@ -967,7 +967,12 @@ defmodule PtcManager.MaintainerActions do
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
     if is_atom(source_snapshot) and function_exported?(source_snapshot, :release, 3) do
-      case source_snapshot.release(repository, action.id, action.target_snapshot || %{}) do
+      release =
+        with :ok <- PtcManager.ExecutionArtifacts.close_action_runs(action) do
+          source_snapshot.release(repository, action.id, action.target_snapshot || %{})
+        end
+
+      case release do
         :ok ->
           case Operations.mark_agent_action_source_released(action.id) do
             {:ok, _released} ->

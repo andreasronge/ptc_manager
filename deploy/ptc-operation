@@ -368,12 +368,16 @@ def managed_run(args, context):
         slot_lock.close()
         raise
     stop_heartbeat = threading.Event()
+    group_lock = threading.RLock()
+    group_alive = True
 
     def forward(signum, _frame):
-        try:
-            os.killpg(child.pid, signum)
-        except ProcessLookupError:
-            pass
+        with group_lock:
+            if group_alive:
+                try:
+                    os.killpg(child.pid, signum)
+                except ProcessLookupError:
+                    pass
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, forward)
@@ -391,7 +395,7 @@ def managed_run(args, context):
                     },
                 )
                 if update.get("cancel_requested"):
-                    os.killpg(child.pid, signal.SIGTERM)
+                    forward(signal.SIGTERM, None)
             except Exception as error:
                 print(
                     f"PtcManager operation heartbeat failed: {error}", file=sys.stderr
@@ -400,12 +404,15 @@ def managed_run(args, context):
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
     pumps = artifact.start(child)
-    status = child.wait()
+    # Keep the exited leader unreaped so its PID/PGID cannot be reused while
+    # signalling descendants. Reap only after terminating the original group.
+    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+    stop_heartbeat.set()
     # A completed command must not leave descendants holding its pipe writers.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    with group_lock:
+        forward(signal.SIGKILL, None)
+        group_alive = False
+    status = child.wait()
     if cgroup_path:
         try:
             write_text(os.path.join(cgroup_path, "cgroup.kill"), "1")

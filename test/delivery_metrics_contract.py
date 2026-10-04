@@ -13,6 +13,24 @@ wrapper = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'deploy/ptc-o
 metrics = wrapper['resource_metrics']
 
 class ResourceMetrics(unittest.TestCase):
+    def test_cleanup_uses_no_follow_directory_descriptors(self):
+        remove = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'priv/execution_artifact_cleanup.py'))['remove']
+        with tempfile.TemporaryDirectory() as directory:
+            root, outside = Path(directory, 'root'), Path(directory, 'outside')
+            good = root / 'repository-1/job-1/agent-run-1'
+            victim = outside / 'agent-run-1'
+            good.mkdir(parents=True)
+            victim.mkdir(parents=True)
+            (good / 'manifest.json').write_text('{}')
+            (victim / 'manifest.json').write_text('{}')
+            (root / 'repository-1/escape').symlink_to(outside)
+            with self.assertRaises(OSError):
+                remove(str(root), 'repository-1/escape/agent-run-1')
+            self.assertTrue((victim / 'manifest.json').exists())
+            remove(str(root), 'repository-1/job-1/agent-run-1')
+            self.assertFalse(good.exists())
+            self.assertTrue(victim.exists())
+
     def test_short_progress_is_forwarded_before_stream_closes(self):
         for artifact_type in ('OperationArtifact', 'PassthroughArtifact'):
             with self.subTest(artifact_type=artifact_type), tempfile.TemporaryDirectory() as directory:

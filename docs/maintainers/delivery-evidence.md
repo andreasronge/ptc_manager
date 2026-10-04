@@ -116,11 +116,21 @@ Session files and manifests publish together through a unique
 staging directory and atomic rename; interrupted copies can be retried. A sealed
 archive is never replaced by a later observation.
 
+Agent runs retain their provider/session history in database metadata, including
+continuations that reuse a run row. Each session has a distinct hashed directory
+identity; the daily index includes every remembered session and marks missing
+captures separately. The existing disposable-workspace and planning-snapshot
+reapers seal persisted action sessions after shutdown, including after coordinator
+restart. A session-manifest identity must match its directory identity.
+
 Archive contents are read-only; their directories remain group-writable so the
 coordinator can unlink expired worker-owned files. Archival locks the parent
 directory instead of creating persistent sibling lock files. Cleanup failures
 are logged. Failed bundle publication releases its captured source checkout;
 if removal fails, the source identity is persisted for the failed-action reaper.
+Expiration validates every ancestor and uses descriptor-relative deletion with
+no-follow directory opens, so swapped or symlinked parents cannot redirect
+deletion outside the configured artifact root.
 
 On main-command exit the wrapper terminates its remaining process group (and
 operation cgroup when enabled), then drains already-emitted output. A pipe held

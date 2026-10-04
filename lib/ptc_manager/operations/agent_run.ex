@@ -20,6 +20,8 @@ defmodule PtcManager.Operations.AgentRun do
     field :herdr_pane, :string
     field :herdr_session, :string
     field :external_key, :string
+    field :provider_kind, :string, virtual: true
+    field :provider_sessions, :map, default: %{}
     field :fencing_token, :integer, default: 0
     field :worker_incarnation_id, :string
     field :herdr_incarnation_id, :string
@@ -68,6 +70,7 @@ defmodule PtcManager.Operations.AgentRun do
       :herdr_pane,
       :herdr_session,
       :external_key,
+      :provider_kind,
       :fencing_token,
       :worker_incarnation_id,
       :herdr_incarnation_id,
@@ -90,6 +93,7 @@ defmodule PtcManager.Operations.AgentRun do
       :workspace_setup_phase_durations,
       :workspace_setup_error
     ])
+    |> remember_provider_session()
     |> validate_required([:worker_id, :role, :state, :started_at, :last_heartbeat_at])
     |> validate_inclusion(:role, @roles)
     |> validate_inclusion(:state, @states)
@@ -115,6 +119,22 @@ defmodule PtcManager.Operations.AgentRun do
     |> unique_constraint([:job_id, :fencing_token], name: :agent_runs_one_per_job_attempt)
     |> stamp_state_change()
     |> validate_terminal_time()
+  end
+
+  defp remember_provider_session(changeset) do
+    case {get_field(changeset, :external_key), get_field(changeset, :provider_kind)} do
+      {key, kind} when is_binary(key) and is_binary(kind) ->
+        session = key |> String.split(":") |> List.last()
+
+        put_change(
+          changeset,
+          :provider_sessions,
+          Map.put(get_field(changeset, :provider_sessions) || %{}, session, kind)
+        )
+
+      _ ->
+        changeset
+    end
   end
 
   # Every writer records when the run entered its current state, so a caller

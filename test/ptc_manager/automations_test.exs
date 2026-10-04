@@ -176,6 +176,13 @@ defmodule PtcManager.AutomationsTest do
     end
   end
 
+  defmodule ArtifactCommand do
+    def run(_helper, args) do
+      send(self(), {:archived_session, args})
+      {"", 0}
+    end
+  end
+
   defmodule InvestigationWorkspaceSetup do
     def run(path, action) do
       send(Process.get(:investigation_test_pid), {:investigation_setup, path, action.id})
@@ -561,12 +568,30 @@ defmodule PtcManager.AutomationsTest do
                {:ok, %{"outcome" => "ready"}}
              )
 
+    artifact_keys = [:execution_artifact_root, :execution_artifact_command]
+    artifact_previous = Map.new(artifact_keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(artifact_previous, fn {key, value} ->
+        Application.put_env(:ptc_manager, key, value)
+      end)
+    end)
+
+    Application.put_env(
+      :ptc_manager,
+      :execution_artifact_root,
+      Path.join(System.tmp_dir!(), "restart-artifacts")
+    )
+
+    Application.put_env(:ptc_manager, :execution_artifact_command, ArtifactCommand)
+
     assert {:ok, cleaned} =
              PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
                InvestigationCleanupAdapter,
                InvestigationCleanupGit
              )
 
+    assert_receive {:archived_session, ["archive-session" | _]}
     assert cleaned.id == run.id
     assert cleaned.herdr_workspace == nil
     assert Map.fetch!(cleaned, :disposable_cleanup_state) == nil

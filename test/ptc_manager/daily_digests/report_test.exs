@@ -3,6 +3,29 @@ defmodule PtcManager.DailyDigests.ReportTest do
   alias PtcManager.DailyDigests.{Bundle, Input, Report}
   alias PtcManager.{DailyDigests, DailyDigestFixtures}
 
+  test "artifact expiration never follows an intermediate symlink" do
+    root = Path.join(System.tmp_dir!(), "artifact-cleanup-#{System.unique_integer([:positive])}")
+    outside = root <> "-outside"
+    previous = Application.get_env(:ptc_manager, :execution_artifact_root)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :execution_artifact_root, previous)
+      File.rm_rf!(root)
+      File.rm_rf!(outside)
+    end)
+
+    File.mkdir_p!(Path.join(root, "repository-1"))
+    victim = Path.join(outside, "agent-run-1")
+    File.mkdir_p!(victim)
+    manifest = Path.join(victim, "manifest.json")
+    File.write!(manifest, "{}")
+    File.touch!(manifest, 0)
+    File.ln_s!(outside, Path.join(root, "repository-1/job-1"))
+    Application.put_env(:ptc_manager, :execution_artifact_root, root)
+    Bundle.cleanup_expired()
+    assert File.read!(manifest) == "{}"
+  end
+
   test "schema example satisfies application validation" do
     result = File.read!("test/fixtures/daily_digest_output.json") |> Jason.decode!()
     schema = File.read!("priv/codex/daily_digest_output.schema.json") |> Jason.decode!()
