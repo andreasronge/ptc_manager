@@ -99,6 +99,20 @@ defmodule PtcManager.ExecutionArtifactsTest do
     assert continued.provider_sessions["native"] == "codex"
   end
 
+  test "recovered unknown provider mappings use the trusted allocation provider" do
+    run = %AgentRun{
+      external_key: "default:native",
+      provider_sessions: %{"native" => "unknown", "older" => "claude"}
+    }
+
+    assert ExecutionArtifacts.sessions(run, "codex") == %{
+             "native" => "codex",
+             "older" => "claude"
+           }
+
+    assert ExecutionArtifacts.sessions(run, nil)["native"] == "unknown"
+  end
+
   test "continuations preserve every exact provider session in the reused run" do
     first =
       AgentRun.changeset(%AgentRun{}, %{external_key: "default:first", provider_kind: "codex"})

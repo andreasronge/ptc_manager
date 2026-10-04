@@ -17,7 +17,10 @@ defmodule PtcManager.ExecutionArtifacts do
     do: :crypto.hash(:sha256, session_id) |> Base.encode16(case: :lower)
 
   def sessions(run, fallback_kind \\ "unknown") do
-    remembered = run.provider_sessions || %{}
+    remembered =
+      Map.new(run.provider_sessions || %{}, fn {session, kind} ->
+        {session, if(kind in [nil, "unknown"], do: fallback_kind || "unknown", else: kind)}
+      end)
 
     case run.external_key do
       key when is_binary(key) ->

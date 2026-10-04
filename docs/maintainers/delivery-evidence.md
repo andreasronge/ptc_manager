@@ -213,3 +213,7 @@ are sealed as unavailable when no verified native session association exists.
 Native session identities learned during Herdr synchronization join the durable history
 and reopen archival. Completion is conditional on the exact history and current external
 identity remaining unchanged throughout the copy.
+
+If restart recovery observed a session before dispatch persisted its provider, archival
+resolves an unknown mapping from the trusted allocation or invocation provider.
+Existing known per-session provider identities take precedence over that fallback.
