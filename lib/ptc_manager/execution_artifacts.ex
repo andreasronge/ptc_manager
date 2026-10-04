@@ -44,9 +44,9 @@ defmodule PtcManager.ExecutionArtifacts do
 
       label = if run, do: "agent-run-#{run.id}", else: "attempt-#{action.attempt_count}"
       capture(action.repository_id, "action-#{action.id}", label, kind, session_id)
+    else
+      :ok
     end
-
-    :ok
   end
 
   def close_action_runs(action) do
@@ -65,8 +65,10 @@ defmodule PtcManager.ExecutionArtifacts do
           case command.run(["workspace", "close", run.herdr_workspace])
                |> PtcManager.Dispatch.HerdrAdapter.action_workspace_removal_result() do
             :ok ->
-              archive_run(run.id)
-              {:cont, :ok}
+              case archive_run(run.id) do
+                :ok -> {:cont, :ok}
+                {:error, _} = error -> {:halt, error}
+              end
 
             {:error, _} = error ->
               {:halt, error}
@@ -96,22 +98,36 @@ defmodule PtcManager.ExecutionArtifacts do
             {run, job.repository_id, action.repository_id, allocation.agent_kind,
              invocation.selected_agent_kind}
       )
-      |> Enum.each(fn {run, job_repository, action_repository, job_kind, action_kind} ->
+      |> Enum.reduce_while(:ok, fn {run, job_repository, action_repository, job_kind, action_kind},
+                                   :ok ->
         owner = if run.job_id, do: "job-#{run.job_id}", else: "action-#{run.agent_action_id}"
 
-        Enum.each(sessions(run, job_kind || action_kind), fn {session, kind} ->
-          capture(
-            job_repository || action_repository,
-            owner,
-            "agent-run-#{run.id}",
-            kind,
-            session
-          )
-        end)
-      end)
-    end
+        result =
+          Enum.reduce_while(sessions(run, job_kind || action_kind), :ok, fn {session, kind},
+                                                                            :ok ->
+            result =
+              capture(
+                job_repository || action_repository,
+                owner,
+                "agent-run-#{run.id}",
+                kind,
+                session
+              )
 
-    :ok
+            case result do
+              :ok -> {:cont, :ok}
+              {:error, _} = error -> {:halt, error}
+            end
+          end)
+
+        case result do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    else
+      :ok
+    end
   end
 
   defp capture(repository_id, owner, label, kind, session_id) do
@@ -129,7 +145,9 @@ defmodule PtcManager.ExecutionArtifacts do
       max_bytes = Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
       command = Application.get_env(:ptc_manager, :execution_artifact_command) || WorkerHelper
 
-      unless File.regular?(Path.join(destination, "manifest.json")) do
+      if File.regular?(Path.join(destination, "manifest.json")) do
+        :ok
+      else
         case command.run("/usr/local/bin/ptc-manager-worker-review", [
                "archive-session",
                kind,
@@ -142,12 +160,13 @@ defmodule PtcManager.ExecutionArtifacts do
             :ok
 
           _ ->
-            Logger.warning("Provider session archival failed for #{label}; capture unavailable")
+            Logger.warning("Provider session archival failed for #{label}; cleanup will retry")
+            {:error, :provider_session_archival_failed}
         end
       end
+    else
+      :ok
     end
-
-    :ok
   end
 
   defp enabled? do

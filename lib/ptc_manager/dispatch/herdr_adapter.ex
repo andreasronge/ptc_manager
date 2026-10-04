@@ -48,8 +48,10 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     command = Keyword.get(opts, :command, Command)
 
     result = worktree_removal_result(run_with(command, args), allocation)
-    if result == :ok, do: PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
-    result
+
+    with :ok <- result do
+      PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
+    end
   end
 
   def remove_worktree(allocation, _opts) do
@@ -70,8 +72,9 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
         allocation
       )
 
-    if result == :ok, do: PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
-    result
+    with :ok <- result do
+      PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
+    end
   end
 
   def discard_worktree(allocation, _opts), do: remove_worktree(allocation, [])

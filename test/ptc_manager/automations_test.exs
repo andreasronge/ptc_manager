@@ -179,7 +179,7 @@ defmodule PtcManager.AutomationsTest do
   defmodule ArtifactCommand do
     def run(_helper, args) do
       send(self(), {:archived_session, args})
-      {"", 0}
+      {"", Process.get(:artifact_exit_code, 0)}
     end
   end
 
@@ -584,6 +584,19 @@ defmodule PtcManager.AutomationsTest do
     )
 
     Application.put_env(:ptc_manager, :execution_artifact_command, ArtifactCommand)
+    Process.put(:artifact_exit_code, 1)
+
+    assert {:error, {:investigation_workspace_cleanup_failed, :provider_session_archival_failed}} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    retained = Repo.get!(PtcManager.Operations.AgentRun, run.id)
+    assert retained.disposable_worktree_path != nil
+    assert retained.disposable_cleanup_state != nil
+    assert_receive {:archived_session, ["archive-session" | _]}
+    Process.delete(:artifact_exit_code)
 
     assert {:ok, cleaned} =
              PtcManager.InvestigationWorkspaces.cleanup_terminal_once(

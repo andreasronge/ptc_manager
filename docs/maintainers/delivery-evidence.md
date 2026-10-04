@@ -200,3 +200,7 @@ unreferenced bundle and execution directories. It protects every bundle named by
 an action snapshot and every execution manifest indexed by those bundles; active
 captures have no final manifest and are not eligible. Prompt rejection removes
 its newly published bundle immediately.
+
+Temporary provider-session archival failures keep durable teardown pending for retry;
+workspace cleanup and source release do not discard their retry records until archival succeeds.
+Retries do not retain an execution resource slot.

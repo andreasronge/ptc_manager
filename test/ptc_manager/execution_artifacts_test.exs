@@ -4,6 +4,10 @@ defmodule PtcManager.ExecutionArtifactsTest do
   alias PtcManager.{Operations, ExecutionArtifacts}
   alias PtcManager.DailyDigests.Bundle
 
+  defmodule FailingCapture do
+    def run(_, _), do: {"temporary capture failure", 1}
+  end
+
   test "continuations preserve every exact provider session in the reused run" do
     first =
       AgentRun.changeset(%AgentRun{}, %{external_key: "default:first", provider_kind: "codex"})
@@ -48,6 +52,15 @@ defmodule PtcManager.ExecutionArtifactsTest do
 
     Application.put_env(:ptc_manager, :execution_artifact_root, root)
 
+    previous_command = Application.get_env(:ptc_manager, :execution_artifact_command)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :execution_artifact_command, previous_command)
+    end)
+
+    Application.put_env(:ptc_manager, :execution_artifact_command, FailingCapture)
+    assert {:error, :provider_session_archival_failed} = ExecutionArtifacts.archive_run(run.id)
+
     paths =
       for {session, kind} <- run.provider_sessions do
         directory =
@@ -82,6 +95,8 @@ defmodule PtcManager.ExecutionArtifactsTest do
         {session, directory}
       end
       |> Map.new()
+
+    assert :ok = ExecutionArtifacts.archive_run(run.id)
 
     digest = %{id: 1, window_started_at: now, window_ended_at: now}
 
