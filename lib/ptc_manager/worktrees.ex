@@ -39,6 +39,11 @@ defmodule PtcManager.Worktrees do
         probe \\ GitProbe,
         external_adapter \\ configured_external_adapter()
       ) do
+    case PtcManager.ExecutionArtifacts.cleanup_terminal_once() do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Provider session cleanup deferred: #{inspect(reason)}")
+    end
+
     reap_investigation_worktree()
 
     case cleanup_terminal_once(adapter, probe, external_adapter) do

@@ -82,6 +82,49 @@ defmodule PtcManager.ExecutionArtifacts do
     end
   end
 
+  def cleanup_terminal_once do
+    if enabled?() do
+      run =
+        Repo.one(
+          from r in AgentRun,
+            join: a in AgentAction,
+            on: a.id == r.agent_action_id,
+            where:
+              a.state in ["done", "failed", "cancelled"] and
+                not r.provider_sessions_archived and is_nil(r.disposable_cleanup_state) and
+                not is_nil(r.external_key),
+            order_by: [asc: r.updated_at, asc: r.id],
+            limit: 1
+        )
+
+      case run do
+        nil ->
+          :ok
+
+        run ->
+          # Keep failures eligible, but give other terminal actions a turn.
+          Repo.update_all(where(AgentRun, [r], r.id == ^run.id),
+            set: [updated_at: DateTime.utc_now()]
+          )
+
+          command =
+            Application.get_env(:ptc_manager, :generic_herdr_command, PtcManager.Herdr.Command)
+
+          if is_binary(run.herdr_workspace) do
+            with :ok <-
+                   command.run(["workspace", "close", run.herdr_workspace])
+                   |> PtcManager.Dispatch.HerdrAdapter.action_workspace_removal_result() do
+              archive_run(run.id)
+            end
+          else
+            {:error, :provider_shutdown_unconfirmed}
+          end
+      end
+    else
+      :ok
+    end
+  end
+
   defp archive(query) do
     if enabled?() do
       Repo.all(
@@ -121,8 +164,20 @@ defmodule PtcManager.ExecutionArtifacts do
           end)
 
         case result do
-          :ok -> {:cont, :ok}
-          {:error, _} = error -> {:halt, error}
+          :ok ->
+            Repo.update_all(
+              where(
+                AgentRun,
+                [r],
+                r.id == ^run.id and r.provider_sessions == ^run.provider_sessions
+              ),
+              set: [provider_sessions_archived: true]
+            )
+
+            {:cont, :ok}
+
+          {:error, _} = error ->
+            {:halt, error}
         end
       end)
     else

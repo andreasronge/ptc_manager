@@ -204,3 +204,8 @@ its newly published bundle immediately.
 Temporary provider-session archival failures keep durable teardown pending for retry;
 workspace cleanup and source release do not discard their retry records until archival succeeds.
 Retries do not retain an execution resource slot.
+
+The worktree cleanup poller also retries provider archival for terminal generic actions
+without source snapshots. A persisted completion flag prevents repeated scans; a new
+provider session clears it. Pane fallback IDs never select native session files and
+are sealed as unavailable when no verified native session association exists.

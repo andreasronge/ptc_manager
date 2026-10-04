@@ -8,6 +8,62 @@ defmodule PtcManager.ExecutionArtifactsTest do
     def run(_, _), do: {"temporary capture failure", 1}
   end
 
+  defmodule RetryCapture do
+    def run(_helper, _args), do: {"", Process.get(:capture_status, 1)}
+    def run(["workspace", "close", "generic-workspace"]), do: {:ok, "closed"}
+  end
+
+  test "terminal generic actions retry archival without a source snapshot" do
+    repository = repository_fixture()
+    worker = worker_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    action =
+      Repo.insert!(%PtcManager.Operations.AgentAction{
+        repository_id: repository.id,
+        action_key: "post_cancellation_note",
+        target_type: "issue",
+        target_id: 1,
+        target_label: "issue",
+        prompt: "task",
+        actor: "maintainer",
+        state: "done",
+        requested_at: now
+      })
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "working",
+        started_at: now,
+        last_heartbeat_at: now,
+        external_key: "default:generic-pane",
+        provider_kind: "codex",
+        herdr_workspace: "generic-workspace"
+      })
+
+    keys = [:execution_artifact_root, :execution_artifact_command, :generic_herdr_command]
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    end)
+
+    Application.put_env(:ptc_manager, :execution_artifact_root, "/tmp/generic-archive-retry")
+    Application.put_env(:ptc_manager, :execution_artifact_command, RetryCapture)
+    Application.put_env(:ptc_manager, :generic_herdr_command, RetryCapture)
+
+    assert {:error, :provider_session_archival_failed} =
+             ExecutionArtifacts.cleanup_terminal_once()
+
+    Process.put(:capture_status, 0)
+    assert :ok = ExecutionArtifacts.cleanup_terminal_once()
+    assert :ok = ExecutionArtifacts.cleanup_terminal_once()
+    assert Repo.get!(AgentRun, run.id).provider_sessions_archived
+  end
+
   test "continuations preserve every exact provider session in the reused run" do
     first =
       AgentRun.changeset(%AgentRun{}, %{external_key: "default:first", provider_kind: "codex"})

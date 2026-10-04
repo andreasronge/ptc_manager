@@ -435,7 +435,11 @@ def read_json_file(path, limit):
 
 
 def archive_session(kind, session_id, destination, max_bytes, artifact_root):
-    session_id = checked_session_id(session_id)
+    # A pane fallback is an association label, never a native-session filename.
+    try:
+        native_session_id = checked_session_id(session_id)
+    except RuntimeError:
+        native_session_id = None
     allowed = os.path.abspath(artifact_root) + os.sep
     destination = os.path.abspath(destination)
     if not destination.startswith(allowed) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", kind) or not 1_000_000 <= max_bytes <= 2_000_000_000:
@@ -443,9 +447,9 @@ def archive_session(kind, session_id, destination, max_bytes, artifact_root):
     homes = {"codex": (".codex/sessions/**/*.jsonl",),
              "claude": (".claude/projects/**/*.jsonl",), "cursor": ()}
     candidates = []
-    for pattern in homes.get(kind, ()):
+    for pattern in homes.get(kind, ()) if native_session_id else ():
         candidates += glob.glob(os.path.join(os.path.expanduser("~"), pattern), recursive=True)
-    matches = [path for path in candidates if session_id in os.path.basename(path)]
+    matches = [path for path in candidates if native_session_id in os.path.basename(path)]
     if os.path.dirname(destination) != os.path.abspath(artifact_root):
         ensure_shared_directory(os.path.dirname(destination), artifact_root)
     lock_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

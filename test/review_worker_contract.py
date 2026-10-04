@@ -25,6 +25,15 @@ class ReviewerContract(unittest.TestCase):
                 self.assertEqual(context['run']([sys.executable, '-c', 'print("finished")'],
                     artifact_directory=root), 'finished\n')
 
+    def test_missing_native_session_is_sealed_unavailable(self):
+        with tempfile.TemporaryDirectory() as root:
+            destination = str(Path(root) / 'archive')
+            context['archive_session']('codex', 'generic-pane', destination, 1000000, root)
+            manifest = json.loads((Path(destination) / 'manifest.json').read_text())
+            self.assertEqual(manifest['coverage'], 'unavailable')
+            self.assertEqual(manifest['streams'], {})
+            self.assertEqual(manifest['session_id'], 'generic-pane')
+
     def test_session_archive_retries_after_interrupted_copy(self):
         with tempfile.TemporaryDirectory() as root:
             session = '0199a213-81c0-7800-8aa1-bbab2a035a53'

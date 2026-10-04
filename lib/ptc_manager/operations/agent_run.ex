@@ -22,6 +22,7 @@ defmodule PtcManager.Operations.AgentRun do
     field :external_key, :string
     field :provider_kind, :string, virtual: true
     field :provider_sessions, :map, default: %{}
+    field :provider_sessions_archived, :boolean, default: false
     field :fencing_token, :integer, default: 0
     field :worker_incarnation_id, :string
     field :herdr_incarnation_id, :string
@@ -126,11 +127,15 @@ defmodule PtcManager.Operations.AgentRun do
       {key, kind} when is_binary(key) and is_binary(kind) ->
         session = key |> String.split(":") |> List.last()
 
-        put_change(
-          changeset,
-          :provider_sessions,
-          Map.put(get_field(changeset, :provider_sessions) || %{}, session, kind)
-        )
+        remembered = get_field(changeset, :provider_sessions) || %{}
+
+        if Map.get(remembered, session) == kind do
+          changeset
+        else
+          changeset
+          |> put_change(:provider_sessions, Map.put(remembered, session, kind))
+          |> put_change(:provider_sessions_archived, false)
+        end
 
       _ ->
         changeset
