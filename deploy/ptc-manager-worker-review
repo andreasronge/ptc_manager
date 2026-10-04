@@ -448,7 +448,7 @@ def archive_session(kind, session_id, destination, max_bytes, artifact_root):
     matches = [path for path in candidates if session_id in os.path.basename(path)]
     if os.path.dirname(destination) != os.path.abspath(artifact_root):
         ensure_shared_directory(os.path.dirname(destination), artifact_root)
-    lock_fd = os.open(destination + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o660)
+    lock_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         # The lock outlives no process: after interruption, only this capture's
@@ -506,7 +506,9 @@ def archive_session_locked(kind, session_id, destination, max_bytes, artifact_ro
             os.fsync(output.fileno())
         for filename in os.listdir(staging):
             os.chmod(os.path.join(staging, filename), 0o440)
-        os.chmod(staging, 0o2750)
+        # Contents are sealed, but the coordinator group must be able to unlink
+        # expired files without changing worker-owned file permissions.
+        os.chmod(staging, 0o2770)
         os.rename(staging, destination)
         parent_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY)
         try:

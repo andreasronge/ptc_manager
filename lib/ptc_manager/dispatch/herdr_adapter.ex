@@ -826,7 +826,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           {:error, :retained_agent_identity_changed}
 
         is_nil(owned) ->
-          :ok
+          PtcManager.ExecutionArtifacts.archive_run(run.id)
 
         not allow_busy and owned["agent_status"] not in ["idle", "done"] ->
           {:error, :retained_agent_busy}
@@ -837,7 +837,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
         true ->
           case Command.run(["pane", "close", pane]) do
-            {:ok, _} -> PtcManager.ExecutionArtifacts.archive_job(job.id)
+            {:ok, _} -> PtcManager.ExecutionArtifacts.archive_run(run.id)
             error -> error
           end
       end

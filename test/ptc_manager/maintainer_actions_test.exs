@@ -66,7 +66,7 @@ defmodule PtcManager.MaintainerActionsTest do
         {:released_oversized_snapshot, action_id, snapshot}
       )
 
-      :ok
+      Process.get(:daily_digest_snapshot_release_result, :ok)
     end
   end
 
@@ -738,6 +738,45 @@ defmodule PtcManager.MaintainerActionsTest do
     assert action_id == digest.agent_action.id
     assert snapshot["source_path"] == "/tmp/ptc-manager-oversized-prompt-snapshot"
     refute_receive {:ran_daily_digest, _action}
+  end
+
+  test "retains source identity for cleanup retry when artifact publication and checkout removal fail" do
+    repository = repository_fixture()
+    Process.put(:daily_digest_snapshot_release_result, {:error, :eacces})
+    enable_automation!(repository, "daily_digest")
+    Application.put_env(:ptc_manager, :planning_source_snapshot, OversizedPromptSourceSnapshot)
+    keys = [:execution_artifact_root, :daily_digest_artifact_max_files]
+    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    end)
+
+    Application.put_env(:ptc_manager, :execution_artifact_root, System.tmp_dir!())
+    Application.put_env(:ptc_manager, :daily_digest_artifact_max_files, 0)
+
+    assert {:ok, digest} =
+             DailyDigests.enqueue(repository, %{
+               date: ~D[2026-08-30],
+               time_zone: "Etc/UTC",
+               started_at: ~U[2026-08-30 00:00:00Z],
+               ended_at: ~U[2026-08-31 00:00:00Z]
+             })
+
+    assert {:ok, failed} =
+             MaintainerActions.run_once(
+               adapter: DailyDigestAdapter,
+               sync: AlwaysFailSync,
+               lane: :planning
+             )
+
+    assert failed.state == "failed"
+    assert failed.last_error =~ "daily_digest_artifact_budget_exceeded"
+    assert failed.target_snapshot["source_path"] == "/tmp/ptc-manager-oversized-prompt-snapshot"
+    assert_receive {:released_oversized_snapshot, action_id, snapshot}
+    assert action_id == digest.agent_action.id
+    assert snapshot["source_path"] == "/tmp/ptc-manager-oversized-prompt-snapshot"
+    refute_receive {:ran_daily_digest, _}
   end
 
   test "fails a daily update when bounded evidence can never fit" do

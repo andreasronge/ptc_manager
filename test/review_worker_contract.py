@@ -44,6 +44,8 @@ class ReviewerContract(unittest.TestCase):
                 context['archive_session']('codex', session, destination, 1000000, root)
                 context['archive_session']('codex', session, destination, 1000000, root)
             self.assertFalse(abandoned.exists())
+            self.assertTrue(os.stat(destination).st_mode & 0o020, 'coordinator group must be able to expire archived files')
+            self.assertFalse(Path(destination + '.lock').exists(), 'archival must not leave uncollectable lock files')
             self.assertEqual((Path(destination) / 'session.jsonl').read_bytes(), source.read_bytes())
             self.assertEqual(json.loads((Path(destination) / 'manifest.json').read_text())['coverage'], 'complete')
 

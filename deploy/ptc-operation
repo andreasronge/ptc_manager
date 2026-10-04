@@ -9,6 +9,7 @@ import os
 import platform
 import resource
 import signal
+import select
 import socket
 import subprocess
 import sys
@@ -400,6 +401,17 @@ def managed_run(args, context):
     thread.start()
     pumps = artifact.start(child)
     status = child.wait()
+    # A completed command must not leave descendants holding its pipe writers.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if cgroup_path:
+        try:
+            write_text(os.path.join(cgroup_path, "cgroup.kill"), "1")
+        except OSError as error:
+            print(f"PtcManager descendant cleanup failed: {error}", file=sys.stderr)
+    artifact.stopped.set()
     for pump in pumps:
         pump.join()
     try:
@@ -428,6 +440,21 @@ def managed_run(args, context):
     return status if status >= 0 else 128 + abs(status)
 
 
+def stream_chunks(source, stopped=None):
+    deadline = None
+    while True:
+        if stopped is not None and stopped.is_set() and deadline is None:
+            deadline = time.monotonic() + 5
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("post-exit stream drain exceeded five seconds")
+        if not select.select([source], [], [], 0.1)[0]:
+            continue
+        data = os.read(source.fileno(), 65536)
+        if not data:
+            return
+        yield data
+
+
 class OperationArtifact:
     """Continuously tees separate child streams into an attempt-scoped durable directory."""
     def __init__(self, context, operation_id, attempt_token):
@@ -442,6 +469,7 @@ class OperationArtifact:
         self.records = {}
 
     def start(self, child):
+        self.stopped = threading.Event()
         pairs = (("stdout", child.stdout, sys.stdout.buffer),
                  ("stderr", child.stderr, sys.stderr.buffer))
         threads = []
@@ -460,10 +488,7 @@ class OperationArtifact:
         except OSError as error:
             state, detail = "error", f"open failed: {error.strerror}"
         try:
-            while True:
-                data = source.read1(65536)
-                if not data:
-                    break
+            for data in stream_chunks(source, getattr(self, "stopped", None)):
                 live.write(data)
                 live.flush()
                 if target is not None:
@@ -480,6 +505,8 @@ class OperationArtifact:
                         state, detail = "partial", "stream exceeded configured file budget"
                         target.close()
                         target = None
+        except TimeoutError as error:
+            state, detail = "partial", str(error)
         finally:
             source.close()
             if target is not None:
@@ -519,6 +546,7 @@ class OperationArtifact:
 class PassthroughArtifact:
     """Drain and forward streams even when durable capture cannot start."""
     def start(self, child):
+        self.stopped = threading.Event()
         threads = []
         for source, live in ((child.stdout, sys.stdout.buffer), (child.stderr, sys.stderr.buffer)):
             thread = threading.Thread(target=self._pump, args=(source, live), daemon=True)
@@ -526,12 +554,13 @@ class PassthroughArtifact:
             threads.append(thread)
         return threads
 
-    @staticmethod
-    def _pump(source, live):
+    def _pump(self, source, live):
         try:
-            while data := source.read1(65536):
+            for data in stream_chunks(source, getattr(self, "stopped", None)):
                 live.write(data)
                 live.flush()
+        except TimeoutError as error:
+            print(f"PtcManager output forwarding incomplete: {error}", file=sys.stderr)
         finally:
             source.close()
 

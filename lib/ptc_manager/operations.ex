@@ -767,11 +767,11 @@ defmodule PtcManager.Operations do
     |> Repo.update!()
   end
 
-  defp close_cancelled_pane(job, %AgentRun{herdr_pane: pane})
+  defp close_cancelled_pane(job, %AgentRun{id: run_id, herdr_pane: pane})
        when is_binary(pane) and pane != "" do
     case Gateway.call(Application.fetch_env!(:ptc_manager, :herdr_client), :close_pane, [pane]) do
       :ok ->
-        PtcManager.ExecutionArtifacts.archive_job(job.id)
+        PtcManager.ExecutionArtifacts.archive_run(run_id)
         {:ok, job}
 
       {:error, reason} ->

@@ -95,18 +95,21 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
 
     wrapper = Path.expand("deploy/ptc-operation")
 
-    assert {output, 0} =
+    assert {output, 23} =
              System.cmd(
-               wrapper,
+               "/usr/bin/timeout",
                [
+                 "5",
+                 wrapper,
                  "run",
                  "--label",
                  "test",
                  "--",
                  "/usr/bin/python3",
                  "-c",
-                 "import os; os.write(1, ('managed:' + os.environ['PTC_OPERATION_ACTIVE'] + '\\n').encode()); " <>
-                   "[(os.write(1, b'x' * 10000), os.write(2, b'y' * 10000)) for _ in range(220)]"
+                 "import os, subprocess, sys; os.write(1, ('managed:' + os.environ['PTC_OPERATION_ACTIVE'] + '\\n').encode()); " <>
+                   "[(os.write(1, b'x' * 10000), os.write(2, b'y' * 10000)) for _ in range(220)]; " <>
+                   "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); sys.exit(23)"
                ],
                env: [
                  {"PTC_MANAGED_OPERATION_CONTEXT", context_path},
@@ -119,7 +122,7 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
     assert output =~ "Waiting for PtcManager operation slot: test"
     assert output =~ "managed:77"
     assert_receive {:wrapper_request, %{"operation" => "request", "label" => "test"}}
-    assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 0}}
+    assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 23}}
     Task.await(server, 2_000)
 
     [artifact] =

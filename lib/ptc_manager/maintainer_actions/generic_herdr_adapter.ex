@@ -51,8 +51,19 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         {:ok, result}
       end
     after
-      archive_remembered_session(action)
-      cleanup(action)
+      case cleanup(action) do
+        {:ok, _} ->
+          archive_remembered_session(action)
+
+        _ ->
+          if Process.delete({__MODULE__, :provider_session}) do
+            require Logger
+
+            Logger.warning(
+              "Provider shutdown was not confirmed; session capture remains unavailable"
+            )
+          end
+      end
     end
   rescue
     error -> {:error, {:generic_herdr_failed, error.__struct__}}
@@ -610,37 +621,40 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   defp agent_name(action), do: "automation_a#{action.id}_f#{action.attempt_count}"
 
   defp cleanup(action) do
-    if workspace = Process.delete({__MODULE__, :workspace}) do
-      if Process.delete({__MODULE__, :disposable_workspace}) do
-        remover = fn workspace_id ->
-          ["worktree", "remove", "--workspace", workspace_id, "--force"]
-          |> command().run()
-          |> HerdrAdapter.action_workspace_removal_result()
-        end
-
-        recoverer = fn repository_path, path, label ->
-          with {:ok, output} <-
-                 command().run([
-                   "worktree",
-                   "open",
-                   "--cwd",
-                   repository_path,
-                   "--path",
-                   path,
-                   "--label",
-                   label,
-                   "--no-focus"
-                 ]),
-               {:ok, workspace_id, _pane} <- HerdrAdapter.decode_worktree(output) do
-            {:ok, workspace_id}
+    closed =
+      if workspace = Process.delete({__MODULE__, :workspace}) do
+        if Process.delete({__MODULE__, :disposable_workspace}) do
+          remover = fn workspace_id ->
+            ["worktree", "remove", "--workspace", workspace_id, "--force"]
+            |> command().run()
+            |> HerdrAdapter.action_workspace_removal_result()
           end
-        end
 
-        _ = InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer)
+          recoverer = fn repository_path, path, label ->
+            with {:ok, output} <-
+                   command().run([
+                     "worktree",
+                     "open",
+                     "--cwd",
+                     repository_path,
+                     "--path",
+                     path,
+                     "--label",
+                     label,
+                     "--no-focus"
+                   ]),
+                 {:ok, workspace_id, _pane} <- HerdrAdapter.decode_worktree(output) do
+              {:ok, workspace_id}
+            end
+          end
+
+          InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer)
+        else
+          command().run(["workspace", "close", workspace])
+        end
       else
-        _ = command().run(["workspace", "close", workspace])
+        {:error, :workspace_shutdown_unconfirmed}
       end
-    end
 
     Process.delete({__MODULE__, :setup_report})
 
@@ -662,7 +676,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       File.rm(ready <> ".tmp")
     end
 
-    :ok
+    closed
   end
 
   defp remember_context(%{path: path}) do

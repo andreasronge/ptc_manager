@@ -109,11 +109,23 @@ The manifest indexes exact available operation and review captures by durable
 source ID and artifact-root-relative manifest path. Missing captures lower
 coverage. Workspace setup retains its full combined output independently of the
 UI tail, and supported provider sessions are acquired by exact session ID;
-unsupported or absent artifacts are explicitly unavailable. Completion observation,
-cancellation, and worktree teardown trigger session archival independently of
-report generation. Session files and manifests publish together through a unique
+unsupported or absent artifacts are explicitly unavailable. Confirmed pane or
+workspace shutdown and worktree removal trigger session archival independently of
+report generation. Terminal database observations alone do not seal a live session.
+Session files and manifests publish together through a unique
 staging directory and atomic rename; interrupted copies can be retried. A sealed
 archive is never replaced by a later observation.
+
+Archive contents are read-only; their directories remain group-writable so the
+coordinator can unlink expired worker-owned files. Archival locks the parent
+directory instead of creating persistent sibling lock files. Cleanup failures
+are logged. Failed bundle publication releases its captured source checkout;
+if removal fails, the source identity is persisted for the failed-action reaper.
+
+On main-command exit the wrapper terminates its remaining process group (and
+operation cgroup when enabled), then drains already-emitted output. A pipe held
+by an escaped descendant has a five-second post-exit drain limit and explicit
+partial coverage, rather than holding the resource slot indefinitely.
 
 Artifact indexing and exact replay each allow at most 1,000 manifests and 512 MB
 of declared stream bytes, with a 30-second hashing deadline. A source manifest

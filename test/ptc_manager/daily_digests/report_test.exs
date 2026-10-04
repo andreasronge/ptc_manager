@@ -212,6 +212,8 @@ defmodule PtcManager.DailyDigests.ReportTest do
     for invalid <- [
           %{"kind" => "bogus", "coverage" => "complete", "streams" => %{}},
           %{"kind" => "operation", "coverage" => "complete", "streams" => %{"stdout" => "bad"}},
+          %{"kind" => "operation", "coverage" => "partial", "streams" => %{"stdout" => %{}}},
+          %{"kind" => "operation", "coverage" => "partial", "streams" => %{"unexpected" => %{}}},
           %{"kind" => "provider_session", "coverage" => "complete", "streams" => %{}}
         ] do
       File.write!(Path.join(directory, "manifest.json"), Jason.encode!(invalid))

@@ -2,6 +2,7 @@ defmodule PtcManager.DailyDigests.Bundle do
   @moduledoc "Atomically publishes and verifies immutable daily-report input bundles."
 
   import Ecto.Query
+  require Logger
   alias PtcManager.{Repo, Operations.AgentAction}
   alias PtcManager.Operations.AgentRun
 
@@ -104,8 +105,13 @@ defmodule PtcManager.DailyDigests.Bundle do
               relative = Path.relative_to(manifest, root)
 
               unless MapSet.member?(referenced, relative) do
-                manifest |> Path.dirname() |> make_writable()
-                manifest |> Path.dirname() |> File.rm_rf()
+                case File.rm_rf(Path.dirname(manifest)) do
+                  {:ok, _} ->
+                    :ok
+
+                  {:error, reason, _} ->
+                    Logger.warning("Execution artifact cleanup failed: #{inspect(reason)}")
+                end
               end
 
             _ ->
@@ -422,14 +428,17 @@ defmodule PtcManager.DailyDigests.Bundle do
     do: {:error, :invalid_streams}
 
   defp verify_streams(manifest_path, kind, streams, deadline) do
-    if Enum.any?(streams, fn {_, stream} -> not is_map(stream) end), do: throw(:invalid_streams)
-
     expected = %{
       "operation" => ~w(stdout stderr),
       "review" => ~w(stdout stderr),
       "workspace_setup" => ~w(combined),
       "provider_session" => ~w(session)
     }
+
+    if Enum.any?(streams, fn {name, stream} ->
+         name not in Map.fetch!(expected, kind) or not valid_stream?(stream)
+       end),
+       do: throw(:invalid_streams)
 
     verified =
       Map.new(streams, fn {name, stream} ->
@@ -463,6 +472,20 @@ defmodule PtcManager.DailyDigests.Bundle do
   catch
     :invalid_streams -> {:error, :invalid_streams}
   end
+
+  defp valid_stream?(%{
+         "path" => path,
+         "bytes" => bytes,
+         "sha256" => hash,
+         "coverage" => coverage
+       }) do
+    is_binary(path) and path not in ["", ".", ".."] and Path.basename(path) == path and
+      is_integer(bytes) and bytes >= 0 and is_binary(hash) and
+      Regex.match?(~r/\A[0-9a-f]{64}\z/, hash) and
+      coverage in ~w(complete partial unavailable error)
+  end
+
+  defp valid_stream?(_), do: false
 
   defp combine_coverage(declared, _) when declared in ~w(unavailable error), do: declared
   defp combine_coverage("complete", "complete"), do: "complete"

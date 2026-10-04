@@ -90,6 +90,12 @@ defmodule PtcManager.AutomationsTest do
           {:ok, ~s({"result":{"state":"idle"}})}
 
         Enum.take(args, 2) == ["workspace", "close"] ->
+          send(
+            self(),
+            {:session_at_shutdown,
+             Process.get({PtcManager.MaintainerActions.GenericHerdrAdapter, :provider_session})}
+          )
+
           {:ok, "{}"}
 
         true ->
@@ -1314,6 +1320,7 @@ defmodule PtcManager.AutomationsTest do
 
     invocation = Repo.get!(Invocation, invocation.id)
     assert invocation.selected_agent_kind == "test-maintainer"
+    assert_receive {:session_at_shutdown, {"test-maintainer", "generic-session"}}
     assert invocation.selected_agent_name == "automation_a#{action.id}_f1"
 
     [run] = PtcManager.Operations.list_active_agent_runs()

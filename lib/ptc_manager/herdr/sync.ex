@@ -126,7 +126,6 @@ defmodule PtcManager.Herdr.Sync do
 
     case result do
       {:ok, summary} ->
-        PtcManager.ExecutionArtifacts.archive_ended()
         Operations.notify_changed(__MODULE__)
         {:ok, summary}
 

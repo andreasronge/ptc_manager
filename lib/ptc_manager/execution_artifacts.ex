@@ -12,9 +12,7 @@ defmodule PtcManager.ExecutionArtifacts do
 
   def archive_job(_), do: :ok
 
-  def archive_ended do
-    archive(where(AgentRun, [run], run.state in ~w(done failed lost)))
-  end
+  def archive_run(run_id), do: archive(where(AgentRun, [run], run.id == ^run_id))
 
   defp archive(query) do
     root = Application.get_env(:ptc_manager, :execution_artifact_root)
