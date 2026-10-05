@@ -748,7 +748,8 @@ defmodule PtcManager.Automations do
           target_label: "#{repository.github_owner}/#{repository.github_name}",
           prompt_version: version.version,
           prompt: repository_prompt(repository, definition, version, invocation, context),
-          actor: actor
+          actor: actor,
+          built_for_branch: repository.default_branch
         }
 
         action =

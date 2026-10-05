@@ -22,6 +22,7 @@ defmodule PtcManager.Collections do
   alias PtcManager.{OperationalMode, RepoTransaction, Reviews}
   alias PtcManager.Collections.{Member, Run, Step, Structure}
   alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication, Repository}
+  alias PtcManager.Repository.{IntegrationBranches, MaintainerLabels}
 
   @actor "system:collection"
   @outstanding_states PtcManager.Operations.AgentAction.pending_states()
@@ -41,6 +42,17 @@ defmodule PtcManager.Collections do
     |> where([run], run.issue_id == ^issue_id and run.state in ^Run.live_states())
     |> preload([:members, :steps])
     |> Repo.one()
+  end
+
+  @doc "The latest integrated run of many umbrella issues, keyed by issue id."
+  def integrated_runs_by_issue([]), do: %{}
+
+  def integrated_runs_by_issue(issue_ids) when is_list(issue_ids) do
+    Run
+    |> where([run], run.issue_id in ^issue_ids and run.state == "integrated")
+    |> order_by([run], asc: run.ended_at, asc: run.id)
+    |> Repo.all()
+    |> Map.new(&{&1.issue_id, &1})
   end
 
   @doc "The live runs of many umbrella issues, keyed by issue id, for the Planning page."
@@ -87,8 +99,11 @@ defmodule PtcManager.Collections do
             true -> :ok
           end
 
-          with :ok <- validate_structure(issue) do
+          base = run_base(issue, Map.get(attrs, :base, :mapped))
+
+          with :ok <- validate_structure(issue, base.branch) do
             now = utc_now()
+            members_on_base!(Structure.members(issue), base.branch)
 
             run =
               %Run{}
@@ -98,6 +113,8 @@ defmodule PtcManager.Collections do
                 state: "active",
                 auto_merge: Map.get(attrs, :auto_merge, true) == true,
                 auto_recover: Map.get(attrs, :auto_recover, true) == true,
+                base_branch: base.branch,
+                base_override: base.override,
                 actor: actor,
                 started_at: now
               })
@@ -122,6 +139,8 @@ defmodule PtcManager.Collections do
                 issue_number: issue.number,
                 auto_merge: run.auto_merge,
                 auto_recover: run.auto_recover,
+                base_branch: run.base_branch,
+                base_override: run.base_override,
                 members: Enum.map(members, & &1.number)
               },
               "collection_run"
@@ -211,7 +230,9 @@ defmodule PtcManager.Collections do
           do: Repo.rollback({:member_in_flight, member.issue_number})
       end
 
-      with :ok <- validate_structure(umbrella) do
+      with :ok <- validate_structure(umbrella, run.base_branch) do
+        members_on_base!(current, run.base_branch)
+
         for member <- existing,
             not MapSet.member?(current_numbers, member.issue_number),
             do: Repo.delete!(member)
@@ -263,6 +284,9 @@ defmodule PtcManager.Collections do
         :ok
     end
   end
+
+  @doc "The live run a member issue belongs to, whose base branch it inherits."
+  def member_run(repo, %Issue{} = issue), do: parent_run(repo, issue)
 
   @doc false
   def dispatch_allowed(%Job{} = job, remote) do
@@ -411,13 +435,39 @@ defmodule PtcManager.Collections do
       admissible(run, statuses) != [] ->
         Enum.each(admissible(run, statuses), &admit(run, &1))
 
-      Enum.all?(statuses, &(&1.status == :closed_completed)) and statuses != [] ->
+      delivered?(run, umbrella, statuses) ->
         closeout_or_finish(run, umbrella, statuses)
 
       true ->
         :ok
     end
   end
+
+  # On the default branch a member is delivered when GitHub closes it. On an
+  # integration branch it never closes before that branch is merged, so its
+  # own merged pull request is the delivery.
+  defp delivered?(_run, _umbrella, []), do: false
+
+  defp delivered?(run, umbrella, statuses) do
+    if integration_run?(run, umbrella),
+      do: Enum.all?(statuses, &integrated_member?(&1, run.base_branch)),
+      else: Enum.all?(statuses, &(&1.status == :closed_completed))
+  end
+
+  # Only a pull request merged into this run's own base delivers a member; one
+  # merged into another branch before the run started did not.
+  defp integrated_member?(%{status: :closed_completed}, _base), do: true
+
+  defp integrated_member?(
+         %{status: :merged, publication: %{pr_state: "merged", base_branch: base}},
+         base
+       ),
+       do: true
+
+  defp integrated_member?(_status, _base), do: false
+
+  defp integration_run?(run, umbrella),
+    do: is_binary(run.base_branch) and run.base_branch != umbrella.repository.default_branch
 
   defp enqueue_closeout(run, umbrella, statuses, attempt) do
     members =
@@ -433,7 +483,7 @@ defmodule PtcManager.Collections do
       MaintainerActions.enqueue_collection_action(
         "collection_closeout",
         umbrella.id,
-        %{members: members},
+        %{members: members, base_branch: run.base_branch},
         @actor
       )
     end)
@@ -1097,8 +1147,18 @@ defmodule PtcManager.Collections do
           # It created the missing members. They were adopted, and this
           # function runs again only once they are delivered too, so the
           # collection closes out again against the complete membership.
-          "completed" -> closeout_again(run, umbrella, statuses, action)
-          _decided -> apply_transition(run, &finish/1, "collection_run.finishing", %{})
+          "completed" ->
+            closeout_again(run, umbrella, statuses, action)
+
+          _decided ->
+            if integration_run?(run, umbrella),
+              do:
+                apply_end(
+                  run,
+                  "integrated",
+                  "Every member merged into #{run.base_branch}; the issues stay open until it reaches #{umbrella.repository.default_branch}."
+                ),
+              else: apply_transition(run, &finish/1, "collection_run.finishing", %{})
         end
 
       {:exhausted, action} ->
@@ -1399,8 +1459,53 @@ defmodule PtcManager.Collections do
     )
   end
 
-  defp validate_structure(issue) do
-    case Structure.validate(issue) do
+  # Every member inherits the base the umbrella's labels resolve to now, or the
+  # default branch when the maintainer chose it once at start.
+  defp run_base(issue, choice) do
+    repository = issue.repository
+
+    case IntegrationBranches.resolve(repository, MaintainerLabels.reported_names(issue)) do
+      {:ok, nil} ->
+        %{branch: repository.default_branch, override: false}
+
+      {:ok, _mapping} when choice == :default ->
+        %{branch: repository.default_branch, override: true}
+
+      {:ok, %{"branch" => branch}} ->
+        %{branch: branch, override: false}
+
+      {:error, {:conflicting_integration_branches, _mappings}} ->
+        Repo.rollback(:conflicting_integration_branches)
+    end
+  end
+
+  # Work a member already has keeps the base it was approved with. A run on a
+  # different base would merge that work into the wrong branch, or recover it
+  # there, so a member joins only when no such work is live, open as a pull
+  # request, or still recoverable: an unanswered stop report or a retained
+  # worktree.
+  defp members_on_base!(members, branch) do
+    numbers =
+      for %{issue: %Issue{id: issue_id}, number: number} <- members,
+          Repo.exists?(
+            from job in Job,
+              left_join: publication in PrPublication,
+              on: publication.job_id == job.id,
+              left_join: allocation in assoc(job, :worktree_allocation),
+              where:
+                job.issue_id == ^issue_id and job.base_branch != ^branch and
+                  (job.state in ^Job.live_states() or publication.pr_state == "open" or
+                     (job.state in ["failed", "lost"] and
+                        ((not is_nil(job.stop_reported_at) and is_nil(job.stop_acknowledged_at)) or
+                           (not is_nil(allocation.id) and allocation.state != "removed"))))
+          ),
+          do: number
+
+    if numbers != [], do: Repo.rollback({:member_work_on_another_branch, numbers})
+  end
+
+  defp validate_structure(issue, base) do
+    case Structure.validate(issue, base) do
       :ok -> :ok
       {:error, reason} -> Repo.rollback({:structure_invalid, reason})
     end

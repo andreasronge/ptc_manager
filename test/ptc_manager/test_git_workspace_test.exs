@@ -93,6 +93,7 @@ defmodule PtcManager.TestGitWorkspaceTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: working.id,
       state: "published",
       idempotency_key: String.duplicate("a", 64),

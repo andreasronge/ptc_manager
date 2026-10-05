@@ -732,7 +732,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
     github_instruction =
       if job.publication_source == "agent" do
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request. Do not merge."
+        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request against #{job.base_branch}. Do not merge."
       else
         "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END. Do not push, create a pull request, or merge."
       end
@@ -742,7 +742,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       <context>
       Repository: #{repository.github_owner}/#{repository.github_name}
       Issue: ##{issue.number}
-      Branch: #{job.branch_name} → #{repository.default_branch}
+      Branch: #{job.branch_name} → #{job.base_branch}
       Workspace: PtcManager created and initialized this worktree; do not create, initialize, or garbage-collect worktrees.
       #{review_instructions(job, required_reviews)}
       GitHub: #{github_instruction}
@@ -759,24 +759,23 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       """
 
     Automations.compose_prompt(job.prompt_instructions, context) <>
-      continuation_instructions(job, repository)
+      continuation_instructions(job)
   end
 
   defp continuation_instructions(
-         %{review_generation: generation, review_resume_mode: "implementation"} = job,
-         repository
+         %{review_generation: generation, review_resume_mode: "implementation"} = job
        )
        when generation > 0 do
     refresh =
       """
 
-      Retained-worktree refresh: before validation, fetch the repository remote and integrate the current origin/#{repository.default_branch} into this branch while preserving all retained commits and uncommitted changes. Do not reset, discard, or start over. If integration conflicts cannot be resolved safely, write the stop report and stop. If dependency definitions or locks changed, refresh and compile dependencies before running the required gates.
+      Retained-worktree refresh: before validation, fetch the repository remote and integrate the current origin/#{job.base_branch} into this branch while preserving all retained commits and uncommitted changes. Do not reset, discard, or start over. If integration conflicts cannot be resolved safely, write the stop report and stop. If dependency definitions or locks changed, refresh and compile dependencies before running the required gates.
       """
 
     refresh <> maintainer_continuation_instructions(job)
   end
 
-  defp continuation_instructions(job, _repository), do: maintainer_continuation_instructions(job)
+  defp continuation_instructions(job), do: maintainer_continuation_instructions(job)
 
   defp maintainer_continuation_instructions(job) do
     case Map.get(job, :review_continuation_instructions) do

@@ -1,10 +1,11 @@
 defmodule PtcManager.TestSourceUpdater do
   @moduledoc false
 
-  def refresh(repository) do
+  def refresh(repository, opts \\ []) do
+    branch = Keyword.get(opts, :branch, repository.default_branch)
     path = repository.local_path || System.tmp_dir!()
-    remote_ref = "refs/remotes/origin/#{repository.default_branch}"
-    branch_ref = "refs/heads/#{repository.default_branch}"
+    remote_ref = "refs/remotes/origin/#{branch}"
+    branch_ref = "refs/heads/#{branch}"
 
     sha =
       case System.cmd("git", ["-C", path, "rev-parse", branch_ref], stderr_to_stdout: true) do

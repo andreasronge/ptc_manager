@@ -258,6 +258,7 @@ defmodule PtcManager.PublisherTest do
     external =
       %PrPublication{}
       |> PrPublication.changeset(%{
+        base_branch: "main",
         repository_id: job.repository_id,
         state: "published",
         idempotency_key: String.duplicate("e", 64),
@@ -1740,6 +1741,7 @@ defmodule PtcManager.PublisherTest do
   defp external_publication_fixture(job, branch, head_sha, pr_number) do
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       repository_id: job.repository_id,
       state: "published",
       idempotency_key:

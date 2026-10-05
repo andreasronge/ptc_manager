@@ -219,6 +219,7 @@ defmodule PtcManager.DeliveryReportDemo do
     Repo.insert!(
       PrPublication.changeset(%PrPublication{}, %{
         job_id: job.id,
+        base_branch: job.base_branch,
         state: "published",
         idempotency_key: String.duplicate("f", 64),
         fencing_token: 1,

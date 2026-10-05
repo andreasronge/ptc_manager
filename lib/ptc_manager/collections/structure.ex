@@ -58,20 +58,26 @@ defmodule PtcManager.Collections.Structure do
   first failing invariant is returned so the console can name it.
   """
   @spec validate(Issue.t()) :: :ok | {:error, term()}
-  def validate(%Issue{structure_projected: false}), do: {:error, :issue_structure_unknown}
+  # `base` is the branch the collection delivers into: the run's, when one is
+  # live or starting, else what the umbrella's labels map to.
+  def validate(umbrella, base \\ nil)
 
-  def validate(%Issue{} = umbrella) do
+  def validate(%Issue{structure_projected: false}, _base), do: {:error, :issue_structure_unknown}
+
+  def validate(%Issue{} = umbrella, base) do
     umbrella = Repo.preload(umbrella, :repository)
     members = members(umbrella)
     full_name = repository_full_name(umbrella.repository)
     member_numbers = MapSet.new(members, & &1.number)
+    base = base || collection_base(umbrella)
+    blockers = %{members: member_numbers, base: base, default: umbrella.repository.default_branch}
 
     with :ok <- check(not Issue.sub_issues_overflow?(umbrella), :sub_issues_overflow),
          :ok <- check(members != [], :no_members),
          :ok <- each(members, &same_repository(&1, full_name)),
          :ok <- each(members, &not_nested/1),
          :ok <- each(members, &labelled_when_open/1),
-         :ok <- each(members, &blockers_known(&1, member_numbers, full_name)),
+         :ok <- each(members, &blockers_known(&1, blockers, full_name)),
          :ok <- no_cycles(members) do
       :ok
     end
@@ -111,7 +117,23 @@ defmodule PtcManager.Collections.Structure do
 
   defp labelled_when_open(_member), do: :ok
 
-  defp blockers_known(%{issue: %Issue{state: "open"} = issue, number: number}, members, full_name) do
+  defp collection_base(umbrella) do
+    case PtcManager.Collections.current_run(umbrella.id) do
+      %{base_branch: branch} when is_binary(branch) ->
+        branch
+
+      _no_run ->
+        PtcManager.Operations.target_base(Repo, umbrella, umbrella.repository)
+    end
+  end
+
+  # A blocker outside the collection is fine once it closed, or once its work
+  # merged into the branch this collection delivers into.
+  defp blockers_known(
+         %{issue: %Issue{state: "open"} = issue, number: number},
+         blockers,
+         full_name
+       ) do
     cond do
       not issue.dependencies_projected or issue.dependency_overflow or
           issue.dependency_unknown_count > 0 ->
@@ -121,17 +143,28 @@ defmodule PtcManager.Collections.Structure do
         each(issue.dependencies, fn dependency ->
           member? =
             dependency.blocking_repository_full_name == full_name and
-              MapSet.member?(members, dependency.blocking_issue_number)
+              MapSet.member?(blockers.members, dependency.blocking_issue_number)
 
           closed? =
             dependency.lookup_state == "resolved" and dependency.blocking_state == "closed"
 
-          check(member? or closed?, {:foreign_blocker, number, dependency.blocking_issue_number})
+          integrated? =
+            PtcManager.Operations.blocker_satisfied?(
+              Repo,
+              dependency,
+              blockers.base,
+              blockers.default
+            )
+
+          check(
+            member? or closed? or integrated?,
+            {:foreign_blocker, number, dependency.blocking_issue_number}
+          )
         end)
     end
   end
 
-  defp blockers_known(_member, _members, _full_name), do: :ok
+  defp blockers_known(_member, _blockers, _full_name), do: :ok
 
   defp no_cycles(members) do
     issues = for %{issue: %Issue{} = issue} <- members, do: issue

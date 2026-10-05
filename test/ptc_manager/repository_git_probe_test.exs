@@ -16,7 +16,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     git!(path, ["commit", "-m", "implement issue"])
 
     repository = %Repository{local_path: path, default_branch: "main"}
-    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch, base_branch: "main"}
 
     assert {:ok, result} = GitProbe.verify(repository, job)
     assert result.commit_count == 1
@@ -33,7 +33,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     File.write!(Path.join(path, "README.md"), "base\nreviewed change\n")
     git!(path, ["commit", "-am", "implementation"])
     repository = %Repository{local_path: path, default_branch: "main"}
-    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch, base_branch: "main"}
     assert {:ok, publication} = GitProbe.verify(repository, job)
     assert {:ok, evidence} = GitProbe.review_patch(repository, job, path)
     assert Map.drop(evidence, [:diff]) == publication
@@ -56,7 +56,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     File.write!(Path.join(path, "README.md"), "base\nfirst round\n")
     git!(path, ["commit", "-am", "implementation"])
     repository = %Repository{local_path: path, default_branch: "main"}
-    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch, base_branch: "main"}
     assert {:ok, first} = GitProbe.review_patch(repository, job, path)
     refute Map.has_key?(first, :review_base_sha)
 
@@ -81,7 +81,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     File.write!(Path.join(path, "README.md"), "base\nonly round\n")
     git!(path, ["commit", "-am", "implementation"])
     repository = %Repository{local_path: path, default_branch: "main"}
-    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch, base_branch: "main"}
     assert {:ok, whole} = GitProbe.review_patch(repository, job, path)
 
     # Unknown, rewritten, identical and merge-base commits all lose their standing.
@@ -111,7 +111,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     File.write!(Path.join(path, "README.md"), "base\nfirst round\n")
     git!(path, ["commit", "-am", "implementation"])
     repository = %Repository{local_path: path, default_branch: "main"}
-    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch, base_branch: "main"}
     assert {:ok, first} = GitProbe.review_patch(repository, job, path)
     refute first.base_sha == original_base
 
@@ -143,7 +143,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     git!(path, ["add", "."])
     git!(path, ["commit", "-m", "generated schema"])
     repository = %Repository{local_path: path, default_branch: "main"}
-    job = %Job{id: 7, issue_id: 42, branch_name: branch}
+    job = %Job{id: 7, issue_id: 42, branch_name: branch, base_branch: "main"}
     assert {:ok, publication} = GitProbe.verify(repository, job)
     assert {:ok, evidence} = GitProbe.review_patch(repository, job, path)
     assert evidence.diff_digest == publication.diff_digest
@@ -160,7 +160,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :no_tree_changes} =
              GitProbe.verify(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 8, issue_id: 42, branch_name: branch}
+               %Job{id: 8, issue_id: 42, branch_name: branch, base_branch: "main"}
              )
   end
 
@@ -176,7 +176,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :no_tree_changes} =
              GitProbe.verify(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 9, issue_id: 42, branch_name: branch}
+               %Job{id: 9, issue_id: 42, branch_name: branch, base_branch: "main"}
              )
   end
 
@@ -195,7 +195,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :git_diff_too_large} =
              GitProbe.verify(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 10, issue_id: 42, branch_name: branch}
+               %Job{id: 10, issue_id: 42, branch_name: branch, base_branch: "main"}
              )
   end
 
@@ -214,7 +214,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :git_blob_too_large} =
              GitProbe.verify(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 11, issue_id: 42, branch_name: branch}
+               %Job{id: 11, issue_id: 42, branch_name: branch, base_branch: "main"}
              )
   end
 
@@ -234,7 +234,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :git_blob_too_large} =
              GitProbe.verify(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 12, issue_id: 42, branch_name: branch}
+               %Job{id: 12, issue_id: 42, branch_name: branch, base_branch: "main"}
              )
   end
 
@@ -348,7 +348,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:ok, verified} =
              GitProbe.verify_repair_at(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 13, issue_id: 42, branch_name: branch},
+               %Job{id: 13, issue_id: 42, branch_name: branch, base_branch: "main"},
                path,
                github_base_sha
              )
@@ -360,7 +360,7 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert {:error, :repair_base_missing} =
              GitProbe.verify_repair_at(
                %Repository{local_path: path, default_branch: "main"},
-               %Job{id: 13, issue_id: 42, branch_name: branch},
+               %Job{id: 13, issue_id: 42, branch_name: branch, base_branch: "main"},
                path,
                String.duplicate("f", 40)
              )

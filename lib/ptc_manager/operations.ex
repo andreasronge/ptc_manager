@@ -14,6 +14,7 @@ defmodule PtcManager.Operations do
   alias PtcManager.RepoTransaction
   alias PtcManager.RuntimeIncarnation
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Operations.DependencyGraph
 
@@ -89,7 +90,8 @@ defmodule PtcManager.Operations do
 
   def onboard_repository(attrs) do
     with {:ok, attrs} <- prepare_repository(attrs),
-         :ok <- verify_repository(attrs) do
+         {:ok, github_branch} <- verify_repository(attrs),
+         {:ok, attrs} <- onboarding_branch(attrs, github_branch) do
       # Synchronization covers enabled repositories only, and a repository is
       # added disabled, so the label snapshet Configuration checks against has
       # to be taken here or it would stay empty until after enabling.
@@ -195,7 +197,9 @@ defmodule PtcManager.Operations do
          github_owner: owner,
          github_name: name,
          default_branch: default_branch,
-         local_path: "/srv/#{name}",
+         # Existing repositories keep the /srv/<name> they were onboarded with;
+         # their path is also in the service units and retained worktrees.
+         local_path: "/srv/#{owner}/#{name}",
          enabled: false
        }}
     else
@@ -226,10 +230,215 @@ defmodule PtcManager.Operations do
         else: {:error, :repository_lookup_unsupported}
 
     case result do
-      {:ok, _repository} -> :ok
+      {:ok, repository} -> {:ok, github_default_branch(repository)}
       {:error, :repository_not_found} -> {:error, :repository_not_found}
       {:error, _reason} -> {:error, :github_unavailable}
     end
+  end
+
+  @doc "GitHub's default branch for an owner/name pair, to prefill onboarding."
+  def lookup_github_default_branch(owner, name) do
+    attrs = %{github_owner: String.trim(owner || ""), github_name: String.trim(name || "")}
+
+    if safe_github_component?(attrs.github_owner) and safe_github_component?(attrs.github_name) do
+      case verify_repository(attrs) do
+        {:ok, branch} when is_binary(branch) -> {:ok, branch}
+        {:ok, nil} -> {:error, :github_unavailable}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :unsafe_repository_name}
+    end
+  end
+
+  defp github_default_branch(%{"defaultBranchRef" => %{"name" => name}})
+       when is_binary(name) and name != "",
+       do: name
+
+  defp github_default_branch(_repository), do: nil
+
+  # A blank branch takes GitHub's default; either way it must be a branch name
+  # the broker and git will accept.
+  defp onboarding_branch(attrs, github_branch) do
+    branch =
+      case attrs.default_branch do
+        value when value in [nil, ""] -> github_branch
+        value -> value
+      end
+
+    if PtcManager.GitHub.Ref.safe?(branch),
+      do:
+        {:ok, %{attrs | default_branch: branch} |> Map.put(:github_default_branch, github_branch)},
+      else: {:error, :invalid_branch}
+  end
+
+  @doc """
+  Sets the command every new worktree of a repository runs before an agent
+  starts, and how long it may take. Work already set up keeps what it ran.
+  """
+  def update_workspace_setup(repository_id, command, timeout_minutes, actor)
+      when is_integer(repository_id) and is_binary(actor) and actor != "" do
+    command = if is_binary(command), do: String.trim(command), else: command
+
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        changeset =
+          Repository.changeset(repository, %{
+            workspace_setup_command: command,
+            workspace_setup_timeout_minutes: timeout_minutes
+          })
+
+        case Repo.update(changeset) do
+          {:ok, updated} ->
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.workspace_setup_changed",
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}",
+                "command" => updated.workspace_setup_command,
+                "timeout_minutes" => updated.workspace_setup_timeout_minutes
+              }
+            })
+
+            updated
+
+          {:error, _changeset} ->
+            Repo.rollback(:invalid_workspace_setup)
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Changes the branch a repository's work starts from and merges into.
+
+  Refused while a job, maintainer action, automation run, or deployment is
+  active, a collection run is live, a managed pull request is open, or a job's
+  worktree is retained,
+  because each carries the old branch in its worktree, pull request base,
+  prompt, or deployed revision, and a retained worktree can still be resumed.
+  """
+  def update_repository_branch(repository_id, branch, actor)
+      when is_integer(repository_id) and is_binary(actor) and actor != "" do
+    branch = if is_binary(branch), do: String.trim(branch), else: branch
+
+    if PtcManager.GitHub.Ref.safe?(branch) do
+      with_repository_lifecycle_lock(repository_id, fn ->
+        do_update_repository_branch(repository_id, branch, actor)
+      end)
+    else
+      {:error, :invalid_branch}
+    end
+  end
+
+  defp do_update_repository_branch(repository_id, branch, actor) do
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        cond do
+          repository.default_branch == branch ->
+            repository
+
+          branch_in_use?(repository_id) ->
+            Repo.rollback(:active_work)
+
+          true ->
+            updated =
+              repository
+              |> Repository.changeset(%{default_branch: branch})
+              |> Repo.update!()
+
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.default_branch_changed",
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}",
+                "from" => repository.default_branch,
+                "to" => branch
+              }
+            })
+
+            updated
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A prompt built from the repository names its default branch. When the
+  # caller says which branch it built for, the action is queued only if that is
+  # still the configured one; update_repository_branch/3 refuses while an action
+  # is queued, so the two cannot interleave the other way.
+  defp unchanged_branch(_repository_id, nil), do: {:ok, :unchecked}
+
+  defp unchanged_branch(repository_id, branch) do
+    case Repo.get(Repository, repository_id) do
+      %Repository{default_branch: ^branch} -> {:ok, branch}
+      _changed -> {:error, :repository_branch_changed}
+    end
+  end
+
+  defp branch_in_use?(repository_id) do
+    Repo.exists?(
+      from job in Job,
+        where: job.repository_id == ^repository_id and job.state in ^@active_job_states
+    ) or
+      Repo.exists?(
+        from publication in PrPublication,
+          join: job in Job,
+          on: job.id == publication.job_id,
+          where:
+            job.repository_id == ^repository_id and
+              publication.source in ["broker", "agent"] and
+              (publication.state in ["queued", "publishing"] or publication.pr_state == "open")
+      ) or
+      agent_action_active?(repository_id) or
+      automation_or_deployment_active?(repository_id) or
+      worktree_retained?(repository_id) or
+      Repo.exists?(
+        from run in PtcManager.Collections.Run,
+          where:
+            run.repository_id == ^repository_id and
+              run.state in ^PtcManager.Collections.Run.live_states()
+      )
+  end
+
+  defp agent_action_active?(repository_id) do
+    Repo.exists?(
+      from action in AgentAction,
+        where:
+          action.repository_id == ^repository_id and
+            action.state in ["queued", "running", "sync_pending"]
+    )
+  end
+
+  defp automation_or_deployment_active?(repository_id) do
+    Repo.exists?(
+      from invocation in PtcManager.Automations.Invocation,
+        where:
+          invocation.repository_id == ^repository_id and
+            invocation.state in ["queued", "running", "synchronizing"]
+    ) or
+      Repo.exists?(
+        from deployment in PtcManager.Deployments.Deployment,
+          where:
+            deployment.repository_id == ^repository_id and
+              deployment.state in ["queued", "draining", "starting", "running"]
+      )
   end
 
   defp onboarding_labels(attrs) do
@@ -264,12 +473,7 @@ defmodule PtcManager.Operations do
       from job in Job,
         where: job.repository_id == ^repository_id and job.state in ^@active_job_states
     ) or
-      Repo.exists?(
-        from action in AgentAction,
-          where:
-            action.repository_id == ^repository_id and
-              action.state in ["queued", "running", "sync_pending"]
-      ) or
+      agent_action_active?(repository_id) or
       Repo.exists?(
         from run in AgentRun,
           left_join: action in AgentAction,
@@ -282,18 +486,7 @@ defmodule PtcManager.Operations do
                  (action.action_key in ^@repair_action_keys and not is_nil(run.herdr_workspace)) or
                  not is_nil(run.disposable_cleanup_state))
       ) or
-      Repo.exists?(
-        from invocation in PtcManager.Automations.Invocation,
-          where:
-            invocation.repository_id == ^repository_id and
-              invocation.state in ["queued", "running", "synchronizing"]
-      ) or
-      Repo.exists?(
-        from deployment in PtcManager.Deployments.Deployment,
-          where:
-            deployment.repository_id == ^repository_id and
-              deployment.state in ["queued", "draining", "starting", "running"]
-      ) or
+      automation_or_deployment_active?(repository_id) or
       Repo.exists?(
         from publication in PrPublication,
           where:
@@ -306,14 +499,16 @@ defmodule PtcManager.Operations do
             operation.repository_id == ^repository_id and
               operation.state not in ["completed", "failed", "cancelled", "lost"]
       ) or
-      Repo.exists?(
-        from allocation in WorktreeAllocation,
-          join: job in Job,
-          on: job.id == allocation.job_id,
-          where:
-            job.repository_id == ^repository_id and
-              allocation.state != "removed"
-      )
+      worktree_retained?(repository_id)
+  end
+
+  defp worktree_retained?(repository_id) do
+    Repo.exists?(
+      from allocation in WorktreeAllocation,
+        join: job in Job,
+        on: job.id == allocation.job_id,
+        where: job.repository_id == ^repository_id and allocation.state != "removed"
+    )
   end
 
   defp delete_repository_records(repository_id) do
@@ -441,6 +636,100 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc """
+  Maps a label to an integration branch, after GitHub confirms the branch.
+
+  A mapping is the maintainer's decision; nothing adds one on a name match.
+  """
+  def add_integration_branch(repository_id, label, branch, actor)
+      when is_integer(repository_id) and is_binary(actor) do
+    branch = if is_binary(branch), do: String.trim(branch), else: branch
+
+    with %Repository{} = repository <-
+           Repo.get(Repository, repository_id) || {:error, :repository_not_found},
+         {:ok, _stored} <- IntegrationBranches.add(repository, label, branch),
+         :ok <- github_branch_exists(repository, branch) do
+      update_integration_branches(
+        repository_id,
+        &IntegrationBranches.add(&1, label, branch),
+        actor,
+        %{"added" => %{"label" => String.trim(label), "branch" => branch}}
+      )
+    end
+  end
+
+  @doc "Switches a mapping on or off. An inactive one keeps its entry and routes nothing."
+  def set_integration_branch_active(repository_id, label, active, actor)
+      when is_integer(repository_id) and is_binary(label) and is_boolean(active) and
+             is_binary(actor) do
+    update_integration_branches(
+      repository_id,
+      &{:ok, IntegrationBranches.set_active(&1, label, active)},
+      actor,
+      %{"label" => label, "active" => active}
+    )
+  end
+
+  @doc "Removes a mapping. Jobs already approved keep the base they stored."
+  def remove_integration_branch(repository_id, label, actor)
+      when is_integer(repository_id) and is_binary(label) and is_binary(actor) do
+    update_integration_branches(
+      repository_id,
+      &{:ok, IntegrationBranches.remove(&1, label)},
+      actor,
+      %{"removed" => label}
+    )
+  end
+
+  # The list is rewritten as a whole, so it is computed from the stored row
+  # inside the write transaction.
+  defp update_integration_branches(repository_id, change, actor, details) do
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        with {:ok, stored} <- change.(repository),
+             {:ok, updated} <-
+               repository
+               |> Repository.changeset(%{integration_branches: stored})
+               |> Repo.update() do
+          insert_audit!(%{
+            actor: actor,
+            action: "repository.integration_branches_updated",
+            target_type: "repository",
+            target_id: repository_id,
+            details: Map.put(details, "mappings", stored["mappings"])
+          })
+
+          updated
+        else
+          {:error, %Ecto.Changeset{}} -> Repo.rollback(:invalid_integration_branches)
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Whether GitHub reports the branch, through the read-only client."
+  def github_branch_exists(%Repository{} = repository, branch) do
+    client = Application.fetch_env!(:ptc_manager, :github_client)
+    {module, arity} = if is_atom(client), do: {client, 2}, else: {client.__struct__, 3}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :branch_exists?, arity) do
+      case Gateway.call(client, :branch_exists?, [repository, branch]) do
+        {:ok, true} -> :ok
+        {:ok, false} -> {:error, :branch_not_found}
+        {:error, _reason} -> {:error, :github_unavailable}
+      end
+    else
+      {:error, :github_unavailable}
+    end
+  end
+
   @doc "Records that a maintainer added or removed one label on GitHub."
   def record_issue_label_change(%Issue{} = issue, operation, name, actor)
       when operation in [:add, :remove] and is_binary(name) and is_binary(actor) do
@@ -477,9 +766,13 @@ defmodule PtcManager.Operations do
 
   def enqueue_agent_action(attrs) when is_map(attrs) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    {built_for_branch, attrs} = Map.pop(attrs, :built_for_branch)
     attrs = Map.merge(attrs, %{state: "queued", attempt_count: 0, requested_at: now})
 
     Multi.new()
+    |> Multi.run(:branch, fn _repo, _changes ->
+      unchanged_branch(attrs[:repository_id], built_for_branch)
+    end)
     |> Multi.insert(:agent_action, AgentAction.changeset(%AgentAction{}, attrs))
     |> Multi.insert(:audit_event, fn %{agent_action: action} ->
       AuditEvent.changeset(%AuditEvent{}, %{
@@ -633,6 +926,20 @@ defmodule PtcManager.Operations do
   def cancel_queued_job(job_id, actor)
       when is_integer(job_id) and is_binary(actor) and actor != "" do
     cancel_queued(Job, job_id, actor, "job.cancelled")
+  end
+
+  @doc """
+  Ends a queued job whose integration branch GitHub no longer has.
+
+  It would otherwise stay the oldest queued job and stop every other job from
+  starting. The issue can be approved again, against another base.
+  """
+  def cancel_queued_job_for_missing_base(job_id, branch)
+      when is_integer(job_id) and is_binary(branch) do
+    cancel_queued(Job, job_id, "coordinator", "job.cancelled", %{
+      last_error: "The integration branch #{branch} no longer exists on GitHub.",
+      details: %{"reason" => "base_branch_missing", "base_branch" => branch}
+    })
   end
 
   def cancel_queued_agent_action(action_id, actor)
@@ -980,6 +1287,7 @@ defmodule PtcManager.Operations do
             repository_id: stopped.repository_id,
             issue_id: stopped.issue_id,
             approval_id: approval.id,
+            base_branch: stopped.base_branch,
             automation_definition_version_id: stopped.automation_definition_version_id,
             prompt_instructions: stopped.prompt_instructions,
             kind: stopped.kind,
@@ -1031,7 +1339,9 @@ defmodule PtcManager.Operations do
       source_updated_at: issue.github_updated_at,
       source_digest: issue.content_digest,
       proposal_digest: previous.proposal_digest,
-      approved_at: now
+      approved_at: now,
+      base_branch: previous.base_branch,
+      base_override: previous.base_override
     })
     |> Repo.insert!()
   end
@@ -1293,15 +1603,16 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp cancel_queued(schema, id, actor, audit_action) do
+  defp cancel_queued(schema, id, actor, audit_action, extra \\ %{}) do
     now = utc_now()
+    error = if extra[:last_error], do: [last_error: extra.last_error], else: []
 
     outcome =
       Repo.transaction(fn ->
         {updated, _rows} =
           schema
           |> where([record], record.id == ^id and record.state == "queued")
-          |> Repo.update_all(set: [state: "cancelled", ended_at: now, updated_at: now])
+          |> Repo.update_all(set: [state: "cancelled", ended_at: now, updated_at: now] ++ error)
 
         if updated != 1, do: Repo.rollback(:work_no_longer_queued)
 
@@ -1310,7 +1621,11 @@ defmodule PtcManager.Operations do
           action: audit_action,
           target_type: if(schema == Job, do: "job", else: "agent_action"),
           target_id: id,
-          details: %{"cancelled_at" => DateTime.to_iso8601(now)}
+          details:
+            Map.merge(
+              %{"cancelled_at" => DateTime.to_iso8601(now)},
+              Map.get(extra, :details, %{})
+            )
         })
 
         Repo.get!(schema, id)
@@ -1930,7 +2245,7 @@ defmodule PtcManager.Operations do
              :ok <- heavy_delivery_priority_unlocked(),
              :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
-             :ok <- issue_dependencies_resolved(Repo, job.issue),
+             :ok <- issue_dependencies_resolved(Repo, job.issue, job.base_branch),
              {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, lifecycle_now),
              :ok <- dispatch_capacity_available(Repo, worker, capacity, lifecycle_now),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
@@ -2514,10 +2829,12 @@ defmodule PtcManager.Operations do
              is_map(result) and
              (is_nil(contract) or is_struct(contract, PtcManager.Repository.Contract)) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    pre_publication_attrs = pre_publication_attrs(contract)
 
     outcome =
-      if valid_result_fields?(result) do
+      with true <- valid_result_fields?(result) || {:error, :invalid_result},
+           {:ok, gate} <- publication_gate(job_id, contract) do
+        pre_publication_attrs = pre_publication_attrs(gate)
+
         Repo.transaction(fn ->
           review_job = Repo.get!(Job, job_id)
 
@@ -2566,6 +2883,7 @@ defmodule PtcManager.Operations do
               idempotency_key: publication_key(job, result),
               fencing_token: fencing_token,
               branch_name: job.branch_name,
+              base_branch: job.base_branch,
               base_sha: result.base_sha,
               head_sha: result.head_sha,
               diff_digest: result.diff_digest,
@@ -2593,7 +2911,7 @@ defmodule PtcManager.Operations do
                     "diff_digest" => result.diff_digest,
                     "commit_count" => result.commit_count
                   },
-                  pre_publication_audit_details(contract)
+                  pre_publication_audit_details(gate)
                 )
             })
 
@@ -2601,13 +2919,11 @@ defmodule PtcManager.Operations do
           else
             job = Repo.get!(Job, job_id)
 
-            if verified_result_matches?(job, fencing_token, attempt_token, result, contract),
+            if verified_result_matches?(job, fencing_token, attempt_token, result, gate),
               do: job,
               else: Repo.rollback(result_attempt_failure(job, fencing_token, attempt_token, now))
           end
         end)
-      else
-        {:error, :invalid_result}
       end
 
     case outcome do
@@ -2697,7 +3013,7 @@ defmodule PtcManager.Operations do
     issue_ids = Enum.map(issues, & &1.id)
     proposals = latest_proposals(issue_ids)
     jobs = active_jobs(issue_ids)
-    dependencies = dashboard_dependencies(issue_ids, jobs)
+    dependencies = dashboard_dependencies(issues, jobs)
     dependency_cycles = dependency_cycles(issue_ids)
     latest_jobs = latest_jobs(issue_ids)
     publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
@@ -2709,11 +3025,24 @@ defmodule PtcManager.Operations do
     retrospective_issue_actions = retrospective_issue_actions()
     external_publications = external_publications_by_issue(issues)
     collection_runs = PtcManager.Collections.live_runs_by_issue(issue_ids)
+    integrated_runs = PtcManager.Collections.integrated_runs_by_issue(issue_ids)
 
     Enum.map(issues, fn issue ->
+      active_job = Map.get(jobs, issue.id)
+
+      publication =
+        publication_for_issue(publications, active_job, Map.get(latest_jobs, issue.id))
+
       %{
         issue: issue,
+        # The branch this issue's work targets: its job's or its merged pull
+        # request's stored base, else where approval would send it now.
+        base:
+          (active_job && active_job.base_branch) ||
+            (publication && publication.pr_state == "merged" && publication.base_branch) ||
+            target_base(Repo, issue, issue.repository),
         collection_run: Map.get(collection_runs, issue.id),
+        integrated_run: Map.get(integrated_runs, issue.id),
         external_publication: Map.get(external_publications, issue.id),
         dependencies: Map.get(dependencies, issue.id, []),
         dependency_cycle: Map.get(dependency_cycles, issue.id),
@@ -2854,6 +3183,8 @@ defmodule PtcManager.Operations do
         })
       end)
 
+    integrated_items = integrated_board_items()
+
     external_publications =
       PrPublication
       |> where(
@@ -2892,15 +3223,107 @@ defmodule PtcManager.Operations do
           pr_agent_action: Map.get(actions, {"pull_request", publication.id}),
           pr_retrospective_action: nil,
           pr_retrospective_issue_actions: [],
-          linked_issues: Map.get(linked_issues, publication.id, [])
+          linked_issues: Map.get(linked_issues, publication.id, []),
+          base: publication.base_branch
         }
       end)
 
-    managed_items ++ stopped_items ++ external_items
+    managed_items ++ stopped_items ++ integrated_items ++ external_items
   end
 
   # A stopped job is no longer active, so it holds no capacity, but its card has
   # to stay until the maintainer decides what to do about it.
+  # Managed pull requests merged into an integration branch while an issue they
+  # deliver is still open: the job's own issue and every issue the pull request
+  # links. Done there, waiting for that branch to reach the default branch;
+  # GitHub closing the last of them takes the card away.
+  defp integrated_board_items do
+    rows =
+      from(publication in PrPublication,
+        join: job in Job,
+        on: job.id == publication.job_id,
+        join: issue in Issue,
+        on: issue.id == job.issue_id,
+        join: repository in Repository,
+        on: repository.id == job.repository_id,
+        where:
+          publication.source in ["broker", "agent"] and publication.pr_state == "merged" and
+            publication.base_branch != repository.default_branch,
+        order_by: [asc: publication.base_branch, asc: issue.number],
+        select: {publication, job, issue, repository}
+      )
+      |> Repo.all()
+
+    open_issues = open_linked_issues(rows)
+
+    Enum.flat_map(rows, fn {publication, job, issue, repository} ->
+      numbers =
+        Enum.uniq([issue.number | get_in(publication.linked_issue_numbers, ["numbers"]) || []])
+
+      linked =
+        numbers
+        |> Enum.map(&Map.get(open_issues, {repository.id, &1}))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.map(&%{&1 | repository: repository})
+
+      case linked do
+        [] ->
+          []
+
+        [first | _rest] ->
+          [
+            %{
+              managed?: true,
+              repository: repository,
+              title: publication.title || issue.title,
+              number: publication.pr_number,
+              url: publication.pr_url,
+              started_at: publication.pr_checked_at || publication.published_at,
+              issue:
+                if(issue.state == "open", do: %{issue | repository: repository}, else: first),
+              dependencies: [],
+              dependency_cycle: nil,
+              proposal: nil,
+              active_job: nil,
+              latest_job: job,
+              publication: publication,
+              external_publication: nil,
+              pr_analysis: nil,
+              merge_approval: nil,
+              issue_agent_action: nil,
+              pr_agent_action: nil,
+              pr_retrospective_action: nil,
+              pr_retrospective_issue_actions: [],
+              linked_issues: linked,
+              base: publication.base_branch
+            }
+          ]
+      end
+    end)
+  end
+
+  defp open_linked_issues([]), do: %{}
+
+  defp open_linked_issues(rows) do
+    wanted =
+      for {publication, _job, issue, repository} <- rows,
+          number <- [issue.number | get_in(publication.linked_issue_numbers, ["numbers"]) || []],
+          uniq: true,
+          do: {repository.id, number}
+
+    wanted
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.flat_map(fn {repository_id, numbers} ->
+      Repo.all(
+        from issue in Issue,
+          where:
+            issue.repository_id == ^repository_id and issue.number in ^numbers and
+              issue.state == "open"
+      )
+    end)
+    |> Map.new(&{{&1.repository_id, &1.number}, &1})
+  end
+
   defp stopped_board_items do
     Enum.map(unacknowledged_stopped_jobs(), fn job ->
       %{
@@ -2925,7 +3348,8 @@ defmodule PtcManager.Operations do
         pr_agent_action: nil,
         pr_retrospective_action: nil,
         pr_retrospective_issue_actions: [],
-        linked_issues: [job.issue]
+        linked_issues: [job.issue],
+        base: job.base_branch
       }
     end)
   end
@@ -3586,10 +4010,10 @@ defmodule PtcManager.Operations do
     broadcast_change(outcome)
   end
 
-  def approve_issue(issue_id, actor, requested_review_count \\ nil, profile \\ nil)
+  def approve_issue(issue_id, actor, requested_review_count \\ nil, profile \\ nil, opts \\ [])
       when is_integer(issue_id) and is_binary(actor) do
     with :ok <- valid_requested_review_count(requested_review_count) do
-      do_approve_issue(issue_id, actor, requested_review_count, :prepared, profile)
+      do_approve_issue(issue_id, actor, requested_review_count, :prepared, profile, opts)
     end
   end
 
@@ -3602,16 +4026,22 @@ defmodule PtcManager.Operations do
   because a small issue does not need a preparation round. The click is the
   approval.
   """
-  def approve_issue_directly(issue_id, actor, requested_review_count \\ nil, profile \\ nil)
+  def approve_issue_directly(
+        issue_id,
+        actor,
+        requested_review_count \\ nil,
+        profile \\ nil,
+        opts \\ []
+      )
       when is_integer(issue_id) and is_binary(actor) do
     with :ok <- valid_requested_review_count(requested_review_count) do
-      do_approve_issue(issue_id, actor, requested_review_count, :direct, profile)
+      do_approve_issue(issue_id, actor, requested_review_count, :direct, profile, opts)
     end
   end
 
   @doc "Queues one ready issue under the repository's explicit automatic implementation policy."
   def auto_approve_issue(issue_id) when is_integer(issue_id) do
-    do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil)
+    do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil, [])
   end
 
   @doc """
@@ -3621,10 +4051,13 @@ defmodule PtcManager.Operations do
   and its daily limit, and keeps every other gate.
   """
   def approve_collection_issue(issue_id) when is_integer(issue_id) do
-    do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil)
+    do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil, [])
   end
 
-  @doc "True when every projected blocker of the issue is closed as completed and no cycle exists."
+  @doc """
+  True when every projected blocker is closed as completed, or merged into the
+  integration branch this issue targets, and no cycle exists.
+  """
   def dependencies_resolved?(%Issue{} = issue),
     do: issue_dependencies_resolved(Repo, issue) == :ok
 
@@ -3636,12 +4069,24 @@ defmodule PtcManager.Operations do
   def dependency_projection_matches?(%Issue{} = issue, remote_issue) when is_map(remote_issue),
     do: issue_dependency_projection_matches(Repo, issue, remote_issue) == :ok
 
-  defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
+  # `base: :default` is the maintainer's "default branch instead" choice for an
+  # issue a mapping would otherwise send to an integration branch.
+  defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile, opts) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    base_choice = Keyword.get(opts, :base, :mapped)
 
     Multi.new()
     |> Multi.run(:snapshot, fn repo, _changes ->
       current_approvable_snapshot(repo, issue_id, mode)
+    end)
+    |> Multi.run(:base, fn repo, %{snapshot: {issue, _proposal, repository}} ->
+      # Blockers are judged against the base this approval chose, so "default
+      # branch instead" needs them completed, not merely integrated.
+      with {:ok, base} <- approval_base(repo, issue, repository, mode, base_choice),
+           :ok <- issue_dependencies_resolved(repo, issue, base.branch),
+           :ok <- not_already_integrated(repo, issue, repository, base) do
+        {:ok, base}
+      end
     end)
     |> Multi.run(:execution, fn _repo, %{snapshot: {_issue, proposal, _repository}} ->
       case PtcManager.ExecutionProfiles.freeze(proposal, profile, requested_review_count) do
@@ -3660,7 +4105,7 @@ defmodule PtcManager.Operations do
           )}}
       end
     end)
-    |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}} ->
+    |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}, base: base} ->
       Approval.changeset(%Approval{}, %{
         proposal_id: proposal && proposal.id,
         decision: approval_decision(mode),
@@ -3668,19 +4113,23 @@ defmodule PtcManager.Operations do
         source_updated_at: issue.github_updated_at,
         source_digest: issue.content_digest,
         proposal_digest: proposal && proposal.proposal_digest,
-        approved_at: now
+        approved_at: now,
+        base_branch: base.branch,
+        base_override: base.override
       })
     end)
     |> Multi.insert(:job, fn %{
                                snapshot: {issue, _proposal, _repository},
                                approval: approval,
                                automation: {version, prompt_instructions},
-                               execution: execution
+                               execution: execution,
+                               base: base
                              } ->
       Job.changeset(%Job{}, %{
         repository_id: issue.repository_id,
         issue_id: issue.id,
         approval_id: approval.id,
+        base_branch: base.branch,
         automation_definition_version_id: version.id,
         prompt_instructions: prompt_instructions,
         kind: "implementation",
@@ -3701,6 +4150,7 @@ defmodule PtcManager.Operations do
     end)
     |> Multi.insert(:audit_event, fn %{
                                        snapshot: {issue, proposal, _repository},
+                                       approval: approval,
                                        job: job
                                      } ->
       AuditEvent.changeset(%AuditEvent{}, %{
@@ -3715,7 +4165,9 @@ defmodule PtcManager.Operations do
           "required_review_count" => job.required_review_count,
           "execution_settings" => job.execution_settings,
           "proposal_digest" => proposal && proposal.proposal_digest,
-          "source_digest" => issue.content_digest
+          "source_digest" => issue.content_digest,
+          "base_branch" => job.base_branch,
+          "base_override" => approval.base_override
         }
       })
     end)
@@ -3726,6 +4178,135 @@ defmodule PtcManager.Operations do
       _result -> :ok
     end)
     |> broadcast_change()
+  end
+
+  # A collection member inherits the base its run resolved at start. Any other
+  # approval resolves it from the issue's labels and the repository's active
+  # mappings now, and the job keeps it whatever changes later.
+  # A member of a live collection run inherits the base the run resolved at
+  # start, however it is approved, so a later label, mapping, or competing
+  # admission path cannot split the collection across branches.
+  defp approval_base(repo, issue, repository, mode, choice) do
+    case PtcManager.Collections.member_run(repo, issue) do
+      %{base_branch: branch, base_override: override} when is_binary(branch) ->
+        {:ok, %{branch: branch, override: override}}
+
+      _no_run ->
+        label_base(repo, issue, repository, mode, choice)
+    end
+  end
+
+  defp label_base(repo, issue, repository, _mode, choice) do
+    case IntegrationBranches.resolve(repository, route_labels(repo, issue)) do
+      {:ok, nil} ->
+        {:ok, %{branch: repository.default_branch, override: false}}
+
+      {:ok, _mapping} when choice == :default ->
+        {:ok, %{branch: repository.default_branch, override: true}}
+
+      {:ok, %{"branch" => branch}} ->
+        {:ok, %{branch: branch, override: false}}
+
+      {:error, {:conflicting_integration_branches, _mappings}} ->
+        {:error, :conflicting_integration_branches}
+    end
+  end
+
+  @doc """
+  The branch an issue's work targets now: its live collection run's base, else
+  the branch its labels or umbrella's labels map to, else the default branch.
+  Conflicting mappings fall back to the default branch here; approval refuses
+  them separately.
+  """
+  def target_base(repo \\ Repo, %Issue{} = issue, %Repository{} = repository) do
+    case PtcManager.Collections.member_run(repo, issue) do
+      %{base_branch: branch} when is_binary(branch) ->
+        branch
+
+      _no_run ->
+        case IntegrationBranches.resolve(repository, route_labels(repo, issue)) do
+          {:ok, %{"branch" => branch}} -> branch
+          _default_or_conflict -> repository.default_branch
+        end
+    end
+  end
+
+  @doc """
+  True when a blocker no longer holds back work targeting `base`: it closed as
+  completed, or, for an integration branch, a pull request for it merged there.
+  """
+  def blocker_satisfied?(repo \\ Repo, dependency, base, default_branch)
+
+  def blocker_satisfied?(
+        _repo,
+        %{lookup_state: "resolved", blocking_state: "closed", blocking_state_reason: "completed"},
+        _base,
+        _default_branch
+      ),
+      do: true
+
+  def blocker_satisfied?(repo, %{blocking_issue_id: blocker_id}, base, default_branch)
+      when is_integer(blocker_id) and base != default_branch,
+      do: integrated_into?(repo, blocker_id, base)
+
+  def blocker_satisfied?(_repo, _dependency, _base, _default_branch), do: false
+
+  @doc """
+  The labels that decide where an issue's work goes: its own and, for a
+  collection member, its umbrella's.
+  """
+  def route_labels(repo \\ Repo, %Issue{} = issue) do
+    own = PtcManager.Repository.MaintainerLabels.reported_names(issue)
+
+    case issue.parent_issue_number do
+      nil ->
+        own
+
+      number ->
+        case repo.get_by(Issue, repository_id: issue.repository_id, number: number) do
+          %Issue{} = umbrella ->
+            own ++ PtcManager.Repository.MaintainerLabels.reported_names(umbrella)
+
+          nil ->
+            own
+        end
+    end
+  end
+
+  # An issue whose work already merged into its integration branch stays open
+  # until that branch reaches the default branch; implementing it again would
+  # duplicate the work.
+  defp not_already_integrated(repo, issue, repository, %{branch: branch}) do
+    if branch != repository.default_branch and integrated_into?(repo, issue.id, branch),
+      do: {:error, :already_integrated},
+      else: :ok
+  end
+
+  @doc """
+  True when a managed pull request merged into this branch for the issue: its
+  own job's, or another job's whose pull request links the issue.
+  """
+  def integrated_into?(repo \\ Repo, issue_id, branch) do
+    case repo.get(Issue, issue_id) do
+      nil ->
+        false
+
+      issue ->
+        repo.exists?(
+          from publication in PrPublication,
+            join: job in Job,
+            on: job.id == publication.job_id,
+            where:
+              job.repository_id == ^issue.repository_id and publication.pr_state == "merged" and
+                publication.base_branch == ^branch and
+                (job.issue_id == ^issue_id or
+                   fragment(
+                     "EXISTS (SELECT 1 FROM json_each(?, '$.numbers') WHERE value = ?)",
+                     publication.linked_issue_numbers,
+                     ^issue.number
+                   ))
+        )
+    end
   end
 
   defp approval_decision(:automatic), do: "start_implementation_automatic"
@@ -3745,7 +4326,6 @@ defmodule PtcManager.Operations do
          :ok <- issue_is_open(issue),
          :ok <- issue_unclaimed(issue, repository),
          :ok <- issue_workflow_allows_implementation(issue),
-         :ok <- issue_dependencies_resolved(repo, issue),
          :ok <- issue_not_collection(issue),
          {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
       {:ok, {issue, proposal, repository}}
@@ -4091,12 +4671,42 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp verified_result_matches?(job, fencing_token, attempt_token, result, contract) do
+  defp verified_result_matches?(job, fencing_token, attempt_token, result, gate) do
     job.state == "ready_for_pr" and job.fencing_token == fencing_token and
       job.result_attempt_token == attempt_token and job.result_base_sha == result.base_sha and
       job.result_head_sha == result.head_sha and
       job.result_diff_digest == result.diff_digest and
-      job.result_commit_count == result.commit_count and pre_publication_matches?(job, contract)
+      job.result_commit_count == result.commit_count and pre_publication_matches?(job, gate)
+  end
+
+  # The broker gate runs the repository's workspace setup, then the contract's
+  # verification, in a fresh checkout of the result. Both are frozen here, so a
+  # later edit of either cannot change what this result is published under.
+  defp publication_gate(_job_id, nil), do: {:ok, nil}
+
+  defp publication_gate(job_id, contract) do
+    case Repo.get!(Job, job_id) |> Repo.preload(:repository) do
+      %Job{
+        repository: %Repository{
+          workspace_setup_command: command,
+          workspace_setup_timeout_minutes: timeout
+        }
+      }
+      when is_binary(command) and is_integer(timeout) ->
+        setup = %{command: command, timeout_minutes: timeout}
+
+        {:ok,
+         %{
+           bootstrap_command: command,
+           bootstrap_timeout_ms: timeout * 60_000,
+           command: contract.before_publish_command,
+           timeout_ms: contract.verification_timeout_minutes * 60_000,
+           digest: PtcManager.Repository.Contract.publication_digest(contract, setup)
+         }}
+
+      _unconfigured ->
+        {:error, :workspace_setup_not_configured}
+    end
   end
 
   defp pre_publication_attrs(nil) do
@@ -4115,13 +4725,13 @@ defmodule PtcManager.Operations do
     ]
   end
 
-  defp pre_publication_attrs(contract) do
+  defp pre_publication_attrs(gate) do
     [
-      pre_publication_bootstrap_command: contract.bootstrap_command,
-      pre_publication_bootstrap_timeout_ms: contract.bootstrap_timeout_minutes * 60_000,
-      pre_publication_command: contract.before_publish_command,
-      pre_publication_timeout_ms: contract.verification_timeout_minutes * 60_000,
-      pre_publication_config_digest: PtcManager.Repository.Contract.publication_digest(contract),
+      pre_publication_bootstrap_command: gate.bootstrap_command,
+      pre_publication_bootstrap_timeout_ms: gate.bootstrap_timeout_ms,
+      pre_publication_command: gate.command,
+      pre_publication_timeout_ms: gate.timeout_ms,
+      pre_publication_config_digest: gate.digest,
       pre_publication_status: "pending",
       pre_publication_verified_sha: nil,
       pre_publication_exit_status: nil,
@@ -4133,14 +4743,13 @@ defmodule PtcManager.Operations do
 
   defp pre_publication_audit_details(nil), do: %{}
 
-  defp pre_publication_audit_details(contract) do
+  defp pre_publication_audit_details(gate) do
     %{
-      "pre_publication_bootstrap_command" => contract.bootstrap_command,
-      "pre_publication_bootstrap_timeout_ms" => contract.bootstrap_timeout_minutes * 60_000,
-      "pre_publication_command" => contract.before_publish_command,
-      "pre_publication_timeout_ms" => contract.verification_timeout_minutes * 60_000,
-      "pre_publication_config_digest" =>
-        PtcManager.Repository.Contract.publication_digest(contract)
+      "pre_publication_bootstrap_command" => gate.bootstrap_command,
+      "pre_publication_bootstrap_timeout_ms" => gate.bootstrap_timeout_ms,
+      "pre_publication_command" => gate.command,
+      "pre_publication_timeout_ms" => gate.timeout_ms,
+      "pre_publication_config_digest" => gate.digest
     }
   end
 
@@ -4151,13 +4760,12 @@ defmodule PtcManager.Operations do
       is_nil(job.pre_publication_config_digest)
   end
 
-  defp pre_publication_matches?(job, contract) do
-    job.pre_publication_bootstrap_command == contract.bootstrap_command and
-      job.pre_publication_bootstrap_timeout_ms == contract.bootstrap_timeout_minutes * 60_000 and
-      job.pre_publication_command == contract.before_publish_command and
-      job.pre_publication_timeout_ms == contract.verification_timeout_minutes * 60_000 and
-      job.pre_publication_config_digest ==
-        PtcManager.Repository.Contract.publication_digest(contract)
+  defp pre_publication_matches?(job, gate) do
+    job.pre_publication_bootstrap_command == gate.bootstrap_command and
+      job.pre_publication_bootstrap_timeout_ms == gate.bootstrap_timeout_ms and
+      job.pre_publication_command == gate.command and
+      job.pre_publication_timeout_ms == gate.timeout_ms and
+      job.pre_publication_config_digest == gate.digest
   end
 
   defp result_error_matches?(job, fencing_token, attempt_token, message) do
@@ -5275,32 +5883,35 @@ defmodule PtcManager.Operations do
   defp issue_workflow_allows_implementation(%Issue{}),
     do: {:error, :issue_workflow_not_ready}
 
-  defp issue_dependencies_resolved(_repo, %Issue{dependencies_projected: false}),
+  # `base` is the branch the work targets: an approval's or job's stored base,
+  # or, for a question asked before approval, where approval would send it.
+  defp issue_dependencies_resolved(repo, issue, base \\ nil)
+
+  defp issue_dependencies_resolved(_repo, %Issue{dependencies_projected: false}, _base),
     do: {:error, :issue_dependencies_unresolved}
 
-  defp issue_dependencies_resolved(_repo, %Issue{dependency_overflow: true}),
+  defp issue_dependencies_resolved(_repo, %Issue{dependency_overflow: true}, _base),
     do: {:error, :issue_dependencies_unresolved}
 
-  defp issue_dependencies_resolved(_repo, %Issue{dependency_unknown_count: count})
+  defp issue_dependencies_resolved(_repo, %Issue{dependency_unknown_count: count}, _base)
        when count > 0,
        do: {:error, :issue_dependencies_unresolved}
 
-  defp issue_dependencies_resolved(repo, %Issue{} = issue) do
+  defp issue_dependencies_resolved(repo, %Issue{} = issue, base) do
     dependencies =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
-      |> join(:left, [dependency], blocker in Issue,
-        on: blocker.id == dependency.blocking_issue_id
-      )
-      |> select([dependency, blocker], {dependency, blocker})
       |> repo.all()
 
+    repository = repo.get!(Repository, issue.repository_id)
+    base = base || target_base(repo, issue, repository)
     cycles = dependency_cycles([issue.id])
 
     if is_nil(Map.get(cycles, issue.id)) and
-         Enum.all?(dependencies, fn {dependency, blocker} ->
-           dependency_satisfied?(dependency, blocker)
-         end) do
+         Enum.all?(
+           dependencies,
+           &blocker_satisfied?(repo, &1, base, repository.default_branch)
+         ) do
       :ok
     else
       {:error, :issue_dependencies_unresolved}
@@ -5388,19 +5999,44 @@ defmodule PtcManager.Operations do
       job.issue_id in ^issue_ids and job.state in ^@active_job_states
     )
     |> order_by([job], desc: job.inserted_at)
+    |> preload(:approval)
     |> Repo.all()
     |> Map.new(&{&1.issue_id, &1})
   end
 
   defp dashboard_dependencies([], _jobs), do: %{}
 
-  defp dashboard_dependencies(issue_ids, jobs) do
-    IssueDependency
-    |> where([dependency], dependency.issue_id in ^issue_ids)
-    |> order_by([dependency], asc: dependency.blocking_issue_number)
-    |> preload([:blocking_issue, :blocking_repository])
-    |> Repo.all()
-    |> Enum.group_by(& &1.issue_id, fn dependency ->
+  # Each entry carries `satisfied`, decided by blocker_satisfied?/4 against the
+  # base its dependent targets, so Planning shows what approval will decide.
+  defp dashboard_dependencies(issues, jobs) do
+    dependencies =
+      IssueDependency
+      |> where([dependency], dependency.issue_id in ^Enum.map(issues, & &1.id))
+      |> order_by([dependency], asc: dependency.blocking_issue_number)
+      |> preload([:blocking_issue, :blocking_repository])
+      |> Repo.all()
+
+    integrated =
+      dependencies
+      |> Enum.map(& &1.blocking_issue_id)
+      |> Enum.reject(&is_nil/1)
+      |> integrated_bases()
+
+    bases =
+      for issue <- issues,
+          Enum.any?(dependencies, &(&1.issue_id == issue.id)),
+          into: %{},
+          do:
+            {issue.id,
+             {target_base(Repo, issue, issue.repository), issue.repository.default_branch}}
+
+    Enum.group_by(dependencies, & &1.issue_id, fn dependency ->
+      {base, default_branch} = Map.fetch!(bases, dependency.issue_id)
+      merged_into = Map.get(integrated, dependency.blocking_issue_id, MapSet.new())
+
+      integrated_base =
+        if base != default_branch and MapSet.member?(merged_into, base), do: base
+
       %{
         number: dependency.blocking_issue_number,
         repository_full_name: dependency.blocking_repository_full_name,
@@ -5410,9 +6046,51 @@ defmodule PtcManager.Operations do
         state_reason: dependency.blocking_state_reason,
         lookup_state: dependency.lookup_state,
         issue: dependency.blocking_issue,
-        active_job: dependency.blocking_issue && Map.get(jobs, dependency.blocking_issue.id)
+        active_job: dependency.blocking_issue && Map.get(jobs, dependency.blocking_issue.id),
+        integrated_base: integrated_base,
+        satisfied:
+          not is_nil(integrated_base) or
+            blocker_satisfied?(Repo, dependency, default_branch, default_branch)
       }
     end)
+  end
+
+  # The branches each issue's work merged into, through its own job's pull
+  # request or another one that links it, as integrated_into?/3 decides.
+  defp integrated_bases([]), do: %{}
+
+  defp integrated_bases(issue_ids) do
+    issues =
+      Repo.all(
+        from issue in Issue,
+          where: issue.id in ^issue_ids,
+          select: {issue.id, issue.repository_id, issue.number}
+      )
+
+    by_number =
+      Map.new(issues, fn {id, repository_id, number} -> {{repository_id, number}, id} end)
+
+    repository_ids = issues |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
+
+    from(publication in PrPublication,
+      join: job in Job,
+      on: job.id == publication.job_id,
+      where: job.repository_id in ^repository_ids and publication.pr_state == "merged",
+      select:
+        {job.issue_id, job.repository_id, publication.linked_issue_numbers,
+         publication.base_branch}
+    )
+    |> Repo.all()
+    |> Enum.flat_map(fn {issue_id, repository_id, linked, branch} ->
+      linked_ids =
+        for number <- get_in(linked || %{}, ["numbers"]) || [],
+            id = Map.get(by_number, {repository_id, number}),
+            do: id
+
+      for id <- Enum.uniq([issue_id | linked_ids]), id in issue_ids, do: {id, branch}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Map.new(fn {issue_id, branches} -> {issue_id, MapSet.new(branches)} end)
   end
 
   defp dependency_cycles(issue_ids) do
@@ -5424,13 +6102,6 @@ defmodule PtcManager.Operations do
     cycles = DependencyGraph.cycles(issues)
     Map.take(cycles, issue_ids)
   end
-
-  defp dependency_satisfied?(%IssueDependency{lookup_state: "resolved"} = dependency, _blocker),
-    do:
-      dependency.blocking_state == "closed" and
-        dependency.blocking_state_reason == "completed"
-
-  defp dependency_satisfied?(_dependency, _blocker), do: false
 
   defp latest_jobs([]), do: %{}
 

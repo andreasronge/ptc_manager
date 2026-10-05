@@ -401,7 +401,7 @@ defmodule PtcManager.MaintainerActionsTest do
   end
 
   defmodule RepairBaseFetcher do
-    def fetch_base_for_verification(path, repository, expected_sha) do
+    def fetch_base_for_verification(path, repository, _base, expected_sha) do
       send(
         Process.get(:agent_action_test_pid),
         {:repair_base_fetch, path, repository.id, expected_sha}
@@ -3327,6 +3327,45 @@ defmodule PtcManager.MaintainerActionsTest do
       assert preview =~ "blocked_implementation"
     end
 
+    test "pull-request previews name the base they would target" do
+      for key <- ["merge_reviewed_pr", "repair_pr"] do
+        preview = Catalog.preview(key)
+        assert preview =~ ~s(base_branch="main")
+        refute preview =~ "an integration branch"
+      end
+    end
+
+    test "merging into an integration branch asks for the comment GitHub will not imply" do
+      repository = repository_fixture()
+
+      publication = %PrPublication{
+        state: "published",
+        pr_state: "open",
+        pr_number: 77,
+        branch_name: "ptc-manager/issue-1-job-1",
+        base_branch: "feature/ska",
+        remote_head_sha: String.duplicate("b", 40),
+        draft: false,
+        checks_state: "success",
+        source: "agent",
+        job_id: 1
+      }
+
+      issue = issue_fixture(repository)
+
+      assert {:ok, %{prompt: prompt}} =
+               Catalog.build("merge_reviewed_pr", %{
+                 publication: publication,
+                 repository: repository,
+                 issue: issue
+               })
+
+      assert prompt =~ ~s(base_branch="feature/ska")
+
+      assert prompt =~
+               "Merged into `feature/ska` in #77; stays open until `feature/ska` reaches `main`."
+    end
+
     test "issue preparation never carries a blocker at all" do
       repository = repository_fixture()
       issue = issue_fixture(repository)
@@ -3431,6 +3470,7 @@ defmodule PtcManager.MaintainerActionsTest do
       external =
         %PrPublication{}
         |> PrPublication.changeset(%{
+          base_branch: "main",
           repository_id: repository.id,
           source: "external",
           state: "published",
@@ -3551,6 +3591,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
       %PrPublication{}
       |> PrPublication.changeset(%{
+        base_branch: "main",
         repository_id: repository.id,
         source: "external",
         state: "published",
@@ -3583,6 +3624,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       state: "published",
       idempotency_key:
@@ -3624,6 +3666,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       state: "published",
       idempotency_key:

@@ -4,7 +4,9 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
   @moduletag :nightly
 
   alias PtcManager.Operations.Job
-  alias PtcManager.Repository.{Contract, WorkspaceSetup}
+  alias PtcManager.Repository.WorkspaceSetup
+
+  @setup %{command: "./scripts/ptc/setup-worktree", timeout_minutes: 1}
 
   test "runs the exact checked-in setup script and records bounded evidence" do
     fixture =
@@ -18,9 +20,9 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
 
     on_exit(fn -> File.rm_rf!(fixture.root) end)
 
-    assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job)
+    assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job, setup: @setup)
     assert report.state == "passed"
-    assert report.script == "scripts/ptc/setup-worktree"
+    assert report.script == "./scripts/ptc/setup-worktree"
     assert report.source_sha == fixture.sha
     assert report.exit_status == 0
     assert report.output =~ "dependencies ready\n"
@@ -46,7 +48,7 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
 
     on_exit(fn -> File.rm_rf!(fixture.root) end)
 
-    assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job)
+    assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job, setup: @setup)
     assert report.cache_state == nil
     assert report.phase_durations == %{}
   end
@@ -55,9 +57,9 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     fixture = workspace_fixture("printf 'missing tool\\n'\nexit 17\n")
     on_exit(fn -> File.rm_rf!(fixture.root) end)
 
-    assert {:error, report} = WorkspaceSetup.run(fixture.worktree, fixture.job)
+    assert {:error, report} = WorkspaceSetup.run(fixture.worktree, fixture.job, setup: @setup)
     assert report.state == "failed"
-    assert report.script == "scripts/ptc/setup-worktree"
+    assert report.script == "./scripts/ptc/setup-worktree"
     assert report.source_sha == fixture.sha
     assert report.exit_status == 17
     assert report.output == "missing tool\n"
@@ -68,30 +70,25 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     fixture = workspace_fixture("printf 'changed\\n' > README.md\n")
     on_exit(fn -> File.rm_rf!(fixture.root) end)
 
-    assert {:error, report} = WorkspaceSetup.run(fixture.worktree, fixture.job)
+    assert {:error, report} = WorkspaceSetup.run(fixture.worktree, fixture.job, setup: @setup)
     assert report.state == "failed"
     assert report.error == :worktree_changed
     assert File.read!(Path.join(fixture.worktree, "README.md")) == "changed\n"
   end
 
-  @tag nightly: false
-  test "the contract accepts only one contained script path" do
-    contract = %Contract{
-      version: 1,
-      bootstrap_command: "../outside",
-      bootstrap_timeout_minutes: 1,
-      before_publish_command: "./scripts/ci/pre-publication",
-      verification_timeout_minutes: 1
+  test "runs a configured command with the repository's variables, no script required" do
+    fixture = workspace_fixture("exit 0\n")
+    on_exit(fn -> File.rm_rf!(fixture.root) end)
+
+    setup = %{
+      command: ~s(printf 'token=%s\\n' "$REGISTRY_TOKEN" && mkdir -p .cache),
+      timeout_minutes: 1,
+      environment: [%{name: "REGISTRY_TOKEN", value: "from-console"}]
     }
 
-    assert {:error, :workspace_setup_script_escapes_worktree} =
-             Contract.bootstrap_script(contract)
-
-    assert {:error, :workspace_setup_must_be_one_script} =
-             Contract.bootstrap_script(%{contract | bootstrap_command: "mix deps.get"})
-
-    assert {:error, :workspace_setup_script_must_be_relative} =
-             Contract.bootstrap_script(%{contract | bootstrap_command: ".//tmp/setup"})
+    assert {:ok, report} = WorkspaceSetup.run(fixture.worktree, fixture.job, setup: setup)
+    assert report.script == setup.command
+    assert report.output == "token=from-console\n"
   end
 
   test "the production runner enforces its timeout and output bound" do
@@ -99,21 +96,13 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     on_exit(fn -> File.rm_rf!(slow.root) end)
 
     assert {:error, :workspace_setup_timeout} =
-             WorkspaceSetup.Runner.run(
-               slow.worktree,
-               "scripts/ptc/setup-worktree",
-               20
-             )
+             WorkspaceSetup.Runner.run(slow.worktree, "./scripts/ptc/setup-worktree", 20)
 
     noisy = workspace_fixture("head -c 70000 /dev/zero | tr '\\000' x\n")
     on_exit(fn -> File.rm_rf!(noisy.root) end)
 
     assert {:ok, result} =
-             WorkspaceSetup.Runner.run(
-               noisy.worktree,
-               "scripts/ptc/setup-worktree",
-               5_000
-             )
+             WorkspaceSetup.Runner.run(noisy.worktree, "./scripts/ptc/setup-worktree", 5_000)
 
     assert result.exit_status == 0
     assert result.output_truncated
@@ -130,7 +119,7 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
     File.chmod!(script, 0o755)
     on_exit(fn -> File.rm_rf!(root) end)
 
-    assert {:ok, result} = WorkspaceSetup.Runner.run(root, "setup", 5_000)
+    assert {:ok, result} = WorkspaceSetup.Runner.run(root, "./setup", 5_000)
     assert result.exit_status == 0
     assert result.output == "ready\n"
   end
@@ -146,15 +135,19 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
               "--",
               "/usr/local/bin/ptc-manager-worker-bootstrap",
               "/srv/ptc_manager-worktrees/job-16",
-              "scripts/ptc/bootstrap"
+              "deno install",
+              "/var/lib/ptc_manager-worker/agent-results/operation-contexts/setup-x.env"
             ]} =
              WorkspaceSetup.Runner.command(
                "/srv/ptc_manager-worktrees/job-16",
-               "scripts/ptc/bootstrap",
-               "/srv/ptc_manager-worktrees/job-16/scripts/ptc/bootstrap",
+               "deno install",
                "ptc-manager-worker",
-               "/usr/local/bin/ptc-manager-worker-bootstrap"
+               "/usr/local/bin/ptc-manager-worker-bootstrap",
+               "/var/lib/ptc_manager-worker/agent-results/operation-contexts/setup-x.env"
              )
+
+    assert {"/bin/sh", ["-c", "deno install"]} =
+             WorkspaceSetup.Runner.command("/tmp/worktree", "deno install", nil, "wrapper", nil)
   end
 
   defp workspace_fixture(script_body) do
@@ -175,9 +168,6 @@ defmodule PtcManager.Repository.WorkspaceSetupTest do
       Path.join(repository, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: ./scripts/ptc/setup-worktree
-        timeout_minutes: 1
       verification:
         before_publish: ./scripts/ptc/setup-worktree
         timeout_minutes: 1

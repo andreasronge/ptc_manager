@@ -53,11 +53,14 @@ defmodule PtcManager.DispatchTest do
   end
 
   defmodule FailingSourceUpdater do
-    def refresh(_repository), do: {:error, :repository_source_refresh_failed}
+    def refresh(_repository, opts) do
+      send(Process.get(:dispatch_test_pid), {:source_refresh, opts})
+      {:error, :repository_source_refresh_failed}
+    end
   end
 
   defmodule IssueChangingSourceUpdater do
-    def refresh(repository) do
+    def refresh(repository, _opts) do
       {:ok, remote} = Process.get(:dispatch_github_result)
 
       Process.put(
@@ -108,6 +111,47 @@ defmodule PtcManager.DispatchTest do
 
     assert Repo.get!(Job, job.id).state == "queued"
     refute_receive {:dispatch_context, _context}
+  end
+
+  test "a deleted integration branch ends its job instead of holding the queue" do
+    Application.put_env(:ptc_manager, :test_github_branches, ["main"])
+    on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    job |> Job.changeset(%{base_branch: "feature/gone"}) |> Repo.update!()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, {:base_branch_missing, "feature/gone"}} =
+             Dispatch.run_once(
+               github: FakeGitHub,
+               adapter: FakeAdapter,
+               source_updater: FailingSourceUpdater
+             )
+
+    cancelled = Repo.get!(Job, job.id)
+    assert cancelled.state == "cancelled"
+    assert cancelled.last_error =~ "feature/gone"
+    assert is_nil(Operations.next_queued_job())
+  end
+
+  test "a failed fetch of an integration branch GitHub still has keeps the job queued" do
+    Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])
+    on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    job |> Job.changeset(%{base_branch: "feature/ska"}) |> Repo.update!()
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, :repository_source_refresh_failed} =
+             Dispatch.run_once(
+               github: FakeGitHub,
+               adapter: FakeAdapter,
+               source_updater: FailingSourceUpdater
+             )
+
+    # The worktree starts from the job's stored base, not the default branch.
+    assert_receive {:source_refresh, [branch: "feature/ska"]}
+    assert Repo.get!(Job, job.id).state == "queued"
   end
 
   test "queued merge work prevents lower-priority implementation from starting" do
@@ -441,6 +485,62 @@ defmodule PtcManager.DispatchTest do
 
     refute_receive {:dispatch_context, _context}
     assert Repo.get!(Job, job.id).state == "cancelled"
+  end
+
+  # The job keeps the base it was approved with, so its blockers are judged
+  # there even after the mapping that chose it is gone.
+  test "dispatch judges blockers against the job's stored base" do
+    {repository, issue, _proposal, job, remote} = approved_job_fixture()
+    job = job |> Job.changeset(%{base_branch: "feature/ska"}) |> Repo.update!()
+    blocker = issue_fixture(repository, %{number: issue.number + 1})
+    {:ok, blocker_job} = Operations.approve_issue_directly(blocker.id, "andreas")
+    blocker_job = blocker_job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+
+    %PtcManager.Operations.PrPublication{}
+    |> PtcManager.Operations.PrPublication.changeset(%{
+      job_id: blocker_job.id,
+      repository_id: repository.id,
+      base_branch: "feature/ska",
+      state: "published",
+      idempotency_key: String.duplicate("8", 64),
+      fencing_token: 0,
+      branch_name: "ptc-manager/issue-#{blocker.number}-job-#{blocker_job.id}",
+      base_sha: String.duplicate("a", 40),
+      head_sha: String.duplicate("a", 40),
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      pr_number: 9100,
+      pr_url: "https://github.com/example/repo/pull/9100",
+      remote_head_sha: String.duplicate("a", 40),
+      remote_base_sha: String.duplicate("a", 40),
+      published_at: DateTime.utc_now(),
+      pr_state: "merged",
+      pr_checked_at: DateTime.utc_now(),
+      source: "agent"
+    })
+    |> Repo.insert!()
+
+    issue_dependency_fixture(issue, %{blocking_issue: blocker, blocking_repository: repository})
+
+    remote =
+      Map.put(remote, "blocked_by", [
+        %{
+          "id" => blocker.number + 10_000,
+          "node_id" => "ISSUE_#{blocker.number}",
+          "number" => blocker.number,
+          "title" => blocker.title,
+          "html_url" => blocker.html_url,
+          "state" => "open",
+          "repository" => %{
+            "full_name" => "#{repository.github_owner}/#{repository.github_name}"
+          }
+        }
+      ])
+
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:ok, %{job: dispatched}} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    assert dispatched.id == job.id
   end
 
   test "dispatch does not treat dependency prose as the machine-readable contract" do
@@ -981,7 +1081,7 @@ defmodule PtcManager.DispatchTest do
     assert prompt =~ "Branch: #{job.branch_name} → main"
     assert prompt =~ "Maximum independent review rounds: 1"
     assert prompt =~ "Read the issue, its comments, linked issues"
-    assert prompt =~ "Push this branch and create a pull request. Do not merge."
+    assert prompt =~ "Push this branch and create a pull request against main. Do not merge."
     refute prompt =~ "Assign the issue to yourself"
     refute prompt =~ "fencing_token"
     refute prompt =~ "result="

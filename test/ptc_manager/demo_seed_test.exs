@@ -29,8 +29,23 @@ defmodule PtcManager.DemoSeedTest do
   test "the browser demo represents one consistent active workflow" do
     Code.eval_file("priv/repo/seeds.exs")
 
-    assert Repo.aggregate(Repository, :count) == 1
-    assert Repo.aggregate(Issue, :count) == 9
+    # Four repositories, one of them failing to synchronize and missing labels,
+    # so the Configuration list has more than one row and a red one.
+    assert Repo.aggregate(Repository, :count) == 4
+
+    assert Repo.get_by!(Repository, github_owner: "tyraorg", github_name: "web").sync_status ==
+             "error"
+
+    # Nine ptc_runner issues, three tyraorg/api issues routed by labels, and an
+    # integrated tyraorg/api collection of two members.
+    assert Repo.aggregate(Issue, :count) == 15
+
+    assert [_, _] =
+             Enum.filter(
+               PtcManager.Operations.delivery_board_items(),
+               &(PtcManager.Operations.DeliveryLane.lane_for(&1) == :integrated)
+             )
+
     assert Repo.aggregate(AgentRun, :count) == 3
     assert Enum.count(Repo.all(AgentRun), &(&1.state == "working")) == 2
     assert Repo.aggregate(ResourceOperation, :count) == 10
@@ -40,7 +55,9 @@ defmodule PtcManager.DemoSeedTest do
     assert Enum.all?(Repo.all(Issue), & &1.github_created_at)
     assert Repo.get_by!(Issue, number: 1314).github_author_login == "an-outside-reporter"
     assert Repo.get_by!(Issue, number: 1331).github_labels == %{"names" => ["wait", "ux"]}
-    assert Repo.one!(Repository).github_viewer_login == "andreasronge"
+
+    assert Repo.get_by!(Repository, github_name: "ptc_runner").github_viewer_login ==
+             "andreasronge"
 
     ready = Repo.get_by!(PrPublication, pr_number: 1319)
     assert ready.checks_state == "success"
@@ -78,7 +95,7 @@ defmodule PtcManager.DemoSeedTest do
     assert PrPublication.follow_up_suggested?(follow_up)
 
     job = Repo.get_by!(Job, state: "working")
-    repository = Repo.one!(Repository)
+    repository = Repo.get_by!(Repository, github_name: "ptc_runner")
     allocation = Repo.get_by!(WorktreeAllocation, job_id: job.id)
 
     assert is_nil(repository.local_path)

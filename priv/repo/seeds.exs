@@ -13,6 +13,8 @@ if Repo.aggregate(Repository, :count) == 0 do
       default_branch: "main",
       local_path: if(demo_mode, do: nil, else: System.get_env("PTC_REPOSITORY_PATH")),
       github_viewer_login: if(demo_mode, do: "andreasronge"),
+      workspace_setup_command: "./scripts/ptc/bootstrap",
+      workspace_setup_timeout_minutes: 30,
       maintainer_labels:
         if(demo_mode,
           do: %{
@@ -271,6 +273,7 @@ if Repo.aggregate(Repository, :count) == 0 do
 
     %PtcManager.Operations.PrPublication{}
     |> PtcManager.Operations.PrPublication.changeset(%{
+      base_branch: "main",
       job_id: merged_job.id,
       state: "published",
       idempotency_key: String.duplicate("e", 64),
@@ -463,6 +466,154 @@ if Repo.aggregate(Repository, :count) == 0 do
   end
 
   if demo_mode, do: PtcManager.DeliveryReportDemo.seed(ready_issue, worker, now)
+
+  if demo_mode do
+    all_labels = %{"names" => ~w(ptc:ready ptc:blocked ptc:needs-decision ptc:follow-up)}
+
+    for attrs <- [
+          %{
+            github_owner: "andreasronge",
+            github_name: "ptc-fs-mcp",
+            enabled: true,
+            sync_status: "ok",
+            last_synced_at: now,
+            github_viewer_login: "andreasronge",
+            github_label_names: all_labels,
+            github_labels_checked_at: now,
+            workspace_setup_command: "./scripts/ptc/bootstrap",
+            workspace_setup_timeout_minutes: 10
+          },
+          %{
+            github_owner: "tyraorg",
+            github_name: "web",
+            enabled: true,
+            sync_status: "error",
+            last_sync_error: "GitHub returned 401 for the read token.",
+            github_label_names: %{"names" => ["bug", "ptc:ready"]},
+            github_labels_checked_at: now
+          },
+          %{
+            github_owner: "tyraorg",
+            github_name: "api",
+            github_default_branch: "develop",
+            enabled: false,
+            github_label_names: %{"names" => ~w(ska legacy billing reports bug)},
+            github_labels_checked_at: now,
+            github_branch_names: %{
+              "names" =>
+                ~w(main develop feature/ska feature/legacy feature/billing feature/reports)
+            },
+            github_branches_checked_at: now,
+            # An active and a switched-off mapping, a second active one to make a
+            # conflict, and `reports`, whose feature/ branch is only suggested.
+            integration_branches: %{
+              "mappings" => [
+                %{"label" => "ska", "branch" => "feature/ska", "active" => true},
+                %{"label" => "legacy", "branch" => "feature/legacy", "active" => false},
+                %{"label" => "billing", "branch" => "feature/billing", "active" => true}
+              ]
+            }
+          }
+        ] do
+      {:ok, repository} =
+        attrs
+        |> Map.put_new(:default_branch, "main")
+        |> Map.put(:local_path, nil)
+        |> Operations.create_repository()
+
+      if repository.github_name == "api" do
+        for {number, title, labels} <- [
+              {117, "SKA: import the course plan", ["ska"]},
+              {118, "SKA: validate attendance codes", ["ska", "legacy"]},
+              {125, "SKA billing export", ["ska", "billing"]}
+            ] do
+          {:ok, _issue} =
+            number
+            |> issue_attrs.(title, 30, %{
+              repository_id: repository.id,
+              html_url: "https://github.com/tyraorg/api/issues/#{number}",
+              github_labels: %{"names" => labels}
+            })
+            |> Operations.create_issue()
+        end
+
+        # A collection delivered into feature/ska: both members merged there and
+        # stay open, so they sit in the Integrated lane, and its run ended
+        # integrated.
+        sub_issues = %{
+          "nodes" =>
+            for number <- [121, 127] do
+              %{"number" => number, "state" => "open", "repository_full_name" => "tyraorg/api"}
+            end,
+          "total" => 2
+        }
+
+        {:ok, umbrella} =
+          123
+          |> issue_attrs.("SKA step 1", 20, %{
+            repository_id: repository.id,
+            html_url: "https://github.com/tyraorg/api/issues/123",
+            github_labels: %{"names" => ["ska"]},
+            workflow_label: nil,
+            sub_issues: sub_issues
+          })
+          |> Operations.create_issue()
+
+        for {number, title} <- [{121, "SKA: course plan schema"}, {127, "SKA: attendance API"}] do
+          {:ok, member} =
+            number
+            |> issue_attrs.(title, 25, %{
+              repository_id: repository.id,
+              html_url: "https://github.com/tyraorg/api/issues/#{number}",
+              github_labels: %{"names" => ["ska"]},
+              parent_issue_number: 123
+            })
+            |> Operations.create_issue()
+
+          {:ok, job} = Operations.approve_issue_directly(member.id, "demo-maintainer")
+          job = job |> Job.changeset(%{state: "done", fencing_token: 1}) |> Repo.update!()
+          sha = Base.encode16(:crypto.hash(:sha, "demo-ska-#{number}"), case: :lower)
+
+          %PtcManager.Operations.PrPublication{}
+          |> PtcManager.Operations.PrPublication.changeset(%{
+            job_id: job.id,
+            repository_id: repository.id,
+            base_branch: job.base_branch,
+            state: "published",
+            idempotency_key: Base.encode16(:crypto.hash(:sha256, sha), case: :lower),
+            fencing_token: 1,
+            branch_name: "ptc-manager/issue-#{number}-job-#{job.id}",
+            base_sha: sha,
+            head_sha: sha,
+            diff_digest: Base.encode16(:crypto.hash(:sha256, "diff-#{number}"), case: :lower),
+            attempt_count: 1,
+            pr_number: 300 + number,
+            pr_url: "https://github.com/tyraorg/api/pull/#{300 + number}",
+            remote_head_sha: sha,
+            remote_base_sha: sha,
+            published_at: DateTime.add(now, -90, :minute),
+            pr_state: "merged",
+            pr_checked_at: DateTime.add(now, -60, :minute),
+            source: "agent",
+            title: title
+          })
+          |> Repo.insert!()
+        end
+
+        Repo.insert!(%PtcManager.Collections.Run{
+          repository_id: repository.id,
+          issue_id: umbrella.id,
+          state: "integrated",
+          base_branch: "feature/ska",
+          actor: "demo-maintainer",
+          started_at: DateTime.add(now, -3, :hour),
+          ended_at: DateTime.add(now, -30, :minute),
+          end_reason:
+            "Every member merged into feature/ska; the issues stay open until it reaches main."
+        })
+      end
+    end
+  end
 
   IO.puts(
     "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation " <>

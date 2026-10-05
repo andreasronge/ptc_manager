@@ -19,7 +19,7 @@ database_path=${PTC_PROVISION_DATABASE_PATH:-/var/lib/ptc_manager/ptc_manager.db
 unit_root=${PTC_PROVISION_UNIT_ROOT:-/etc/systemd/system}
 repositories_query=${PTC_PROVISION_REPOSITORIES_QUERY:-/usr/local/libexec/ptc-manager-configured-repositories.sql}
 dropin_check=${PTC_PROVISION_DROPIN_CHECK:-/usr/local/bin/ptc-manager-check-access-dropin}
-lock=/run/lock/ptc-manager-provision-repository.lock
+lock=${PTC_PROVISION_LOCK:-/run/lock/ptc-manager-provision-repository.lock}
 
 fail() {
   echo "ptc-manager-provision-repository: $1" >&2
@@ -55,10 +55,40 @@ install_dropin_when_changed() {
 checkout_prepared() { sudo test -d "$1/.git"; }
 checkout_occupied() { sudo test -e "$1"; }
 
+# Clones as the worker, whose gh credential helper can read private
+# repositories; root has no GitHub credentials. New checkouts live under
+# /srv/<owner>/, which is created when missing and otherwise left alone. A
+# failed clone leaves nothing behind, so the next run tries again.
+clone_checkout() {
+  owner=$1
+  name=$2
+  checkout=$3
+  parent=$(dirname "$checkout")
+
+  # Called as a condition, so set -e is off in here: every step is checked.
+  if ! sudo test -d "$parent"; then
+    sudo install -d -o root -g root -m 0755 "$parent" || return 1
+  fi
+  sudo install -d -o ptc-manager-worker -g ptc-manager-repo -m 2750 "$checkout" || return 1
+
+  if sudo -n -H -u ptc-manager-worker env GIT_TERMINAL_PROMPT=0 \
+    git clone --quiet "https://github.com/$owner/$name" "$checkout" </dev/null &&
+    sudo chown -R ptc-manager-worker:ptc-manager-repo "$checkout" &&
+    sudo chmod -R g-w,g+rX,o-rwx "$checkout" &&
+    sudo find "$checkout" -type d -exec chmod g+s {} +; then
+    return 0
+  fi
+
+  sudo rm -rf -- "$checkout"
+  return 1
+}
 
 configured=$(sudo sqlite3 -readonly "$database_path" <"$repositories_query")
+failed=""
 
-printf '%s\n' "$configured" | while IFS='|' read -r owner name checkout; do
+# A here-document keeps the loop in this shell, so a failed clone is recorded
+# rather than ending the run before the drop-ins are written for the others.
+while IFS='|' read -r owner name checkout; do
   [ -n "$checkout" ] || continue
 
   case "$owner$name" in
@@ -75,15 +105,20 @@ printf '%s\n' "$configured" | while IFS='|' read -r owner name checkout; do
   checkout_prepared "$checkout" && continue
 
   if checkout_occupied "$checkout"; then
-    fail "configured checkout path exists but is not a Git repository: $checkout"
+    echo "ptc-manager-provision-repository: $checkout exists but is not a Git repository" >&2
+    failed="$failed $owner/$name"
+    continue
   fi
 
   echo "Preparing checkout for $owner/$name at $checkout"
-  sudo git clone --quiet "https://github.com/$owner/$name" "$checkout"
-  sudo chown -R ptc-manager-worker:ptc-manager-repo "$checkout"
-  sudo chmod -R g-w,g+rX,o-rwx "$checkout"
-  sudo find "$checkout" -type d -exec chmod g+s {} +
-done
+
+  if ! clone_checkout "$owner" "$name" "$checkout"; then
+    echo "ptc-manager-provision-repository: could not clone $owner/$name; check the worker's GitHub access" >&2
+    failed="$failed $owner/$name"
+  fi
+done <<CONFIGURED
+$configured
+CONFIGURED
 
 write_dropin() {
   suffix=$1
@@ -118,3 +153,10 @@ install_dropin_when_changed "$worker_dropin" \
 sudo systemctl daemon-reload
 
 echo "Repository access prepared. Restart the services to take it up."
+
+# Exit 3 says only that some checkouts are still missing, so a deployment can
+# carry on with the others; every other failure exits 1.
+if [ -n "$failed" ]; then
+  echo "ptc-manager-provision-repository: checkouts still missing:$failed" >&2
+  exit 3
+fi

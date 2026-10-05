@@ -140,16 +140,14 @@ defmodule PtcManager.TestGitWorkspace do
       Path.join(repository, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: ./scripts/ptc/setup-worktree
-        timeout_minutes: 1
       verification:
-        before_publish: ./scripts/ptc/setup-worktree
+        before_publish: ./scripts/ptc/bootstrap
         timeout_minutes: 1
       """
     )
 
-    setup_script = Path.join(repository, "scripts/ptc/setup-worktree")
+    # The workspace setup repository_fixture/1 configures.
+    setup_script = Path.join(repository, "scripts/ptc/bootstrap")
     File.write!(setup_script, "#!/bin/sh\nset -eu\nmkdir -p .ptc-setup-cache\n")
     File.chmod!(setup_script, 0o755)
     run!(git!(), ["-C", repository, "add", "."])
