@@ -58,6 +58,19 @@ defmodule Mix.Tasks.PtcDeployTest do
 
   # Deployment and the Prepare checkouts button share one implementation, so a
   # private repository is cloned as the worker either way.
+  # The Prepare checkouts button starts the unit through sudo by one exact name.
+  test "the provisioning unit is installed under the name the console starts" do
+    script = File.read!(@remote_script)
+    sudoers = File.read!(@sudoers)
+    unit = "ptc-manager-provision-repository.service"
+
+    assert script =~ "/etc/systemd/system/#{unit}"
+    assert sudoers =~ "/bin/systemctl start --no-block #{unit}"
+
+    assert File.read!(Path.join(@project_root, "lib/ptc_manager/repository/provisioning.ex")) =~
+             ~s(@unit "#{unit}")
+  end
+
   test "deployment prepares checkouts through the provisioning script" do
     script = File.read!(@remote_script)
 

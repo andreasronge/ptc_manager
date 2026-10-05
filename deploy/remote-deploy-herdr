@@ -1788,8 +1788,11 @@ sudo install -o root -g root -m 0755 "$access_dropin_check" \
   /usr/local/bin/ptc-manager-check-access-dropin
 sudo install -o root -g root -m 0755 "$provision_runner_candidate" \
   /usr/local/bin/ptc-manager-provision-repository
+# The console and its sudoers rule start this unit by the hyphenated name, as
+# with the self-deploy unit; an older deployment installed it under another.
 sudo install -o root -g root -m 0644 "$provision_service_candidate" \
-  /etc/systemd/system/ptc_manager-provision-repository.service
+  /etc/systemd/system/ptc-manager-provision-repository.service
+sudo rm -f -- /etc/systemd/system/ptc_manager-provision-repository.service
 sudo install -o root -g root -m 0644 "$repositories_query" \
   /usr/local/libexec/ptc-manager-configured-repositories.sql
 sudo install -o root -g root -m 0440 "$sudoers_candidate" \
