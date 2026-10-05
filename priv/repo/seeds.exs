@@ -13,6 +13,8 @@ if Repo.aggregate(Repository, :count) == 0 do
       default_branch: "main",
       local_path: if(demo_mode, do: nil, else: System.get_env("PTC_REPOSITORY_PATH")),
       github_viewer_login: if(demo_mode, do: "andreasronge"),
+      workspace_setup_command: "./scripts/ptc/bootstrap",
+      workspace_setup_timeout_minutes: 30,
       maintainer_labels:
         if(demo_mode,
           do: %{
@@ -476,7 +478,9 @@ if Repo.aggregate(Repository, :count) == 0 do
             last_synced_at: now,
             github_viewer_login: "andreasronge",
             github_label_names: all_labels,
-            github_labels_checked_at: now
+            github_labels_checked_at: now,
+            workspace_setup_command: "./scripts/ptc/bootstrap",
+            workspace_setup_timeout_minutes: 10
           },
           %{
             github_owner: "tyraorg",

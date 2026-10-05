@@ -96,6 +96,40 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  def handle_event("save-workspace-setup", %{"setup" => params}, socket) do
+    timeout =
+      case Integer.parse(params["timeout_minutes"] || "") do
+        {value, ""} -> value
+        _invalid -> nil
+      end
+
+    case Operations.update_workspace_setup(
+           socket.assigns.repository.id,
+           params["command"],
+           timeout,
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        socket
+        |> put_flash(
+          :info,
+          "Workspace setup saved. New worktrees run it; existing ones keep theirs."
+        )
+        |> reload()
+
+      {:error, :invalid_workspace_setup} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Enter a one-line command of at most 2000 bytes and a timeout of 1 to 1440 minutes."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The workspace setup could not be saved.")}
+    end
+  end
+
   def handle_event("set-auto-fix", %{"enabled" => enabled}, socket)
       when enabled in ["true", "false"] do
     case PtcManager.AutoImplementation.configure(

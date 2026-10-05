@@ -25,14 +25,9 @@ defmodule PtcManager.ResultReconcilerTest do
     def for_result(_job, _result), do: {:error, :repository_contract_missing}
   end
 
-  defmodule BootstrapOnlyContract do
+  defmodule VerificationlessContract do
     def for_result(_job, _result) do
-      {:ok,
-       %PtcManager.Repository.Contract{
-         version: 1,
-         bootstrap_command: "./scripts/ptc/bootstrap",
-         bootstrap_timeout_minutes: 10
-       }}
+      {:ok, %PtcManager.Repository.Contract{version: 1}}
     end
   end
 
@@ -76,6 +71,30 @@ defmodule PtcManager.ResultReconcilerTest do
            )
 
     assert {:error, :already_active} = Operations.approve_issue(job.issue_id, "andreas")
+  end
+
+  test "the broker gate freezes the repository's workspace setup with the contract" do
+    {repository, _issue, job} = awaiting_job_fixture()
+
+    Operations.update_workspace_setup(repository.id, "deno install", 7, "andreas")
+
+    Process.put(
+      :result_probe_result,
+      {:ok,
+       %{
+         base_sha: String.duplicate("a", 40),
+         head_sha: String.duplicate("b", 40),
+         diff_digest: String.duplicate("c", 64),
+         commit_count: 1
+       }}
+    )
+
+    assert {:ok, ready} =
+             ResultReconciler.run_job(job.id, probe: FakeProbe, contract_provider: FakeContract)
+
+    assert ready.pre_publication_bootstrap_command == "deno install"
+    assert ready.pre_publication_bootstrap_timeout_ms == 7 * 60_000
+    assert PtcManager.Repository.Contract.frozen_publication_digest_matches?(ready)
   end
 
   test "publication ownership remains the mode captured when the job was leased" do
@@ -154,7 +173,7 @@ defmodule PtcManager.ResultReconcilerTest do
     assert {:error, {:repository_contract_invalid, :repository_publication_verification_missing}} =
              ResultReconciler.run_job(job.id,
                probe: FakeProbe,
-               contract_provider: BootstrapOnlyContract
+               contract_provider: VerificationlessContract
              )
 
     pending = Repo.get!(Job, job.id)

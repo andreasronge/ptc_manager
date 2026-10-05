@@ -218,9 +218,6 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
       Path.join(ready_path, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: mix deps.get
-        timeout_minutes: 10
       verification:
         before_publish: mix precommit
         timeout_minutes: 30
@@ -251,9 +248,6 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
       Path.join(setup_only_path, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: ./scripts/ptc/bootstrap
-        timeout_minutes: 10
       """
     )
 
@@ -287,7 +281,8 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     {:ok, setup_only_view, _html} =
       conn |> authenticated_conn() |> live(repository_path(setup_only))
 
-    assert has_element?(setup_only_view, "#repository-health", "Repository setup ready")
+    assert has_element?(setup_only_view, "#repository-health", "Repository contract ready")
+    assert has_element?(setup_only_view, "#repository-health", "Workspace setup configured")
 
     assert has_element?(
              setup_only_view,
@@ -311,7 +306,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     assert has_element?(view, "#repository-health", "Refreshing repository data now")
   end
 
-  test "does not accept an untracked publication contract", %{conn: conn} do
+  test "an untracked contract counts as no contract", %{conn: conn} do
     root =
       Path.join(
         System.tmp_dir!(),
@@ -331,9 +326,6 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
       Path.join(root, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: mix deps.get
-        timeout_minutes: 10
       verification:
         before_publish: mix precommit
         timeout_minutes: 30
@@ -343,13 +335,9 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     repository = repository_fixture(%{github_name: "untracked-contract", local_path: root})
     {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
 
-    assert has_element?(
-             view,
-             "#repository-health",
-             "Repository contract needs attention"
-           )
-
-    assert has_element?(view, "#repository-health", "Add .ptc-manager.yml")
+    # Only a contract committed on the configured branch counts, and without
+    # one the repository simply has no broker verification or deployment.
+    assert has_element?(view, "#repository-health", "No repository contract")
   end
 
   test "checks the publication contract on the configured default branch", %{conn: conn} do
@@ -373,9 +361,6 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
       Path.join(root, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: mix deps.get
-        timeout_minutes: 10
       verification:
         before_publish: mix precommit
         timeout_minutes: 30
@@ -388,13 +373,9 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     repository = repository_fixture(%{github_name: "feature-contract", local_path: root})
     {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
 
-    assert has_element?(
-             view,
-             "#repository-health",
-             "Repository contract needs attention"
-           )
-
-    assert has_element?(view, "#repository-health", "Add .ptc-manager.yml")
+    # Only a contract committed on the configured branch counts, and without
+    # one the repository simply has no broker verification or deployment.
+    assert has_element?(view, "#repository-health", "No repository contract")
   end
 
   test "configures the maintainer's own triage labels per repository", %{conn: conn} do
@@ -488,6 +469,31 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
              "Active work, retained worktrees, or open managed pull requests still use develop."
 
     assert Repo.get!(Repository, repository.id).default_branch == "develop"
+  end
+
+  test "edits the workspace setup command and timeout", %{conn: conn} do
+    repository = repository_fixture()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+
+    html =
+      view
+      |> form("#workspace-setup-form", %{
+        "setup" => %{"command" => "deno install", "timeout_minutes" => "15"}
+      })
+      |> render_submit()
+
+    assert html =~ "Workspace setup saved."
+    assert has_element?(view, "#repository-health", "deno install · up to 15 min")
+
+    html =
+      view
+      |> form("#workspace-setup-form", %{
+        "setup" => %{"command" => "deno install", "timeout_minutes" => "0"}
+      })
+      |> render_submit()
+
+    assert html =~ "timeout of 1 to 1440 minutes"
+    assert Repo.get!(Repository, repository.id).workspace_setup_timeout_minutes == 15
   end
 
   test "an unknown repository returns to the Configuration list", %{conn: conn} do

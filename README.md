@@ -31,7 +31,7 @@ The console has six views:
   capacity.
 
 Implementation work runs in an isolated Herdr worktree that the repository's
-own `.ptc-manager.yml` bootstrap prepares. The agent implements, validates,
+workspace setup command, configured in the console, prepares. The agent implements, validates,
 runs the number of independent reviews frozen on the job, and either pushes
 its branch and opens the pull request itself (agent publication) or commits
 locally for PtcManager's credential-isolated GitHub App broker to verify and
@@ -442,10 +442,11 @@ The authenticated routes are:
   default branch, editable while no work is active, no job worktree is
   retained, and no managed pull request is open, with a warning when GitHub's
   default branch differs; enable/disable; automatic implementation; your own
-  triage labels; write-only encrypted implementation-agent variables; removal;
-  and a link to its prompt and automation settings. Repository variables are
-  sourced from protected per-pane files after setup completes; they are never
-  supplied to bootstrap or maintainer-action agents.
+  triage labels; the workspace setup command and its timeout; write-only
+  encrypted implementation-agent variables; removal; and a link to its prompt
+  and automation settings. Repository variables are passed to workspace setup
+  through a protected file and sourced from protected per-pane files by
+  implementation agents; they are never supplied to maintainer-action agents.
 
 To choose a different local password:
 
@@ -501,43 +502,17 @@ Store its private key outside the repository, readable only by the coordinator.
 Configure the App ID, installation ID, and PEM path, then set
 `PTC_PUBLICATION_ENABLED=true`.
 
-Every repository that uses writable implementation worktrees must commit a
-strict `.ptc-manager.yml` contract. The bootstrap is required and belongs to
-the repository rather than PtcManager:
-
-```yaml
-version: 1
-bootstrap:
-  command: ./scripts/ptc/bootstrap
-  timeout_minutes: 10
-```
-
-When the Herdr agent pushes its own branch and creates the PR, this is the
-complete contract. Repository hooks may provide fast local feedback, while
-GitHub CI and branch protection remain the authoritative merge gate.
-
-Brokered publication is an optional alternative for agents without GitHub
-write credentials. In that mode PtcManager verifies the exact commit in a
-credential-free disposable checkout before its GitHub App publishes the
-branch. Repositories using that mode must also configure:
-
-```yaml
-verification:
-  before_publish: ./scripts/ci/pre-publication
-  timeout_minutes: 45
-```
-
-Malformed sections and unknown fields fail closed. Omitting `verification`
-does not weaken brokered publication: a broker job without that section is
-blocked before PtcManager uses its GitHub credential.
-
-`bootstrap.command` is one repository-relative, checked-in executable script.
-Herdr remains responsible for creating the Git worktree. After creation,
-PtcManager runs this script with the worktree as its current directory, records
-the worktree-creation and setup durations, verifies that HEAD, branch, and
-tracked files did not change, and only then starts the selected Herdr agent.
-Repository-specific setup belongs behind this entrypoint. For example,
-`ptc_runner` can commit a small wrapper which calls its existing setup logic:
+Every repository that uses writable worktrees needs a **workspace setup**
+command, set on its Configuration page with a timeout. The command belongs to
+the maintainer, not to repository content, so a repository needs no checked-in
+script; `./scripts/ptc/bootstrap` is just one possible command. Herdr remains
+responsible for creating the Git worktree. After creation, PtcManager runs the
+command through `/bin/sh -c` as the worker, with the worktree as its current
+directory and the repository's agent variables in its environment, records the
+worktree-creation and setup durations, verifies that HEAD, branch, and tracked
+files did not change, and only then starts the selected Herdr agent. For
+example, `ptc_runner` can use a small wrapper which calls its existing setup
+logic:
 
 ```sh
 #!/bin/sh
@@ -546,16 +521,41 @@ set -eu
 ./scripts/worktree.sh init .
 ```
 
-The setup script must be executable in Git. It may create ignored dependency
-and build artifacts, but changing tracked files, HEAD, or the job branch fails
-closed before any agent starts. Setup status, bounded output, and timings are
-shown on the Operations page.
+Setup may create ignored dependency and build artifacts, but changing tracked
+files, HEAD, or the job branch fails closed before any agent starts. Setup
+status, bounded output, and timings are shown on the Operations page. A
+repository without a setup command reports it in its health, and its
+worktrees fail before an agent starts. A changed command applies to new
+worktrees only.
+
+A checked-in `.ptc-manager.yml` is optional. It holds what PtcManager freezes
+from an exact commit: broker publication verification and self-deployment.
+When the Herdr agent pushes its own branch and creates the PR, a repository
+needs no contract at all. Repository hooks may provide fast local feedback,
+while GitHub CI and branch protection remain the authoritative merge gate.
+
+Brokered publication is an optional alternative for agents without GitHub
+write credentials. In that mode PtcManager verifies the exact commit in a
+credential-free disposable checkout before its GitHub App publishes the
+branch. Repositories using that mode must configure:
+
+```yaml
+version: 1
+verification:
+  before_publish: ./scripts/ci/pre-publication
+  timeout_minutes: 45
+```
+
+Malformed sections and unknown fields, including a leftover `bootstrap`
+section, fail closed. Omitting `verification` does not weaken brokered
+publication: a broker job without that section is blocked before PtcManager
+uses its GitHub credential.
 
 Issue preparation, daily updates, and repository investigation automations use
 `generic_ephemeral` read-only source snapshots and skip the writable build
 bootstrap. **Review issue** instead uses an `ephemeral_investigation` worktree:
 PtcManager pins the same source evidence, creates a writable disposable
-worktree at that exact commit, runs the checked-in bootstrap, and removes the
+worktree at that exact commit, runs the workspace setup, and removes the
 worktree and its temporary branch after the review. The reviewer may run tests
 and create temporary reproduction tests, but must not implement, commit, push,
 or open a pull request. Writable implementation jobs also run the full
@@ -573,7 +573,7 @@ share writable `deps` or `_build` directories. Set `PTC_WORKSPACE_CACHE_ROOT`
 inside the repository setup environment to select another cache root. Cache
 miss/hit state and restore, dependency, asset-tool, and publish timings are
 recorded on Operations. Cache failure is non-fatal and falls back to the normal
-clean bootstrap.
+clean setup.
 
 Before enabling a repository on a server, exercise the same handoff against a
 local Herdr session:
@@ -581,12 +581,13 @@ local Herdr session:
 ```sh
 mix ptc.herdr_workspace_canary \
   --session canary \
-  --repository /absolute/path/to/repository
+  --repository /absolute/path/to/repository \
+  --setup ./scripts/ptc/bootstrap
 ```
 
-The canary asks real Herdr to create a disposable worktree, runs the real
-checked-in setup script, reports phase timings, and removes its workspace and
-temporary branch. It does not start an AI agent and does not access GitHub.
+The canary asks real Herdr to create a disposable worktree, runs the setup
+command (`--setup`, default `./scripts/ptc/bootstrap`), reports phase timings,
+and removes its workspace and temporary branch. It does not start an AI agent and does not access GitHub.
 
 On a paused job's **Reviews** page, **Override review and finish PR** lets a
 maintainer accept the displayed reviewed commit with a short reason. The original
@@ -599,8 +600,9 @@ the displayed reviewed commit; an earlier approval or an old browser form is not
 carried forward.
 
 Before publication, PtcManager reads the contract from the verified candidate
-commit—not from a possibly dirty filesystem copy—and freezes its bootstrap
-command, pre-publication command, timeouts, and digest on the job. It then
+commit—not from a possibly dirty filesystem copy—and freezes the
+repository's workspace setup command, the contract's pre-publication command,
+their timeouts, and a digest on the job. It then
 creates a fresh checkout owned by `ptc-manager-gate`, runs both commands
 with an empty environment and OS-enforced timeouts, verifies the checkout stayed
 clean, and stores the exact SHA, exit status, duration, and at most 64 KiB of
@@ -1247,9 +1249,9 @@ memory.
 
 To onboard another public or private repository:
 
-1. commit a `.ptc-manager.yml` contract to that repository whose bootstrap
-   command prepares it, and an `AGENTS.md` describing its own conventions; add
-   broker verification only if PtcManager will publish for the agent;
+1. commit an `AGENTS.md` describing the repository's own conventions, and a
+   `.ptc-manager.yml` contract only if PtcManager will verify and publish for
+   the agent or deploy the repository;
 2. create the four `ptc:` labels on GitHub. PtcManager never creates a label, and
    `gh` fails against one that does not exist, so a missing label makes the agent
    step that writes it fail:
@@ -1285,7 +1287,8 @@ To onboard another public or private repository:
    does it without building a release. A clone that fails is named in the
    unit's log and leaves nothing behind; the other checkouts and the drop-ins
    are still prepared. A checkout cloned by hand as the worker is kept;
-5. verify checkout, GitHub, and gate health, then review or copy the desired
+5. set its workspace setup command on its Configuration page, verify checkout,
+   GitHub, setup, and contract health, then review or copy the desired
    definitions on **Automations**;
 6. enable the repository on **Configuration**, then enable only the definitions
    and schedules it needs and test a read-only action before approving
@@ -2026,7 +2029,7 @@ The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed
 paths, individual blobs, total blob bytes, and generated diff bytes. A result
 outside those limits remains pending for maintainer review; it never becomes PR
-eligible automatically. Repository bootstrap and pre-publication commands use
+eligible automatically. Workspace setup and pre-publication commands use
 the same empty credential environment and nested OS timeouts; configure their
 tool search path with `PTC_PRE_PUBLICATION_PATH` when Elixir, Node, or another
 required tool is not installed under `/usr/local/bin`, `/usr/bin`, or `/bin`.

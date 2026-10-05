@@ -452,8 +452,6 @@ defmodule PtcManager.Deployments do
   defp frozen_contract(%Deployment{} = deployment) do
     %Contract{
       version: 1,
-      bootstrap_command: nil,
-      bootstrap_timeout_minutes: nil,
       deployment_command: deployment.deployment_command,
       deployment_timeout_minutes: deployment.deployment_timeout_minutes
     }

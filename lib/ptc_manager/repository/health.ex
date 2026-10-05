@@ -20,6 +20,7 @@ defmodule PtcManager.Repository.Health do
       repository: repository,
       checkout: checkout,
       gate: gate_health(repository, checkout),
+      workspace_setup: workspace_setup_health(repository),
       github: github_health(repository),
       labels: label_health(repository),
       service_access: ServiceAccess.summarize(repository)
@@ -29,7 +30,10 @@ defmodule PtcManager.Repository.Health do
   @doc "The most urgent status among a summary's checks, for a single badge."
   def overall(summary) do
     statuses =
-      Enum.map([:checkout, :github, :labels, :gate, :service_access], &summary[&1].status)
+      Enum.map(
+        [:checkout, :github, :labels, :workspace_setup, :gate, :service_access],
+        &summary[&1].status
+      )
 
     Enum.find([:attention, :syncing, :unchecked], :ready, &(&1 in statuses))
   end
@@ -49,12 +53,42 @@ defmodule PtcManager.Repository.Health do
     end
   end
 
+  defp workspace_setup_health(%Repository{
+         workspace_setup_command: command,
+         workspace_setup_timeout_minutes: timeout
+       })
+       when is_binary(command) and is_integer(timeout) do
+    %{
+      status: :ready,
+      label: "Workspace setup configured",
+      detail: "#{command} · up to #{timeout} min"
+    }
+  end
+
+  defp workspace_setup_health(_repository) do
+    %{
+      status: :attention,
+      label: "Workspace setup missing",
+      detail: "Set the command each new worktree runs before an agent starts."
+    }
+  end
+
+  # .ptc-manager.yml is optional; it only adds broker verification and
+  # deployment, which are frozen from an exact commit.
   defp gate_health(repository, %{status: :ready, path: path}) do
     with {:ok, branch_sha} <- GitProbe.branch_sha(path, repository.default_branch),
          {:ok, content} <- GitProbe.repository_contract(path, branch_sha),
          {:ok, contract} <- Contract.parse(content) do
       contract_health(contract)
     else
+      {:error, :repository_contract_missing} ->
+        %{
+          status: :ready,
+          label: "No repository contract",
+          detail:
+            "Agent publishing uses GitHub CI; broker verification and deployment are not configured."
+        }
+
       {:error, reason} ->
         %{
           status: :attention,
@@ -82,7 +116,7 @@ defmodule PtcManager.Repository.Health do
     else
       %{
         status: :ready,
-        label: "Repository setup ready",
+        label: "Repository contract ready",
         detail: "Agent publishing uses GitHub CI; broker verification is not configured."
       }
     end
@@ -178,9 +212,6 @@ defmodule PtcManager.Repository.Health do
 
   defp checkout_error(:repository_origin_not_github), do: "The origin is not a GitHub repository."
   defp checkout_error(_reason), do: "The checkout identity could not be verified."
-
-  defp gate_error(:repository_contract_missing),
-    do: "Add .ptc-manager.yml to the repository root."
 
   defp gate_error(:branch_missing), do: "Commit the repository before enabling agent work."
 

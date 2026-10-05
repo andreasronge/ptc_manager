@@ -523,9 +523,6 @@ defmodule PtcManager.DeploymentsTest do
   defp contract(command) do
     """
     version: 1
-    bootstrap:
-      command: ./scripts/ptc/bootstrap
-      timeout_minutes: 10
     deployment:
       command: #{command}
       timeout_minutes: 20

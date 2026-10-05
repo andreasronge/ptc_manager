@@ -305,11 +305,11 @@ defmodule PtcManager.Repository.PrePublicationGateTest do
 
     contract = %Contract{
       version: 1,
-      bootstrap_command: "./scripts/ptc/bootstrap",
-      bootstrap_timeout_minutes: 1,
       before_publish_command: "./scripts/ci/pre-publication",
       verification_timeout_minutes: 1
     }
+
+    setup = %{command: "./scripts/ptc/bootstrap", timeout_minutes: 1}
 
     %PrPublication{
       id: 1,
@@ -318,11 +318,11 @@ defmodule PtcManager.Repository.PrePublicationGateTest do
       job: %Job{
         id: 1,
         branch_name: branch,
-        pre_publication_bootstrap_command: contract.bootstrap_command,
-        pre_publication_bootstrap_timeout_ms: contract.bootstrap_timeout_minutes * 60_000,
+        pre_publication_bootstrap_command: setup.command,
+        pre_publication_bootstrap_timeout_ms: setup.timeout_minutes * 60_000,
         pre_publication_command: contract.before_publish_command,
         pre_publication_timeout_ms: contract.verification_timeout_minutes * 60_000,
-        pre_publication_config_digest: Contract.publication_digest(contract),
+        pre_publication_config_digest: Contract.publication_digest(contract, setup),
         worktree_allocation: %WorktreeAllocation{path: path}
       }
     }

@@ -10,7 +10,9 @@ defmodule PtcManager.OperationsFixtures do
     defaults = %{
       github_owner: "owner-#{suffix}",
       github_name: "repo-#{suffix}",
-      default_branch: "main"
+      default_branch: "main",
+      workspace_setup_command: "./scripts/ptc/bootstrap",
+      workspace_setup_timeout_minutes: 10
     }
 
     {:ok, repository} =

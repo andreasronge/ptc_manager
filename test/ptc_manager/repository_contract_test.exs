@@ -8,19 +8,13 @@ defmodule PtcManager.Repository.ContractTest do
 
   @valid """
   version: 1
-  bootstrap:
-    command: ./scripts/ptc/bootstrap
-    timeout_minutes: 10
   verification:
     before_publish: ./scripts/ci/pre-publication
     timeout_minutes: 45
   """
 
-  @bootstrap_only """
+  @version_only """
   version: 1
-  bootstrap:
-    command: ./scripts/ptc/bootstrap
-    timeout_minutes: 10
   """
 
   @deployable @valid <>
@@ -33,23 +27,27 @@ defmodule PtcManager.Repository.ContractTest do
   test "parses the complete versioned contract" do
     assert {:ok, contract} = Contract.parse(@valid)
     assert contract.version == 1
-    assert contract.bootstrap_command == "./scripts/ptc/bootstrap"
-    assert contract.bootstrap_timeout_minutes == 10
     assert contract.before_publish_command == "./scripts/ci/pre-publication"
     assert contract.verification_timeout_minutes == 45
     assert Contract.publication_verification_configured?(contract)
     assert :ok = Contract.require_publication_verification(contract)
   end
 
-  test "accepts setup without optional broker verification" do
-    assert {:ok, contract} = Contract.parse(@bootstrap_only)
-    assert contract.bootstrap_command == "./scripts/ptc/bootstrap"
+  test "accepts a contract without optional broker verification" do
+    assert {:ok, contract} = Contract.parse(@version_only)
     assert contract.before_publish_command == nil
     assert contract.verification_timeout_minutes == nil
     refute Contract.publication_verification_configured?(contract)
 
     assert {:error, :repository_publication_verification_missing} =
              Contract.require_publication_verification(contract)
+  end
+
+  # Workspace setup is a repository setting now. A leftover bootstrap section is
+  # refused like any unknown key, so it cannot look as if it still applied.
+  test "refuses a bootstrap section" do
+    assert {:error, {:unexpected_contract_keys, :contract}} =
+             Contract.parse(@valid <> "bootstrap:\n  command: ./setup\n  timeout_minutes: 1\n")
   end
 
   test "parses an optional contained deployment entrypoint" do
@@ -70,13 +68,14 @@ defmodule PtcManager.Repository.ContractTest do
 
   test "recomputes the frozen job digest and rejects changed gate fields" do
     contract = PtcManager.RepositoryContractFixture.contract()
+    setup = PtcManager.RepositoryContractFixture.setup()
 
     job = %Job{
-      pre_publication_bootstrap_command: contract.bootstrap_command,
-      pre_publication_bootstrap_timeout_ms: contract.bootstrap_timeout_minutes * 60_000,
+      pre_publication_bootstrap_command: setup.command,
+      pre_publication_bootstrap_timeout_ms: setup.timeout_minutes * 60_000,
       pre_publication_command: contract.before_publish_command,
       pre_publication_timeout_ms: contract.verification_timeout_minutes * 60_000,
-      pre_publication_config_digest: Contract.publication_digest(contract)
+      pre_publication_config_digest: Contract.publication_digest(contract, setup)
     }
 
     assert {:ok, job.pre_publication_config_digest} == Contract.frozen_publication_digest(job)
@@ -90,8 +89,8 @@ defmodule PtcManager.Repository.ContractTest do
     duplicate_nested =
       String.replace(
         @valid,
-        "  timeout_minutes: 10",
-        "  timeout_minutes: 10\n  timeout_minutes: 11"
+        "  timeout_minutes: 45",
+        "  timeout_minutes: 45\n  timeout_minutes: 46"
       )
 
     assert {:error, :duplicate_repository_contract_key} = Contract.parse(duplicate_top)
@@ -153,10 +152,10 @@ defmodule PtcManager.Repository.ContractTest do
              Contract.parse(String.replace(@valid, "timeout_minutes: 45", "timeout_minutes: 0"))
 
     assert {:error, {:unexpected_contract_keys, :contract}} =
-             Contract.parse(@bootstrap_only <> "unknown: true\n")
+             Contract.parse(@version_only <> "unknown: true\n")
 
     assert {:error, {:unexpected_contract_keys, :contract}} =
-             Contract.parse("version: 1\n")
+             Contract.parse("verification: {}\n")
   end
 
   test "the checked-in PtcManager contract and executable entrypoints agree" do
@@ -165,7 +164,7 @@ defmodule PtcManager.Repository.ContractTest do
     assert {:ok, contract} = Contract.load(repository)
 
     for command <- [
-          contract.bootstrap_command,
+          "./scripts/ptc/bootstrap",
           contract.before_publish_command,
           contract.deployment_command
         ] do

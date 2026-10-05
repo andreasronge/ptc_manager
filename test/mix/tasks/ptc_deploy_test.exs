@@ -512,7 +512,8 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert sudoers =~ "/usr/local/bin/ptc-manager-worker-bootstrap"
     assert wrapper =~ "worktree_root=/srv/ptc_manager-worktrees"
     assert wrapper =~ "worktree is outside the managed root"
-    assert wrapper =~ "script is outside the worktree"
+    assert wrapper =~ ~s|exec /bin/sh -c "$command" </dev/null|
+    assert wrapper =~ "environment file must not be a symlink"
   end
 
   test "Herdr observation runs as the managed session owner" do

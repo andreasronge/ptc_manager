@@ -272,6 +272,51 @@ defmodule PtcManager.Operations do
   end
 
   @doc """
+  Sets the command every new worktree of a repository runs before an agent
+  starts, and how long it may take. Work already set up keeps what it ran.
+  """
+  def update_workspace_setup(repository_id, command, timeout_minutes, actor)
+      when is_integer(repository_id) and is_binary(actor) and actor != "" do
+    command = if is_binary(command), do: String.trim(command), else: command
+
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        changeset =
+          Repository.changeset(repository, %{
+            workspace_setup_command: command,
+            workspace_setup_timeout_minutes: timeout_minutes
+          })
+
+        case Repo.update(changeset) do
+          {:ok, updated} ->
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.workspace_setup_changed",
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}",
+                "command" => updated.workspace_setup_command,
+                "timeout_minutes" => updated.workspace_setup_timeout_minutes
+              }
+            })
+
+            updated
+
+          {:error, _changeset} ->
+            Repo.rollback(:invalid_workspace_setup)
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Changes the branch a repository's work starts from and merges into.
 
   Refused while a job, maintainer action, automation run, or deployment is
@@ -2667,10 +2712,12 @@ defmodule PtcManager.Operations do
              is_map(result) and
              (is_nil(contract) or is_struct(contract, PtcManager.Repository.Contract)) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    pre_publication_attrs = pre_publication_attrs(contract)
 
     outcome =
-      if valid_result_fields?(result) do
+      with true <- valid_result_fields?(result) || {:error, :invalid_result},
+           {:ok, gate} <- publication_gate(job_id, contract) do
+        pre_publication_attrs = pre_publication_attrs(gate)
+
         Repo.transaction(fn ->
           review_job = Repo.get!(Job, job_id)
 
@@ -2746,7 +2793,7 @@ defmodule PtcManager.Operations do
                     "diff_digest" => result.diff_digest,
                     "commit_count" => result.commit_count
                   },
-                  pre_publication_audit_details(contract)
+                  pre_publication_audit_details(gate)
                 )
             })
 
@@ -2754,13 +2801,11 @@ defmodule PtcManager.Operations do
           else
             job = Repo.get!(Job, job_id)
 
-            if verified_result_matches?(job, fencing_token, attempt_token, result, contract),
+            if verified_result_matches?(job, fencing_token, attempt_token, result, gate),
               do: job,
               else: Repo.rollback(result_attempt_failure(job, fencing_token, attempt_token, now))
           end
         end)
-      else
-        {:error, :invalid_result}
       end
 
     case outcome do
@@ -4244,12 +4289,42 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp verified_result_matches?(job, fencing_token, attempt_token, result, contract) do
+  defp verified_result_matches?(job, fencing_token, attempt_token, result, gate) do
     job.state == "ready_for_pr" and job.fencing_token == fencing_token and
       job.result_attempt_token == attempt_token and job.result_base_sha == result.base_sha and
       job.result_head_sha == result.head_sha and
       job.result_diff_digest == result.diff_digest and
-      job.result_commit_count == result.commit_count and pre_publication_matches?(job, contract)
+      job.result_commit_count == result.commit_count and pre_publication_matches?(job, gate)
+  end
+
+  # The broker gate runs the repository's workspace setup, then the contract's
+  # verification, in a fresh checkout of the result. Both are frozen here, so a
+  # later edit of either cannot change what this result is published under.
+  defp publication_gate(_job_id, nil), do: {:ok, nil}
+
+  defp publication_gate(job_id, contract) do
+    case Repo.get!(Job, job_id) |> Repo.preload(:repository) do
+      %Job{
+        repository: %Repository{
+          workspace_setup_command: command,
+          workspace_setup_timeout_minutes: timeout
+        }
+      }
+      when is_binary(command) and is_integer(timeout) ->
+        setup = %{command: command, timeout_minutes: timeout}
+
+        {:ok,
+         %{
+           bootstrap_command: command,
+           bootstrap_timeout_ms: timeout * 60_000,
+           command: contract.before_publish_command,
+           timeout_ms: contract.verification_timeout_minutes * 60_000,
+           digest: PtcManager.Repository.Contract.publication_digest(contract, setup)
+         }}
+
+      _unconfigured ->
+        {:error, :workspace_setup_not_configured}
+    end
   end
 
   defp pre_publication_attrs(nil) do
@@ -4268,13 +4343,13 @@ defmodule PtcManager.Operations do
     ]
   end
 
-  defp pre_publication_attrs(contract) do
+  defp pre_publication_attrs(gate) do
     [
-      pre_publication_bootstrap_command: contract.bootstrap_command,
-      pre_publication_bootstrap_timeout_ms: contract.bootstrap_timeout_minutes * 60_000,
-      pre_publication_command: contract.before_publish_command,
-      pre_publication_timeout_ms: contract.verification_timeout_minutes * 60_000,
-      pre_publication_config_digest: PtcManager.Repository.Contract.publication_digest(contract),
+      pre_publication_bootstrap_command: gate.bootstrap_command,
+      pre_publication_bootstrap_timeout_ms: gate.bootstrap_timeout_ms,
+      pre_publication_command: gate.command,
+      pre_publication_timeout_ms: gate.timeout_ms,
+      pre_publication_config_digest: gate.digest,
       pre_publication_status: "pending",
       pre_publication_verified_sha: nil,
       pre_publication_exit_status: nil,
@@ -4286,14 +4361,13 @@ defmodule PtcManager.Operations do
 
   defp pre_publication_audit_details(nil), do: %{}
 
-  defp pre_publication_audit_details(contract) do
+  defp pre_publication_audit_details(gate) do
     %{
-      "pre_publication_bootstrap_command" => contract.bootstrap_command,
-      "pre_publication_bootstrap_timeout_ms" => contract.bootstrap_timeout_minutes * 60_000,
-      "pre_publication_command" => contract.before_publish_command,
-      "pre_publication_timeout_ms" => contract.verification_timeout_minutes * 60_000,
-      "pre_publication_config_digest" =>
-        PtcManager.Repository.Contract.publication_digest(contract)
+      "pre_publication_bootstrap_command" => gate.bootstrap_command,
+      "pre_publication_bootstrap_timeout_ms" => gate.bootstrap_timeout_ms,
+      "pre_publication_command" => gate.command,
+      "pre_publication_timeout_ms" => gate.timeout_ms,
+      "pre_publication_config_digest" => gate.digest
     }
   end
 
@@ -4304,13 +4378,12 @@ defmodule PtcManager.Operations do
       is_nil(job.pre_publication_config_digest)
   end
 
-  defp pre_publication_matches?(job, contract) do
-    job.pre_publication_bootstrap_command == contract.bootstrap_command and
-      job.pre_publication_bootstrap_timeout_ms == contract.bootstrap_timeout_minutes * 60_000 and
-      job.pre_publication_command == contract.before_publish_command and
-      job.pre_publication_timeout_ms == contract.verification_timeout_minutes * 60_000 and
-      job.pre_publication_config_digest ==
-        PtcManager.Repository.Contract.publication_digest(contract)
+  defp pre_publication_matches?(job, gate) do
+    job.pre_publication_bootstrap_command == gate.bootstrap_command and
+      job.pre_publication_bootstrap_timeout_ms == gate.bootstrap_timeout_ms and
+      job.pre_publication_command == gate.command and
+      job.pre_publication_timeout_ms == gate.timeout_ms and
+      job.pre_publication_config_digest == gate.digest
   end
 
   defp result_error_matches?(job, fencing_token, attempt_token, message) do
