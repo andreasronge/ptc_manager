@@ -98,6 +98,9 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "input[name='repository[default_branch]'][value='develop']")
     # The re-render keeps the form open.
     assert has_element?(view, "#add-repository[open]")
+    # A focused field keeps its value in the browser, so the branch is also named.
+    assert has_element?(view, "#github-default-branch", "develop")
+    assert has_element?(view, "input[name='repository[default_branch]'][placeholder='develop']")
 
     # Another repository replaces a prefilled branch, but never a typed one.
     view

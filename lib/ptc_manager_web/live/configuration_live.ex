@@ -19,7 +19,8 @@ defmodule PtcManagerWeb.ConfigurationLive do
      |> assign(:page_title, "Configuration")
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:repository_form, to_form(%{}, as: :repository))
-     |> assign(looked_up: nil, prefilled_branch: nil, add_repository_open: false)
+     |> assign(looked_up: nil, prefilled_branch: nil, github_branch: nil)
+     |> assign(:add_repository_open, false)
      |> load_configuration()}
   end
 
@@ -48,7 +49,8 @@ defmodule PtcManagerWeb.ConfigurationLive do
            "#{full_name(repository)} added disabled. Verify its checkout, GitHub access, gate, and automations before enabling it."
          )
          |> assign(:repository_form, to_form(%{}, as: :repository))
-         |> assign(looked_up: nil, prefilled_branch: nil, add_repository_open: false)
+         |> assign(looked_up: nil, prefilled_branch: nil, github_branch: nil)
+         |> assign(:add_repository_open, false)
          |> load_configuration()}
 
       {:error, reason} ->
@@ -79,20 +81,22 @@ defmodule PtcManagerWeb.ConfigurationLive do
     else
       typed = params["default_branch"] || ""
 
-      {params, prefilled} =
+      {params, prefilled, github_branch} =
         case Operations.lookup_github_default_branch(elem(key, 0), elem(key, 1)) do
           {:ok, branch} ->
             if typed in ["", socket.assigns.prefilled_branch],
-              do: {Map.put(params, "default_branch", branch), branch},
-              else: {params, socket.assigns.prefilled_branch}
+              do: {Map.put(params, "default_branch", branch), branch, branch},
+              else: {params, socket.assigns.prefilled_branch, branch}
 
           {:error, _reason} ->
-            {params, socket.assigns.prefilled_branch}
+            {params, socket.assigns.prefilled_branch, nil}
         end
 
+      # The browser keeps the value of the field it has focus in, so GitHub's
+      # branch is also shown beside it; a blank field means that branch.
       {:noreply,
        socket
-       |> assign(looked_up: key, prefilled_branch: prefilled)
+       |> assign(looked_up: key, prefilled_branch: prefilled, github_branch: github_branch)
        |> assign(:repository_form, to_form(params, as: :repository))}
     end
   end

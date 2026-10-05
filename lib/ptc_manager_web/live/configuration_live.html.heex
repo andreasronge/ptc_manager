@@ -172,10 +172,17 @@
             Default branch<input
               name="repository[default_branch]"
               value={@repository_form[:default_branch].value}
-              placeholder="GitHub's default branch"
+              placeholder={@github_branch || "GitHub's default branch"}
               class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
             />
           </label>
+          <p
+            :if={@github_branch}
+            id="github-default-branch"
+            class="self-end text-xs text-slate-400"
+          >
+            GitHub's default branch is <code>{@github_branch}</code>; leave the field blank to use it.
+          </p>
           <button class="w-fit rounded-xl bg-teal-400 px-4 py-2 text-sm font-semibold text-slate-950">
             Add repository
           </button>
