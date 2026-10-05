@@ -1771,6 +1771,10 @@ sudo install -d -o ptc-manager-gate -g ptc-manager-repo -m 0700 \
 sudo chmod 3770 /var/lib/ptc_manager-output
 sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
   /var/lib/ptc_manager-output/planning-snapshots
+sudo install -d -o ptc-manager-worker -g ptc-manager-output -m 2770 \
+  /var/lib/ptc_manager-output/execution-artifacts
+sudo install -d -o ptc-manager -g ptc-manager-output -m 2750 \
+  /var/lib/ptc_manager-output/daily-digest-bundles
 sudo chown ptc-manager-worker:ptc-manager-output /var/lib/ptc_manager-worker
 sudo chmod 0710 /var/lib/ptc_manager-worker
 sudo install -d -o root -g ptc-manager-output -m 1730 \

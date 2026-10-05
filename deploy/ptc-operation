@@ -9,12 +9,14 @@ import os
 import platform
 import resource
 import signal
+import select
 import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
+import hashlib
 
 
 def parse_args():
@@ -332,6 +334,12 @@ def managed_run(args, context):
     child_environment = os.environ.copy()
     child_environment["PTC_OPERATION_ACTIVE"] = str(operation_id)
     child_environment["PTC_OPERATION_LABEL"] = args.label
+    artifact = None
+    try:
+        artifact = OperationArtifact(context, operation_id, attempt_token)
+    except Exception as error:
+        print(f"PtcManager artifact capture unavailable: {error}", file=sys.stderr)
+        artifact = PassthroughArtifact()
     try:
         if cgroup_path:
 
@@ -339,13 +347,11 @@ def managed_run(args, context):
                 os.setsid()
                 cgroup_add_process(cgroup_path, os.getpid())
 
-            child = subprocess.Popen(
-                args.command, env=child_environment, preexec_fn=child_setup
-            )
+            child = subprocess.Popen(args.command, env=child_environment, preexec_fn=child_setup,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
-            child = subprocess.Popen(
-                args.command, env=child_environment, start_new_session=True
-            )
+            child = subprocess.Popen(args.command, env=child_environment, start_new_session=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except Exception as error:
         cleanup_cgroup(cgroup_path)
         broker_request_with_retry(
@@ -362,12 +368,16 @@ def managed_run(args, context):
         slot_lock.close()
         raise
     stop_heartbeat = threading.Event()
+    group_lock = threading.RLock()
+    group_alive = True
 
     def forward(signum, _frame):
-        try:
-            os.killpg(child.pid, signum)
-        except ProcessLookupError:
-            pass
+        with group_lock:
+            if group_alive:
+                try:
+                    os.killpg(child.pid, signum)
+                except ProcessLookupError:
+                    pass
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, forward)
@@ -385,7 +395,7 @@ def managed_run(args, context):
                     },
                 )
                 if update.get("cancel_requested"):
-                    os.killpg(child.pid, signal.SIGTERM)
+                    forward(signal.SIGTERM, None)
             except Exception as error:
                 print(
                     f"PtcManager operation heartbeat failed: {error}", file=sys.stderr
@@ -393,7 +403,28 @@ def managed_run(args, context):
 
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
+    pumps = artifact.start(child)
+    # Keep the exited leader unreaped so its PID/PGID cannot be reused while
+    # signalling descendants. Reap only after terminating the original group.
+    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+    stop_heartbeat.set()
+    # A completed command must not leave descendants holding its pipe writers.
+    with group_lock:
+        forward(signal.SIGKILL, None)
+        group_alive = False
     status = child.wait()
+    if cgroup_path:
+        try:
+            write_text(os.path.join(cgroup_path, "cgroup.kill"), "1")
+        except OSError as error:
+            print(f"PtcManager descendant cleanup failed: {error}", file=sys.stderr)
+    artifact.stopped.set()
+    for pump in pumps:
+        pump.join()
+    try:
+        artifact.seal(status if status >= 0 else 128 + abs(status))
+    except OSError as error:
+        print(f"PtcManager artifact sealing failed: {error}", file=sys.stderr)
     stop_heartbeat.set()
     thread.join(timeout=1)
 
@@ -414,6 +445,153 @@ def managed_run(args, context):
     )
     slot_lock.close()
     return status if status >= 0 else 128 + abs(status)
+
+
+def stream_chunks(source, stopped=None):
+    deadline = None
+    while True:
+        if stopped is not None and stopped.is_set() and deadline is None:
+            deadline = time.monotonic() + 5
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("post-exit stream drain exceeded five seconds")
+        if not select.select([source], [], [], 0.1)[0]:
+            continue
+        data = os.read(source.fileno(), 65536)
+        if not data:
+            return
+        yield data
+
+
+class OperationArtifact:
+    """Continuously tees separate child streams into an attempt-scoped durable directory."""
+    def __init__(self, context, operation_id, attempt_token):
+        root = context.get("artifact_root")
+        if not root:
+            raise RuntimeError("execution artifact root unavailable")
+        owner = f"{context['owner_type']}-{context['owner_id']}"
+        self.directory = os.path.join(root, f"repository-{context['repository_id']}", owner,
+                                      f"operation-{operation_id}-{attempt_token}")
+        ensure_shared_directory(root, self.directory)
+        self.limit = context.get("artifact_max_bytes", 256_000_000)
+        self.records = {}
+
+    def start(self, child):
+        self.stopped = threading.Event()
+        pairs = (("stdout", child.stdout, sys.stdout.buffer),
+                 ("stderr", child.stderr, sys.stderr.buffer))
+        threads = []
+        for name, source, live in pairs:
+            thread = threading.Thread(target=self._pump, args=(name, source, live), daemon=True)
+            thread.start()
+            threads.append(thread)
+        return threads
+
+    def _pump(self, name, source, live):
+        path = os.path.join(self.directory, name + ".log")
+        digest, size, state, detail = hashlib.sha256(), 0, "complete", None
+        target = None
+        try:
+            target = open(path, "xb", buffering=0)
+        except OSError as error:
+            state, detail = "error", f"open failed: {error.strerror}"
+        try:
+            for data in stream_chunks(source, getattr(self, "stopped", None)):
+                live.write(data)
+                live.flush()
+                if target is not None:
+                    if size + len(data) <= self.limit:
+                        try:
+                            target.write(data)
+                            digest.update(data)
+                            size += len(data)
+                        except OSError as error:
+                            state, detail = "error", f"write failed: {error.strerror}"
+                            target.close()
+                            target = None
+                    else:
+                        state, detail = "partial", "stream exceeded configured file budget"
+                        target.close()
+                        target = None
+        except TimeoutError as error:
+            state, detail = "partial", str(error)
+        finally:
+            source.close()
+            if target is not None:
+                try:
+                    target.flush()
+                    os.fsync(target.fileno())
+                    target.close()
+                except OSError as error:
+                    state, detail = "error", f"finalization failed: {error.strerror}"
+            self.records[name] = {"path": name + ".log", "bytes": size,
+                                  "sha256": digest.hexdigest(), "coverage": state,
+                                  "diagnostic": detail}
+
+    def seal(self, exit_status):
+        states = [self.records.get(name, {}).get("coverage", "error")
+                  for name in ("stdout", "stderr")]
+        coverage = ("error" if "error" in states else
+                    "complete" if all(state == "complete" for state in states) else "partial")
+        manifest = {"schema_version": 1, "kind": "operation", "exit_status": exit_status,
+                    "coverage": coverage, "streams": self.records,
+                    "ordering": "streams_are_independent"}
+        temporary = os.path.join(self.directory, ".manifest.json.tmp")
+        final = os.path.join(self.directory, "manifest.json")
+        with open(temporary, "x", encoding="utf-8") as output:
+            json.dump(manifest, output, separators=(",", ":"), sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, final)
+        os.chmod(final, 0o440)
+        for record in self.records.values():
+            try:
+                os.chmod(os.path.join(self.directory, record["path"]), 0o440)
+            except OSError:
+                pass
+
+
+class PassthroughArtifact:
+    """Drain and forward streams even when durable capture cannot start."""
+    def start(self, child):
+        self.stopped = threading.Event()
+        threads = []
+        for source, live in ((child.stdout, sys.stdout.buffer), (child.stderr, sys.stderr.buffer)):
+            thread = threading.Thread(target=self._pump, args=(source, live), daemon=True)
+            thread.start()
+            threads.append(thread)
+        return threads
+
+    def _pump(self, source, live):
+        try:
+            for data in stream_chunks(source, getattr(self, "stopped", None)):
+                live.write(data)
+                live.flush()
+        except TimeoutError as error:
+            print(f"PtcManager output forwarding incomplete: {error}", file=sys.stderr)
+        finally:
+            source.close()
+
+    def seal(self, _exit_status):
+        pass
+
+
+def ensure_shared_directory(root, directory):
+    current = os.path.abspath(root)
+    target = os.path.abspath(directory)
+    if os.path.islink(current) or not os.path.isdir(current):
+        raise RuntimeError("unsafe artifact root")
+    if not target.startswith(current + os.sep):
+        raise RuntimeError("artifact path escaped configured root")
+    for part in os.path.relpath(target, current).split(os.sep):
+        current = os.path.join(current, part)
+        try:
+            os.mkdir(current, mode=0o2770)
+            os.chmod(current, 0o2770)
+        except FileExistsError:
+            if os.path.islink(current) or not os.path.isdir(current):
+                raise RuntimeError("unsafe artifact directory")
+            if os.stat(current, follow_symlinks=False).st_mode & 0o020 == 0:
+                raise RuntimeError("artifact directory is not group writable")
 
 
 def main():

@@ -693,7 +693,9 @@ defmodule PtcManager.HerdrSyncTest do
         agent_name: "impl_j#{job.id}_f1",
         started_at: now(),
         last_heartbeat_at: now(),
-        fencing_token: 1
+        fencing_token: 1,
+        external_key: "managed:w1:p1",
+        provider_kind: "codex"
       })
 
     allocation =
@@ -726,6 +728,7 @@ defmodule PtcManager.HerdrSyncTest do
     assert run.id == pending_run.id
     assert run.fencing_token == 1
     assert run.external_key == "managed:managed-agent"
+    assert run.provider_sessions == %{"p1" => "codex", "managed-agent" => "codex"}
     assert Repo.get!(Job, job.id).state == "working"
     recovered_allocation = Repo.get!(WorktreeAllocation, allocation.id)
     assert recovered_allocation.herdr_workspace == "recovered-workspace"

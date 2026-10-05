@@ -47,7 +47,13 @@ defmodule PtcManager.Repository.WorkspaceSetup do
            {:ok, setup} <- configured_setup(owner, opts),
            script = setup.command,
            execution <-
-             runner.run(path, script, setup.timeout_minutes * 60_000, setup.environment),
+             runner.run(
+               path,
+               script,
+               setup.timeout_minutes * 60_000,
+               setup.environment,
+               setup_artifact(owner)
+             ),
            {:ok, output, truncated} <- successful_execution(execution, script, source_sha),
            :ok <- GitProbe.reclaimable(path, branch, source_sha) do
         {:ok, script, source_sha, 0, output, truncated}
@@ -119,6 +125,26 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
       _unconfigured ->
         {:error, :workspace_setup_not_configured}
+    end
+  end
+
+  defp setup_artifact(owner) do
+    case Application.get_env(:ptc_manager, :execution_artifact_root) do
+      root when is_binary(root) and root != "" ->
+        {type, attempt} =
+          if is_struct(owner, Job),
+            do: {"job", owner.fencing_token},
+            else: {"action", owner.attempt_count}
+
+        Path.join([
+          root,
+          "repository-#{owner.repository_id}",
+          "#{type}-#{owner.id}",
+          "workspace-setup-#{attempt}"
+        ])
+
+      _ ->
+        nil
     end
   end
 
@@ -227,7 +253,7 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
     @output_limit 65_536
 
-    def run(path, command, timeout_ms, variables \\ []) do
+    def run(path, command, timeout_ms, variables \\ [], artifact_directory \\ nil) do
       started = System.monotonic_time(:millisecond)
       user = Application.get_env(:ptc_manager, :herdr_run_as_user)
 
@@ -259,7 +285,21 @@ defmodule PtcManager.Repository.WorkspaceSetup do
               ]
             )
 
-          receive_result(port, "", false, started, started + timeout_ms, command)
+          artifact = open_artifact(artifact_directory)
+
+          result =
+            receive_result(
+              port,
+              "",
+              false,
+              started,
+              started + timeout_ms,
+              command,
+              artifact
+            )
+
+          seal_artifact(artifact, result)
+          result
         after
           if environment_file, do: File.rm(environment_file)
         end
@@ -274,13 +314,14 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
     defp environment_file(_user, _variables), do: {:ok, nil}
 
-    defp receive_result(port, output, truncated, started, deadline, script) do
+    defp receive_result(port, output, truncated, started, deadline, script, artifact) do
       remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
       receive do
         {^port, {:data, data}} ->
+          artifact = write_artifact(artifact, data)
           {output, truncated} = append_bounded(output, data, truncated)
-          receive_result(port, output, truncated, started, deadline, script)
+          receive_result(port, output, truncated, started, deadline, script, artifact)
 
         {^port, {:exit_status, status}} ->
           {:ok,
@@ -293,9 +334,163 @@ defmodule PtcManager.Repository.WorkspaceSetup do
            }}
       after
         remaining ->
+          if artifact do
+            Process.put({__MODULE__, artifact.path}, %{artifact | coverage: "partial"})
+          end
+
           close_port(port)
           {:error, :workspace_setup_timeout}
       end
+    end
+
+    defp open_artifact(nil), do: nil
+
+    defp open_artifact(directory) do
+      try do
+        ensure_shared_directory!(directory)
+        path = Path.join(directory, "combined.log")
+
+        artifact = %{
+          io: File.open!(path, [:write, :binary, :exclusive]),
+          path: path,
+          bytes: 0,
+          coverage: "complete"
+        }
+
+        Process.put({__MODULE__, path}, artifact)
+        artifact
+      rescue
+        _ -> nil
+      end
+    end
+
+    defp ensure_shared_directory!(directory) do
+      case Application.get_env(:ptc_manager, :execution_artifact_root) do
+        root when is_binary(root) and root != "" ->
+          root = Path.expand(root)
+          relative = Path.relative_to(Path.expand(directory), root)
+
+          Enum.reduce(Path.split(relative), root, fn part, parent ->
+            path = Path.join(parent, part)
+
+            case File.lstat(path) do
+              {:error, :enoent} ->
+                File.mkdir!(path)
+                File.chmod!(path, 0o2770)
+
+              {:ok, %{type: :directory, mode: mode}} ->
+                if Bitwise.band(mode, 0o020) == 0,
+                  do:
+                    raise(File.Error,
+                      reason: :eacces,
+                      action: "use shared artifact directory",
+                      path: path
+                    )
+
+              _ ->
+                raise File.Error,
+                  reason: :eacces,
+                  action: "use shared artifact directory",
+                  path: path
+            end
+
+            path
+          end)
+
+        _ ->
+          File.mkdir_p!(directory)
+      end
+
+      :ok
+    end
+
+    defp write_artifact(nil, _data), do: nil
+
+    defp write_artifact(%{io: nil} = artifact, _data), do: artifact
+
+    defp write_artifact(artifact, data) do
+      limit = Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000)
+
+      updated =
+        if artifact.bytes + byte_size(data) <= limit do
+          case IO.binwrite(artifact.io, data) do
+            :ok -> %{artifact | bytes: artifact.bytes + byte_size(data)}
+            _ -> %{artifact | coverage: "error"}
+          end
+        else
+          %{artifact | coverage: "partial"}
+        end
+
+      Process.put({__MODULE__, artifact.path}, updated)
+      updated
+    end
+
+    defp seal_artifact(nil, _result), do: :ok
+
+    defp seal_artifact(artifact, result) do
+      artifact = Process.delete({__MODULE__, artifact.path}) || artifact
+      sync_result = :file.sync(artifact.io)
+      close_result = File.close(artifact.io)
+
+      coverage =
+        if sync_result == :ok and close_result == :ok, do: artifact.coverage, else: "error"
+
+      bytes = File.stat!(artifact.path).size
+
+      digest =
+        artifact.path
+        |> File.stream!(65_536, [])
+        |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
+        |> :crypto.hash_final()
+        |> Base.encode16(case: :lower)
+
+      status =
+        case result do
+          {:ok, %{exit_status: value}} -> value
+          _ -> nil
+        end
+
+      manifest = %{
+        schema_version: 1,
+        kind: "workspace_setup",
+        coverage: coverage,
+        diagnostic:
+          if(coverage == "error", do: "workspace capture write or finalization failed", else: nil),
+        exit_status: status,
+        streams: %{
+          combined: %{
+            path: "combined.log",
+            bytes: bytes,
+            sha256: digest,
+            coverage: coverage
+          }
+        }
+      }
+
+      File.write!(
+        Path.join(Path.dirname(artifact.path), "manifest.json"),
+        Jason.encode!(manifest),
+        [:exclusive]
+      )
+
+      :ok
+    rescue
+      _ ->
+        require Logger
+        Logger.warning("Workspace capture finalization failed; output may be incomplete")
+
+        File.write(
+          Path.join(Path.dirname(artifact.path), "manifest.json"),
+          Jason.encode!(%{
+            schema_version: 1,
+            kind: "workspace_setup",
+            coverage: "error",
+            diagnostic: "workspace capture finalization failed",
+            streams: %{}
+          })
+        )
+
+        :ok
     end
 
     @doc false

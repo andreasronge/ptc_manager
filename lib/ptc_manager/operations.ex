@@ -1074,11 +1074,15 @@ defmodule PtcManager.Operations do
     |> Repo.update!()
   end
 
-  defp close_cancelled_pane(job, %AgentRun{herdr_pane: pane})
+  defp close_cancelled_pane(job, %AgentRun{id: run_id, herdr_pane: pane})
        when is_binary(pane) and pane != "" do
     case Gateway.call(Application.fetch_env!(:ptc_manager, :herdr_client), :close_pane, [pane]) do
-      :ok -> {:ok, job}
-      {:error, reason} -> {:ok, job, {:pane_close_failed, reason}}
+      :ok ->
+        PtcManager.ExecutionArtifacts.archive_run(run_id)
+        {:ok, job}
+
+      {:error, reason} ->
+        {:ok, job, {:pane_close_failed, reason}}
     end
   end
 
@@ -2395,6 +2399,7 @@ defmodule PtcManager.Operations do
             herdr_pane: dispatch.pane_id,
             herdr_session: dispatch.session,
             external_key: dispatch.external_key,
+            provider_kind: Map.get(dispatch, :agent_kind),
             fencing_token: fencing_token,
             worker_incarnation_id: worker.worker_incarnation_id,
             herdr_incarnation_id: worker.herdr_incarnation_id,
@@ -2696,7 +2701,8 @@ defmodule PtcManager.Operations do
               herdr_workspace: dispatch.workspace_id,
               herdr_pane: dispatch.pane_id,
               herdr_session: dispatch.session,
-              external_key: dispatch.external_key
+              external_key: dispatch.external_key,
+              provider_kind: Map.get(dispatch, :agent_kind)
             })
             |> Repo.update!()
           else

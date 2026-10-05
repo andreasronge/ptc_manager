@@ -53,12 +53,16 @@ defmodule PtcManager.MaintainerActions do
     daily_digest_pull_request_limit_reached
     daily_digest_commit_limit_reached
     daily_digest_evidence_too_large
+    daily_digest_prompt_too_large
     unexpected_github_response
     unexpected_github_pull_request
     github_pull_request_merge_identity_unavailable
     unexpected_github_commit_date
     invalid_github_head_sha
-    daily_digest_projection_invalid_or_oversized
+    daily_digest_invalid_byte_limit
+    daily_digest_artifact_budget_exceeded
+    daily_digest_manifest_too_large
+    daily_digest_legacy_contract_cancelled
   )a
 
   @doc """
@@ -823,49 +827,65 @@ defmodule PtcManager.MaintainerActions do
     evidence_source =
       Application.get_env(:ptc_manager, :daily_digest_evidence, DailyDigestEvidence)
 
-    source_snapshot =
-      Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
+    source_snapshot = Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
-    with {:ok, evidence} <- evidence_source.fetch(repository, digest),
+    with :ok <- require_file_daily_contract(action),
+         {:ok, evidence} <- evidence_source.fetch(repository, digest),
          {:ok, input} <-
            PtcManager.DailyDigests.Input.prepare(repository, digest, evidence, DateTime.utc_now()),
-         {:ok, %{sha: source_sha, ref: source_ref} = source} <-
-           capture_planning_snapshot(source_snapshot, repository, action) do
-      captured_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
+         {:ok, source} <- capture_planning_snapshot(source_snapshot, repository, action) do
       snapshot =
         Map.merge(action.target_snapshot || %{}, %{
-          "source_sha" => source_sha,
-          "source_ref" => source_ref,
+          "source_sha" => source.sha,
+          "source_ref" => source.ref,
           "source_default_branch" => repository.default_branch,
-          "source_captured_at" => DateTime.to_iso8601(captured_at),
-          "digest_date" => Date.to_iso8601(digest.digest_date),
-          "trusted_source_head_sha" => evidence["source_head_sha"]
+          "source_captured_at" => DateTime.to_iso8601(DateTime.utc_now()),
+          "digest_date" => Date.to_iso8601(digest.digest_date)
         })
         |> Map.merge(input.snapshot)
         |> maybe_put_source_path(source)
 
-      prompt =
-        action.prompt <>
-          """
-
-          <source_snapshot ref="#{source_ref}" sha="#{source_sha}" default_branch="#{repository.default_branch}" workspace="read_only" github_access="none" />
-          #{PtcManager.DailyDigests.Input.block(input)}
-          """
-
-      if PtcManager.DailyDigests.Input.validate_prompt(prompt) == :ok,
-        do: Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt),
-        else:
-          reject_oversized_daily_digest_prompt(
-            action,
-            repository,
-            source_snapshot,
-            snapshot
-          )
+      publish_daily_digest_input(action, digest, repository, source_snapshot, snapshot, input)
     else
-      {:error, reason} ->
-        handle_daily_digest_preflight_error(action, reason)
+      {:error, reason} -> handle_daily_digest_preflight_error(action, reason)
     end
+  end
+
+  defp publish_daily_digest_input(action, digest, repository, source_snapshot, snapshot, input) do
+    case PtcManager.DailyDigests.Input.publish(repository, digest, input, %{
+           action_id: action.id,
+           attempt: action.attempt_count + 1
+         }) do
+      {:ok, input} ->
+        snapshot = Map.merge(snapshot, input.snapshot)
+
+        prompt =
+          action.prompt <>
+            """
+
+            <source_snapshot ref="#{snapshot["source_ref"]}" sha="#{snapshot["source_sha"]}" default_branch="#{repository.default_branch}" workspace="read_only" github_access="read" />
+            #{PtcManager.DailyDigests.Input.block(input)}
+            """
+
+        with :ok <- PtcManager.DailyDigests.Input.validate_prompt(prompt),
+             {:ok, _} = result <-
+               Operations.record_agent_action_target_snapshot(action.id, snapshot, prompt) do
+          result
+        else
+          {:error, reason} ->
+            reject_daily_digest_input(action, repository, source_snapshot, snapshot, reason)
+        end
+
+      {:error, reason} ->
+        reject_daily_digest_input(action, repository, source_snapshot, snapshot, reason)
+    end
+  end
+
+  defp require_file_daily_contract(%{prompt: prompt}) when is_binary(prompt) do
+    if String.contains?(prompt, ~s(action="daily_digest")) and
+         String.contains?(prompt, ~s(github_access="read")),
+       do: :ok,
+       else: {:error, :daily_digest_legacy_contract_cancelled}
   end
 
   defp handle_daily_digest_preflight_error(action, reason)
@@ -874,6 +894,12 @@ defmodule PtcManager.MaintainerActions do
 
   defp handle_daily_digest_preflight_error(action, {:invalid_github_json, _reason}),
     do: fail_preflight(action.id, :invalid_github_json)
+
+  defp handle_daily_digest_preflight_error(
+         action,
+         {:daily_digest_projection_invalid, _} = reason
+       ),
+       do: fail_preflight(action.id, reason)
 
   defp handle_daily_digest_preflight_error(action, reason) do
     case Operations.defer_agent_action_source_preflight(
@@ -892,7 +918,9 @@ defmodule PtcManager.MaintainerActions do
       else: source_snapshot.capture(repository)
   end
 
-  defp reject_oversized_daily_digest_prompt(action, repository, source_snapshot, snapshot) do
+  defp reject_daily_digest_input(action, repository, source_snapshot, snapshot, reason) do
+    _ = PtcManager.DailyDigests.Bundle.release(snapshot)
+
     release_result =
       if is_binary(snapshot["source_path"]) and is_atom(source_snapshot) and
            function_exported?(source_snapshot, :release, 3) do
@@ -903,14 +931,14 @@ defmodule PtcManager.MaintainerActions do
 
     case release_result do
       :ok ->
-        fail_preflight(action.id, :daily_digest_prompt_too_large)
+        handle_daily_digest_preflight_error(action, reason)
 
       {:error, _reason} ->
         # Keep the path durable so the regular failed-action reaper can retry
         # cleanup instead of orphaning a coordinator-owned snapshot.
         with {:ok, _prepared} <-
                Operations.record_agent_action_target_snapshot(action.id, snapshot) do
-          fail_preflight(action.id, :daily_digest_prompt_too_large)
+          handle_daily_digest_preflight_error(action, reason)
         end
     end
   end
@@ -943,7 +971,12 @@ defmodule PtcManager.MaintainerActions do
       Application.get_env(:ptc_manager, :planning_source_snapshot, SourceSnapshot)
 
     if is_atom(source_snapshot) and function_exported?(source_snapshot, :release, 3) do
-      case source_snapshot.release(repository, action.id, action.target_snapshot || %{}) do
+      release =
+        with :ok <- PtcManager.ExecutionArtifacts.close_action_runs(action) do
+          source_snapshot.release(repository, action.id, action.target_snapshot || %{})
+        end
+
+      case release do
         :ok ->
           case Operations.mark_agent_action_source_released(action.id) do
             {:ok, _released} ->

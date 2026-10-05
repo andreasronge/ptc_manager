@@ -90,6 +90,12 @@ defmodule PtcManager.AutomationsTest do
           {:ok, ~s({"result":{"state":"idle"}})}
 
         Enum.take(args, 2) == ["workspace", "close"] ->
+          send(
+            self(),
+            {:session_at_shutdown,
+             Process.get({PtcManager.MaintainerActions.GenericHerdrAdapter, :provider_session})}
+          )
+
           {:ok, "{}"}
 
         true ->
@@ -167,6 +173,13 @@ defmodule PtcManager.AutomationsTest do
           File.write!(temporary_path, Jason.encode!(result()))
           File.rename!(temporary_path, path)
       end
+    end
+  end
+
+  defmodule ArtifactCommand do
+    def run(_helper, args) do
+      send(self(), {:archived_session, args})
+      {"", Process.get(:artifact_exit_code, 0)}
     end
   end
 
@@ -555,12 +568,43 @@ defmodule PtcManager.AutomationsTest do
                {:ok, %{"outcome" => "ready"}}
              )
 
+    artifact_keys = [:execution_artifact_root, :execution_artifact_command]
+    artifact_previous = Map.new(artifact_keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(artifact_previous, fn {key, value} ->
+        Application.put_env(:ptc_manager, key, value)
+      end)
+    end)
+
+    Application.put_env(
+      :ptc_manager,
+      :execution_artifact_root,
+      Path.join(System.tmp_dir!(), "restart-artifacts")
+    )
+
+    Application.put_env(:ptc_manager, :execution_artifact_command, ArtifactCommand)
+    Process.put(:artifact_exit_code, 1)
+
+    assert {:error, {:investigation_workspace_cleanup_failed, :provider_session_archival_failed}} =
+             PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
+               InvestigationCleanupAdapter,
+               InvestigationCleanupGit
+             )
+
+    retained = Repo.get!(PtcManager.Operations.AgentRun, run.id)
+    assert retained.disposable_worktree_path != nil
+    assert retained.disposable_cleanup_state != nil
+    assert_receive {:archived_session, ["archive-session" | _]}
+    Process.delete(:artifact_exit_code)
+
     assert {:ok, cleaned} =
              PtcManager.InvestigationWorkspaces.cleanup_terminal_once(
                InvestigationCleanupAdapter,
                InvestigationCleanupGit
              )
 
+    assert_receive {:archived_session, ["archive-session" | _]}
     assert cleaned.id == run.id
     assert cleaned.herdr_workspace == nil
     assert Map.fetch!(cleaned, :disposable_cleanup_state) == nil
@@ -1314,6 +1358,7 @@ defmodule PtcManager.AutomationsTest do
 
     invocation = Repo.get!(Invocation, invocation.id)
     assert invocation.selected_agent_kind == "test-maintainer"
+    assert_receive {:session_at_shutdown, {"test-maintainer", "generic-session"}}
     assert invocation.selected_agent_name == "automation_a#{action.id}_f1"
 
     [run] = PtcManager.Operations.list_active_agent_runs()

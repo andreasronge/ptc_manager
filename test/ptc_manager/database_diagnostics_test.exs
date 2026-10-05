@@ -218,8 +218,8 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
   end
 
   test "dead transaction owners are removed from diagnostics" do
-    owner =
-      spawn(fn ->
+    {owner, monitor} =
+      spawn_monitor(fn ->
         DatabaseDiagnostics.handle_event(
           [:ptc_manager, :repo, :query],
           %{total_time: 0},
@@ -228,7 +228,6 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
         )
       end)
 
-    monitor = Process.monitor(owner)
     assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
     refute Enum.any?(DatabaseDiagnostics.open_transactions(), &(&1.pid == owner))
   end

@@ -22,7 +22,7 @@ Delegate=memory pids
 # writable here: `git worktree add` records the job branch and per-worktree
 # metadata inside the source checkout's Git directory. A checkout missing from
 # this list fails every implementation dispatch with "cannot lock ref".
-ReadWritePaths=/var/lib/ptc_manager-worker /srv/ptc_runner /srv/ptc_manager /srv/ptc_manager-worktrees
+ReadWritePaths=/var/lib/ptc_manager-worker /var/lib/ptc_manager-output /srv/ptc_runner /srv/ptc_manager /srv/ptc_manager-worktrees
 
 [Install]
 WantedBy=multi-user.target

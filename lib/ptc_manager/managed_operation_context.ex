@@ -59,6 +59,9 @@ defmodule PtcManager.ManagedOperationContext do
         "socket_path" => socket_path(),
         "wrapper" => wrapper_path(),
         "lock_directory" => lock_directory(),
+        "artifact_root" => Application.get_env(:ptc_manager, :execution_artifact_root),
+        "artifact_max_bytes" =>
+          Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000),
         "cgroups" => Application.get_env(:ptc_manager, :resource_operation_cgroups, false),
         "operation_memory_high_bytes" =>
           Application.get_env(:ptc_manager, :operation_memory_high_bytes, 2_147_483_648),

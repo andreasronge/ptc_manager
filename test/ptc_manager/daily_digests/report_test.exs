@@ -1,11 +1,55 @@
 defmodule PtcManager.DailyDigests.ReportTest do
   use PtcManager.DataCase, async: false
-  alias PtcManager.DailyDigests.{Input, Report}
+  alias PtcManager.DailyDigests.{Bundle, Input, Report}
   alias PtcManager.{DailyDigests, DailyDigestFixtures}
+
+  test "artifact expiration never follows an intermediate symlink" do
+    root = Path.join(System.tmp_dir!(), "artifact-cleanup-#{System.unique_integer([:positive])}")
+    outside = root <> "-outside"
+    previous = Application.get_env(:ptc_manager, :execution_artifact_root)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :execution_artifact_root, previous)
+      File.rm_rf!(root)
+      File.rm_rf!(outside)
+    end)
+
+    File.mkdir_p!(Path.join(root, "repository-1"))
+    victim = Path.join(outside, "agent-run-1")
+    File.mkdir_p!(victim)
+    manifest = Path.join(victim, "manifest.json")
+    File.write!(manifest, "{}")
+    File.touch!(manifest, 0)
+    File.ln_s!(outside, Path.join(root, "repository-1/job-1"))
+    Application.put_env(:ptc_manager, :execution_artifact_root, root)
+    Bundle.cleanup_expired()
+    assert File.read!(manifest) == "{}"
+  end
 
   test "schema example satisfies application validation" do
     result = File.read!("test/fixtures/daily_digest_output.json") |> Jason.decode!()
+    schema = File.read!("priv/codex/daily_digest_output.schema.json") |> Jason.decode!()
+    assert Enum.sort(schema["required"]) == Enum.sort(Map.keys(schema["properties"]))
+    assert Enum.sort(schema["required"]) == Enum.sort(Map.keys(result))
     assert :ok = Report.validate(result)
+  end
+
+  test "supplemental destinations cannot inject Markdown" do
+    result = File.read!("test/fixtures/daily_digest_output.json") |> Jason.decode!()
+
+    for url <- [
+          "https://github.com/o/r/pull/1)\n\n## Health\nfalse",
+          "https://github.com/o/r/a b"
+        ] do
+      reference = %{
+        "url" => url,
+        "observed_at" => "2026-09-17T00:00:00Z",
+        "context" => "Observed"
+      }
+
+      assert {:error, :invalid_daily_digest_output} =
+               Report.validate(Map.put(result, "supplemental_references", [reference]))
+    end
   end
 
   setup do
@@ -21,6 +65,229 @@ defmodule PtcManager.DailyDigests.ReportTest do
       })
 
     %{repository: repository, digest: digest}
+  end
+
+  test "projection diagnostics distinguish size and configuration failures", %{
+    repository: repository,
+    digest: digest
+  } do
+    previous = Application.get_env(:ptc_manager, :daily_digest_bundle_max_bytes)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, previous),
+        else: Application.delete_env(:ptc_manager, :daily_digest_bundle_max_bytes)
+    end)
+
+    selection = DailyDigestFixtures.selection(repository, digest)
+    observed_at = DateTime.add(digest.window_ended_at, 1)
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1)
+
+    assert {:error, :daily_digest_evidence_too_large} =
+             Input.prepare(repository, digest, selection, observed_at)
+
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, "invalid")
+
+    assert {:error, :daily_digest_invalid_byte_limit} =
+             Input.prepare(repository, digest, selection, observed_at)
+  end
+
+  test "multi-megabyte evidence is file-backed while the handoff stays small", %{
+    repository: repository,
+    digest: digest
+  } do
+    evidence = %{"late_marker" => String.duplicate("x", 2_000_000) <> "query-me"}
+
+    snapshot = %{
+      "source_default_branch" => "main",
+      "trusted_source_head_sha" => String.duplicate("a", 40)
+    }
+
+    assert {:ok, bundle} =
+             Bundle.publish(
+               repository,
+               digest,
+               evidence,
+               snapshot,
+               %{action_id: digest.agent_action.id, attempt: digest.agent_action.attempt_count}
+             )
+
+    assert bundle.evidence_bytes > 2_000_000
+    assert File.read!(bundle.evidence_path) =~ "query-me"
+
+    prompt =
+      Input.block(%{
+        snapshot: %{
+          "evidence_manifest_path" => bundle.manifest_path,
+          "evidence_manifest_sha256" => bundle.manifest_sha256,
+          "evidence_path" => bundle.evidence_path,
+          "trusted_evidence_sha256" => bundle.evidence_sha256
+        }
+      })
+
+    assert byte_size(prompt) < 1_000
+    refute prompt =~ "query-me"
+  end
+
+  test "bundle indexes exact captured operation manifests with truthful coverage", %{
+    repository: repository,
+    digest: digest
+  } do
+    root = Path.join(System.tmp_dir!(), "artifact-index-#{System.unique_integer([:positive])}")
+    previous = Application.get_env(:ptc_manager, :execution_artifact_root)
+    Application.put_env(:ptc_manager, :execution_artifact_root, root)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :execution_artifact_root, previous)
+      File.rm_rf!(root)
+    end)
+
+    directory = Path.join(root, "repository-#{repository.id}/job-9/operation-42-token")
+    File.mkdir_p!(directory)
+    output = "full output"
+    output_hash = Base.encode16(:crypto.hash(:sha256, output), case: :lower)
+    File.write!(Path.join(directory, "stdout.log"), output)
+    File.write!(Path.join(directory, "stderr.log"), "")
+
+    File.write!(
+      Path.join(directory, "manifest.json"),
+      Jason.encode!(%{
+        "kind" => "operation",
+        "coverage" => "complete",
+        "streams" => %{
+          "stdout" => %{
+            "path" => "stdout.log",
+            "bytes" => 11,
+            "sha256" => output_hash,
+            "coverage" => "complete"
+          },
+          "stderr" => %{
+            "path" => "stderr.log",
+            "bytes" => 0,
+            "sha256" => Base.encode16(:crypto.hash(:sha256, ""), case: :lower),
+            "coverage" => "complete"
+          }
+        }
+      })
+    )
+
+    setup_directory = Path.join(root, "repository-#{repository.id}/job-9/workspace-setup-1")
+    File.mkdir_p!(setup_directory)
+    File.write!(Path.join(setup_directory, "combined.log"), output)
+
+    File.write!(
+      Path.join(setup_directory, "manifest.json"),
+      Jason.encode!(%{
+        "kind" => "workspace_setup",
+        "coverage" => "complete",
+        "streams" => %{
+          "combined" => %{
+            "path" => "combined.log",
+            "bytes" => 11,
+            "sha256" => output_hash,
+            "coverage" => "complete"
+          }
+        }
+      })
+    )
+
+    evidence = %{
+      "pull_requests" => %{
+        "data" => [
+          %{
+            "attempts" => %{
+              "data" => [
+                %{
+                  "job_id" => 9,
+                  "managed_operations" => %{"data" => [%{"id" => 42}]},
+                  "reviews" => %{"data" => []}
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+
+    snapshot = %{
+      "source_default_branch" => "main",
+      "trusted_source_head_sha" => String.duplicate("a", 40)
+    }
+
+    assert {:ok, bundle} =
+             Bundle.publish(repository, digest, evidence, snapshot, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
+    manifest = File.read!(bundle.manifest_path) |> Jason.decode!()
+    assert manifest["coverage"]["execution_logs"] == "complete"
+
+    assert [entry] =
+             Enum.filter(
+               manifest["execution_artifacts"]["data"],
+               &(&1["source_id"] == "operation:42")
+             )
+
+    assert entry["source_id"] == "operation:42"
+    assert entry["manifest_path"] =~ "operation-42-token/manifest.json"
+
+    for invalid <- [
+          %{"kind" => "bogus", "coverage" => "complete", "streams" => %{}},
+          %{"kind" => "operation", "coverage" => "complete", "streams" => %{"stdout" => "bad"}},
+          %{"kind" => "operation", "coverage" => "partial", "streams" => %{"stdout" => %{}}},
+          %{"kind" => "operation", "coverage" => "partial", "streams" => %{"unexpected" => %{}}},
+          %{"kind" => "provider_session", "coverage" => "complete", "streams" => %{}}
+        ] do
+      File.write!(Path.join(directory, "manifest.json"), Jason.encode!(invalid))
+
+      assert {:ok, invalid_bundle} =
+               Bundle.publish(repository, digest, evidence, snapshot, %{
+                 action_id: digest.agent_action.id,
+                 attempt: digest.agent_action.attempt_count
+               })
+
+      assert "operation:42" in invalid_bundle.manifest["execution_artifacts"][
+               "missing_source_ids"
+             ]
+
+      assert invalid_bundle.manifest["coverage"]["execution_logs"] == "partial"
+    end
+
+    File.write!(
+      Path.join(directory, "manifest.json"),
+      Jason.encode!(%{
+        "kind" => "operation",
+        "coverage" => "error",
+        "streams" => %{}
+      })
+    )
+
+    assert {:ok, error_bundle} =
+             Bundle.publish(repository, digest, evidence, snapshot, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
+    assert Enum.find(
+             error_bundle.manifest["execution_artifacts"]["data"],
+             &(&1["source_id"] == "operation:42")
+           )["coverage"] == "error"
+
+    previous_limit = Application.get_env(:ptc_manager, :daily_digest_artifact_max_bytes)
+    Application.put_env(:ptc_manager, :daily_digest_artifact_max_bytes, 1)
+
+    try do
+      assert {:error, :daily_digest_artifact_budget_exceeded} =
+               Bundle.publish(repository, digest, evidence, snapshot, %{
+                 action_id: digest.agent_action.id,
+                 attempt: digest.agent_action.attempt_count
+               })
+    after
+      if previous_limit,
+        do: Application.put_env(:ptc_manager, :daily_digest_artifact_max_bytes, previous_limit),
+        else: Application.delete_env(:ptc_manager, :daily_digest_artifact_max_bytes)
+    end
   end
 
   test "quiet days publish without invented work or lessons", %{digest: digest} do
@@ -100,19 +367,18 @@ defmodule PtcManager.DailyDigests.ReportTest do
     action = DailyDigestFixtures.prepare(digest)
     result = DailyDigestFixtures.result(action)
 
-    for prompt <- [
-          nil,
-          "no evidence",
-          String.replace(action.prompt, "Useful change", "Tampered change"),
-          action.prompt <> "\n<daily_delivery_evidence>\n{}\n</daily_delivery_evidence>"
+    for snapshot <- [
+          Map.delete(action.target_snapshot, "evidence_manifest_path"),
+          Map.put(action.target_snapshot, "evidence_manifest_path", "/tmp/outside.json"),
+          Map.put(action.target_snapshot, "evidence_manifest_sha256", String.duplicate("0", 64))
         ] do
       assert {:error, :daily_digest_evidence_mismatch} =
-               Report.render(%{action | prompt: prompt}, result)
+               Report.render(%{action | target_snapshot: snapshot}, result)
     end
 
     bad_snapshot = Map.delete(action.target_snapshot, "trusted_evidence_sha256")
 
-    assert {:error, :daily_digest_evidence_mismatch} =
+    assert {:error, :daily_digest_provenance_mismatch} =
              Report.render(%{action | target_snapshot: bad_snapshot}, result)
 
     refute DailyDigests.published?(DailyDigests.get_digest(digest.id))
@@ -133,6 +399,13 @@ defmodule PtcManager.DailyDigests.ReportTest do
       ])
 
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
+
+    assert {:ok, input} =
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
     refute input.json =~ "</daily_delivery_evidence>"
     assert input.json =~ "\\u003C"
 
@@ -186,7 +459,7 @@ defmodule PtcManager.DailyDigests.ReportTest do
     repository: repository,
     digest: digest
   } do
-    keys = [:daily_digest_evidence_max_bytes, :daily_digest_prompt_max_bytes]
+    keys = [:daily_digest_bundle_max_bytes, :daily_digest_prompt_max_bytes]
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
 
     on_exit(fn ->
@@ -197,15 +470,23 @@ defmodule PtcManager.DailyDigests.ReportTest do
       end)
     end)
 
-    Application.put_env(:ptc_manager, :daily_digest_evidence_max_bytes, 100)
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1_000_000)
 
-    assert {:error, :daily_digest_projection_invalid_or_oversized} =
+    assert {:ok, input} =
              Input.prepare(
                repository,
                digest,
                DailyDigestFixtures.selection(repository, digest),
                digest.window_ended_at
              )
+
+    Application.put_env(:ptc_manager, :daily_digest_bundle_max_bytes, 1_000)
+
+    assert {:error, :daily_digest_evidence_too_large} =
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
 
     Application.put_env(:ptc_manager, :daily_digest_prompt_max_bytes, 100)
     assert :ok = Input.validate_prompt(String.duplicate("x", 100))
@@ -294,6 +575,13 @@ defmodule PtcManager.DailyDigests.ReportTest do
       )
 
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
+
+    assert {:ok, input} =
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
     action = %{digest.agent_action | prompt: Input.block(input), target_snapshot: input.snapshot}
     assert {:ok, markdown} = Report.render(action, DailyDigestFixtures.result(action))
     assert markdown =~ "review rounds 0; time to ready 10000 ms; failed managed operations 0"
@@ -326,6 +614,13 @@ defmodule PtcManager.DailyDigests.ReportTest do
       })
 
     assert {:ok, input} = Input.prepare(repository, digest, selection, digest.window_ended_at)
+
+    assert {:ok, input} =
+             Input.publish(repository, digest, input, %{
+               action_id: digest.agent_action.id,
+               attempt: digest.agent_action.attempt_count
+             })
+
     action = %{digest.agent_action | prompt: Input.block(input), target_snapshot: input.snapshot}
 
     result =

@@ -2,21 +2,19 @@ defmodule PtcManager.DailyDigests.Input do
   @moduledoc "Exact, bounded daily evidence bytes and their persisted provenance."
   alias PtcManager.DeliveryEvidence
 
-  @open "<daily_delivery_evidence>\n"
-  @close "\n</daily_delivery_evidence>"
+  alias PtcManager.DailyDigests.Bundle
 
   def prepare(repository, digest, selection, observed_at) do
-    with {:ok, cap} <- limit(:daily_digest_evidence_max_bytes, 90_000, 240_000),
-         {:ok, evidence} <-
+    with {:ok, evidence} <-
            DeliveryEvidence.build(
              repository,
              %{started_at: digest.window_started_at, ended_at: digest.window_ended_at},
              selection,
              observed_at: observed_at,
-             max_bytes: cap
+             max_bytes:
+               Application.get_env(:ptc_manager, :daily_digest_bundle_max_bytes, 32_000_000)
            ),
-         {:ok, json} <- Jason.encode(evidence, escape: :html_safe),
-         true <- byte_size(json) <= cap do
+         {:ok, json} <- Jason.encode(evidence, escape: :html_safe) do
       {:ok,
        %{
          json: json,
@@ -35,25 +33,41 @@ defmodule PtcManager.DailyDigests.Input do
          }
        }}
     else
-      _ -> {:error, :daily_digest_projection_invalid_or_oversized}
+      {:error, :encoded_byte_limit} -> {:error, :daily_digest_evidence_too_large}
+      {:error, :invalid_byte_limit} -> {:error, :daily_digest_invalid_byte_limit}
+      {:error, reason} -> {:error, {:daily_digest_projection_invalid, reason}}
     end
   end
 
-  def block(%{json: json, snapshot: snapshot}) do
-    "<daily_delivery_provenance>\n" <>
-      Jason.encode!(snapshot, escape: :html_safe) <>
-      "\n</daily_delivery_provenance>\n" <> @open <> json <> @close
+  def publish(repository, digest, input, identity) do
+    with {:ok, bundle} <-
+           Bundle.publish(repository, digest, Jason.decode!(input.json), input.snapshot, identity) do
+      snapshot =
+        input.snapshot
+        |> Map.put("evidence_manifest_path", bundle.manifest_path)
+        |> Map.put("evidence_manifest_sha256", bundle.manifest_sha256)
+        |> Map.put("evidence_path", bundle.evidence_path)
+
+      {:ok, input |> Map.put(:snapshot, snapshot) |> Map.put(:bundle, bundle)}
+    end
+  end
+
+  def block(%{snapshot: snapshot}) do
+    "<daily_delivery_bundle>\n" <>
+      Jason.encode!(
+        Map.take(
+          snapshot,
+          ~w(evidence_manifest_path evidence_manifest_sha256 evidence_path trusted_evidence_sha256)
+        ),
+        escape: :html_safe
+      ) <>
+      "\n</daily_delivery_bundle>"
   end
 
   def read(action) do
     snapshot = action.target_snapshot || %{}
 
-    with prompt when is_binary(prompt) <- action.prompt,
-         [_prefix, rest] <- String.split(prompt, @open),
-         [json, _suffix] <- String.split(rest, @close),
-         true <- byte_size(json) == snapshot["evidence_bytes"],
-         true <- hash(json) == snapshot["trusted_evidence_sha256"],
-         {:ok, evidence} <- Jason.decode(json),
+    with {:ok, evidence} <- Bundle.read(action),
          true <- is_map(evidence),
          true <- evidence["schema_version"] == 1 and snapshot["projection_schema_version"] == 1,
          true <- evidence["repository"]["id"] == action.repository_id,

@@ -408,6 +408,21 @@ defmodule PtcManager.ResourceOperationBroker do
     ResourceOperations.expire_stale_queued()
     ResourceOperations.mark_stale_recovery_pending()
     recover_pending_operations()
+    cleanup_artifacts()
+  end
+
+  defp cleanup_artifacts do
+    now = System.monotonic_time(:millisecond)
+    key = {__MODULE__, :last_artifact_cleanup}
+
+    last = Process.get(key)
+
+    if is_nil(last) or now - last >= 86_400_000 do
+      Process.put(key, now)
+      PtcManager.DailyDigests.Bundle.cleanup_expired()
+    end
+  rescue
+    _ -> :ok
   end
 
   defp recover_pending_operations do

@@ -19,6 +19,87 @@ context = review.__globals__
 
 
 class ReviewerContract(unittest.TestCase):
+    def test_capture_initialization_failure_does_not_change_command_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch.dict(context, ensure_shared_directory=lambda *a: (_ for _ in ()).throw(RuntimeError("unsafe artifact root"))):
+                self.assertEqual(context['run']([sys.executable, '-c', 'print("finished")'],
+                    artifact_directory=root), 'finished\n')
+
+    def test_missing_native_session_is_sealed_unavailable(self):
+        with tempfile.TemporaryDirectory() as root:
+            destination = str(Path(root) / 'archive')
+            context['archive_session']('codex', 'generic-pane', destination, 1000000, root)
+            manifest = json.loads((Path(destination) / 'manifest.json').read_text())
+            self.assertEqual(manifest['coverage'], 'unavailable')
+            self.assertEqual(manifest['streams'], {})
+            self.assertEqual(manifest['session_id'], 'generic-pane')
+
+    def test_session_archive_retries_after_interrupted_copy(self):
+        with tempfile.TemporaryDirectory() as root:
+            session = '0199a213-81c0-7800-8aa1-bbab2a035a53'
+            source = Path(root) / (session + '.jsonl')
+            source.write_bytes(b'full session\n')
+            destination = str(Path(root) / 'archive')
+            abandoned = Path(destination + '.staging-interrupted')
+            abandoned.mkdir()
+            (abandoned / 'session.jsonl').write_bytes(b'interrupted')
+            real_glob = context['glob'].glob
+            def session_glob(pattern, **kwargs):
+                return real_glob(pattern, **kwargs) if '.staging-' in pattern else [str(source)]
+            with patch.object(context['glob'], 'glob', side_effect=session_glob):
+                with patch.object(context['shutil'], 'copyfileobj', side_effect=OSError('interrupted')):
+                    with self.assertRaises(OSError):
+                        context['archive_session']('codex', session, destination, 1000000, root)
+                context['archive_session']('codex', session, destination, 1000000, root)
+                context['archive_session']('codex', session, destination, 1000000, root)
+            self.assertFalse(abandoned.exists())
+            self.assertTrue(os.stat(destination).st_mode & 0o020, 'coordinator group must be able to expire archived files')
+            self.assertFalse(Path(destination + '.lock').exists(), 'archival must not leave uncollectable lock files')
+            self.assertEqual((Path(destination) / 'session.jsonl').read_bytes(), source.read_bytes())
+            self.assertEqual(json.loads((Path(destination) / 'manifest.json').read_text())['coverage'], 'complete')
+
+    def test_multi_megabyte_interleaved_reviewer_events_are_retained(self):
+        event = json.dumps({'type': 'thread.started', 'thread_id': '0199a213-81c0-7800-8aa1-bbab2a035a53'}) + '\n'
+        stdout = event.encode() + b'{"progress":"' + b'x' * 2000000 + b'"}\n'
+        stderr = b'y' * 2000000
+        with tempfile.TemporaryDirectory() as root:
+            script = ('import os; os.write(1, ' + repr(event.encode()) + '); '
+                      'os.write(1,b\'{"progress":"\'); '
+                      '[(os.write(1,b"x"*10000),os.write(2,b"y"*10000)) for _ in range(200)]; '
+                      'os.write(1,b\'"}\\n\')')
+            context['run']([sys.executable, '-c', script], session_events=True,
+                           artifact_directory=os.path.join(root, 'review'))
+            run = next(Path(root).glob('review/run-*'))
+            self.assertEqual((run / 'stdout.log').read_bytes(), stdout)
+            self.assertEqual((run / 'stderr.log').read_bytes(), stderr)
+
+    def test_full_reviewer_streams_are_sealed_before_parsing(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = context['run'](
+                [sys.executable, '-c',
+                 'import sys; sys.stdout.write("event\\n"); sys.stderr.write("detail\\n")'],
+                artifact_directory=os.path.join(root, 'review'))
+            self.assertEqual(output, 'event\n')
+            runs = list(Path(root).glob('review/run-*'))
+            self.assertEqual(len(runs), 1)
+            self.assertEqual((runs[0] / 'stdout.log').read_bytes(), b'event\n')
+            self.assertEqual((runs[0] / 'stderr.log').read_bytes(), b'detail\n')
+            manifest = json.loads((runs[0] / 'manifest.json').read_text())
+            self.assertEqual(manifest['ordering'], 'streams_are_independent')
+            self.assertEqual(manifest['streams']['stdout']['bytes'], 6)
+
+    def test_reviewer_artifact_budget_is_truthful_without_changing_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = context['run'](
+                [sys.executable, '-c', 'print("x" * 2000000)'],
+                max_output=3000000, artifact_directory=os.path.join(root, 'review'),
+                artifact_max_bytes=1000000)
+            self.assertGreater(len(output), 1000000)
+            run = next(Path(root).glob('review/run-*'))
+            manifest = json.loads((run / 'manifest.json').read_text())
+            self.assertEqual(manifest['coverage'], 'partial')
+            self.assertEqual(manifest['streams']['stdout']['coverage'], 'partial')
+
     def test_claude_catalog_initializes_without_a_model_turn(self):
         def fake_run(args, prompt=None, cwd=None, **kwargs):
             request = json.loads(prompt)

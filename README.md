@@ -1101,10 +1101,11 @@ expose the arrival time of a direct push, so that distinction is shown in the
 bounded evidence rather than guessed. A PR merge identity comes from the pull
 response when available, or from the matching GitHub merged-event `commit_id`
 when the configured API omits it; its source is retained and no branch or PR head
-is substituted. A configured generic Herdr agent receives
-the delivery projection and a read-only local snapshot, then returns bounded
-shipped summaries and attributed lessons. The exact escaped JSON is retained in
-the persisted prompt and hashed in the action snapshot. Publication rejects
+is substituted. A configured generic Herdr agent receives a short path/index
+prompt and a read-only local snapshot, then investigates the immutable on-disk
+delivery bundle with `jq`, `rg`, `git`, and read-only `gh`. Captured window facts
+stay distinct from current supplemental GitHub context. The exact JSON and small
+manifest are retained outside the prompt and hashed in the action snapshot. Publication rejects
 missing/tampered evidence, mismatched hashes, windows, SHAs, counts, PR numbers,
 or citations outside the selected changes. PtcManager renders **What shipped**,
 optional **What we learned**, and factual **Delivery health** from that captured
@@ -1112,6 +1113,26 @@ evidence. Missing metrics stay unknown; model prose is not verified fact. Old
 published Markdown remains readable. The Updates page sanitizes the generated
 Markdown before displaying it. See the [daily contract](docs/maintainers/delivery-evidence.md)
 for limits and provenance; this wiring does not enable generation.
+
+Managed commands continuously tee stdout and stderr to separate files under
+`PTC_EXECUTION_ARTIFACT_ROOT` while preserving live output. Reviewer CLI events
+and streams, workspace setup output, and supported provider session JSONL use
+the same root. Daily manifests index exact available artifacts by source ID and
+artifact-root-relative path. Capture manifests record coverage, sizes, hashes,
+and exit status without claiming a total ordering between streams. Defaults are
+256 MB per command stream and 32 MB per delivery JSON. Daily artifact indexing
+and replay verification fail explicitly above 1,000 artifact manifests, 512 MB
+of retained bytes, a 1 MB bundle manifest, or 30 seconds of hashing. The aggregate
+file and byte budgets use `daily_digest_artifact_max_files` and
+`daily_digest_artifact_max_bytes` application configuration. Exceeding a budget
+fails the capture rather than silently omitting evidence. Provider sessions are
+sealed at terminal-run observation and after provider shutdown during workspace
+removal or cancellation, while provider-owned session files remain available. Session archives publish through unique staging
+directories, so interrupted copies can be retried without overwriting sealed inputs. Capture failure is surfaced
+without replacing the command result or retaining its resource slot. Finalized,
+unreferenced artifacts expire after 90 days by default; active and daily-bundle-
+referenced captures are protected. Queued inline-contract daily actions are
+cancelled or rejected rather than silently reinterpreted.
 
 The new generation prompt remains visible on **Automations** while evaluation
 is pending and can be edited under **Daily update → Prompt**. The built-in voice

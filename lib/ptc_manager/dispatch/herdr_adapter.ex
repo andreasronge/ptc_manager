@@ -47,7 +47,11 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
     args = remove_worktree_args(allocation)
     command = Keyword.get(opts, :command, Command)
 
-    worktree_removal_result(run_with(command, args), allocation)
+    result = worktree_removal_result(run_with(command, args), allocation)
+
+    with :ok <- result do
+      PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
+    end
   end
 
   def remove_worktree(allocation, _opts) do
@@ -62,10 +66,15 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       when is_binary(workspace) and workspace != "" and is_list(opts) do
     command = Keyword.get(opts, :command, Command)
 
-    worktree_removal_result(
-      run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]),
-      allocation
-    )
+    result =
+      worktree_removal_result(
+        run_with(command, ["worktree", "remove", "--workspace", workspace, "--force"]),
+        allocation
+      )
+
+    with :ok <- result do
+      PtcManager.ExecutionArtifacts.archive_job(Map.get(allocation, :job_id))
+    end
   end
 
   def discard_worktree(allocation, _opts), do: remove_worktree(allocation, [])
@@ -819,7 +828,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
           {:error, :retained_agent_identity_changed}
 
         is_nil(owned) ->
-          :ok
+          PtcManager.ExecutionArtifacts.archive_run(run.id)
 
         not allow_busy and owned["agent_status"] not in ["idle", "done"] ->
           {:error, :retained_agent_busy}
@@ -830,7 +839,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
         true ->
           case Command.run(["pane", "close", pane]) do
-            {:ok, _} -> :ok
+            {:ok, _} -> PtcManager.ExecutionArtifacts.archive_run(run.id)
             error -> error
           end
       end
@@ -894,6 +903,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
             agent_name: new_name,
             herdr_pane: pane,
             external_key: "#{session}:#{key}",
+            provider_kind: kind,
             last_heartbeat_at: DateTime.utc_now()
           })
           |> PtcManager.Repo.update!()

@@ -39,6 +39,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
              PtcManager.ManagedOperationContext.prepare_action(command(), pane, action),
            :ok <- remember_context(context),
            {:ok, agent_key} <- start_agent(name, pane, profile, path, action),
+           :ok <- remember_agent_session(profile.kind, agent_key),
            dispatch = dispatch(action, profile.kind, name, workspace, pane, agent_key, path),
            {:ok, _run} <-
              Operations.attach_agent_action_herdr_run(action.id, action.attempt_count, dispatch),
@@ -50,13 +51,37 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
         {:ok, result}
       end
     after
-      cleanup(action)
+      case cleanup(action) do
+        {:ok, _} ->
+          archive_remembered_session(action)
+
+        _ ->
+          if Process.delete({__MODULE__, :provider_session}) do
+            require Logger
+
+            Logger.warning(
+              "Provider shutdown was not confirmed; session capture remains unavailable"
+            )
+          end
+      end
     end
   rescue
     error -> {:error, {:generic_herdr_failed, error.__struct__}}
   end
 
   def run(%AgentAction{}), do: {:error, :automation_version_missing}
+
+  defp remember_agent_session(kind, session_id) do
+    Process.put({__MODULE__, :provider_session}, {kind, session_id})
+    :ok
+  end
+
+  defp archive_remembered_session(action) do
+    case Process.delete({__MODULE__, :provider_session}) do
+      {kind, session_id} -> PtcManager.ExecutionArtifacts.archive_action(action, kind, session_id)
+      nil -> :ok
+    end
+  end
 
   defp validate_health_snapshot(%AgentAction{
          action_key: "check_health",
@@ -564,37 +589,40 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
   defp agent_name(action), do: "automation_a#{action.id}_f#{action.attempt_count}"
 
   defp cleanup(action) do
-    if workspace = Process.delete({__MODULE__, :workspace}) do
-      if Process.delete({__MODULE__, :disposable_workspace}) do
-        remover = fn workspace_id ->
-          ["worktree", "remove", "--workspace", workspace_id, "--force"]
-          |> command().run()
-          |> HerdrAdapter.action_workspace_removal_result()
-        end
-
-        recoverer = fn repository_path, path, label ->
-          with {:ok, output} <-
-                 command().run([
-                   "worktree",
-                   "open",
-                   "--cwd",
-                   repository_path,
-                   "--path",
-                   path,
-                   "--label",
-                   label,
-                   "--no-focus"
-                 ]),
-               {:ok, workspace_id, _pane} <- HerdrAdapter.decode_worktree(output) do
-            {:ok, workspace_id}
+    closed =
+      if workspace = Process.delete({__MODULE__, :workspace}) do
+        if Process.delete({__MODULE__, :disposable_workspace}) do
+          remover = fn workspace_id ->
+            ["worktree", "remove", "--workspace", workspace_id, "--force"]
+            |> command().run()
+            |> HerdrAdapter.action_workspace_removal_result()
           end
-        end
 
-        _ = InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer)
+          recoverer = fn repository_path, path, label ->
+            with {:ok, output} <-
+                   command().run([
+                     "worktree",
+                     "open",
+                     "--cwd",
+                     repository_path,
+                     "--path",
+                     path,
+                     "--label",
+                     label,
+                     "--no-focus"
+                   ]),
+                 {:ok, workspace_id, _pane} <- HerdrAdapter.decode_worktree(output) do
+              {:ok, workspace_id}
+            end
+          end
+
+          InvestigationWorkspaces.cleanup(action, remover, nil, workspace, recoverer)
+        else
+          command().run(["workspace", "close", workspace])
+        end
       else
-        _ = command().run(["workspace", "close", workspace])
+        {:error, :workspace_shutdown_unconfirmed}
       end
-    end
 
     Process.delete({__MODULE__, :setup_report})
 
@@ -616,7 +644,7 @@ defmodule PtcManager.MaintainerActions.GenericHerdrAdapter do
       File.rm(ready <> ".tmp")
     end
 
-    :ok
+    closed
   end
 
   defp remember_context(%{path: path}) do

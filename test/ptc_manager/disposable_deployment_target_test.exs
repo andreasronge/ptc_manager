@@ -589,6 +589,10 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     old =
       "Write a concise daily update from the supplied delivery evidence. Explain what shipped and why it matters, then include only concrete, attributed lessons when the evidence supports them. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
 
+    # The text this migration writes; later migrations change the default again.
+    voice =
+      "Write a concise daily update for a busy maintainer using only the supplied delivery evidence. Use plain, factual language: no hype, generic praise, or unnecessary jargon. Start with a two-sentence overview in the summary field. For each shipped change, give one short sentence describing it and one explaining why it matters. Include at most three concrete, attributed lessons, and omit lessons when the evidence does not support them. Aim for a one-minute read on ordinary days; allow more space when needed to cover significant changes. Keep unknowns explicit and reported claims attributed. Do not propose or create issues."
+
     repository = repository_fixture()
     definition = PtcManager.Automations.get_definition(repository, "daily_digest")
     prefix = "For #{repository.github_owner}/#{repository.github_name}: "
@@ -605,17 +609,8 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
 
       _migrated = DisposableDeploymentTarget.migrate_remaining!(target)
       actual = Repo.get!(PtcManager.Automations.DefinitionVersion, definition.current_version.id)
-      expected = PtcManager.Automations.Defaults.get(repository, "daily_digest").prompt
-
-      assert actual.prompt ==
-               if(changes?,
-                 do:
-                   if(prompt == old,
-                     do: String.replace_prefix(expected, prefix, ""),
-                     else: expected
-                   ),
-                 else: prompt
-               )
+      expected = if prompt == old, do: voice, else: prefix <> voice
+      assert actual.prompt == if(changes?, do: expected, else: prompt)
 
       paused = PtcManager.Automations.get_definition(repository, "daily_digest")
       refute paused.enabled

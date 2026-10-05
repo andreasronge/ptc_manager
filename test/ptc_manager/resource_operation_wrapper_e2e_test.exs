@@ -58,9 +58,11 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
     assert Jason.decode!(max) == [2_684_354_560, 2_684_354_560, 2_684_354_560]
   end
 
-  test "wrapper uses the generic socket protocol and preserves child output" do
+  @tag :nightly
+  test "wrapper uses the generic socket protocol and preserves multi-megabyte child output" do
     root = Path.join(System.tmp_dir!(), "ptc-operation-e2e-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
+    File.mkdir!(Path.join(root, "artifacts"))
     socket_path = Path.join(root, "broker.sock")
     context_path = Path.join(root, "context.json")
 
@@ -82,23 +84,32 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
         "context_id" => "e2e-context",
         "token" => "fake-token",
         "socket_path" => socket_path,
-        "lock_directory" => root
+        "lock_directory" => root,
+        "artifact_root" => Path.join(root, "artifacts"),
+        "artifact_max_bytes" => 8_000_000,
+        "repository_id" => 12,
+        "owner_type" => "job",
+        "owner_id" => 34
       })
     )
 
     wrapper = Path.expand("deploy/ptc-operation")
 
-    assert {output, 0} =
+    assert {output, 23} =
              System.cmd(
-               wrapper,
+               "/usr/bin/timeout",
                [
+                 "5",
+                 wrapper,
                  "run",
                  "--label",
                  "test",
                  "--",
-                 "/bin/sh",
+                 "/usr/bin/python3",
                  "-c",
-                 "printf 'managed:%s\\n' \"$PTC_OPERATION_ACTIVE\""
+                 "import os, subprocess, sys; os.write(1, ('managed:' + os.environ['PTC_OPERATION_ACTIVE'] + '\\n').encode()); " <>
+                   "[(os.write(1, b'x' * 10000), os.write(2, b'y' * 10000)) for _ in range(220)]; " <>
+                   "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); sys.exit(23)"
                ],
                env: [
                  {"PTC_MANAGED_OPERATION_CONTEXT", context_path},
@@ -111,8 +122,22 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
     assert output =~ "Waiting for PtcManager operation slot: test"
     assert output =~ "managed:77"
     assert_receive {:wrapper_request, %{"operation" => "request", "label" => "test"}}
-    assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 0}}
+    assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 23}}
     Task.await(server, 2_000)
+
+    [artifact] =
+      Path.wildcard(Path.join(root, "artifacts/repository-12/job-34/operation-77-*/"))
+
+    assert File.read!(Path.join(artifact, "stdout.log")) ==
+             "managed:77\n" <> String.duplicate("x", 2_200_000)
+
+    assert File.read!(Path.join(artifact, "stderr.log")) == String.duplicate("y", 2_200_000)
+    assert byte_size(output) >= 4_400_000
+
+    manifest = Path.join(artifact, "manifest.json") |> File.read!() |> Jason.decode!()
+    assert manifest["streams"]["stdout"]["coverage"] == "complete"
+    assert manifest["streams"]["stderr"]["coverage"] == "complete"
+    assert manifest["ordering"] == "streams_are_independent"
     File.rm_rf!(root)
   end
 

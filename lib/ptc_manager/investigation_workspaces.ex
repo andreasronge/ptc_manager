@@ -121,6 +121,7 @@ defmodule PtcManager.InvestigationWorkspaces do
                workspace_hint,
                recover_workspace
              ),
+           :ok <- PtcManager.ExecutionArtifacts.archive_run(run.id),
            :ok <- delete_branch(run, identity, git),
            {:ok, cleaned} <- Operations.complete_disposable_workspace_cleanup(run.id, token) do
         {:ok, cleaned}

@@ -12,6 +12,9 @@ import sys
 import tempfile
 import time
 import uuid
+import glob
+import shutil
+import fcntl
 
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
 
@@ -66,16 +69,36 @@ class CodexSessionEvents:
         return json.dumps({"type": "thread.started", "thread_id": self.session_id, "usage": self.usage})
 
 
-def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, session_events=False):
+def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, session_events=False,
+        artifact_directory=None, artifact_max_bytes=256_000_000, artifact_root=None):
     # Bound captured output, not the CLI's persistent databases and WAL files.
     with tempfile.TemporaryFile() as input_file, selectors.DefaultSelector() as streams:
         if prompt:
             input_file.write(prompt.encode())
         input_file.seek(0)
+        stdout, stderr = bytearray(), bytearray()
+        artifact_files = {}
+        artifact_state = {name: {"coverage": "complete", "bytes": 0, "sha256": hashlib.sha256()}
+                          for name in ("stdout", "stderr")}
+        if artifact_directory:
+            try:
+                artifact_directory = os.path.join(artifact_directory, "run-" + str(uuid.uuid4()))
+                ensure_shared_directory(artifact_directory, artifact_root)
+                for name in ("stdout", "stderr"):
+                    artifact_files[name] = open(os.path.join(artifact_directory, name + ".log"), "xb", buffering=0)
+            except (OSError, RuntimeError):
+                for output in artifact_files.values():
+                    output.close()
+                artifact_files = {}
+                artifact_directory = None
+                print("review artifact initialization failed; capture unavailable", file=sys.stderr)
+                for state in artifact_state.values():
+                    state["coverage"] = "error"
+                    state["diagnostic"] = "artifact initialization failed"
         process = subprocess.Popen(command, stdin=input_file, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
-        stdout, stderr = bytearray(), bytearray()
         captured = 0
+        completed_normally = False
         events = CodexSessionEvents() if session_events else None
         deadline = time.monotonic() + timeout
         streams.register(process.stdout, selectors.EVENT_READ, stdout)
@@ -90,6 +113,24 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
                     if not data:
                         streams.unregister(key.fileobj)
                         continue
+                    name = "stdout" if key.data is stdout else "stderr"
+                    if name in artifact_files:
+                        try:
+                            state = artifact_state[name]
+                            if state["bytes"] + len(data) <= artifact_max_bytes:
+                                artifact_files[name].write(data)
+                                state["bytes"] += len(data)
+                                state["sha256"].update(data)
+                            else:
+                                state["coverage"] = "partial"
+                                state["diagnostic"] = "stream exceeded configured file budget"
+                                artifact_files[name].close()
+                                del artifact_files[name]
+                        except OSError as error:
+                            artifact_state[name]["coverage"] = "error"
+                            artifact_state[name]["diagnostic"] = "artifact write failed: " + (error.strerror or type(error).__name__)
+                            artifact_files[name].close()
+                            del artifact_files[name]
                     if events is not None:
                         if key.data is stdout:
                             events.feed(data)
@@ -104,6 +145,7 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
                     if key.data is stderr:
                         del stderr[:-4_000]
             process.wait(timeout=max(0, deadline - time.monotonic()))
+            completed_normally = True
         except subprocess.TimeoutExpired:
             raise RuntimeError("review_timeout") from None
         finally:
@@ -115,6 +157,37 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
             process.wait()
             process.stdout.close()
             process.stderr.close()
+            for name, output in artifact_files.items():
+                try:
+                    output.flush()
+                    os.fsync(output.fileno())
+                    output.close()
+                    os.chmod(output.name, 0o440)
+                except OSError as exc:
+                    artifact_state[name]["coverage"] = "error"
+                    artifact_state[name]["diagnostic"] = f"artifact finalization failed: {exc.strerror or exc}"
+                    try:
+                        output.close()
+                    except OSError:
+                        pass
+            if artifact_directory and os.path.isdir(artifact_directory):
+                if not completed_normally:
+                    for state in artifact_state.values():
+                        if state["coverage"] == "complete":
+                            state["coverage"] = "partial"
+                            state["diagnostic"] = "provider process was forcibly terminated"
+                coverage = "complete" if all(s["coverage"] == "complete" for s in artifact_state.values()) else "partial"
+                manifest = {"schema_version": 1, "kind": "review", "coverage": coverage,
+                            "ordering": "streams_are_independent",
+                            "exit_status": process.returncode,
+                            "streams": {name: {**{k: v for k, v in state.items() if k != "sha256"},
+                                               "path": name + ".log", "sha256": state["sha256"].hexdigest()}
+                                        for name, state in artifact_state.items()}}
+                try:
+                    with open(os.path.join(artifact_directory, "manifest.json"), "x") as record:
+                        json.dump(manifest, record, separators=(",", ":"), sort_keys=True)
+                except OSError:
+                    pass
         if process.returncode:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(f"agent_command_failed exit={process.returncode}: {detail}")
@@ -300,7 +373,10 @@ def run_review(request, remaining=None):
             if effort:
                 args += ["-c", 'model_reasoning_effort="' + effort + '"']
             args += ["-c", 'web_search="disabled"']
-            events = run(args + ["-"], prompt, repository_path, timeout=timeout, session_events=True)
+            events = run(args + ["-"], prompt, repository_path, timeout=timeout, session_events=True,
+                         artifact_directory=request.get("artifact_directory"),
+                         artifact_max_bytes=request.get("artifact_max_bytes", 256_000_000),
+                         artifact_root=request.get("artifact_root"))
             started = [json.loads(line) for line in events.splitlines() if line.strip()]
             ids = [event["thread_id"] for event in started if event.get("type") == "thread.started"]
             if len(ids) != 1:
@@ -316,13 +392,19 @@ def run_review(request, remaining=None):
                 args += ["--resume", session_id]
             if effort:
                 args += ["--effort", effort]
-            envelope = json.loads(run(args, prompt, repository_path, timeout=timeout))
+            envelope = json.loads(run(args, prompt, repository_path, timeout=timeout,
+                                      artifact_directory=request.get("artifact_directory"),
+                                      artifact_max_bytes=request.get("artifact_max_bytes", 256_000_000),
+                                      artifact_root=request.get("artifact_root")))
             return review_envelope(envelope["structured_output"], envelope.get("session_id"), session_id)
         args = [BINARIES[kind], "--print", "--mode", "ask", "--model", model,
                 "--workspace", repository_path, "--output-format", "json"]
         if session_id:
             args += ["--resume", session_id]
-        envelope = json.loads(run(args, prompt, repository_path, timeout=timeout))
+        envelope = json.loads(run(args, prompt, repository_path, timeout=timeout,
+                                  artifact_directory=request.get("artifact_directory"),
+                                  artifact_max_bytes=request.get("artifact_max_bytes", 256_000_000),
+                                  artifact_root=request.get("artifact_root")))
         return review_envelope(json.loads(envelope["result"]), envelope.get("session_id"), session_id)
 
 
@@ -352,7 +434,132 @@ def read_json_file(path, limit):
         return json.loads(data)
 
 
+def archive_session(kind, session_id, destination, max_bytes, artifact_root):
+    # A pane fallback is an association label, never a native-session filename.
+    try:
+        native_session_id = checked_session_id(session_id)
+    except RuntimeError:
+        native_session_id = None
+    allowed = os.path.abspath(artifact_root) + os.sep
+    destination = os.path.abspath(destination)
+    if not destination.startswith(allowed) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", kind) or not 1_000_000 <= max_bytes <= 2_000_000_000:
+        raise RuntimeError("invalid_session_archive_target")
+    homes = {"codex": (".codex/sessions/**/*.jsonl",),
+             "claude": (".claude/projects/**/*.jsonl",), "cursor": ()}
+    candidates = []
+    for pattern in homes.get(kind, ()) if native_session_id else ():
+        candidates += glob.glob(os.path.join(os.path.expanduser("~"), pattern), recursive=True)
+    matches = [path for path in candidates if native_session_id in os.path.basename(path)]
+    if os.path.dirname(destination) != os.path.abspath(artifact_root):
+        ensure_shared_directory(os.path.dirname(destination), artifact_root)
+    lock_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # The lock outlives no process: after interruption, only this capture's
+        # abandoned staging directories can be removed before retrying.
+        for abandoned in glob.glob(destination + ".staging-*"):
+            if os.path.islink(abandoned):
+                raise RuntimeError("unsafe session staging directory")
+            if os.path.isdir(abandoned):
+                os.chmod(abandoned, 0o2770)
+                shutil.rmtree(abandoned)
+        archive_session_locked(kind, session_id, destination, max_bytes, artifact_root, matches)
+    finally:
+        os.close(lock_fd)
+
+
+def archive_session_locked(kind, session_id, destination, max_bytes, artifact_root, matches):
+    if os.path.lexists(destination):
+        if os.path.islink(destination):
+            raise RuntimeError("unsafe session archive")
+        with open(os.path.join(destination, "manifest.json")) as existing:
+            sealed = json.load(existing)
+        if sealed.get("provider") != kind or sealed.get("session_id") != session_id:
+            raise RuntimeError("session archive identity changed")
+        return
+    staging = destination + ".staging-" + str(uuid.uuid4())
+    ensure_shared_directory(staging, artifact_root)
+    try:
+        manifest = {"schema_version": 1, "kind": "provider_session", "provider": kind, "session_id": session_id,
+                    "coverage": "unavailable", "streams": {}}
+        if len(matches) == 1:
+            source, target = matches[0], os.path.join(staging, "session.jsonl")
+            size = os.path.getsize(source)
+            if size <= max_bytes:
+                with open(source, "rb") as input_file, open(target, "xb") as output:
+                    shutil.copyfileobj(input_file, output, 65536)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if os.path.getsize(target) != size or os.path.getsize(source) != size:
+                    raise RuntimeError("provider session changed during archival")
+                manifest["coverage"] = "complete"
+                manifest["streams"] = {"session": {"path": "session.jsonl", "bytes": size,
+                                                     "sha256": file_digest(target),
+                                                     "coverage": "complete"}}
+            else:
+                manifest["coverage"] = "partial"
+                manifest["diagnostic"] = "provider session exceeded configured file budget"
+        elif len(matches) > 1:
+            manifest["coverage"] = "error"
+            manifest["diagnostic"] = "provider session association was ambiguous"
+        else:
+            manifest["diagnostic"] = "provider has no associated durable session artifact"
+        with open(os.path.join(staging, "manifest.json"), "x") as output:
+            json.dump(manifest, output, separators=(",", ":"), sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        for filename in os.listdir(staging):
+            os.chmod(os.path.join(staging, filename), 0o440)
+        # Contents are sealed, but the coordinator group must be able to unlink
+        # expired files without changing worker-owned file permissions.
+        os.chmod(staging, 0o2770)
+        os.rename(staging, destination)
+        parent_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        if os.path.isdir(staging):
+            os.chmod(staging, 0o2770)
+            shutil.rmtree(staging)
+
+
+def file_digest(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while data := source.read(65536):
+            digest.update(data)
+    return digest.hexdigest()
+
+
+def ensure_shared_directory(directory, configured=None):
+    target = os.path.abspath(directory)
+    if not configured:
+        os.makedirs(target, mode=0o2770, exist_ok=False)
+        return
+    root = os.path.abspath(configured)
+    if os.path.islink(root) or not os.path.isdir(root):
+        raise RuntimeError("unsafe artifact root")
+    if not target.startswith(root + os.sep):
+        raise RuntimeError("artifact path escaped configured root")
+    current = root
+    for part in os.path.relpath(target, root).split(os.sep):
+        current = os.path.join(current, part)
+        try:
+            os.mkdir(current, mode=0o2770)
+            os.chmod(current, 0o2770)
+        except FileExistsError:
+            if os.path.islink(current) or not os.path.isdir(current):
+                raise RuntimeError("unsafe artifact directory")
+            if os.stat(current, follow_symlinks=False).st_mode & 0o020 == 0:
+                raise RuntimeError("artifact directory is not group writable")
+
+
 def main():
+    if len(sys.argv) == 7 and sys.argv[1] == "archive-session":
+        archive_session(sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]), sys.argv[6])
+        return
     if len(sys.argv) == 3 and sys.argv[1] == "models" and sys.argv[2] in BINARIES:
         print(json.dumps(catalog(sys.argv[2])))
         return

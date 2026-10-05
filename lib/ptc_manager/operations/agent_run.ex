@@ -20,6 +20,9 @@ defmodule PtcManager.Operations.AgentRun do
     field :herdr_pane, :string
     field :herdr_session, :string
     field :external_key, :string
+    field :provider_kind, :string, virtual: true
+    field :provider_sessions, :map, default: %{}
+    field :provider_sessions_archived, :boolean, default: false
     field :fencing_token, :integer, default: 0
     field :worker_incarnation_id, :string
     field :herdr_incarnation_id, :string
@@ -68,6 +71,7 @@ defmodule PtcManager.Operations.AgentRun do
       :herdr_pane,
       :herdr_session,
       :external_key,
+      :provider_kind,
       :fencing_token,
       :worker_incarnation_id,
       :herdr_incarnation_id,
@@ -90,6 +94,7 @@ defmodule PtcManager.Operations.AgentRun do
       :workspace_setup_phase_durations,
       :workspace_setup_error
     ])
+    |> remember_provider_session()
     |> validate_required([:worker_id, :role, :state, :started_at, :last_heartbeat_at])
     |> validate_inclusion(:role, @roles)
     |> validate_inclusion(:state, @states)
@@ -116,6 +121,33 @@ defmodule PtcManager.Operations.AgentRun do
     |> stamp_state_change()
     |> validate_terminal_time()
   end
+
+  defp remember_provider_session(changeset) do
+    remembered = get_field(changeset, :provider_sessions) || %{}
+    previous_session = session_identity(changeset.data.external_key)
+
+    kind =
+      get_field(changeset, :provider_kind) || Map.get(remembered, previous_session) || "unknown"
+
+    case session_identity(get_field(changeset, :external_key)) do
+      nil ->
+        changeset
+
+      session ->
+        if Map.get(remembered, session) == kind do
+          if changed?(changeset, :external_key),
+            do: put_change(changeset, :provider_sessions_archived, false),
+            else: changeset
+        else
+          changeset
+          |> put_change(:provider_sessions, Map.put(remembered, session, kind))
+          |> put_change(:provider_sessions_archived, false)
+        end
+    end
+  end
+
+  defp session_identity(key) when is_binary(key), do: key |> String.split(":") |> List.last()
+  defp session_identity(_), do: nil
 
   # Every writer records when the run entered its current state, so a caller
   # never has to remember to. A Herdr snapshot rewrites the same state every

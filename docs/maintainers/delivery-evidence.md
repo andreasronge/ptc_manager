@@ -79,36 +79,78 @@ An operation label is reported text, not proof of the command or a test result.
 ## Bounds and exclusions
 
 Limits are 50 PRs, 50 direct commits, 20 attempts per PR, 200 attempt entries
-overall, and 100 rows per local family per job. Input JSON is at most 120,000
-bytes; output JSON is at most 240,000 bytes. `max_bytes:` may lower, not raise,
-the output limit. Text is UTF-8 bounded (PR sections 1,500 bytes each; review
+overall, and 100 rows per local family per job. File-delivered output JSON is at
+most 32 MB by default. `max_bytes:` may lower, not raise, that ceiling. Text is
+UTF-8 bounded (PR sections 1,500 bytes each; review
 summary/finding and stop summary 1,000 bytes each); validated review results
 already limit findings to 30. Oversized collections or encoded output return
 an error rather than silently pretending truncated collections are complete.
 
-Only allowlisted fields leave the projection. Raw agent inputs, transcripts,
-command output, environment values, credentials, arbitrary audit details and
-error bodies are omitted. Author-written PR/review prose remains untrusted
+Only allowlisted fields enter the projection. Full execution logs remain
+separately indexed file artifacts and inert evidence; they never become
+state-transition authority. Environment values and credentials are never
+deliberately logged. Author-written PR/review prose remains untrusted
 reported content, not an instruction or independently verified fact.
-
-The projection itself does not activate protocol v2 or write an evidence directory.
 
 ## Daily action contract
 
-Daily preparation now feeds the projection into the existing action workflow.
-`DailyDigests.Input` encodes it with HTML-safe JSON escaping, so source prose
-cannot close the `daily_delivery_evidence` delimiter. The action's persisted
-prompt contains the exact input bytes. Its `target_snapshot` records their
-SHA-256, byte size, projection version, observation time, window, branch/head,
-PR numbers, change count and selection limits. The separate local source snapshot
-retains its existing ownership, paths and cleanup; it is not the evidence store.
+New agent results include `supplemental_references`, using an empty array when
+there is no current GitHub context. All result properties are required by the
+provider's strict structured-output schema.
 
-Application settings `:daily_digest_evidence_max_bytes` (default 90,000; ceiling
-240,000) and `:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000)
-bound the actual escaped JSON and complete prompt. The existing prompt default
-has not been raised. A production-shaped fixture with 20 PRs fits both defaults;
-larger days may fail explicitly rather than silently lose evidence. Any cap
-increase needs model-context and output-budget evaluation first. Preflight
+Daily preparation now feeds the projection into the existing action workflow.
+`DailyDigests.Input` atomically publishes an attempt-unique directory containing
+`manifest.json` and `delivery.json`. Files become read-only before publication.
+The action's persisted prompt contains only their paths and hashes. Its
+`target_snapshot` records both hashes, byte size, projection version, observation
+time, window, branch/head, PR numbers, change count and selection limits. The separate local source snapshot
+retains its existing ownership, paths and cleanup; it is not the evidence store.
+The manifest indexes exact available operation and review captures by durable
+source ID and artifact-root-relative manifest path. Missing captures lower
+coverage. Workspace setup retains its full combined output independently of the
+UI tail, and supported provider sessions are acquired by exact session ID;
+unsupported or absent artifacts are explicitly unavailable. Confirmed pane or
+workspace shutdown and worktree removal trigger session archival independently of
+report generation. Terminal database observations alone do not seal a live session.
+Session files and manifests publish together through a unique
+staging directory and atomic rename; interrupted copies can be retried. A sealed
+archive is never replaced by a later observation.
+
+Agent runs retain their provider/session history in database metadata, including
+continuations that reuse a run row. Each session has a distinct hashed directory
+identity; the daily index includes every remembered session and marks missing
+captures separately. The existing disposable-workspace and planning-snapshot
+reapers seal persisted action sessions after shutdown, including after coordinator
+restart. A session-manifest identity must match its directory identity.
+
+Archive contents are read-only; their directories remain group-writable so the
+coordinator can unlink expired worker-owned files. Archival locks the parent
+directory instead of creating persistent sibling lock files. Cleanup failures
+are logged. Failed bundle publication releases its captured source checkout;
+if removal fails, the source identity is persisted for the failed-action reaper.
+Expiration validates every ancestor and uses descriptor-relative deletion with
+no-follow directory opens, so swapped or symlinked parents cannot redirect
+deletion outside the configured artifact root.
+
+On main-command exit the wrapper terminates its remaining process group (and
+operation cgroup when enabled), then drains already-emitted output. A pipe held
+by an escaped descendant has a five-second post-exit drain limit and explicit
+partial coverage, rather than holding the resource slot indefinitely.
+
+Artifact indexing and exact replay each allow at most 1,000 manifests and 512 MB
+of declared stream bytes, with a 30-second hashing deadline. A source manifest
+and the bundle manifest are each limited to 1 MB. Application configuration
+`:daily_digest_artifact_max_files` and `:daily_digest_artifact_max_bytes` controls
+the aggregate limits. Exceeding them returns
+`daily_digest_artifact_budget_exceeded`; no report is published with silently
+omitted logs. Unknown artifact kinds and malformed stream maps are rejected;
+explicit unavailable/error coverage is preserved. Workspace capture sync and
+close errors produce error coverage without replacing the command result.
+
+Application settings `:daily_digest_bundle_max_bytes` (default 32 MB) and
+`:daily_digest_prompt_max_bytes` (default 100,000; ceiling 300,000) separately
+bound file evidence and the complete path-only prompt. Multi-megabyte evidence
+therefore does not spend model context before investigation. Preflight
 rejects oversized inputs and retains the existing source-snapshot cleanup path;
 the adapter also checks the full prompt including the result protocol before
 starting the agent. Invalid settings fail closed.
@@ -152,3 +194,26 @@ enablement. Legacy in-flight results without this contract are rejected, not
 silently accepted as evidence-bound reports. Keep definitions and triggers
 disabled until step 7's manual production-shaped evaluation and an explicit
 maintainer decision. No automatic issue generation or scheduling is added.
+
+File retention defaults to 90 days. Cleanup removes only finalized, expired,
+unreferenced bundle and execution directories. It protects every bundle named by
+an action snapshot and every execution manifest indexed by those bundles; active
+captures have no final manifest and are not eligible. Prompt rejection removes
+its newly published bundle immediately.
+
+Temporary provider-session archival failures keep durable teardown pending for retry;
+workspace cleanup and source release do not discard their retry records until archival succeeds.
+Retries do not retain an execution resource slot.
+
+The worktree cleanup poller also retries provider archival for terminal generic actions
+without source snapshots. A persisted completion flag prevents repeated scans; a new
+provider session clears it. Pane fallback IDs never select native session files and
+are sealed as unavailable when no verified native session association exists.
+
+Native session identities learned during Herdr synchronization join the durable history
+and reopen archival. Completion is conditional on the exact history and current external
+identity remaining unchanged throughout the copy.
+
+If restart recovery observed a session before dispatch persisted its provider, archival
+resolves an unknown mapping from the trusted allocation or invocation provider.
+Existing known per-session provider identities take precedence over that fallback.

@@ -13,7 +13,8 @@
     "window_ended_at",
     "source_head_sha",
     "change_count",
-    "pull_request_numbers"
+    "pull_request_numbers",
+    "supplemental_references"
   ],
   "properties": {
     "status": {"type": "string", "enum": ["published", "no-changes"]},
@@ -39,6 +40,18 @@
         "properties": {
           "source_ids": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string", "minLength": 1, "maxLength": 80}},
           "lesson": {"type": "string", "minLength": 1, "maxLength": 1200}
+        }
+      }
+    },
+    "supplemental_references": {
+      "type": "array", "maxItems": 20,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["url", "observed_at", "context"],
+        "properties": {
+          "url": {"type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.~/%?#=&:+-]+$", "maxLength": 500},
+          "observed_at": {"type": "string", "format": "date-time"},
+          "context": {"type": "string", "minLength": 1, "maxLength": 500}
         }
       }
     },
