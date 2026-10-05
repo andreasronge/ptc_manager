@@ -29,7 +29,9 @@ fail() {
 exec 9>"$lock"
 flock -n 9 || fail "another repository provisioning run is already active"
 
-[ -f "$database_path" ] || fail "database not found: $database_path"
+# The database lives in the coordinator's private directory, which the
+# deployment user cannot look into; ask through sudo like every read of it.
+sudo test -f "$database_path" || fail "database not found: $database_path"
 [ -r "$repositories_query" ] || fail "repositories query not found: $repositories_query"
 [ -x "$dropin_check" ] || fail "drop-in check not found: $dropin_check"
 

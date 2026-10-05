@@ -66,6 +66,11 @@ defmodule Mix.Tasks.PtcDeployTest do
 
     refute script =~ "git clone"
     assert File.read!(@provision) =~ "sudo -n -H -u ptc-manager-worker env GIT_TERMINAL_PROMPT=0"
+
+    # It runs as the deployment user, who cannot see into the coordinator's
+    # private database directory.
+    assert File.read!(@provision) =~ ~s|sudo test -f "$database_path"|
+    refute File.read!(@provision) =~ ~s|[ -f "$database_path" ]|
   end
 
   test "the worker Claude trust helper records and removes one exact path" do
