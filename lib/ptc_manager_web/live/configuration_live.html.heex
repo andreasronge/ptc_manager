@@ -130,16 +130,21 @@
 
       <details
         id="add-repository"
+        open={@add_repository_open}
         class="mb-5 rounded-2xl border border-dashed border-teal-400/30 bg-teal-400/[0.04] p-5"
       >
-        <summary class="cursor-pointer font-semibold text-teal-200">
+        <summary
+          phx-click="toggle-add-repository"
+          class="cursor-pointer font-semibold text-teal-200"
+        >
           Add another GitHub repository
         </summary>
         <p class="mt-2 text-sm leading-6 text-slate-400">
-          Register an accessible GitHub repository. Its checkout is expected at <code>/srv/&lt;repository-name&gt;</code>. The repository starts disabled and receives its own editable automation definitions.
+          Register an accessible GitHub repository. The default branch is read from GitHub once owner and name are entered; change it if work should target another branch. Its checkout is expected at <code>/srv/&lt;repository-name&gt;</code>. The repository starts disabled and receives its own editable automation definitions.
         </p>
         <.form
           for={@repository_form}
+          phx-change="lookup-repository"
           phx-submit="add-repository"
           class="mt-4 grid gap-3 md:grid-cols-2"
         >
@@ -148,6 +153,7 @@
               required
               name="repository[github_owner]"
               value={@repository_form[:github_owner].value}
+              phx-debounce="blur"
               class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
             />
           </label>
@@ -156,14 +162,15 @@
               required
               name="repository[github_name]"
               value={@repository_form[:github_name].value}
+              phx-debounce="blur"
               class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
             />
           </label>
           <label class="text-xs text-slate-400">
             Default branch<input
-              required
               name="repository[default_branch]"
               value={@repository_form[:default_branch].value}
+              placeholder="GitHub's default branch"
               class="mt-1 w-full rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
             />
           </label>

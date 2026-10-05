@@ -84,6 +84,67 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert has_element?(view, "#repository-#{repository.id}", "attention")
   end
 
+  test "prefills the branch from GitHub unless the maintainer typed one", %{conn: conn} do
+    put_tyraorg_repositories()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> form("#add-repository form", %{
+      "repository" => %{"github_owner" => "tyraorg", "github_name" => "api"}
+    })
+    |> render_change()
+
+    assert has_element?(view, "input[name='repository[default_branch]'][value='develop']")
+    # The re-render keeps the form open.
+    assert has_element?(view, "#add-repository[open]")
+
+    # Another repository replaces a prefilled branch, but never a typed one.
+    view
+    |> form("#add-repository form", %{
+      "repository" => %{
+        "github_owner" => "tyraorg",
+        "github_name" => "web",
+        "default_branch" => "develop"
+      }
+    })
+    |> render_change()
+
+    assert has_element?(view, "input[name='repository[default_branch]'][value='main']")
+
+    view
+    |> form("#add-repository form", %{
+      "repository" => %{
+        "github_owner" => "tyraorg",
+        "github_name" => "api",
+        "default_branch" => "feature/ska"
+      }
+    })
+    |> render_change()
+
+    assert has_element?(view, "input[name='repository[default_branch]'][value='feature/ska']")
+  end
+
+  test "a failed lookup does not turn a prefilled branch into a typed one", %{conn: conn} do
+    put_tyraorg_repositories()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    for {name, branch} <- [{"api", ""}, {"wbe", "develop"}, {"web", "develop"}] do
+      view
+      |> form("#add-repository form", %{
+        "repository" => %{
+          "github_owner" => "tyraorg",
+          "github_name" => name,
+          "default_branch" => branch
+        }
+      })
+      |> render_change()
+    end
+
+    assert has_element?(view, "input[name='repository[default_branch]'][value='main']")
+  end
+
   test "keeps repository input and explains GitHub validation failures", %{conn: conn} do
     previous = Application.get_env(:ptc_manager, :test_github_repositories, :all)
     on_exit(fn -> Application.put_env(:ptc_manager, :test_github_repositories, previous) end)
@@ -319,6 +380,18 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
 
     {:ok, identified, _html} = conn |> authenticated_conn() |> live(~p"/configuration")
     assert has_element?(identified, "#integrations", "Reads GitHub as @andreasronge")
+  end
+
+  defp put_tyraorg_repositories do
+    previous = Application.get_env(:ptc_manager, :test_github_repositories, :all)
+    on_exit(fn -> Application.put_env(:ptc_manager, :test_github_repositories, previous) end)
+
+    Application.put_env(:ptc_manager, :test_github_repositories, %{
+      {"tyraorg", "api"} =>
+        {:ok, %{"nameWithOwner" => "tyraorg/api", "defaultBranchRef" => %{"name" => "develop"}}},
+      {"tyraorg", "web"} =>
+        {:ok, %{"nameWithOwner" => "tyraorg/web", "defaultBranchRef" => %{"name" => "main"}}}
+    })
   end
 
   defp authenticated_conn(conn) do

@@ -490,7 +490,7 @@ if Repo.aggregate(Repository, :count) == 0 do
           %{
             github_owner: "tyraorg",
             github_name: "api",
-            default_branch: "develop",
+            github_default_branch: "develop",
             enabled: false
           }
         ] do

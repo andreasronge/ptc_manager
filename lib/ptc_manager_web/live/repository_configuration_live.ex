@@ -64,6 +64,38 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  def handle_event("update-default-branch", %{"branch" => %{"name" => name}}, socket) do
+    case Operations.update_repository_branch(
+           socket.assigns.repository.id,
+           name,
+           socket.assigns.actor
+         ) do
+      {:ok, repository} ->
+        socket
+        |> put_flash(:info, "New work starts from and targets #{repository.default_branch}.")
+        |> reload()
+
+      {:error, :invalid_branch} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Use a branch name of letters, digits, and . _ / - that does not start with - or /, end with . or /, or contain .. or @{."
+         )}
+
+      {:error, :active_work} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Active work, retained worktrees, or open managed pull requests still use #{socket.assigns.repository.default_branch}. Change the branch once they finish or are cleaned up."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The branch could not be changed.")}
+    end
+  end
+
   def handle_event("set-auto-fix", %{"enabled" => enabled}, socket)
       when enabled in ["true", "false"] do
     case PtcManager.AutoImplementation.configure(

@@ -407,7 +407,7 @@ defmodule PtcManager.GitHub.Client do
   defp repository_query do
     """
     query($owner: String!, $name: String!) {
-      repository(owner: $owner, name: $name) { nameWithOwner }
+      repository(owner: $owner, name: $name) { nameWithOwner defaultBranchRef { name } }
     }
     """
   end

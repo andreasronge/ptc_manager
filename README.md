@@ -438,11 +438,14 @@ The authenticated routes are:
   and health state, and the **Integrations** section describing what GitHub
   synchronization, publication, private analysis, and the dispatcher currently
   reach;
-- `/configuration/repositories/:id` — one repository's health checks,
-  enable/disable, automatic implementation, your own triage labels, write-only
-  encrypted implementation-agent variables, removal, and a link to its prompt
-  and automation settings. Repository variables are sourced from protected per-pane files after setup
-  completes; they are never supplied to bootstrap or maintainer-action agents.
+- `/configuration/repositories/:id` — one repository's health checks; its
+  default branch, editable while no work is active, no job worktree is
+  retained, and no managed pull request is open, with a warning when GitHub's
+  default branch differs; enable/disable; automatic implementation; your own
+  triage labels; write-only encrypted implementation-agent variables; removal;
+  and a link to its prompt and automation settings. Repository variables are
+  sourced from protected per-pane files after setup completes; they are never
+  supplied to bootstrap or maintainer-action agents.
 
 To choose a different local password:
 
@@ -1267,8 +1270,9 @@ To onboard another public or private repository:
    repository and checked before enabling it;
 3. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
-   GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
-   and creates the repository disabled;
+   GitHub credentials, prefills GitHub's default branch, derives
+   `/srv/<repository-name>` as the checkout path, and creates the repository
+   disabled;
 4. press **Prepare checkouts** on Configuration, or deploy. Either clones any
    configured checkout that does not exist yet, gives it to the worker identity,
    and regenerates the drop-in that grants every configured checkout to both

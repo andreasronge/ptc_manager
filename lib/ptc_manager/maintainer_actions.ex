@@ -278,7 +278,11 @@ defmodule PtcManager.MaintainerActions do
     with {:ok, versioned_attrs} <- Automations.snapshot_attrs(repository, action_key, attrs),
          {:ok, action} <-
            Operations.enqueue_agent_action(
-             Map.merge(versioned_attrs, %{action_key: action_key, actor: actor})
+             Map.merge(versioned_attrs, %{
+               action_key: action_key,
+               actor: actor,
+               built_for_branch: repository.default_branch
+             })
            ),
          {:ok, _invocation} <-
            Automations.link_agent_action_invocation(repository, action_key, action, actor) do

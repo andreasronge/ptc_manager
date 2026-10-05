@@ -18,7 +18,8 @@ defmodule PtcManagerWeb.ConfigurationLive do
      socket
      |> assign(:page_title, "Configuration")
      |> assign(:actor, session["actor"] || "maintainer")
-     |> assign(:repository_form, to_form(%{"default_branch" => "main"}, as: :repository))
+     |> assign(:repository_form, to_form(%{}, as: :repository))
+     |> assign(looked_up: nil, prefilled_branch: nil, add_repository_open: false)
      |> load_configuration()}
   end
 
@@ -46,14 +47,53 @@ defmodule PtcManagerWeb.ConfigurationLive do
            :info,
            "#{full_name(repository)} added disabled. Verify its checkout, GitHub access, gate, and automations before enabling it."
          )
-         |> assign(:repository_form, to_form(%{"default_branch" => "main"}, as: :repository))
+         |> assign(:repository_form, to_form(%{}, as: :repository))
+         |> assign(looked_up: nil, prefilled_branch: nil, add_repository_open: false)
          |> load_configuration()}
 
       {:error, reason} ->
         {:noreply,
          socket
          |> assign(:repository_form, to_form(params, as: :repository))
+         |> assign(:add_repository_open, true)
          |> put_flash(:error, repository_error(reason))}
+    end
+  end
+
+  # The browser toggles <details> itself; the assign follows it so a re-render
+  # from a live update does not close the form under the maintainer.
+  def handle_event("toggle-add-repository", _params, socket),
+    do: {:noreply, update(socket, :add_repository_open, &(!&1))}
+
+  # Prefills the branch from GitHub once owner and name are both entered, unless
+  # the maintainer already typed a branch of their own. The last prefilled value
+  # is kept apart from the last lookup, so a failed lookup in between does not
+  # turn a prefill into what looks like a typed branch.
+  def handle_event("lookup-repository", %{"repository" => params}, socket) do
+    key = {String.trim(params["github_owner"] || ""), String.trim(params["github_name"] || "")}
+    # A re-render would otherwise drop the browser's open state of the form.
+    socket = assign(socket, :add_repository_open, true)
+
+    if elem(key, 0) == "" or elem(key, 1) == "" or key == socket.assigns.looked_up do
+      {:noreply, assign(socket, :repository_form, to_form(params, as: :repository))}
+    else
+      typed = params["default_branch"] || ""
+
+      {params, prefilled} =
+        case Operations.lookup_github_default_branch(elem(key, 0), elem(key, 1)) do
+          {:ok, branch} ->
+            if typed in ["", socket.assigns.prefilled_branch],
+              do: {Map.put(params, "default_branch", branch), branch},
+              else: {params, socket.assigns.prefilled_branch}
+
+          {:error, _reason} ->
+            {params, socket.assigns.prefilled_branch}
+        end
+
+      {:noreply,
+       socket
+       |> assign(looked_up: key, prefilled_branch: prefilled)
+       |> assign(:repository_form, to_form(params, as: :repository))}
     end
   end
 
@@ -121,6 +161,10 @@ defmodule PtcManagerWeb.ConfigurationLive do
   defp repository_error(:repository_not_found),
     do:
       "GitHub could not find that exact owner/name repository, or the configured credentials cannot access it. Check the spelling and repository access."
+
+  defp repository_error(:invalid_branch),
+    do:
+      "Use a branch name of letters, digits, and . _ / - that does not start with - or /, end with . or /, or contain .. or @{."
 
   defp repository_error(:github_unavailable),
     do:

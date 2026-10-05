@@ -8,8 +8,15 @@ defmodule PtcManager.TestGitHubClient do
 
   defp response(key) do
     case Application.get_env(:ptc_manager, :test_github_repositories, :all) do
-      :all -> {:ok, %{"nameWithOwner" => Enum.join(Tuple.to_list(key), "/")}}
-      responses -> Map.get(responses, key, {:error, :repository_not_found})
+      :all ->
+        {:ok,
+         %{
+           "nameWithOwner" => Enum.join(Tuple.to_list(key), "/"),
+           "defaultBranchRef" => %{"name" => "main"}
+         }}
+
+      responses ->
+        Map.get(responses, key, {:error, :repository_not_found})
     end
   end
 end

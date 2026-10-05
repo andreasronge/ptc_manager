@@ -89,7 +89,8 @@ defmodule PtcManager.Operations do
 
   def onboard_repository(attrs) do
     with {:ok, attrs} <- prepare_repository(attrs),
-         :ok <- verify_repository(attrs) do
+         {:ok, github_branch} <- verify_repository(attrs),
+         {:ok, attrs} <- onboarding_branch(attrs, github_branch) do
       # Synchronization covers enabled repositories only, and a repository is
       # added disabled, so the label snapshet Configuration checks against has
       # to be taken here or it would stay empty until after enabling.
@@ -226,10 +227,170 @@ defmodule PtcManager.Operations do
         else: {:error, :repository_lookup_unsupported}
 
     case result do
-      {:ok, _repository} -> :ok
+      {:ok, repository} -> {:ok, github_default_branch(repository)}
       {:error, :repository_not_found} -> {:error, :repository_not_found}
       {:error, _reason} -> {:error, :github_unavailable}
     end
+  end
+
+  @doc "GitHub's default branch for an owner/name pair, to prefill onboarding."
+  def lookup_github_default_branch(owner, name) do
+    attrs = %{github_owner: String.trim(owner || ""), github_name: String.trim(name || "")}
+
+    if safe_github_component?(attrs.github_owner) and safe_github_component?(attrs.github_name) do
+      case verify_repository(attrs) do
+        {:ok, branch} when is_binary(branch) -> {:ok, branch}
+        {:ok, nil} -> {:error, :github_unavailable}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :unsafe_repository_name}
+    end
+  end
+
+  defp github_default_branch(%{"defaultBranchRef" => %{"name" => name}})
+       when is_binary(name) and name != "",
+       do: name
+
+  defp github_default_branch(_repository), do: nil
+
+  # A blank branch takes GitHub's default; either way it must be a branch name
+  # the broker and git will accept.
+  defp onboarding_branch(attrs, github_branch) do
+    branch =
+      case attrs.default_branch do
+        value when value in [nil, ""] -> github_branch
+        value -> value
+      end
+
+    if PtcManager.GitHub.Ref.safe?(branch),
+      do:
+        {:ok, %{attrs | default_branch: branch} |> Map.put(:github_default_branch, github_branch)},
+      else: {:error, :invalid_branch}
+  end
+
+  @doc """
+  Changes the branch a repository's work starts from and merges into.
+
+  Refused while a job, maintainer action, automation run, or deployment is
+  active, a collection run is live, a managed pull request is open, or a job's
+  worktree is retained,
+  because each carries the old branch in its worktree, pull request base,
+  prompt, or deployed revision, and a retained worktree can still be resumed.
+  """
+  def update_repository_branch(repository_id, branch, actor)
+      when is_integer(repository_id) and is_binary(actor) and actor != "" do
+    branch = if is_binary(branch), do: String.trim(branch), else: branch
+
+    if PtcManager.GitHub.Ref.safe?(branch) do
+      with_repository_lifecycle_lock(repository_id, fn ->
+        do_update_repository_branch(repository_id, branch, actor)
+      end)
+    else
+      {:error, :invalid_branch}
+    end
+  end
+
+  defp do_update_repository_branch(repository_id, branch, actor) do
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        cond do
+          repository.default_branch == branch ->
+            repository
+
+          branch_in_use?(repository_id) ->
+            Repo.rollback(:active_work)
+
+          true ->
+            updated =
+              repository
+              |> Repository.changeset(%{default_branch: branch})
+              |> Repo.update!()
+
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.default_branch_changed",
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}",
+                "from" => repository.default_branch,
+                "to" => branch
+              }
+            })
+
+            updated
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A prompt built from the repository names its default branch. When the
+  # caller says which branch it built for, the action is queued only if that is
+  # still the configured one; update_repository_branch/3 refuses while an action
+  # is queued, so the two cannot interleave the other way.
+  defp unchanged_branch(_repository_id, nil), do: {:ok, :unchecked}
+
+  defp unchanged_branch(repository_id, branch) do
+    case Repo.get(Repository, repository_id) do
+      %Repository{default_branch: ^branch} -> {:ok, branch}
+      _changed -> {:error, :repository_branch_changed}
+    end
+  end
+
+  defp branch_in_use?(repository_id) do
+    Repo.exists?(
+      from job in Job,
+        where: job.repository_id == ^repository_id and job.state in ^@active_job_states
+    ) or
+      Repo.exists?(
+        from publication in PrPublication,
+          join: job in Job,
+          on: job.id == publication.job_id,
+          where:
+            job.repository_id == ^repository_id and
+              publication.source in ["broker", "agent"] and
+              (publication.state in ["queued", "publishing"] or publication.pr_state == "open")
+      ) or
+      agent_action_active?(repository_id) or
+      automation_or_deployment_active?(repository_id) or
+      worktree_retained?(repository_id) or
+      Repo.exists?(
+        from run in PtcManager.Collections.Run,
+          where:
+            run.repository_id == ^repository_id and
+              run.state in ^PtcManager.Collections.Run.live_states()
+      )
+  end
+
+  defp agent_action_active?(repository_id) do
+    Repo.exists?(
+      from action in AgentAction,
+        where:
+          action.repository_id == ^repository_id and
+            action.state in ["queued", "running", "sync_pending"]
+    )
+  end
+
+  defp automation_or_deployment_active?(repository_id) do
+    Repo.exists?(
+      from invocation in PtcManager.Automations.Invocation,
+        where:
+          invocation.repository_id == ^repository_id and
+            invocation.state in ["queued", "running", "synchronizing"]
+    ) or
+      Repo.exists?(
+        from deployment in PtcManager.Deployments.Deployment,
+          where:
+            deployment.repository_id == ^repository_id and
+              deployment.state in ["queued", "draining", "starting", "running"]
+      )
   end
 
   defp onboarding_labels(attrs) do
@@ -264,12 +425,7 @@ defmodule PtcManager.Operations do
       from job in Job,
         where: job.repository_id == ^repository_id and job.state in ^@active_job_states
     ) or
-      Repo.exists?(
-        from action in AgentAction,
-          where:
-            action.repository_id == ^repository_id and
-              action.state in ["queued", "running", "sync_pending"]
-      ) or
+      agent_action_active?(repository_id) or
       Repo.exists?(
         from run in AgentRun,
           left_join: action in AgentAction,
@@ -282,18 +438,7 @@ defmodule PtcManager.Operations do
                  (action.action_key in ^@repair_action_keys and not is_nil(run.herdr_workspace)) or
                  not is_nil(run.disposable_cleanup_state))
       ) or
-      Repo.exists?(
-        from invocation in PtcManager.Automations.Invocation,
-          where:
-            invocation.repository_id == ^repository_id and
-              invocation.state in ["queued", "running", "synchronizing"]
-      ) or
-      Repo.exists?(
-        from deployment in PtcManager.Deployments.Deployment,
-          where:
-            deployment.repository_id == ^repository_id and
-              deployment.state in ["queued", "draining", "starting", "running"]
-      ) or
+      automation_or_deployment_active?(repository_id) or
       Repo.exists?(
         from publication in PrPublication,
           where:
@@ -306,14 +451,16 @@ defmodule PtcManager.Operations do
             operation.repository_id == ^repository_id and
               operation.state not in ["completed", "failed", "cancelled", "lost"]
       ) or
-      Repo.exists?(
-        from allocation in WorktreeAllocation,
-          join: job in Job,
-          on: job.id == allocation.job_id,
-          where:
-            job.repository_id == ^repository_id and
-              allocation.state != "removed"
-      )
+      worktree_retained?(repository_id)
+  end
+
+  defp worktree_retained?(repository_id) do
+    Repo.exists?(
+      from allocation in WorktreeAllocation,
+        join: job in Job,
+        on: job.id == allocation.job_id,
+        where: job.repository_id == ^repository_id and allocation.state != "removed"
+    )
   end
 
   defp delete_repository_records(repository_id) do
@@ -477,9 +624,13 @@ defmodule PtcManager.Operations do
 
   def enqueue_agent_action(attrs) when is_map(attrs) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    {built_for_branch, attrs} = Map.pop(attrs, :built_for_branch)
     attrs = Map.merge(attrs, %{state: "queued", attempt_count: 0, requested_at: now})
 
     Multi.new()
+    |> Multi.run(:branch, fn _repo, _changes ->
+      unchanged_branch(attrs[:repository_id], built_for_branch)
+    end)
     |> Multi.insert(:agent_action, AgentAction.changeset(%AgentAction{}, attrs))
     |> Multi.insert(:audit_event, fn %{agent_action: action} ->
       AuditEvent.changeset(%AuditEvent{}, %{

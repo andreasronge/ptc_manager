@@ -53,8 +53,11 @@ defmodule PtcManager.GitHub.Sync do
         syncing_repository,
         remote_issues,
         missing_issues,
-        viewer_login(client),
-        Operations.read_repository_labels(client, syncing_repository),
+        %{
+          viewer_login: viewer_login(client),
+          label_names: Operations.read_repository_labels(client, syncing_repository),
+          github_default_branch: github_default_branch(client, syncing_repository)
+        },
         opts
       )
     else
@@ -75,14 +78,23 @@ defmodule PtcManager.GitHub.Sync do
     end
   end
 
-  defp persist_snapshot(
-         repository,
-         remote_issues,
-         missing_issues,
-         viewer_login,
-         label_names,
-         opts
-       ) do
+  # GitHub's default branch, recorded so the repository page can say when it
+  # differs from the configured one. It never changes the configured branch.
+  defp github_default_branch(client, repository) do
+    {module, arity} = if is_atom(client), do: {client, 2}, else: {client.__struct__, 3}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :get_repository, arity) do
+      case Gateway.call(client, :get_repository, [repository.github_owner, repository.github_name]) do
+        {:ok, %{"defaultBranchRef" => %{"name" => name}}} when is_binary(name) and name != "" ->
+          name
+
+        _unavailable ->
+          nil
+      end
+    end
+  end
+
+  defp persist_snapshot(repository, remote_issues, missing_issues, remote, opts) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     normalized =
@@ -102,9 +114,12 @@ defmodule PtcManager.GitHub.Sync do
                 sync_status: "ok",
                 last_synced_at: now,
                 last_sync_error: nil,
-                github_viewer_login: viewer_login || projection.repository.github_viewer_login
+                github_viewer_login:
+                  remote.viewer_login || projection.repository.github_viewer_login,
+                github_default_branch:
+                  remote.github_default_branch || projection.repository.github_default_branch
               }
-              |> put_label_names(label_names, now)
+              |> put_label_names(remote.label_names, now)
             )
             |> Repo.update!()
 

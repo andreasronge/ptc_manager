@@ -8,6 +8,7 @@ defmodule PtcManager.Operations.Repository do
     field :github_owner, :string
     field :github_name, :string
     field :default_branch, :string, default: "main"
+    field :github_default_branch, :string
     field :enabled, :boolean, default: true
     field :auto_fix_issues, :boolean, default: false
     field :auto_fix_daily_limit, :integer, default: 5
@@ -39,6 +40,7 @@ defmodule PtcManager.Operations.Repository do
       :github_owner,
       :github_name,
       :default_branch,
+      :github_default_branch,
       :enabled,
       :auto_fix_issues,
       :auto_fix_daily_limit,
@@ -54,6 +56,11 @@ defmodule PtcManager.Operations.Repository do
     ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
+    |> validate_change(:default_branch, fn :default_branch, branch ->
+      if PtcManager.GitHub.Ref.safe?(branch),
+        do: [],
+        else: [default_branch: "is not a safe branch name"]
+    end)
     |> MaintainerLabels.validate()
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,

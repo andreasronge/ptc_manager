@@ -165,7 +165,7 @@ defmodule PtcManager.GitHub.AppBroker do
       not safe_repository_component?(repository.github_name) ->
         {:blocked, :invalid_repository_name}
 
-      not safe_ref?(repository.default_branch) ->
+      not PtcManager.GitHub.Ref.safe?(repository.default_branch) ->
         {:blocked, :invalid_default_branch}
 
       publication.branch_name != expected_branch ->
@@ -204,7 +204,7 @@ defmodule PtcManager.GitHub.AppBroker do
       not safe_repository_component?(repository.github_name) ->
         {:blocked, :invalid_repository_name}
 
-      not safe_ref?(repository.default_branch) ->
+      not PtcManager.GitHub.Ref.safe?(repository.default_branch) ->
         {:blocked, :invalid_default_branch}
 
       not Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, expected_sha) ->
@@ -980,14 +980,6 @@ defmodule PtcManager.GitHub.AppBroker do
     do: Regex.match?(~r/\A[A-Za-z0-9_.-]+\z/, value) and value not in [".", ".."]
 
   defp safe_repository_component?(_value), do: false
-
-  defp safe_ref?(value) when is_binary(value) do
-    byte_size(value) in 1..240 and Regex.match?(~r/\A[A-Za-z0-9._\/-]+\z/, value) and
-      not String.starts_with?(value, ["-", "/"]) and not String.ends_with?(value, [".", "/"]) and
-      not String.contains?(value, ["..", "@{"])
-  end
-
-  defp safe_ref?(_value), do: false
 
   defp repository_url(repository),
     do: "https://github.com/#{repository.github_owner}/#{repository.github_name}.git"

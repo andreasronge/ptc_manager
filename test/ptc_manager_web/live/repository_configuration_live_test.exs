@@ -454,6 +454,42 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     assert Repo.get!(Repository, repository.id).maintainer_labels == %{"labels" => []}
   end
 
+  test "edits the default branch and warns when GitHub's differs", %{conn: conn} do
+    repository = repository_fixture(%{github_default_branch: "develop"})
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+
+    assert has_element?(view, "#default-branch-mismatch", "develop")
+
+    html =
+      view
+      |> form("#default-branch-form", %{"branch" => %{"name" => "develop"}})
+      |> render_submit()
+
+    assert html =~ "New work starts from and targets develop."
+    assert Repo.get!(Repository, repository.id).default_branch == "develop"
+    refute has_element?(view, "#default-branch-mismatch")
+
+    html =
+      view
+      |> form("#default-branch-form", %{"branch" => %{"name" => "a..b"}})
+      |> render_submit()
+
+    assert html =~ "Use a branch name"
+
+    issue = issue_fixture(repository)
+    {:ok, _job} = Operations.approve_issue_directly(issue.id, "andreas")
+
+    html =
+      view
+      |> form("#default-branch-form", %{"branch" => %{"name" => "main"}})
+      |> render_submit()
+
+    assert html =~
+             "Active work, retained worktrees, or open managed pull requests still use develop."
+
+    assert Repo.get!(Repository, repository.id).default_branch == "develop"
+  end
+
   test "an unknown repository returns to the Configuration list", %{conn: conn} do
     for id <- ["999999", "not-a-number"] do
       assert {:error, {:live_redirect, %{to: "/configuration", flash: flash}}} =
