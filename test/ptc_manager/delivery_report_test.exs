@@ -66,6 +66,7 @@ defmodule PtcManager.DeliveryReportTest do
     pub =
       Repo.insert!(
         PrPublication.changeset(%PrPublication{}, %{
+          base_branch: "main",
           job_id: job.id,
           state: "queued",
           pr_state: "open",

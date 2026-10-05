@@ -58,6 +58,7 @@ defmodule PtcManagerWeb.Router do
       live "/automations/:id", AutomationsLive, :show
       live "/deployments", DeploymentsLive, :index
       live "/configuration", ConfigurationLive, :index
+      live "/configuration/repositories/:id", RepositoryConfigurationLive, :show
       live "/execution-profiles", ExecutionProfilesLive, :index
       live "/jobs/:id/reviews", JobReviewsLive, :show
       live "/jobs/:id/report", DeliveryReportLive, :show

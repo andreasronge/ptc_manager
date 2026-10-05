@@ -348,9 +348,6 @@ defmodule PtcManagerWeb.DeploymentsLiveTest do
       Path.join(path, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: ./scripts/ptc/bootstrap
-        timeout_minutes: 10
       deployment:
         command: ./scripts/ptc/deploy
         timeout_minutes: 20

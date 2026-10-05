@@ -205,6 +205,54 @@ defmodule PtcManager.GitHub.Client do
     end
   end
 
+  @impl true
+  def list_branches(%Repository{} = repository), do: list_branches(repository, 1, [])
+
+  defp list_branches(_repository, page, _names) when page > @max_pages,
+    do: {:error, :pagination_limit_reached}
+
+  defp list_branches(repository, page, names) do
+    url =
+      "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}" <>
+        "/branches?per_page=#{@per_page}&page=#{page}"
+
+    case get_json(url) do
+      {:ok, branches} when is_list(branches) ->
+        names = names ++ for(%{"name" => name} <- branches, is_binary(name), do: name)
+
+        if length(branches) < @per_page,
+          do: {:ok, names},
+          else: list_branches(repository, page + 1, names)
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_github_response}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def branch_exists?(%Repository{} = repository, branch) when is_binary(branch) do
+    if PtcManager.GitHub.Ref.safe?(branch),
+      do: fetch_branch(repository, branch),
+      else: {:error, :invalid_branch}
+  end
+
+  # A safe ref is URL-safe as it is, and GitHub expects its slashes unencoded.
+  defp fetch_branch(repository, branch) do
+    url =
+      "https://api.github.com/repos/#{repository.github_owner}/#{repository.github_name}" <>
+        "/branches/" <> branch
+
+    case get_json(url) do
+      {:ok, %{"name" => ^branch}} -> {:ok, true}
+      {:ok, _unexpected} -> {:error, :unexpected_github_response}
+      {:error, {:github_http_error, 404, _message, _retry}} -> {:ok, false}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @doc false
   def get_json(url) when is_binary(url) do
     with {:ok, body} <- get(url),
@@ -407,7 +455,7 @@ defmodule PtcManager.GitHub.Client do
   defp repository_query do
     """
     query($owner: String!, $name: String!) {
-      repository(owner: $owner, name: $name) { nameWithOwner }
+      repository(owner: $owner, name: $name) { nameWithOwner defaultBranchRef { name } }
     }
     """
   end

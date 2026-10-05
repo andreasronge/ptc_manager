@@ -758,6 +758,7 @@ defmodule PtcManager.StallsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       repository_id: member.repository_id,
       state: "published",

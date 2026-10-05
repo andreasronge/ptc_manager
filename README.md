@@ -31,7 +31,7 @@ The console has six views:
   capacity.
 
 Implementation work runs in an isolated Herdr worktree that the repository's
-own `.ptc-manager.yml` bootstrap prepares. The agent implements, validates,
+workspace setup command, configured in the console, prepares. The agent implements, validates,
 runs the number of independent reviews frozen on the job, and either pushes
 its branch and opens the pull request itself (agent publication) or commits
 locally for PtcManager's credential-isolated GitHub App broker to verify and
@@ -181,8 +181,10 @@ new assessment or needing another maintainer retry.
 without starting another implementer. A passing result queues a continuation to
 publish that exact commit; a high or medium finding pauses for a decision. **Continue existing
 work** instead starts an implementer to address the failure or change the code.
-Unacknowledged partial failures that permit retry can also continue their retained
-work, provided no newer job supersedes them. Unsafe stop reports retain their
+Unacknowledged stops that permit retry can also continue when the agent reports
+partial progress or the retained worktree has observed dirty files or local commits,
+provided no newer job supersedes them. Retry warns when it would discard observed
+retained work. Unsafe stop reports retain their
 existing restriction on restarting.
 A failed broker publication check offers continuation from the review page; the
 old publication remains blocked while the implementation is repaired.
@@ -431,13 +433,20 @@ The authenticated routes are:
   complete editable prompt with a runtime preview, advanced settings, its own
   run history, versions, and cross-repository copying. `/automations/new`
   creates a paused custom automation with a key derived from its name;
-- `/configuration` — safe registration and health checks for dedicated repository
-  checkouts, your own triage labels and write-only encrypted implementation-agent
-  variables per repository, the **Integrations** section describing what GitHub
+- `/configuration` — worker capacity, safe registration of dedicated repository
+  checkouts, a short list of repositories with their enabled, synchronization,
+  and health state, and the **Integrations** section describing what GitHub
   synchronization, publication, private analysis, and the dispatcher currently
-  reach, and direct links to each repository's prompt and automation settings.
-  Repository variables are sourced from protected per-pane files after setup
-  completes; they are never supplied to bootstrap or maintainer-action agents.
+  reach;
+- `/configuration/repositories/:id` — one repository's health checks; its
+  default branch, editable while no work is active, no job worktree is
+  retained, and no managed pull request is open, with a warning when GitHub's
+  default branch differs; enable/disable; automatic implementation; your own
+  triage labels; the workspace setup command and its timeout; write-only
+  encrypted implementation-agent variables; removal; and a link to its prompt
+  and automation settings. Repository variables are passed to workspace setup
+  through a protected file and sourced from protected per-pane files by
+  implementation agents; they are never supplied to maintainer-action agents.
 
 To choose a different local password:
 
@@ -481,51 +490,29 @@ onto the Delivery board, also grant
 **Commit statuses: Read** and **Checks: Read**. PtcManager uses the token only
 through its read-only GitHub client. If either CI source is unavailable, the
 board reports CI as unknown and will not place that PR in **Ready to merge**.
+The token may also be the `gh` OAuth token of the account that already reads
+the repositories (`gh auth token`); its owner's access decides which private
+repositories, of any owner, PtcManager can read.
 
 Automatic draft-PR publishing is a separate, off-by-default capability. Create
-a GitHub App installed only on the managed repository with repository
+a GitHub App installed only on the managed repositories, one installation per
+owner, with repository
 **Contents: Read and write** and **Pull requests: Read and write** permissions.
 Store its private key outside the repository, readable only by the coordinator.
 Configure the App ID, installation ID, and PEM path, then set
 `PTC_PUBLICATION_ENABLED=true`.
 
-Every repository that uses writable implementation worktrees must commit a
-strict `.ptc-manager.yml` contract. The bootstrap is required and belongs to
-the repository rather than PtcManager:
-
-```yaml
-version: 1
-bootstrap:
-  command: ./scripts/ptc/bootstrap
-  timeout_minutes: 10
-```
-
-When the Herdr agent pushes its own branch and creates the PR, this is the
-complete contract. Repository hooks may provide fast local feedback, while
-GitHub CI and branch protection remain the authoritative merge gate.
-
-Brokered publication is an optional alternative for agents without GitHub
-write credentials. In that mode PtcManager verifies the exact commit in a
-credential-free disposable checkout before its GitHub App publishes the
-branch. Repositories using that mode must also configure:
-
-```yaml
-verification:
-  before_publish: ./scripts/ci/pre-publication
-  timeout_minutes: 45
-```
-
-Malformed sections and unknown fields fail closed. Omitting `verification`
-does not weaken brokered publication: a broker job without that section is
-blocked before PtcManager uses its GitHub credential.
-
-`bootstrap.command` is one repository-relative, checked-in executable script.
-Herdr remains responsible for creating the Git worktree. After creation,
-PtcManager runs this script with the worktree as its current directory, records
-the worktree-creation and setup durations, verifies that HEAD, branch, and
-tracked files did not change, and only then starts the selected Herdr agent.
-Repository-specific setup belongs behind this entrypoint. For example,
-`ptc_runner` can commit a small wrapper which calls its existing setup logic:
+Every repository that uses writable worktrees needs a **workspace setup**
+command, set on its Configuration page with a timeout. The command belongs to
+the maintainer, not to repository content, so a repository needs no checked-in
+script; `./scripts/ptc/bootstrap` is just one possible command. Herdr remains
+responsible for creating the Git worktree. After creation, PtcManager runs the
+command through `/bin/sh -c` as the worker, with the worktree as its current
+directory and the repository's agent variables in its environment, records the
+worktree-creation and setup durations, verifies that HEAD, branch, and tracked
+files did not change, and only then starts the selected Herdr agent. For
+example, `ptc_runner` can use a small wrapper which calls its existing setup
+logic:
 
 ```sh
 #!/bin/sh
@@ -534,16 +521,41 @@ set -eu
 ./scripts/worktree.sh init .
 ```
 
-The setup script must be executable in Git. It may create ignored dependency
-and build artifacts, but changing tracked files, HEAD, or the job branch fails
-closed before any agent starts. Setup status, bounded output, and timings are
-shown on the Operations page.
+Setup may create ignored dependency and build artifacts, but changing tracked
+files, HEAD, or the job branch fails closed before any agent starts. Setup
+status, bounded output, and timings are shown on the Operations page. A
+repository without a setup command reports it in its health, and its
+worktrees fail before an agent starts. A changed command applies to new
+worktrees only.
+
+A checked-in `.ptc-manager.yml` is optional. It holds what PtcManager freezes
+from an exact commit: broker publication verification and self-deployment.
+When the Herdr agent pushes its own branch and creates the PR, a repository
+needs no contract at all. Repository hooks may provide fast local feedback,
+while GitHub CI and branch protection remain the authoritative merge gate.
+
+Brokered publication is an optional alternative for agents without GitHub
+write credentials. In that mode PtcManager verifies the exact commit in a
+credential-free disposable checkout before its GitHub App publishes the
+branch. Repositories using that mode must configure:
+
+```yaml
+version: 1
+verification:
+  before_publish: ./scripts/ci/pre-publication
+  timeout_minutes: 45
+```
+
+Malformed sections and unknown fields, including a leftover `bootstrap`
+section, fail closed. Omitting `verification` does not weaken brokered
+publication: a broker job without that section is blocked before PtcManager
+uses its GitHub credential.
 
 Issue preparation, daily updates, and repository investigation automations use
 `generic_ephemeral` read-only source snapshots and skip the writable build
 bootstrap. **Review issue** instead uses an `ephemeral_investigation` worktree:
 PtcManager pins the same source evidence, creates a writable disposable
-worktree at that exact commit, runs the checked-in bootstrap, and removes the
+worktree at that exact commit, runs the workspace setup, and removes the
 worktree and its temporary branch after the review. The reviewer may run tests
 and create temporary reproduction tests, but must not implement, commit, push,
 or open a pull request. Writable implementation jobs also run the full
@@ -561,7 +573,7 @@ share writable `deps` or `_build` directories. Set `PTC_WORKSPACE_CACHE_ROOT`
 inside the repository setup environment to select another cache root. Cache
 miss/hit state and restore, dependency, asset-tool, and publish timings are
 recorded on Operations. Cache failure is non-fatal and falls back to the normal
-clean bootstrap.
+clean setup.
 
 Before enabling a repository on a server, exercise the same handoff against a
 local Herdr session:
@@ -569,12 +581,13 @@ local Herdr session:
 ```sh
 mix ptc.herdr_workspace_canary \
   --session canary \
-  --repository /absolute/path/to/repository
+  --repository /absolute/path/to/repository \
+  --setup ./scripts/ptc/bootstrap
 ```
 
-The canary asks real Herdr to create a disposable worktree, runs the real
-checked-in setup script, reports phase timings, and removes its workspace and
-temporary branch. It does not start an AI agent and does not access GitHub.
+The canary asks real Herdr to create a disposable worktree, runs the setup
+command (`--setup`, default `./scripts/ptc/bootstrap`), reports phase timings,
+and removes its workspace and temporary branch. It does not start an AI agent and does not access GitHub.
 
 On a paused job's **Reviews** page, **Override review and finish PR** lets a
 maintainer accept the displayed reviewed commit with a short reason. The original
@@ -587,8 +600,9 @@ the displayed reviewed commit; an earlier approval or an old browser form is not
 carried forward.
 
 Before publication, PtcManager reads the contract from the verified candidate
-commit—not from a possibly dirty filesystem copy—and freezes its bootstrap
-command, pre-publication command, timeouts, and digest on the job. It then
+commit—not from a possibly dirty filesystem copy—and freezes the
+repository's workspace setup command, the contract's pre-publication command,
+their timeouts, and a digest on the job. It then
 creates a fresh checkout owned by `ptc-manager-gate`, runs both commands
 with an empty environment and OS-enforced timeouts, verifies the checkout stayed
 clean, and stores the exact SHA, exit status, duration, and at most 64 KiB of
@@ -914,6 +928,64 @@ on it, check the members it created or related on GitHub, then **Run
 collection**. The reconciler runs after every GitHub sync, pull-request
 status change, and finished agent action, and once a minute as a backstop.
 
+#### Integration branches
+
+A repository can send labelled work to an integration branch instead of its
+default branch, for a feature that is delivered as several pull requests and
+reaches the default branch together. On the repository's Configuration page,
+**Integration branches** maps a label such as `ska` to a branch such as
+`feature/ska`. GitHub must report the branch when the mapping is saved, and
+dispatch fetches it again before every job. When synchronization finds a label
+`x` and a `feature/x` branch, the page suggests that mapping with one button;
+nothing routes on a matching name alone. A mapping switched off keeps its
+entry and routes nothing.
+
+Approval resolves the base once and stores it on the approval and the job:
+
+- an issue whose own labels, or whose collection umbrella's labels, include an
+  active mapping's label targets that branch, and the card shows
+  **→ feature/ska** with a **→ main instead** checkbox for one issue that
+  should skip it;
+- labels that map to two different branches block approval until one is
+  removed;
+- **Run collection** resolves the base from the umbrella, offers the same
+  choice once, and every member inherits it;
+- an issue that already has a pull request merged into its integration branch
+  is not approved for that branch again.
+
+The worktree starts from the stored base, the agent's pull request targets it,
+and merge, repair, and broker checks compare against it. A label or mapping
+changed after approval does not retarget the job; the card shows the mismatch.
+Deployments, daily updates, source snapshots, toolchain bumps, and repository
+health stay on the default branch.
+
+GitHub closes an issue only when its pull request merges into the default
+branch, so an issue whose pull request merged into an integration branch stays
+open. PtcManager derives **integrated** from that merged pull request; it is not
+a label or a stored issue state:
+
+- the Delivery board's **Integrated** section lists such work grouped by
+  repository and branch, and offers the `Closes #…` lines to paste into the
+  `feature/ska → main` pull request, which you open yourself. When GitHub
+  closes the issues, the cards leave. Planning shows the same **Integrated**
+  badge;
+- the merge action on an integration-branch pull request also comments on each
+  linked issue: "Merged into `feature/ska` in #N; stays open until
+  `feature/ska` reaches `main`.";
+- a blocker counts as done for a dependent that targets the same integration
+  branch once its pull request merged there, for approval, collection
+  admission, and collection structure alike, so a blocker outside the
+  collection is accepted when it is integrated;
+- a collection run on an integration branch closes out once every member
+  merged there: the close-out comment on the umbrella lists the members and
+  their pull requests, and the run ends **integrated** instead of waiting for
+  the umbrella to close.
+
+Planning and the Delivery board have a **Branch** filter (all branches, default
+branches only, or one integration branch), remembered in the browser like the
+repository filter. Keeping an integration branch current with the default
+branch stays manual.
+
 ### When an agent cannot finish
 
 Nothing watches a managed pane. An agent that asks a question there is asking
@@ -926,7 +998,7 @@ and exit rather than wait.
 The report is a small JSON file validated against
 `priv/codex/agent_stop_report.schema.json`: a `reason_code`, one plain sentence,
 a detail paragraph, optionally the exact `prerequisite` that is missing, and
-whether anything was committed. It is data. It records a reason and never causes
+whether any work was left in the worktree, committed or not. It is data. It records a reason and never causes
 a state transition by itself. Once you acknowledge the report or continue the
 retained work, its explanation and recovery buttons disappear from the live card.
 The report remains stored; a later stop produces a new actionable report.
@@ -1256,9 +1328,9 @@ memory.
 
 To onboard another public or private repository:
 
-1. commit a `.ptc-manager.yml` contract to that repository whose bootstrap
-   command prepares it, and an `AGENTS.md` describing its own conventions; add
-   broker verification only if PtcManager will publish for the agent;
+1. commit an `AGENTS.md` describing the repository's own conventions, and a
+   `.ptc-manager.yml` contract only if PtcManager will verify and publish for
+   the agent or deploy the repository;
 2. create the four `ptc:` labels on GitHub. PtcManager never creates a label, and
    `gh` fails against one that does not exist, so a missing label makes the agent
    step that writes it fail:
@@ -1278,18 +1350,24 @@ To onboard another public or private repository:
    The first three are what **Prepare issue** and **Review issue** leave on an
    issue; the fourth is how an implementation agent marks its own pull request as
    having left work behind. Any triage label configured under **Your triage
-   labels** has to exist on GitHub for the same reason. Configuration health
-   names whichever are still missing, so this can be done after registering the
-   repository and checked before enabling it;
+   labels** has to exist on GitHub for the same reason. The repository's
+   health checks name whichever are still missing, so this can be done after
+   registering the repository and checked before enabling it;
 3. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
-   GitHub credentials, derives `/srv/<repository-name>` as the checkout path,
-   and creates the repository disabled;
+   GitHub credentials, prefills GitHub's default branch, derives
+   `/srv/<owner>/<name>` as the checkout path, and creates the repository
+   disabled. Repositories onboarded before this keep their `/srv/<name>` path,
+   which is also in the service units and retained worktrees;
 4. press **Prepare checkouts** on Configuration, or deploy. Either clones any
-   configured checkout that does not exist yet, gives it to the worker identity,
-   and regenerates the drop-in that grants every configured checkout to both
-   services; the button does it without building a release;
-5. verify checkout, GitHub, and gate health, then review or copy the desired
+   configured checkout that does not exist yet as the worker identity, whose
+   `gh` credential helper reads private repositories, and regenerates the
+   drop-in that grants every configured checkout to both services; the button
+   does it without building a release. A clone that fails is named in the
+   unit's log and leaves nothing behind; the other checkouts and the drop-ins
+   are still prepared. A checkout cloned by hand as the worker is kept;
+5. set its workspace setup command on its Configuration page, verify checkout,
+   GitHub, setup, and contract health, then review or copy the desired
    definitions on **Automations**;
 6. enable the repository on **Configuration**, then enable only the definitions
    and schedules it needs and test a read-only action before approving
@@ -1335,10 +1413,10 @@ deployment therefore installs `deploy/ptc_manager-resources.conf` as a
 `ptc_manager.service` drop-in that raises the console's CPU and IO weight and
 protects 512 MB of its memory from reclaim.
 
-The Configuration page displays the derived checkout path. A repository can be
-removed there after explicit confirmation, but only when all managed jobs,
-actions, automation invocations, deployments, resource operations, and worktree
-lifecycles are terminal. Removal transactionally deletes PtcManager-owned
+The repository page under Configuration displays the derived checkout path. A
+repository can be removed there after explicit confirmation, but only when all
+managed jobs, actions, automation invocations, deployments, resource
+operations, and worktree lifecycles are terminal. Removal transactionally deletes PtcManager-owned
 configuration and synchronized database records. It never changes the GitHub
 repository or deletes server checkouts, worktrees, branches, pull requests, or
 issues. Existing configured repository paths are preserved during upgrades.
@@ -2030,7 +2108,7 @@ The verifier runs each fixed Git command with an empty environment, a wall-clock
 timeout, a Linux address-space limit, and preflight limits for commits, changed
 paths, individual blobs, total blob bytes, and generated diff bytes. A result
 outside those limits remains pending for maintainer review; it never becomes PR
-eligible automatically. Repository bootstrap and pre-publication commands use
+eligible automatically. Workspace setup and pre-publication commands use
 the same empty credential environment and nested OS timeouts; configure their
 tool search path with `PTC_PRE_PUBLICATION_PATH` when Elixir, Node, or another
 required tool is not installed under `/usr/local/bin`, `/usr/bin`, or `/bin`.

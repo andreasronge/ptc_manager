@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+# Runs a repository's workspace setup command as the worker in one managed
+# worktree. The command is a maintainer's repository setting, not repository
+# content. An optional environment file carries the repository's agent
+# variables, since sudo passes no environment.
+
 worktree_root=/srv/ptc_manager-worktrees
 
 fail() {
@@ -8,19 +13,13 @@ fail() {
   exit 2
 }
 
-[ "$#" -eq 2 ] || fail "expected WORKTREE and SCRIPT"
+[ "$#" -eq 2 ] || [ "$#" -eq 3 ] || fail "expected WORKTREE COMMAND [ENVIRONMENT_FILE]"
 
 worktree=$1
-script=$2
+command=$2
 
-case "$script" in
-  ""|/*|../*|*/../*|*/..)
-    fail "script must be a contained relative path"
-    ;;
-esac
-
+[ -n "$command" ] || fail "command must not be empty"
 [ ! -L "$worktree" ] || fail "worktree must not be a symlink"
-[ ! -L "$worktree/$script" ] || fail "script must not be a symlink"
 
 root_real=$(/usr/bin/realpath -e -- "$worktree_root") || fail "worktree root is unavailable"
 worktree_real=$(/usr/bin/realpath -e -- "$worktree") || fail "worktree is unavailable"
@@ -30,15 +29,14 @@ case "$worktree_real" in
   *) fail "worktree is outside the managed root" ;;
 esac
 
-script_real=$(/usr/bin/realpath -e -- "$worktree_real/$script") || fail "script is unavailable"
-
-case "$script_real" in
-  "$worktree_real"/*) ;;
-  *) fail "script is outside the worktree" ;;
-esac
-
-[ -f "$script_real" ] || fail "script is not a regular file"
-[ -x "$script_real" ] || fail "script is not executable"
+if [ "$#" -eq 3 ]; then
+  environment_file=$3
+  [ ! -L "$environment_file" ] || fail "environment file must not be a symlink"
+  [ -f "$environment_file" ] || fail "environment file is not a regular file"
+  set -a
+  . "$environment_file"
+  set +a
+fi
 
 cd "$worktree_real"
-exec "$script_real" </dev/null
+exec /bin/sh -c "$command" </dev/null

@@ -741,7 +741,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
 
     github_instruction =
       if job.publication_source == "agent" do
-        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request. Do not merge."
+        "Read the issue, its comments, linked issues, and relevant pull requests as needed. Push this branch and create a pull request against #{job.base_branch}. Do not merge."
       else
         "Read the issue, its comments, linked issues, and relevant pull requests as needed. Commit the result locally; PtcManager will publish it. Put the retrospective in the final commit message between a line PTC-AGENT-RETROSPECTIVE-BEGIN and a line PTC-AGENT-RETROSPECTIVE-END. Do not push, create a pull request, or merge."
       end
@@ -751,13 +751,13 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       <context>
       Repository: #{repository.github_owner}/#{repository.github_name}
       Issue: ##{issue.number}
-      Branch: #{job.branch_name} → #{repository.default_branch}
+      Branch: #{job.branch_name} → #{job.base_branch}
       Workspace: PtcManager created and initialized this worktree; do not create, initialize, or garbage-collect worktrees.
       #{review_instructions(job, required_reviews)}
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       Session: nobody is watching this session. No question you ask here will be answered, and waiting for input only stalls the work until PtcManager times it out.
-      If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{StopReport.path_for(job)} matching the schema at #{StopReport.schema_path_for(job)}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait.
+      If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{StopReport.path_for(job)} matching the schema at #{StopReport.schema_path_for(job)}, then stop. Set progress to partial if you left any work in the worktree, committed or not; use none only when you left no work. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait.
       </context>
       <issue_data>
       Number: #{issue.number}
@@ -768,24 +768,23 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       """
 
     Automations.compose_prompt(job.prompt_instructions, context) <>
-      continuation_instructions(job, repository)
+      continuation_instructions(job)
   end
 
   defp continuation_instructions(
-         %{review_generation: generation, review_resume_mode: "implementation"} = job,
-         repository
+         %{review_generation: generation, review_resume_mode: "implementation"} = job
        )
        when generation > 0 do
     refresh =
       """
 
-      Retained-worktree refresh: before validation, fetch the repository remote and integrate the current origin/#{repository.default_branch} into this branch while preserving all retained commits and uncommitted changes. Do not reset, discard, or start over. If integration conflicts cannot be resolved safely, write the stop report and stop. If dependency definitions or locks changed, refresh and compile dependencies before running the required gates.
+      Retained-worktree refresh: before validation, fetch the repository remote and integrate the current origin/#{job.base_branch} into this branch while preserving all retained commits and uncommitted changes. Do not reset, discard, or start over. If integration conflicts cannot be resolved safely, write the stop report and stop. If dependency definitions or locks changed, refresh and compile dependencies before running the required gates.
       """
 
     refresh <> maintainer_continuation_instructions(job)
   end
 
-  defp continuation_instructions(job, _repository), do: maintainer_continuation_instructions(job)
+  defp continuation_instructions(job), do: maintainer_continuation_instructions(job)
 
   defp maintainer_continuation_instructions(job) do
     case Map.get(job, :review_continuation_instructions) do

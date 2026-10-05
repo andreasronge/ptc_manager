@@ -33,6 +33,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      |> assign(:page_title, "Delivery board")
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:selected_repository, nil)
+     |> assign(:selected_branch, nil)
+     |> assign(:branches, [])
      |> assign(:repositories, Operations.list_repositories())
      |> assign(:now, DateTime.utc_now())
      |> assign(:lane_definitions, @lane_definitions)
@@ -58,6 +60,8 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
      socket
      |> assign(:repositories, repositories)
      |> assign(:selected_repository, selected)
+     |> assign(:selected_branch, PtcManagerWeb.BranchFilter.from_params(params))
+     |> assign(:branches, PtcManagerWeb.BranchFilter.branches(repositories))
      |> load_board()}
   end
 
@@ -753,6 +757,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
     items =
       Operations.delivery_board_items()
       |> filter_repository(socket.assigns.selected_repository)
+      |> PtcManagerWeb.BranchFilter.apply(
+        socket.assigns.selected_branch,
+        &{&1.base, &1.repository.default_branch}
+      )
       |> Enum.map(fn item ->
         run =
           cond do
@@ -800,6 +808,31 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   end
 
   def lane_title(key), do: DeliveryLane.label(key)
+
+  @doc "Integrated items grouped by repository and integration branch."
+  def integrated_groups(lanes) do
+    lanes
+    |> Map.get(:integrated, [])
+    |> Enum.group_by(&{&1.repository.id, &1.publication.base_branch})
+    |> Enum.map(fn {{_repository_id, branch}, [first | _] = items} ->
+      %{
+        id: String.replace("#{first.repository.id}-#{branch}", ~r/[^A-Za-z0-9_-]/, "-"),
+        repository: first.repository,
+        branch: branch,
+        items: Enum.sort_by(items, & &1.issue.number)
+      }
+    end)
+    |> Enum.sort_by(&{&1.repository.github_name, &1.branch})
+  end
+
+  @doc "One `Closes #N` line per open issue, for the pull request into the default branch."
+  def closes_lines(items) do
+    items
+    |> Enum.flat_map(fn item -> Enum.map(item.linked_issues, & &1.number) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map_join("\n", &"Closes ##{&1}")
+  end
 
   defp job_state(%{active_job: %{state: state}}), do: state
   defp job_state(_item), do: nil

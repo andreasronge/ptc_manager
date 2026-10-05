@@ -25,6 +25,7 @@ defmodule PtcManager.ExternalPrSessionsTest do
     publication =
       %PrPublication{}
       |> PrPublication.changeset(%{
+        base_branch: "main",
         repository_id: repository.id,
         state: "published",
         idempotency_key: String.duplicate("a", 64),

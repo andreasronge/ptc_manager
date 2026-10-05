@@ -45,7 +45,9 @@ defmodule PtcManager.Dispatch do
   end
 
   defp dispatch_job(job, github, source_updater, adapter, worker_key, lease_ms, capacity, clock) do
-    with {:ok, source} <- Gateway.call(source_updater, :refresh, [job.repository]),
+    # The worktree starts from the job's stored base. Fetching it is also the
+    # check that an integration branch still exists before work starts.
+    with {:ok, source} <- refresh_base(source_updater, job),
          {:ok, remote} <- Gateway.call(github, :get_issue, [job.repository, job.issue.number]),
          {:ok, canonical} <- normalize_remote(remote, job.repository),
          lease_now = Clock.utc_now(clock),
@@ -249,6 +251,33 @@ defmodule PtcManager.Dispatch do
        do: report
 
   defp workspace_setup_report(_result), do: nil
+
+  defp refresh_base(source_updater, job) do
+    case Gateway.call(source_updater, :refresh, [job.repository, [branch: job.base_branch]]) do
+      {:ok, source} ->
+        {:ok, source}
+
+      {:error, _reason} = error when job.base_branch == job.repository.default_branch ->
+        error
+
+      {:error, _reason} = error ->
+        missing_integration_branch(job, error)
+    end
+  end
+
+  # A fetch can fail for many passing reasons; only GitHub saying the branch is
+  # gone ends the job, so a deleted integration branch cannot hold the queue.
+  defp missing_integration_branch(job, error) do
+    case Operations.github_branch_exists(job.repository, job.base_branch) do
+      {:error, :branch_not_found} ->
+        # A job that left the queue meanwhile needs nothing more here.
+        _ = Operations.cancel_queued_job_for_missing_base(job.id, job.base_branch)
+        {:error, {:base_branch_missing, job.base_branch}}
+
+      _present_or_unknown ->
+        error
+    end
+  end
 
   defp normalize_remote(remote, repository) do
     {:ok, IssueSnapshot.normalize!(remote, repository)}

@@ -1,9 +1,17 @@
 defmodule PtcManager.Repository.WorkspaceSetup do
-  @moduledoc "Runs one repository-owned setup script before an agent gets a writable worktree."
+  @moduledoc """
+  Runs a repository's configured setup command before an agent gets a writable
+  worktree.
 
+  The command and its timeout are repository settings, not repository content,
+  so a repository needs no checked-in script. It runs as the worker in the new
+  worktree with the repository's agent environment variables.
+  """
+
+  alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.CommandEnvironment
-  alias PtcManager.Operations.{AgentAction, Job}
-  alias PtcManager.Repository.{Contract, GitProbe}
+  alias PtcManager.Operations.{AgentAction, Job, Repository}
+  alias PtcManager.Repository.GitProbe
 
   @type report :: %{
           state: binary(),
@@ -36,11 +44,16 @@ defmodule PtcManager.Repository.WorkspaceSetup do
     result =
       with {:ok, branch, source_sha} <- workspace_identity(path, owner),
            :ok <- GitProbe.reclaimable(path, branch, source_sha),
-           {:ok, contract} <- Contract.for_workspace(path, source_sha),
-           {:ok, script} <- Contract.bootstrap_script(contract),
-           :ok <- GitProbe.tracked_executable(path, source_sha, script),
+           {:ok, setup} <- configured_setup(owner, opts),
+           script = setup.command,
            execution <-
-             run_setup(runner, path, script, contract.bootstrap_timeout_minutes * 60_000, owner),
+             runner.run(
+               path,
+               script,
+               setup.timeout_minutes * 60_000,
+               setup.environment,
+               setup_artifact(owner)
+             ),
            {:ok, output, truncated} <- successful_execution(execution, script, source_sha),
            :ok <- GitProbe.reclaimable(path, branch, source_sha) do
         {:ok, script, source_sha, 0, output, truncated}
@@ -91,10 +104,28 @@ defmodule PtcManager.Repository.WorkspaceSetup do
     end
   end
 
-  defp run_setup(runner, path, script, timeout, owner) do
-    if function_exported?(runner, :run, 4),
-      do: runner.run(path, script, timeout, setup_artifact(owner)),
-      else: runner.run(path, script, timeout)
+  # Tests pass the setup directly; production reads the repository's setting.
+  defp configured_setup(owner, opts) do
+    case Keyword.fetch(opts, :setup) do
+      {:ok, setup} -> {:ok, Map.put_new(setup, :environment, [])}
+      :error -> repository_setup(owner.repository_id)
+    end
+  end
+
+  defp repository_setup(repository_id) do
+    case PtcManager.Repo.get(Repository, repository_id) do
+      %Repository{workspace_setup_command: command, workspace_setup_timeout_minutes: timeout}
+      when is_binary(command) and is_integer(timeout) ->
+        {:ok,
+         %{
+           command: command,
+           timeout_minutes: timeout,
+           environment: AgentEnvironmentVariables.list(repository_id)
+         }}
+
+      _unconfigured ->
+        {:error, :workspace_setup_not_configured}
+    end
   end
 
   defp setup_artifact(owner) do
@@ -222,57 +253,66 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
     @output_limit 65_536
 
-    def run(path, script, timeout_ms), do: run(path, script, timeout_ms, nil)
-
-    def run(path, script, timeout_ms, artifact_directory) do
-      absolute_script = Path.join(path, script)
+    def run(path, command, timeout_ms, variables \\ [], artifact_directory \\ nil) do
       started = System.monotonic_time(:millisecond)
+      user = Application.get_env(:ptc_manager, :herdr_run_as_user)
 
-      {command, args} =
-        command(
-          path,
-          script,
-          absolute_script,
-          Application.get_env(:ptc_manager, :herdr_run_as_user),
-          Application.get_env(
-            :ptc_manager,
-            :workspace_bootstrap_wrapper,
-            "/usr/local/bin/ptc-manager-worker-bootstrap"
-          )
+      wrapper =
+        Application.get_env(
+          :ptc_manager,
+          :workspace_bootstrap_wrapper,
+          "/usr/local/bin/ptc-manager-worker-bootstrap"
         )
 
-      port =
-        Port.open(
-          {:spawn_executable, command},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            :hide,
-            args: args,
-            cd: path,
-            env: normalize_environment(CommandEnvironment.scrub())
-          ]
-        )
+      # Across OS identities the variables reach the worker through a file only
+      # it and the coordinator can read; sudo passes no environment.
+      with {:ok, environment_file} <- environment_file(user, variables) do
+        try do
+          {executable, args} = command(path, command, user, wrapper, environment_file)
+          environment = if environment_file, do: [], else: variables
 
-      artifact = open_artifact(artifact_directory)
+          port =
+            Port.open(
+              {:spawn_executable, executable},
+              [
+                :binary,
+                :exit_status,
+                :stderr_to_stdout,
+                :hide,
+                args: args,
+                cd: path,
+                env: normalize_environment(CommandEnvironment.scrub(), environment)
+              ]
+            )
 
-      result =
-        receive_result(
-          port,
-          "",
-          false,
-          started,
-          started + timeout_ms,
-          script,
-          artifact
-        )
+          artifact = open_artifact(artifact_directory)
 
-      seal_artifact(artifact, result)
-      result
+          result =
+            receive_result(
+              port,
+              "",
+              false,
+              started,
+              started + timeout_ms,
+              command,
+              artifact
+            )
+
+          seal_artifact(artifact, result)
+          result
+        after
+          if environment_file, do: File.rm(environment_file)
+        end
+      end
     rescue
       error -> {:error, {:workspace_setup_unavailable, error.__struct__}}
     end
+
+    defp environment_file(user, variables)
+         when is_binary(user) and user != "" and variables != [],
+         do: PtcManager.ManagedOperationContext.write_setup_environment(variables)
+
+    defp environment_file(_user, _variables), do: {:ok, nil}
 
     defp receive_result(port, output, truncated, started, deadline, script, artifact) do
       remaining = max(deadline - System.monotonic_time(:millisecond), 0)
@@ -454,12 +494,14 @@ defmodule PtcManager.Repository.WorkspaceSetup do
     end
 
     @doc false
-    def command(path, script, _absolute_script, user, wrapper)
+    def command(path, command, user, wrapper, environment_file)
         when is_binary(user) and user != "" do
-      {"/usr/bin/sudo", ["-n", "-H", "-u", user, "--", wrapper, path, script]}
+      {"/usr/bin/sudo",
+       ["-n", "-H", "-u", user, "--", wrapper, path, command] ++ List.wrap(environment_file)}
     end
 
-    def command(_path, _script, absolute_script, _user, _wrapper), do: {absolute_script, []}
+    def command(_path, command, _user, _wrapper, _environment_file),
+      do: {"/bin/sh", ["-c", command]}
 
     defp append_bounded(output, data, truncated) do
       output = output <> String.replace_invalid(data)
@@ -471,11 +513,12 @@ defmodule PtcManager.Repository.WorkspaceSetup do
       end
     end
 
-    defp normalize_environment(environment) do
+    defp normalize_environment(environment, variables) do
       Enum.map(environment, fn
         {key, nil} -> {to_charlist(key), false}
         {key, value} -> {to_charlist(key), to_charlist(value)}
-      end)
+      end) ++
+        Enum.map(variables, &{to_charlist(&1.name), to_charlist(&1.value)})
     end
 
     defp close_port(port) do

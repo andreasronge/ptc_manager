@@ -347,6 +347,52 @@ defmodule PtcManager.ReviewsTest do
     assert replay.id == attempt.id
   end
 
+  test "observed retained work allows continuation despite no reported progress" do
+    for {state, dirty, commits, available} <- [
+          {"attention", true, 0, true},
+          {"attention", false, 1, true},
+          {"attention", false, 0, false},
+          {"removed", true, 1, false}
+        ] do
+      job = job!(2)
+
+      failed =
+        job
+        |> Job.changeset(%{
+          state: "failed",
+          stop_report: %{"reason_code" => "environment_broken", "progress" => "none"},
+          stop_reported_at: DateTime.utc_now()
+        })
+        |> Repo.update!()
+
+      worker = worker_fixture()
+
+      %PtcManager.Operations.WorktreeAllocation{}
+      |> PtcManager.Operations.WorktreeAllocation.changeset(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        state: state,
+        path: "/tmp/retained-review-#{job.id}",
+        last_used_at: DateTime.utc_now(),
+        retained_dirty: dirty,
+        retained_local_commits: commits
+      })
+      |> Repo.insert!()
+
+      assert Reviews.decision_available?(failed) == available
+
+      if available do
+        assert {:ok, continued} = Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+        assert continued.id == job.id
+        assert continued.review_generation == 1
+        assert continued.review_state == "resume_pending"
+      else
+        assert {:error, :review_decision_stale} =
+                 Reviews.decide(job.id, 0, "continue", %{}, "maintainer")
+      end
+    end
+  end
+
   test "partial stopped work respects unsafe, acknowledged, and superseded outcomes" do
     job = job!(2)
     report = %{"reason_code" => "unsafe_to_proceed", "progress" => "partial"}
@@ -380,6 +426,7 @@ defmodule PtcManager.ReviewsTest do
 
     %Job{}
     |> Job.changeset(%{
+      base_branch: "main",
       repository_id: job.repository_id,
       issue_id: job.issue_id,
       approval_id: job.approval_id,

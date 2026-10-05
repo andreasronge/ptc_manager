@@ -1,15 +1,16 @@
 defmodule PtcManager.Repository.Contract do
   @moduledoc """
-  Strict, versioned repository-owned setup, publication verification, and deployment.
+  Strict, versioned repository-owned publication verification and deployment.
 
-  Contract files are untrusted repository input. Unknown keys and malformed
+  Both are frozen from an exact commit, which is why they stay in the
+  repository; workspace setup is a repository setting in PtcManager. The file is
+  optional. Contract files are untrusted repository input. Unknown keys and malformed
   values fail closed so a typo cannot silently weaken a publication gate.
   """
 
   @filename ".ptc-manager.yml"
-  @top_keys MapSet.new(["version", "bootstrap", "verification", "deployment"])
-  @required_top_keys MapSet.new(["version", "bootstrap"])
-  @bootstrap_keys MapSet.new(["command", "timeout_minutes"])
+  @top_keys MapSet.new(["version", "verification", "deployment"])
+  @required_top_keys MapSet.new(["version"])
   @verification_keys MapSet.new(["before_publish", "timeout_minutes"])
   @deployment_keys MapSet.new(["command", "timeout_minutes"])
   @max_command_bytes 2_000
@@ -18,11 +19,7 @@ defmodule PtcManager.Repository.Contract do
   def max_command_bytes, do: @max_command_bytes
   def max_timeout_minutes, do: @max_timeout_minutes
 
-  @enforce_keys [
-    :version,
-    :bootstrap_command,
-    :bootstrap_timeout_minutes
-  ]
+  @enforce_keys [:version]
   defstruct @enforce_keys ++
               [
                 before_publish_command: nil,
@@ -33,8 +30,6 @@ defmodule PtcManager.Repository.Contract do
 
   @type t :: %__MODULE__{
           version: 1,
-          bootstrap_command: binary(),
-          bootstrap_timeout_minutes: pos_integer(),
           before_publish_command: binary() | nil,
           verification_timeout_minutes: pos_integer() | nil,
           deployment_command: binary() | nil,
@@ -55,35 +50,6 @@ defmodule PtcManager.Repository.Contract do
   end
 
   def for_result(%Job{}, _result), do: {:error, :worktree_allocation_missing}
-
-  @doc "Reads the repository contract from the exact commit used to create a worktree."
-  @spec for_workspace(binary(), binary()) :: {:ok, t()} | {:error, term()}
-  def for_workspace(path, source_sha) when is_binary(path) and is_binary(source_sha) do
-    with {:ok, content} <- GitProbe.repository_contract(path, source_sha),
-         {:ok, contract} <- parse(content) do
-      {:ok, contract}
-    end
-  end
-
-  @doc "Returns the bootstrap entrypoint as one contained relative executable path."
-  @spec bootstrap_script(t()) :: {:ok, binary()} | {:error, term()}
-  def bootstrap_script(%__MODULE__{bootstrap_command: command}) when is_binary(command) do
-    case contained_script(command, :bootstrap) do
-      {:ok, script} ->
-        {:ok, script}
-
-      {:error, {:contract_script_must_be_one_path, :bootstrap}} ->
-        {:error, :workspace_setup_must_be_one_script}
-
-      {:error, {:contract_script_must_be_relative, :bootstrap}} ->
-        {:error, :workspace_setup_script_must_be_relative}
-
-      {:error, {:contract_script_escapes_repository, :bootstrap}} ->
-        {:error, :workspace_setup_script_escapes_worktree}
-    end
-  end
-
-  def bootstrap_script(_contract), do: {:error, :workspace_setup_script_missing}
 
   @doc "Returns the optional deployment entrypoint as one contained relative executable path."
   @spec deployment_script(t()) :: {:ok, binary()} | {:error, term()}
@@ -119,13 +85,16 @@ defmodule PtcManager.Repository.Contract do
       else: {:error, :repository_publication_verification_missing}
   end
 
-  @doc "Stable digest for the publication-relevant contract values."
-  @spec publication_digest(t()) :: binary()
-  def publication_digest(%__MODULE__{} = contract) do
+  @doc """
+  Stable digest for what the publication gate runs: the repository's workspace
+  setup, frozen when the result is verified, and the contract's verification.
+  """
+  @spec publication_digest(t(), %{command: binary(), timeout_minutes: pos_integer()}) :: binary()
+  def publication_digest(%__MODULE__{} = contract, %{command: command, timeout_minutes: timeout}) do
     [
       Integer.to_string(contract.version),
-      contract.bootstrap_command,
-      Integer.to_string(contract.bootstrap_timeout_minutes),
+      command,
+      Integer.to_string(timeout),
       contract.before_publish_command,
       Integer.to_string(contract.verification_timeout_minutes)
     ]
@@ -137,21 +106,21 @@ defmodule PtcManager.Repository.Contract do
   @doc "Recomputes the digest from the immutable gate fields frozen on a job."
   @spec frozen_publication_digest(struct()) :: {:ok, binary()} | {:error, term()}
   def frozen_publication_digest(%Job{} = job) do
-    with {:ok, bootstrap_command} <- command(job.pre_publication_bootstrap_command, :bootstrap),
-         {:ok, bootstrap_timeout} <-
-           timeout_ms(job.pre_publication_bootstrap_timeout_ms, :bootstrap),
+    with {:ok, setup_command} <- command(job.pre_publication_bootstrap_command, :bootstrap),
+         {:ok, setup_timeout} <- timeout_ms(job.pre_publication_bootstrap_timeout_ms, :bootstrap),
          {:ok, before_publish_command} <-
            command(job.pre_publication_command, :before_publish),
          {:ok, verification_timeout} <-
            timeout_ms(job.pre_publication_timeout_ms, :verification) do
       {:ok,
-       publication_digest(%__MODULE__{
-         version: 1,
-         bootstrap_command: bootstrap_command,
-         bootstrap_timeout_minutes: bootstrap_timeout,
-         before_publish_command: before_publish_command,
-         verification_timeout_minutes: verification_timeout
-       })}
+       publication_digest(
+         %__MODULE__{
+           version: 1,
+           before_publish_command: before_publish_command,
+           verification_timeout_minutes: verification_timeout
+         },
+         %{command: setup_command, timeout_minutes: setup_timeout}
+       )}
     end
   end
 
@@ -185,10 +154,6 @@ defmodule PtcManager.Repository.Contract do
     with {:ok, decoded} <- decode(content),
          :ok <- allowed_keys(decoded, @top_keys, @required_top_keys, :contract),
          1 <- decoded["version"],
-         {:ok, bootstrap} <- mapping(decoded["bootstrap"], :bootstrap),
-         :ok <- exact_keys(bootstrap, @bootstrap_keys, :bootstrap),
-         {:ok, bootstrap_command} <- command(bootstrap["command"], :bootstrap),
-         {:ok, bootstrap_timeout} <- timeout(bootstrap["timeout_minutes"], :bootstrap),
          {:ok, before_publish_command, verification_timeout} <-
            optional_verification(decoded["verification"]),
          {:ok, deployment_command, deployment_timeout} <-
@@ -196,8 +161,6 @@ defmodule PtcManager.Repository.Contract do
       {:ok,
        %__MODULE__{
          version: 1,
-         bootstrap_command: bootstrap_command,
-         bootstrap_timeout_minutes: bootstrap_timeout,
          before_publish_command: before_publish_command,
          verification_timeout_minutes: verification_timeout,
          deployment_command: deployment_command,

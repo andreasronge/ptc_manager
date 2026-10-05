@@ -95,7 +95,12 @@
     <section aria-labelledby="issue-inbox-title" class="min-w-0">
       <div class="mb-4 flex items-center justify-between">
         <h2 id="issue-inbox-title" class="text-lg font-semibold">Issue inbox</h2>
-        <span class="text-xs text-slate-500">Grouped by what you can do next</span>
+        <span class="flex items-center gap-3 text-xs text-slate-500">
+          <PtcManagerWeb.BranchFilter.branch_selector
+            branches={@branches}
+            selected={@selected_branch}
+          /> Grouped by what you can do next
+        </span>
       </div>
 
       <div id="issue-inbox" class="space-y-5">
@@ -282,12 +287,24 @@
                         </button>
                       </div>
                     <% else %>
+                      <p
+                        :if={item.integrated_run}
+                        id={"collection-integrated-#{item.issue.id}"}
+                        class="w-full text-xs text-violet-200"
+                      >
+                        Integrated into <code>{item.integrated_run.base_branch}</code>: every member merged there, and the issues stay open until it reaches <code>{item.issue.repository.default_branch}</code>.
+                      </p>
                       <form
                         id={"collection-run-form-#{item.issue.id}"}
                         phx-submit="start-collection-run"
                         class="flex flex-wrap items-end gap-3"
                       >
                         <input type="hidden" name="issue-id" value={item.issue.id} />
+                        <.approval_route
+                          item={item}
+                          route={issue_route(item)}
+                          prefix="collection"
+                        />
                         <label class="flex items-center gap-2 text-xs font-medium text-slate-400">
                           <input
                             type="checkbox"
@@ -379,10 +396,11 @@
                           </option>
                         </select>
                       </label>
+                      <.approval_route item={item} route={issue_route(item)} />
                       <button
                         id={"approve-issue-#{item.issue.id}"}
                         type="submit"
-                        disabled={!approvable?(item)}
+                        disabled={!approvable?(item) || route_conflict?(item)}
                         class="rounded-xl bg-teal-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
                       >
                         Approve and start
@@ -392,7 +410,7 @@
                         type="submit"
                         name="direct"
                         value="true"
-                        disabled={!startable?(item)}
+                        disabled={!startable?(item) || route_conflict?(item)}
                         title="Start implementation without a preparation round. Every other deterministic check still applies."
                         class="rounded-xl border border-teal-400/30 px-4 py-2.5 text-sm font-semibold text-teal-200 transition hover:bg-teal-400/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500"
                       >
@@ -617,6 +635,24 @@
                     class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-xs font-medium text-slate-400"
                   >
                     {job_review_label(item.active_job, item.issue.repository)}
+                  </span>
+                  <span
+                    :if={
+                      item.active_job &&
+                        item.active_job.base_branch != item.issue.repository.default_branch
+                    }
+                    id={"job-base-#{item.active_job.id}"}
+                    class="rounded-xl border border-teal-400/25 bg-teal-400/[0.07] px-3 py-2.5 font-mono text-xs font-semibold text-teal-200"
+                  >
+                    → {item.active_job.base_branch}
+                  </span>
+                  <span
+                    :if={base_mismatch(item)}
+                    id={"job-base-mismatch-#{item.active_job.id}"}
+                    class="self-center text-xs text-amber-200"
+                    title="A label changed after approval. The job keeps the base it was approved with."
+                  >
+                    Labels now point to {base_mismatch(item)}; this job keeps {item.active_job.base_branch}.
                   </span>
                   <button
                     :if={

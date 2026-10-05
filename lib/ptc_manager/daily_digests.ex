@@ -83,11 +83,15 @@ defmodule PtcManager.DailyDigests do
                 })
                 |> Repo.insert!()
 
-              {:ok, action_attrs} =
-                Catalog.build("daily_digest", %{repository: repository, digest: digest})
+              # Read inside the transaction, so the prompt names the branch that
+              # is configured when the action is queued.
+              current = Repo.get!(Repository, repository.id)
 
               {:ok, action_attrs} =
-                PtcManager.Automations.snapshot_attrs(repository, "daily_digest", action_attrs)
+                Catalog.build("daily_digest", %{repository: current, digest: digest})
+
+              {:ok, action_attrs} =
+                PtcManager.Automations.snapshot_attrs(current, "daily_digest", action_attrs)
 
               now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 

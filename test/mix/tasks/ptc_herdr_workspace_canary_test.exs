@@ -74,9 +74,6 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanaryTest do
       Path.join(repository, ".ptc-manager.yml"),
       """
       version: 1
-      bootstrap:
-        command: ./scripts/ptc/setup-worktree
-        timeout_minutes: 1
       verification:
         before_publish: ./scripts/ptc/setup-worktree
         timeout_minutes: 1
@@ -106,7 +103,9 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanaryTest do
           "--repository",
           repository,
           "--session",
-          "test-canary"
+          "test-canary",
+          "--setup",
+          "./scripts/ptc/setup-worktree"
         ])
       end)
 

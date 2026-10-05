@@ -5,14 +5,15 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
 
   @moduledoc """
   Creates a disposable worktree through the configured local Herdr session,
-  runs the exact checked-in repository setup script, prints phase timings, and
-  removes the worktree and temporary branch. It never starts an AI agent.
+  runs a workspace setup command in it, prints phase timings, and removes the
+  worktree and temporary branch. It never starts an AI agent.
 
       mix ptc.herdr_workspace_canary --repository /absolute/path/to/repository
-      mix ptc.herdr_workspace_canary --session canary --repository "$PWD"
+      mix ptc.herdr_workspace_canary --session canary --repository "$PWD" --setup "deno install"
 
   Use `--base branch-or-sha` to select a source other than the repository's
-  currently checked-out branch.
+  currently checked-out branch. `--setup` defaults to `./scripts/ptc/bootstrap`
+  and `--setup-timeout` to 30 minutes, the setting existing repositories have.
   """
 
   alias PtcManager.Dispatch.HerdrAdapter
@@ -23,7 +24,15 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
   @impl Mix.Task
   def run(args) do
     {options, positional, invalid} =
-      OptionParser.parse(args, strict: [repository: :string, base: :string, session: :string])
+      OptionParser.parse(args,
+        strict: [
+          repository: :string,
+          base: :string,
+          session: :string,
+          setup: :string,
+          setup_timeout: :integer
+        ]
+      )
 
     if positional != [] or invalid != [], do: usage_error()
 
@@ -72,7 +81,12 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
 
         with {:ok, workspace, _pane} <- HerdrAdapter.decode_worktree(output) do
           try do
-            run_setup!(worktree, branch, id, creation_ms)
+            setup = %{
+              command: Keyword.get(options, :setup, "./scripts/ptc/bootstrap"),
+              timeout_minutes: Keyword.get(options, :setup_timeout, 30)
+            }
+
+            run_setup!(worktree, branch, id, creation_ms, setup)
           after
             cleanup!(command, workspace, repository, branch)
           end
@@ -86,15 +100,15 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
     end
   end
 
-  defp run_setup!(worktree, branch, id, creation_ms) do
+  defp run_setup!(worktree, branch, id, creation_ms, setup) do
     job = %Job{id: id, issue_id: 0, branch_name: branch}
 
-    case WorkspaceSetup.run(worktree, job) do
+    case WorkspaceSetup.run(worktree, job, setup: setup) do
       {:ok, report} ->
         Mix.shell().info("Local Herdr workspace canary passed.")
         Mix.shell().info("Worktree creation: #{format_ms(creation_ms)}")
         Mix.shell().info("Repository setup: #{format_ms(report.duration_ms)}")
-        Mix.shell().info("Script: #{report.script}")
+        Mix.shell().info("Command: #{report.script}")
         Mix.shell().info("Source: #{report.source_sha}")
 
         if report.output != "" do

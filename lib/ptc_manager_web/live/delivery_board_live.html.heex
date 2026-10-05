@@ -16,6 +16,10 @@
         </p>
       </div>
       <div class="flex items-center gap-3">
+        <PtcManagerWeb.BranchFilter.branch_selector
+          branches={@branches}
+          selected={@selected_branch}
+        />
         <div class="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
           <span class="text-2xl font-semibold">{@item_count}</span><span class="ml-2 text-slate-500">active deliveries</span>
         </div>
@@ -202,9 +206,16 @@
                   Missing: <span class="font-mono">{report["prerequisite"]}</span>
                 </p>
                 <p class="mt-1 text-[11px] leading-4 text-slate-500">
-                  {if report["progress"] == "partial",
-                    do: "It had committed something; its worktree is kept on Operations.",
-                    else: "It committed nothing, so a fresh attempt loses no work."}
+                  {cond do
+                    PtcManager.Operations.StopReport.retained_work?(item.active_job) ->
+                      "Retry starts a fresh attempt and discards the work observed in the retained worktree. Continue existing work to keep it."
+
+                    report["progress"] == "partial" ->
+                      "It left work in the worktree, committed or not; its worktree is kept on Operations."
+
+                    true ->
+                      "It reported leaving no work in the worktree. Retry starts a fresh attempt."
+                  end}
                 </p>
               </div>
             </div>
@@ -468,4 +479,68 @@
       </div>
     </section>
   </div>
+
+  <section
+    :if={integrated_groups(@lanes) != []}
+    id="lane-integrated"
+    aria-labelledby="lane-title-integrated"
+    class="mt-6"
+  >
+    <div class="mb-3 flex items-center gap-2 px-1">
+      <span class="size-2 rounded-full bg-violet-400"></span>
+      <h2 id="lane-title-integrated" class="text-sm font-semibold">
+        {lane_title(:integrated)}
+      </h2>
+      <p class="text-[11px] text-slate-500">
+        Merged into an integration branch · the issues stay open until it reaches the default branch
+      </p>
+    </div>
+
+    <div class="grid gap-4 lg:grid-cols-2">
+      <article
+        :for={group <- integrated_groups(@lanes)}
+        id={"integrated-#{group.id}"}
+        class="rounded-2xl border border-violet-400/20 bg-slate-900 p-4"
+      >
+        <h3 class="text-sm font-semibold text-slate-100">
+          {group.repository.github_name} → <code class="text-violet-200">{group.branch}</code>
+          <span class="ml-2 text-xs font-normal text-slate-500">
+            {length(group.items)} merged
+          </span>
+        </h3>
+        <ul class="mt-3 space-y-2">
+          <li
+            :for={item <- group.items}
+            id={card_id(item)}
+            class="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-white/[0.035] px-3 py-2 text-sm"
+          >
+            <span class="min-w-0 text-slate-200">
+              <span class="text-slate-500">#{item.issue.number}</span> {item.issue.title}
+            </span>
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              class="shrink-0 text-xs text-slate-400 hover:text-white"
+            >
+              PR #{item.number} ↗
+            </a>
+          </li>
+        </ul>
+        <details id={"integrated-closes-#{group.id}"} class="mt-3">
+          <summary class="cursor-pointer text-xs font-semibold text-violet-200">
+            Closes lines for the {group.branch} → {group.repository.default_branch} pull request
+          </summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">
+            Open that pull request yourself and paste these lines into its description; GitHub closes the issues when it merges.
+          </p>
+          <textarea
+            readonly
+            rows={length(group.items)}
+            class="mt-2 w-full rounded-lg border border-white/10 bg-slate-950 p-2 font-mono text-xs text-slate-200"
+          >{closes_lines(group.items)}</textarea>
+        </details>
+      </article>
+    </div>
+  </section>
 </Layouts.app>

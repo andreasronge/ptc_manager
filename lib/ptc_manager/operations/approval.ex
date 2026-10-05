@@ -23,6 +23,8 @@ defmodule PtcManager.Operations.Approval do
     field :source_digest, :string
     field :proposal_digest, :string
     field :approved_at, :utc_datetime_usec
+    field :base_branch, :string
+    field :base_override, :boolean, default: false
 
     belongs_to :proposal, PtcManager.Operations.Proposal
     has_one :job, PtcManager.Operations.Job
@@ -39,7 +41,9 @@ defmodule PtcManager.Operations.Approval do
       :source_updated_at,
       :source_digest,
       :proposal_digest,
-      :approved_at
+      :approved_at,
+      :base_branch,
+      :base_override
     ])
     |> validate_required([:decision, :actor, :source_updated_at, :source_digest, :approved_at])
     |> validate_inclusion(:decision, @decisions)

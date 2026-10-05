@@ -30,7 +30,10 @@ defmodule PtcManager.Operations.StopReport do
   coordinator.
   """
 
-  alias PtcManager.Operations.Job
+  import Ecto.Query
+
+  alias PtcManager.Repo
+  alias PtcManager.Operations.{Job, WorktreeAllocation}
 
   @reason_codes ~w(missing_prerequisite environment_broken ambiguous_requirement unsafe_to_proceed)
   @progress_values ~w(none partial)
@@ -195,9 +198,16 @@ defmodule PtcManager.Operations.StopReport do
   def primary_action("ambiguous_requirement"), do: :ask_on_issue
   def primary_action(_code), do: :none
 
-  @doc "True when the agent committed nothing, so a fresh attempt loses nothing."
-  def nothing_committed?(%{"progress" => "none"}), do: true
-  def nothing_committed?(_report), do: false
+  @doc "True when the retained allocation has observed uncommitted work or local commits."
+  def retained_work?(%Job{id: id}) do
+    Repo.exists?(
+      from allocation in WorktreeAllocation,
+        where:
+          allocation.job_id == ^id and allocation.state == "attention" and
+            is_nil(allocation.removed_at) and
+            (allocation.retained_dirty == true or allocation.retained_local_commits > 0)
+    )
+  end
 
   @doc "The maintainer-facing sentence for a card."
   def summary(%{"summary" => summary}) when is_binary(summary), do: summary

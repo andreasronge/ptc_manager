@@ -8,6 +8,12 @@ defmodule PtcManager.Operations.Repository do
     field :github_owner, :string
     field :github_name, :string
     field :default_branch, :string, default: "main"
+    field :github_default_branch, :string
+    field :integration_branches, :map, default: %{"mappings" => []}
+    field :github_branch_names, :map, default: %{"names" => []}
+    field :github_branches_checked_at, :utc_datetime_usec
+    field :workspace_setup_command, :string
+    field :workspace_setup_timeout_minutes, :integer
     field :enabled, :boolean, default: true
     field :auto_fix_issues, :boolean, default: false
     field :auto_fix_daily_limit, :integer, default: 5
@@ -33,12 +39,22 @@ defmodule PtcManager.Operations.Repository do
     timestamps(type: :utc_datetime_usec)
   end
 
+  @doc "Longest workspace setup command and timeout a repository may configure."
+  def max_workspace_setup_command_bytes, do: 2_000
+  def max_workspace_setup_timeout_minutes, do: 24 * 60
+
   def changeset(repository, attrs) do
     repository
     |> cast(attrs, [
       :github_owner,
       :github_name,
       :default_branch,
+      :github_default_branch,
+      :workspace_setup_command,
+      :workspace_setup_timeout_minutes,
+      :integration_branches,
+      :github_branch_names,
+      :github_branches_checked_at,
       :enabled,
       :auto_fix_issues,
       :auto_fix_daily_limit,
@@ -54,11 +70,18 @@ defmodule PtcManager.Operations.Repository do
     ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
+    |> validate_change(:default_branch, fn :default_branch, branch ->
+      if PtcManager.GitHub.Ref.safe?(branch),
+        do: [],
+        else: [default_branch: "is not a safe branch name"]
+    end)
     |> MaintainerLabels.validate()
+    |> PtcManager.Repository.IntegrationBranches.validate()
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,
       less_than_or_equal_to: 3
     )
+    |> validate_workspace_setup()
     |> validate_number(:auto_fix_daily_limit,
       greater_than_or_equal_to: 1,
       less_than_or_equal_to: 50
@@ -75,4 +98,27 @@ defmodule PtcManager.Operations.Repository do
 
   defp normalize_local_path(path) when is_binary(path) and path != "", do: Path.expand(path)
   defp normalize_local_path(path), do: path
+
+  # The command runs through /bin/sh -c in a fresh worktree, so it is one line;
+  # a command and its timeout are set together or not at all.
+  defp validate_workspace_setup(changeset) do
+    command = get_field(changeset, :workspace_setup_command)
+    timeout = get_field(changeset, :workspace_setup_timeout_minutes)
+
+    cond do
+      is_nil(command) and is_nil(timeout) ->
+        changeset
+
+      not is_binary(command) or String.trim(command) != command or command == "" or
+        byte_size(command) > max_workspace_setup_command_bytes() or
+          String.contains?(command, ["\n", "\r", <<0>>]) ->
+        add_error(changeset, :workspace_setup_command, "must be one non-blank line")
+
+      not is_integer(timeout) or timeout < 1 or timeout > max_workspace_setup_timeout_minutes() ->
+        add_error(changeset, :workspace_setup_timeout_minutes, "must be 1 to 1440 minutes")
+
+      true ->
+        changeset
+    end
+  end
 end

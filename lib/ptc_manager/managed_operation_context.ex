@@ -364,15 +364,34 @@ defmodule PtcManager.ManagedOperationContext do
   defp write_environment(context_path, variables) do
     path = environment_path(context_path)
 
-    body =
-      Enum.map_join(variables, "", fn variable ->
-        variable.name <> "=" <> shell_quote(variable.value) <> "\n"
-      end)
-
-    case write_context(path, body) do
+    case write_context(path, environment_body(variables)) do
       :ok -> {:ok, path}
       {:error, reason} -> {:error, {:environment_file_write_failed, reason}}
     end
+  end
+
+  @doc """
+  Writes a repository's agent environment variables for one workspace setup
+  run, in the directory the worker already reads pane environment files from.
+  The caller removes it when the run ends.
+  """
+  def write_setup_environment(variables, directory \\ context_directory()) do
+    id = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    path = Path.join(directory, "setup-#{id}.env")
+
+    with :ok <- File.mkdir_p(directory),
+         :ok <- File.chmod(directory, 0o2750),
+         :ok <- write_context(path, environment_body(variables)) do
+      {:ok, path}
+    else
+      {:error, reason} -> {:error, {:environment_file_write_failed, reason}}
+    end
+  end
+
+  defp environment_body(variables) do
+    Enum.map_join(variables, "", fn variable ->
+      variable.name <> "=" <> shell_quote(variable.value) <> "\n"
+    end)
   end
 
   defp remove_context_pair(path) do

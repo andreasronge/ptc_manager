@@ -288,6 +288,7 @@ defmodule PtcManager.ToolchainTest do
         {"node", "ptc-manager-node-", "node", "/bin/node"},
         {"pnpm", "ptc-manager-pnpm-", "pnpm", "/pnpm"},
         {"mise", "ptc-manager-mise-", "mise", "/mise"},
+        {"deno", "ptc-manager-deno-", "deno", "/deno"},
         {"erlang", "ptc-manager-gate-mise/data/installs/erlang/", "erl", "/bin/erl"},
         {"elixir", "ptc-manager-gate-mise/data/installs/elixir/", "elixir", "/bin/elixir"}
       ],

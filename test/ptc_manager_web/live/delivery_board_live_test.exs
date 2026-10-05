@@ -555,7 +555,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     card = "#lane-stuck #board-job-#{stopped.id}"
     assert has_element?(view, card, "Work stopped · Missing prerequisite")
     assert has_element?(view, card, "OPENROUTER_API_KEY is not set")
-    assert has_element?(view, card, "committed nothing")
+    assert has_element?(view, card, "reported leaving no work")
+    refute has_element?(view, "#resume-worktree-#{stopped.id}")
     # The technical branch error must not replace the agent's own explanation.
     refute has_element?(view, card, "The agent stopped before completing the task.")
 
@@ -571,14 +572,16 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 
-  test "a stopped job with a retained worktree offers Resume", %{conn: conn} do
+  test "a stopped job with observed dirty work offers Resume despite no reported progress", %{
+    conn: conn
+  } do
     failed =
       stop_job("Verify the retained branch", %{
         "reason_code" => "environment_broken",
         "summary" => "The test database was locked.",
         "detail" =>
           "Two commits are on the branch; the last test run could not open the database.",
-        "progress" => "partial"
+        "progress" => "none"
       })
 
     worker = worker_fixture(%{worker_key: "herdr:resume-#{System.unique_integer([:positive])}"})
@@ -589,6 +592,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
       worker_id: worker.id,
       job_id: failed.id,
       state: "attention",
+      retained_dirty: true,
+      retained_local_commits: 0,
       path: "/tmp/resume-board-worktree",
       last_used_at: now
     })
@@ -610,6 +615,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
     assert has_element?(view, "#resume-worktree-#{failed.id}")
+    assert has_element?(view, "#board-job-#{failed.id}", "discards the work observed")
 
     view |> element("#resume-worktree-#{failed.id}") |> render_click()
     assert render(view) =~ "Resuming on the retained worktree"
@@ -762,6 +768,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     # was ever published, so there is no pull request to orphan.
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: blocked.id,
       state: "blocked",
       idempotency_key: String.duplicate("8", 64),
@@ -802,6 +809,84 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     assert has_element?(view, "#board-job-#{claimed.id}")
     refute has_element?(view, "#abandon-job-#{claimed.id}")
+  end
+
+  describe "integration branches" do
+    setup do
+      {:ok, repository: mapped_repository_fixture()}
+    end
+
+    test "merged integration work waits in the Integrated lane with its Closes lines",
+         %{conn: conn, repository: repository} do
+      integrated =
+        for number <- [117, 118] do
+          issue =
+            issue_fixture(repository, %{number: number, github_labels: %{"names" => ["ska"]}})
+
+          merged_into!(issue)
+        end
+
+      main_issue = issue_fixture(repository, %{number: 200})
+      {:ok, main_job} = Operations.approve_issue_directly(main_issue.id, "andreas")
+
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+      group = "#integrated-#{repository.id}-feature-ska"
+      assert has_element?(view, group, "feature/ska")
+
+      for publication <- integrated do
+        assert has_element?(view, "#{group} #board-pr-#{publication.id}")
+      end
+
+      assert render(view) =~ "Closes #117\nCloses #118"
+      assert has_element?(view, "#board-job-#{main_job.id}")
+
+      # The branch filter shows one branch's work at a time.
+      {:ok, ska_only, _html} =
+        conn |> authenticated_conn() |> live(~p"/board?branch=feature/ska")
+
+      assert has_element?(ska_only, group)
+      refute has_element?(ska_only, "#board-job-#{main_job.id}")
+
+      {:ok, default_only, _html} =
+        conn |> authenticated_conn() |> live(~p"/board?branch=default")
+
+      refute has_element?(default_only, "#lane-integrated")
+      assert has_element?(default_only, "#board-job-#{main_job.id}")
+    end
+  end
+
+  defp merged_into!(issue) do
+    {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+    job = job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+    Repo.update_all(PtcManager.Automations.Invocation, set: [state: "succeeded"])
+    now = DateTime.utc_now()
+    sha = String.duplicate("a", 40)
+
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      job_id: job.id,
+      repository_id: job.repository_id,
+      base_branch: job.base_branch,
+      state: "published",
+      idempotency_key: :crypto.hash(:sha256, "pub-#{job.id}") |> Base.encode16(case: :lower),
+      fencing_token: job.fencing_token,
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+      base_sha: sha,
+      head_sha: sha,
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      pr_number: 900 + issue.number,
+      pr_url: "https://github.com/example/repo/pull/#{900 + issue.number}",
+      remote_head_sha: sha,
+      remote_base_sha: sha,
+      published_at: now,
+      pr_state: "merged",
+      pr_checked_at: now,
+      source: "agent",
+      title: issue.title
+    })
+    |> Repo.insert!()
   end
 
   defp stop_job(title, report) do
@@ -889,6 +974,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       state: "published",
       idempotency_key: String.duplicate(Integer.to_string(rem(job.id, 10)), 64),

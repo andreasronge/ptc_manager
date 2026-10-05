@@ -41,6 +41,33 @@ defmodule PtcManager.CollectionsTest do
     :ok
   end
 
+  defmodule CloseoutAdapter do
+    @behaviour PtcManager.MaintainerActions.Adapter
+
+    def run(_action) do
+      {:ok,
+       %{
+         "outcome" => Process.get(:closeout_outcome, "no-changes"),
+         "private_summary" => "Every member is merged into the integration branch.",
+         "why_it_matters" => "The collection is ready to reach the default branch.",
+         "scope" => "small",
+         "risk" => "low",
+         "technical_evidence" => "Both merged pull requests were read.",
+         "github_changes" => ["Commented on the parent"],
+         "evidence" => ["Read the merged pull requests"],
+         "created_issue_numbers" => [],
+         "suggestions" => [],
+         "decision_question" => "",
+         "decision_options" => []
+       }}
+    end
+  end
+
+  defmodule CloseoutSync do
+    def sync_action(action), do: {:ok, %{repository: action.repository}}
+    def sync_action(action, _result), do: {:ok, %{repository: action.repository}}
+  end
+
   # An umbrella with labelled members; `chain: true` blocks each member by the
   # previous one so only the first can start.
   defp collection_fixture(repository, numbers, opts \\ []) do
@@ -135,6 +162,7 @@ defmodule PtcManager.CollectionsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: Keyword.get(opts, :base_branch, "main"),
       job_id: job.id,
       repository_id: issue.repository_id,
       state: "published",
@@ -238,6 +266,56 @@ defmodule PtcManager.CollectionsTest do
   end
 
   describe "admission" do
+    test "a run on a mapped umbrella sends every member to its integration branch" do
+      repository = mapped_repository_fixture()
+
+      {umbrella, [first, _second]} = collection_fixture(repository, [1, 2], chain: true)
+
+      umbrella =
+        umbrella
+        |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+        |> Repo.update!()
+
+      run = start!(umbrella)
+      assert run.base_branch == "feature/ska"
+      refute run.base_override
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Job{base_branch: "feature/ska"} = job_for(first)
+
+      {:ok, _cancelled} = Collections.cancel(run.id, "andreas")
+      Repo.delete_all(Job)
+
+      instead = start!(Repo.reload!(umbrella), %{base: :default})
+      assert instead.base_branch == "main"
+      assert instead.base_override
+
+      # Every approval path follows the run, not the member's labels.
+      first |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]}) |> Repo.update!()
+
+      assert {:ok, %Job{base_branch: "main"}} =
+               Operations.approve_issue_directly(first.id, "andreas")
+    end
+
+    test "a run does not start on a base other than a member's existing work" do
+      repository = mapped_repository_fixture()
+
+      {umbrella, [first, _second]} = collection_fixture(repository, [1, 2])
+
+      # Approved before the umbrella was labelled, so it targets main.
+      {:ok, %Job{base_branch: "main"}} = Operations.approve_issue_directly(first.id, "andreas")
+
+      umbrella
+      |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+      |> Repo.update!()
+
+      assert {:error, {:member_work_on_another_branch, [1]}} =
+               Collections.start(umbrella.id, %{}, "andreas")
+
+      assert {:ok, %{base_branch: "main"}} =
+               Collections.start(umbrella.id, %{base: :default}, "andreas")
+    end
+
     test "admits only ready, unblocked members, once each, under the run's own approval" do
       repository = repository_fixture()
       {umbrella, [first, second]} = collection_fixture(repository, [1, 2], chain: true)
@@ -779,6 +857,62 @@ defmodule PtcManager.CollectionsTest do
       assert {:error, {:member_in_flight, 1}} = Collections.accept_changes(run.id, "andreas")
     end
 
+    test "accepting changes refuses a new member whose work targets another base" do
+      repository = mapped_repository_fixture()
+
+      {umbrella, _members} = collection_fixture(repository, [1, 2])
+
+      umbrella
+      |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+      |> Repo.update!()
+
+      run = start!(Repo.reload!(umbrella))
+      assert run.base_branch == "feature/ska"
+
+      # Approved on its own, before it joined the collection.
+      outsider = issue_fixture(repository, %{number: 3, workflow_label: "ptc:ready"})
+      {:ok, %Job{base_branch: "main"}} = Operations.approve_issue_directly(outsider.id, "andreas")
+
+      outsider
+      |> Ecto.Changeset.change(parent_issue_number: umbrella.number)
+      |> Repo.update!()
+
+      refresh_umbrella(umbrella, repository, [1, 2, 3], %{})
+      :ok = Collections.reconcile(repository.id)
+      assert %Run{pause_kind: "membership_changed"} = Repo.get!(Run, run.id)
+
+      assert {:error, {:member_work_on_another_branch, [3]}} =
+               Collections.accept_changes(run.id, "andreas")
+    end
+
+    test "a member's recoverable failed work on another base blocks a run on this one" do
+      repository = mapped_repository_fixture()
+
+      {umbrella, [first, _second]} = collection_fixture(repository, [1, 2])
+      {:ok, job} = Operations.approve_issue_directly(first.id, "andreas")
+
+      job
+      |> Job.changeset(%{
+        state: "failed",
+        stop_reported_at: DateTime.utc_now(),
+        stop_report: %{"reason_code" => "environment_broken"}
+      })
+      |> Repo.update!()
+
+      umbrella
+      |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+      |> Repo.update!()
+
+      # A retry would recover the work on main under a run on feature/ska.
+      assert {:error, {:member_work_on_another_branch, [1]}} =
+               Collections.start(umbrella.id, %{}, "andreas")
+
+      {:ok, _job} = Operations.acknowledge_job_stop(job.id, "andreas")
+
+      assert {:ok, %Run{base_branch: "feature/ska"}} =
+               Collections.start(umbrella.id, %{}, "andreas")
+    end
+
     test "issues a handoff created are adopted as members" do
       repository = repository_fixture()
       {umbrella, [first]} = collection_fixture(repository, [1])
@@ -866,6 +1000,77 @@ defmodule PtcManager.CollectionsTest do
 
       assert :ok = Collections.reconcile(repository.id)
       assert %Run{state: "completed"} = Repo.get!(Run, run.id)
+    end
+
+    test "a run on an integration branch ends integrated once every member merged there" do
+      repository = mapped_repository_fixture()
+
+      {umbrella, [first]} = collection_fixture(repository, [1])
+
+      umbrella =
+        umbrella
+        |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+        |> Repo.update!()
+
+      run = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+      job = job_for(first)
+      assert job.base_branch == "feature/ska"
+
+      # GitHub merges it into feature/ska and leaves the issue open.
+      open_publication!(first, job, pr_state: "merged", base_branch: "feature/ska")
+      job |> Repo.reload!() |> Job.changeset(%{state: "done"}) |> Repo.update!()
+
+      :ok = Collections.reconcile(repository.id)
+      [handoff] = collection_actions(repository)
+      finish_action(handoff, "no-changes")
+      assert :ok = Collections.reconcile(repository.id)
+
+      assert [_handoff, %AgentAction{action_key: "collection_closeout"} = closeout] =
+               collection_actions(repository)
+
+      assert closeout.prompt =~ "Members, all merged into feature/ska and still open"
+      assert closeout.prompt =~ "Do not offer to close the parent"
+
+      # Through the real result path: no-changes with the umbrella open is the
+      # expected answer for a collection that stays open on purpose.
+      Process.put(:closeout_outcome, "no-changes")
+
+      assert {:ok, %AgentAction{id: id, state: "done"}} =
+               PtcManager.MaintainerActions.run_once(adapter: CloseoutAdapter, sync: CloseoutSync)
+
+      assert id == closeout.id
+      assert :ok = Collections.reconcile(repository.id)
+
+      ended = Repo.get!(Run, run.id)
+      assert ended.state == "integrated"
+      assert ended.end_reason =~ "merged into feature/ska"
+      assert Repo.get!(Issue, first.id).state == "open"
+    end
+
+    test "a member merged into another branch does not deliver an integration run" do
+      repository = mapped_repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+
+      # Merged into an older branch before this run existed.
+      {:ok, job} = Operations.approve_issue_directly(first.id, "andreas")
+      job = job |> Job.changeset(%{base_branch: "feature/old"}) |> Repo.update!()
+      open_publication!(first, job, pr_state: "merged", base_branch: "feature/old")
+      job |> Repo.reload!() |> Job.changeset(%{state: "done"}) |> Repo.update!()
+
+      umbrella =
+        umbrella
+        |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+        |> Repo.update!()
+
+      run = start!(umbrella)
+      assert run.base_branch == "feature/ska"
+
+      :ok = Collections.reconcile(repository.id)
+      :ok = Collections.reconcile(repository.id)
+
+      refute Enum.any?(collection_actions(repository), &(&1.action_key == "collection_closeout"))
+      assert Repo.get!(Run, run.id).state == "active"
     end
 
     test "a close-out that created members closes out again once they are delivered" do

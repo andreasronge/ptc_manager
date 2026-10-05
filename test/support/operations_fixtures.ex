@@ -10,7 +10,9 @@ defmodule PtcManager.OperationsFixtures do
     defaults = %{
       github_owner: "owner-#{suffix}",
       github_name: "repo-#{suffix}",
-      default_branch: "main"
+      default_branch: "main",
+      workspace_setup_command: "./scripts/ptc/bootstrap",
+      workspace_setup_timeout_minutes: 10
     }
 
     {:ok, repository} =
@@ -63,6 +65,25 @@ defmodule PtcManager.OperationsFixtures do
     definition
     |> PtcManager.Automations.Definition.changeset(%{enabled: true})
     |> Repo.update!()
+  end
+
+  @doc """
+  A repository whose `label` routes to `branch`, with the test GitHub client
+  reporting that branch for the rest of the test.
+  """
+  def mapped_repository_fixture(label \\ "ska", branch \\ "feature/ska", attrs \\ %{}) do
+    previous = Application.get_env(:ptc_manager, :test_github_branches)
+    Application.put_env(:ptc_manager, :test_github_branches, ["main", branch])
+
+    ExUnit.Callbacks.on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ptc_manager, :test_github_branches, previous),
+        else: Application.delete_env(:ptc_manager, :test_github_branches)
+    end)
+
+    repository = repository_fixture(attrs)
+    {:ok, repository} = Operations.add_integration_branch(repository.id, label, branch, "andreas")
+    repository
   end
 
   def issue_fixture(repository, attrs \\ %{}) do

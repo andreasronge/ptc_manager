@@ -40,8 +40,6 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
 
     contract = %Contract{
       version: 1,
-      bootstrap_command: "./scripts/ptc/bootstrap",
-      bootstrap_timeout_minutes: 10,
       deployment_command: "./scripts/ptc/deploy",
       deployment_timeout_minutes: 20
     }
@@ -89,8 +87,6 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
 
     contract = %Contract{
       version: 1,
-      bootstrap_command: "./scripts/ptc/bootstrap",
-      bootstrap_timeout_minutes: 10,
       deployment_command: "./scripts/ptc/deploy",
       deployment_timeout_minutes: 20
     }
@@ -140,8 +136,6 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
 
     contract = %Contract{
       version: 1,
-      bootstrap_command: "./scripts/ptc/bootstrap",
-      bootstrap_timeout_minutes: 10,
       deployment_command: "./scripts/ptc/deploy",
       deployment_timeout_minutes: 20
     }

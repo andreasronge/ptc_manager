@@ -56,6 +56,36 @@ defmodule Mix.Tasks.PtcDeployTest do
     end
   end
 
+  # Deployment and the Prepare checkouts button share one implementation, so a
+  # private repository is cloned as the worker either way.
+  # The Prepare checkouts button starts the unit through sudo by one exact name.
+  test "the provisioning unit is installed under the name the console starts" do
+    script = File.read!(@remote_script)
+    sudoers = File.read!(@sudoers)
+    unit = "ptc-manager-provision-repository.service"
+
+    assert script =~ "/etc/systemd/system/#{unit}"
+    assert sudoers =~ "/bin/systemctl start --no-block #{unit}"
+
+    assert File.read!(Path.join(@project_root, "lib/ptc_manager/repository/provisioning.ex")) =~
+             ~s(@unit "#{unit}")
+  end
+
+  test "deployment prepares checkouts through the provisioning script" do
+    script = File.read!(@remote_script)
+
+    assert script =~
+             ~s|PTC_PROVISION_DATABASE_PATH="$database_path" \\\n  /usr/local/bin/ptc-manager-provision-repository|
+
+    refute script =~ "git clone"
+    assert File.read!(@provision) =~ "sudo -n -H -u ptc-manager-worker env GIT_TERMINAL_PROMPT=0"
+
+    # It runs as the deployment user, who cannot see into the coordinator's
+    # private database directory.
+    assert File.read!(@provision) =~ ~s|sudo test -f "$database_path"|
+    refute File.read!(@provision) =~ ~s|[ -f "$database_path" ]|
+  end
+
   test "the worker Claude trust helper records and removes one exact path" do
     home =
       Path.join(
@@ -500,7 +530,8 @@ defmodule Mix.Tasks.PtcDeployTest do
     assert sudoers =~ "/usr/local/bin/ptc-manager-worker-bootstrap"
     assert wrapper =~ "worktree_root=/srv/ptc_manager-worktrees"
     assert wrapper =~ "worktree is outside the managed root"
-    assert wrapper =~ "script is outside the worktree"
+    assert wrapper =~ ~s|exec /bin/sh -c "$command" </dev/null|
+    assert wrapper =~ "environment file must not be a symlink"
   end
 
   test "Herdr observation runs as the managed session owner" do
@@ -939,8 +970,17 @@ defmodule Mix.Tasks.PtcDeployTest do
     refute script =~ "/home/agent/.local/bin/mise"
     assert script =~ ~s|"$worker_mise" install "node@${node_version}"|
 
-    assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
+    assert byte_index(script, "install_worker_mise\ninstall_worker_deno\ninstall_worker_node") <
              byte_index(script, "echo \"Building production release...\"")
+  end
+
+  test "remote deployment installs the pinned Deno and links it onto the worker's PATH" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "install_worker_deno"
+    assert script =~ ~s|/releases/download/v${deno_version}/deno-x86_64-unknown-linux-gnu.zip|
+    assert script =~ ~s|!= "$deno_sha256"|
+    assert script =~ ~s|sudo ln -sfn "$worker_deno_dir/deno" /usr/local/bin/deno|
   end
 
   test "remote production builds consume the persistent keyed workspace cache" do

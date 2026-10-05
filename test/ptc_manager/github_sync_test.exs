@@ -15,6 +15,10 @@ defmodule PtcManager.GitHubSyncTest do
     def viewer_login, do: Process.get(:github_viewer_login, {:error, :not_configured})
 
     @impl true
+    def get_repository(_owner, _name),
+      do: Process.get(:github_repository, {:error, :not_configured})
+
+    @impl true
     def get_issue(_repository, number) do
       case Process.get(:github_issue_results) do
         results when is_map(results) -> Map.fetch!(results, number)
@@ -218,6 +222,22 @@ defmodule PtcManager.GitHubSyncTest do
     Process.put(:github_viewer_login, {:error, :github_graphql_token_required})
     assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
     assert Repo.get!(Repository, repository.id).github_viewer_login == "andreasronge"
+  end
+
+  test "records GitHub's default branch without changing the configured one" do
+    repository = repository_fixture(%{default_branch: "main"})
+    Process.put(:github_result, {:ok, []})
+    Process.put(:github_repository, {:ok, %{"defaultBranchRef" => %{"name" => "develop"}}})
+
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+    synced = Repo.get!(Repository, repository.id)
+    assert synced.github_default_branch == "develop"
+    assert synced.default_branch == "main"
+
+    # A lookup that fails keeps the last known value.
+    Process.put(:github_repository, {:error, :github_unavailable})
+    assert {:ok, _summary} = Sync.sync_repository(repository, client: FakeClient)
+    assert Repo.get!(Repository, repository.id).github_default_branch == "develop"
   end
 
   test "keeps every GitHub label name outside the content digest" do

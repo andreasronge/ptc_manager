@@ -267,7 +267,8 @@ defmodule PtcManager.Worktrees do
     match?({:ok, %{type: :directory}}, File.lstat(path))
   end
 
-  defp empty_worktree?(%{path: path, job: %{repository: %{default_branch: branch}}}, probe)
+  # A job's commits are counted from the base it targets, not the default branch.
+  defp empty_worktree?(%{path: path, job: %{base_branch: branch}}, probe)
        when is_binary(branch) do
     probe.empty_worktree(path, branch) == :ok
   end
@@ -275,7 +276,7 @@ defmodule PtcManager.Worktrees do
   defp empty_worktree?(_allocation, _probe), do: false
 
   defp observe_retained_work(
-         %{path: path, job: %{repository: %{default_branch: branch}}} = allocation,
+         %{path: path, job: %{base_branch: branch}} = allocation,
          probe
        )
        when is_binary(branch) do

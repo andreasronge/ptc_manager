@@ -105,6 +105,28 @@ defmodule PtcManager.ManagedOperationContextTest do
     :ok
   end
 
+  test "workspace setup variables go to a protected, quoted file" do
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-setup-env-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    assert {:ok, path} =
+             ManagedOperationContext.write_setup_environment(
+               [%{name: "REGISTRY_TOKEN", value: "a'b c"}],
+               directory
+             )
+
+    assert Path.dirname(path) == directory
+    assert {:ok, %{mode: mode}} = File.stat(path)
+    assert Bitwise.band(mode, 0o777) == 0o440
+
+    {output, 0} =
+      System.cmd("sh", ["-c", ~s(set -a; . "$1"; printf '%s' "$REGISTRY_TOKEN"), "sh", path])
+
+    assert output == "a'b c"
+  end
+
   test "issued context reserves a higher soft memory limit for verify" do
     assert {:ok, context} =
              ManagedOperationContext.issue(%{

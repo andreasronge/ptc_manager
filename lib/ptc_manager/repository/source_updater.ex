@@ -1,5 +1,8 @@
 defmodule PtcManager.Repository.SourceUpdater do
-  @moduledoc "Fetches and pins a repository's current remote default-branch commit."
+  @moduledoc """
+  Fetches and pins the current remote commit of a repository's default branch,
+  or of another branch named with `branch:`.
+  """
 
   alias PtcManager.Operations.Repository
   alias PtcManager.Repository.{Checkout, WorkerGit}
@@ -24,7 +27,7 @@ defmodule PtcManager.Repository.SourceUpdater do
   end
 
   defp do_refresh(repository, path, opts) do
-    branch = repository.default_branch
+    branch = Keyword.get(opts, :branch, repository.default_branch)
     remote_ref = "refs/remotes/origin/#{branch}"
     branch_ref = "refs/heads/#{branch}"
     remote = Keyword.get(opts, :remote, github_remote(repository))
