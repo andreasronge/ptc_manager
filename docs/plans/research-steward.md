@@ -1,6 +1,7 @@
 # Plan: the research steward
 
-Status: draft, 2026-09-18, revised after two independent review rounds. Not
+Status: paused by the maintainer on 2026-10-05; issues #170–#173 are held by
+assignment. Drafted 2026-09-18, revised after two independent review rounds. Not
 implemented. Companion to [`collection-steward.md`](collection-steward.md):
 that plan keeps a collection of *deliverables* moving; this one keeps a
 *research program* moving, where most work is never merged and the output is
