@@ -433,12 +433,15 @@ The authenticated routes are:
   complete editable prompt with a runtime preview, advanced settings, its own
   run history, versions, and cross-repository copying. `/automations/new`
   creates a paused custom automation with a key derived from its name;
-- `/configuration` — safe registration and health checks for dedicated repository
-  checkouts, your own triage labels and write-only encrypted implementation-agent
-  variables per repository, the **Integrations** section describing what GitHub
+- `/configuration` — worker capacity, safe registration of dedicated repository
+  checkouts, a short list of repositories with their enabled, synchronization,
+  and health state, and the **Integrations** section describing what GitHub
   synchronization, publication, private analysis, and the dispatcher currently
-  reach, and direct links to each repository's prompt and automation settings.
-  Repository variables are sourced from protected per-pane files after setup
+  reach;
+- `/configuration/repositories/:id` — one repository's health checks,
+  enable/disable, automatic implementation, your own triage labels, write-only
+  encrypted implementation-agent variables, removal, and a link to its prompt
+  and automation settings. Repository variables are sourced from protected per-pane files after setup
   completes; they are never supplied to bootstrap or maintainer-action agents.
 
 To choose a different local password:
@@ -1259,8 +1262,8 @@ To onboard another public or private repository:
    The first three are what **Prepare issue** and **Review issue** leave on an
    issue; the fourth is how an implementation agent marks its own pull request as
    having left work behind. Any triage label configured under **Your triage
-   labels** has to exist on GitHub for the same reason. Configuration health
-   names whichever are still missing, so this can be done after registering the
+   labels** has to exist on GitHub for the same reason. The repository's
+   health checks name whichever are still missing, so this can be done after registering the
    repository and checked before enabling it;
 3. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
@@ -1316,9 +1319,9 @@ deployment therefore installs `deploy/ptc_manager-resources.conf` as a
 `ptc_manager.service` drop-in that raises the console's CPU and IO weight and
 protects 512 MB of its memory from reclaim.
 
-The Configuration page displays the derived checkout path. A repository can be
-removed there after explicit confirmation, but only when all managed jobs,
-actions, automation invocations, deployments, resource operations, and worktree
+The repository page under Configuration displays the derived checkout path. A
+repository can be removed there after explicit confirmation, but only when all
+managed jobs, actions, automation invocations, deployments, resource operations, and worktree
 lifecycles are terminal. Removal transactionally deletes PtcManager-owned
 configuration and synchronized database records. It never changes the GitHub
 repository or deletes server checkouts, worktrees, branches, pull requests, or

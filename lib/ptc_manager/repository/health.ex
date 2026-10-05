@@ -26,6 +26,14 @@ defmodule PtcManager.Repository.Health do
     }
   end
 
+  @doc "The most urgent status among a summary's checks, for a single badge."
+  def overall(summary) do
+    statuses =
+      Enum.map([:checkout, :github, :labels, :gate, :service_access], &summary[&1].status)
+
+    Enum.find([:attention, :syncing, :unchecked], :ready, &(&1 in statuses))
+  end
+
   defp checkout_health(availability) do
     case availability do
       {:ok, path} ->

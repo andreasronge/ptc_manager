@@ -464,6 +464,44 @@ if Repo.aggregate(Repository, :count) == 0 do
 
   if demo_mode, do: PtcManager.DeliveryReportDemo.seed(ready_issue, worker, now)
 
+  if demo_mode do
+    all_labels = %{"names" => ~w(ptc:ready ptc:blocked ptc:needs-decision ptc:follow-up)}
+
+    for attrs <- [
+          %{
+            github_owner: "andreasronge",
+            github_name: "ptc-fs-mcp",
+            enabled: true,
+            sync_status: "ok",
+            last_synced_at: now,
+            github_viewer_login: "andreasronge",
+            github_label_names: all_labels,
+            github_labels_checked_at: now
+          },
+          %{
+            github_owner: "tyraorg",
+            github_name: "web",
+            enabled: true,
+            sync_status: "error",
+            last_sync_error: "GitHub returned 401 for the read token.",
+            github_label_names: %{"names" => ["bug", "ptc:ready"]},
+            github_labels_checked_at: now
+          },
+          %{
+            github_owner: "tyraorg",
+            github_name: "api",
+            default_branch: "develop",
+            enabled: false
+          }
+        ] do
+      {:ok, _repository} =
+        attrs
+        |> Map.put_new(:default_branch, "main")
+        |> Map.put(:local_path, nil)
+        |> Operations.create_repository()
+    end
+  end
+
   IO.puts(
     "Seeded PtcManager demo data, including issue ##{unreviewed_issue.number} awaiting investigation " <>
       "and issue ##{blocked_issue.number} blocked on GitHub."

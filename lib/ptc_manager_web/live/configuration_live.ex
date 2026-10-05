@@ -1,14 +1,13 @@
 defmodule PtcManagerWeb.ConfigurationLive do
   use PtcManagerWeb, :live_view
 
+  import PtcManagerWeb.RepositoryDisplay
+
   alias PtcManager.MaintainerActions
   alias PtcManager.Operations
-  alias PtcManager.AgentEnvironmentVariables
-  alias PtcManager.Operations.AgentEnvironmentVariable
   alias PtcManager.Operations.Repository
   alias PtcManager.Publications
   alias PtcManager.Repository.Health
-  alias PtcManager.Repository.MaintainerLabels
   alias PtcManager.CapacitySettings
 
   @impl true
@@ -20,19 +19,12 @@ defmodule PtcManagerWeb.ConfigurationLive do
      |> assign(:page_title, "Configuration")
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:repository_form, to_form(%{"default_branch" => "main"}, as: :repository))
-     |> assign(:remove_repository, nil)
      |> load_configuration()}
   end
 
   @impl true
   def handle_info({:operations_changed, source}, socket)
-      when source in [
-             Repository,
-             Operations,
-             AgentEnvironmentVariable,
-             PtcManager.GitHub.Sync,
-             CapacitySettings
-           ],
+      when source in [Repository, Operations, PtcManager.GitHub.Sync, CapacitySettings],
       do: {:noreply, load_configuration(socket)}
 
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
@@ -52,7 +44,7 @@ defmodule PtcManagerWeb.ConfigurationLive do
          socket
          |> put_flash(
            :info,
-           "#{repository.github_owner}/#{repository.github_name} added disabled. Verify its checkout, GitHub access, gate, and automations before enabling it."
+           "#{full_name(repository)} added disabled. Verify its checkout, GitHub access, gate, and automations before enabling it."
          )
          |> assign(:repository_form, to_form(%{"default_branch" => "main"}, as: :repository))
          |> load_configuration()}
@@ -62,31 +54,6 @@ defmodule PtcManagerWeb.ConfigurationLive do
          socket
          |> assign(:repository_form, to_form(params, as: :repository))
          |> put_flash(:error, repository_error(reason))}
-    end
-  end
-
-  def handle_event("set-repository-enabled", %{"id" => id, "enabled" => enabled}, socket) do
-    with {repository_id, ""} <- Integer.parse(id),
-         {:ok, repository} <-
-           Operations.set_repository_enabled(
-             repository_id,
-             enabled == "true",
-             socket.assigns.actor
-           ) do
-      message =
-        if repository.enabled,
-          do:
-            "#{repository.github_owner}/#{repository.github_name} is enabled. Synchronization now covers it; review its automations before approving agent work.",
-          else:
-            "#{repository.github_owner}/#{repository.github_name} is disabled. No new synchronization or agent work will start for it."
-
-      {:noreply, socket |> put_flash(:info, message) |> load_configuration()}
-    else
-      {:error, :repository_not_found} ->
-        {:noreply, put_flash(socket, :error, "That repository is no longer configured.")}
-
-      _invalid ->
-        {:noreply, put_flash(socket, :error, "The repository could not be updated.")}
     end
   end
 
@@ -114,110 +81,6 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
-  def handle_event("confirm-remove-repository", %{"id" => id}, socket) do
-    {:noreply,
-     assign(socket, :remove_repository, Operations.get_repository(String.to_integer(id)))}
-  end
-
-  def handle_event("cancel-remove-repository", _params, socket),
-    do: {:noreply, assign(socket, :remove_repository, nil)}
-
-  def handle_event(
-        "remove-repository",
-        %{"id" => id},
-        %{assigns: %{remove_repository: %{id: confirmed_id}}} = socket
-      ) do
-    if id == Integer.to_string(confirmed_id) do
-      remove_confirmed_repository(socket, confirmed_id)
-    else
-      {:noreply, put_flash(socket, :error, "Confirm the repository before removing it.")}
-    end
-  end
-
-  def handle_event("remove-repository", _params, socket),
-    do: {:noreply, put_flash(socket, :error, "Confirm the repository before removing it.")}
-
-  def handle_event("set-auto-fix", %{"id" => id, "enabled" => enabled}, socket)
-      when is_binary(id) and enabled in ["true", "false"] do
-    with {repository_id, ""} when repository_id > 0 <- Integer.parse(id),
-         {:ok, _repository} <-
-           PtcManager.AutoImplementation.configure(
-             repository_id,
-             enabled == "true",
-             socket.assigns.actor
-           ) do
-      {:noreply,
-       socket
-       |> put_flash(:info, "Automatic implementation setting saved.")
-       |> load_configuration()}
-    else
-      _invalid -> handle_event("set-auto-fix", %{}, socket)
-    end
-  end
-
-  def handle_event("set-auto-fix", _params, socket),
-    do: {:noreply, put_flash(socket, :error, "Could not save automatic implementation setting.")}
-
-  def handle_event("set-auto-fix-daily-limit", %{"auto_fix" => params}, socket) do
-    with {repository_id, ""} <- Integer.parse(params["repository_id"] || ""),
-         {limit, ""} <- Integer.parse(params["daily_limit"] || ""),
-         {:ok, _repository} <-
-           PtcManager.AutoImplementation.configure_daily_limit(
-             repository_id,
-             limit,
-             socket.assigns.actor
-           ) do
-      {:noreply,
-       socket
-       |> put_flash(:info, "Automatic implementation daily limit saved.")
-       |> load_configuration()}
-    else
-      _invalid -> handle_event("set-auto-fix-daily-limit", %{}, socket)
-    end
-  end
-
-  def handle_event("set-auto-fix-daily-limit", _params, socket),
-    do:
-      {:noreply,
-       put_flash(socket, :error, "The daily limit must be a whole number from 1 to 50.")}
-
-  def handle_event("add-maintainer-label", %{"label" => params}, socket) do
-    with {repository_id, ""} <- Integer.parse(params["repository_id"] || ""),
-         %Repository{} = repository <- Operations.get_repository(repository_id),
-         {:ok, labels} <- MaintainerLabels.add(repository, params["name"], params["role"]),
-         {:ok, _repository} <-
-           Operations.update_maintainer_labels(repository_id, labels, socket.assigns.actor) do
-      {:noreply,
-       socket
-       |> put_flash(
-         :info,
-         "Added #{params["name"]}. It must already exist on GitHub for the toggle to work."
-       )
-       |> load_configuration()}
-    else
-      {:error, reason} -> {:noreply, put_flash(socket, :error, label_error(reason))}
-      _invalid -> {:noreply, put_flash(socket, :error, label_error(:invalid_label_name))}
-    end
-  end
-
-  def handle_event("remove-maintainer-label", %{"id" => id, "name" => name}, socket) do
-    with {repository_id, ""} <- Integer.parse(id),
-         %Repository{} = repository <- Operations.get_repository(repository_id),
-         {:ok, _repository} <-
-           Operations.update_maintainer_labels(
-             repository_id,
-             MaintainerLabels.remove(repository, name),
-             socket.assigns.actor
-           ) do
-      {:noreply,
-       socket
-       |> put_flash(:info, "#{name} is no longer a maintainer label here. GitHub is unchanged.")
-       |> load_configuration()}
-    else
-      _invalid -> {:noreply, put_flash(socket, :error, "That label could not be removed.")}
-    end
-  end
-
   def handle_event("save-capacity", %{"capacity" => params}, socket) do
     case CapacitySettings.update(params) do
       {:ok, _setting} ->
@@ -232,97 +95,11 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
-  def handle_event(
-        "save-agent-environment-variable",
-        %{"repository-id" => repository_id, "variable" => params},
-        socket
-      ) do
-    attrs = %{"name" => params["name"], "value" => params["secret"]}
-
-    case AgentEnvironmentVariables.put(repository_id, attrs, socket.assigns.actor) do
-      {:ok, _variable} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Implementation-agent variable saved.")
-         |> load_configuration()}
-
-      {:error, %Ecto.Changeset{} = changeset} ->
-        message =
-          if changeset.errors[:name],
-            do: "Use an allowed uppercase variable name.",
-            else: "Provide a non-empty value."
-
-        {:noreply, put_flash(socket, :error, message)}
-
-      {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "The variable could not be saved. Try again.")}
-    end
-  end
-
-  def handle_event(
-        "delete-agent-environment-variable",
-        %{"repository-id" => repository_id, "id" => id},
-        socket
-      ) do
-    case AgentEnvironmentVariables.delete(repository_id, id, socket.assigns.actor) do
-      {:ok, _variable} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Implementation-agent variable deleted.")
-         |> load_configuration()}
-
-      {:error, :not_found} ->
-        {:noreply, put_flash(socket, :error, "The variable no longer exists.")}
-
-      {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "The variable could not be deleted. Try again.")}
-    end
-  end
-
-  defp remove_confirmed_repository(socket, confirmed_id) do
-    case Operations.remove_repository(confirmed_id) do
-      {:ok, repository} ->
-        {:noreply,
-         socket
-         |> assign(:remove_repository, nil)
-         |> put_flash(
-           :info,
-           "#{repository.github_owner}/#{repository.github_name} was removed from PtcManager. Its GitHub repository and server files were not changed."
-         )
-         |> load_configuration()}
-
-      {:error, :active_work} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "This repository has active managed work. Wait for it to finish or cancel it before removing the repository."
-         )}
-
-      {:error, _reason} ->
-        {:noreply,
-         socket
-         |> assign(:remove_repository, nil)
-         |> put_flash(:error, "The repository could not be removed.")}
-    end
-  end
-
   defp load_configuration(socket) do
     repositories = Operations.list_repositories()
     availability = PtcManager.Repository.Checkout.availability(repositories)
-    repository_ids = MapSet.new(repositories, & &1.id)
-
-    remove_repository =
-      case socket.assigns[:remove_repository] do
-        %{id: id} = repository ->
-          if MapSet.member?(repository_ids, id), do: repository, else: nil
-
-        _repository ->
-          nil
-      end
 
     assign(socket,
-      remove_repository: remove_repository,
       repositories: repositories,
       capacity_setting: CapacitySettings.current(),
       agent_actions_enabled: MaintainerActions.enabled?(),
@@ -333,46 +110,13 @@ defmodule PtcManagerWeb.ConfigurationLive do
       pr_reconcile_enabled:
         Application.get_env(:ptc_manager, :pr_reconcile_enabled, false) or
           Publications.agent_reconciliation_needed?(),
-      agent_environment_variables:
-        Map.new(repositories, fn repository ->
-          {repository.id, AgentEnvironmentVariables.list_metadata(repository.id)}
-        end),
       repository_health:
-        Enum.map(repositories, &Health.summarize(&1, Map.fetch!(availability, &1.id)))
+        Map.new(repositories, fn repository ->
+          summary = Health.summarize(repository, Map.fetch!(availability, repository.id))
+          {repository.id, Health.overall(summary)}
+        end)
     )
   end
-
-  def maintainer_labels(repository), do: MaintainerLabels.list(repository)
-
-  defp label_error(:invalid_label_role), do: "Choose either badge or park."
-
-  defp label_error(:reserved_label_name),
-    do: "Names starting with ptc: belong to PtcManager's own display projection."
-
-  defp label_error(:label_already_configured), do: "That label is already configured here."
-  defp label_error(:too_many_labels), do: "Twenty maintainer labels per repository is the limit."
-
-  defp label_error(_reason),
-    do:
-      "Use 1 to 50 characters from letters, digits, spaces, and . _ / : - for a GitHub label name."
-
-  def sync_label(%{sync_status: "syncing"}), do: "syncing"
-  def sync_label(%{sync_status: "ok"}), do: "connected"
-  def sync_label(%{sync_status: "error"}), do: "needs attention"
-  def sync_label(_repository), do: "not synchronized"
-
-  def sync_classes(%{sync_status: "ok"}), do: "text-teal-300"
-  def sync_classes(%{sync_status: "error"}), do: "text-rose-300"
-  def sync_classes(_repository), do: "text-amber-300"
-
-  def health_classes(:ready), do: "bg-teal-400/15 text-teal-200"
-  def health_classes(:attention), do: "bg-amber-400/15 text-amber-200"
-  def health_classes(:syncing), do: "bg-sky-400/15 text-sky-200"
-  def health_classes(:unchecked), do: "bg-white/5 text-slate-400"
-
-  def health_detail(%{detail: %DateTime{} = value}), do: Calendar.strftime(value, "%d %b · %H:%M")
-  def health_detail(%{detail: nil}), do: "No detail recorded."
-  def health_detail(%{detail: detail}), do: detail
 
   defp repository_error(:repository_not_found),
     do:
@@ -394,6 +138,4 @@ defmodule PtcManagerWeb.ConfigurationLive do
   end
 
   defp repository_error(_reason), do: "The repository configuration is invalid or already exists."
-
-  def variable_set_at(%DateTime{} = value), do: Calendar.strftime(value, "%d %b %Y · %H:%M")
 end
