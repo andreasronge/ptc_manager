@@ -145,13 +145,24 @@ Each step is one pull request and is useful on its own.
 
 ### 5. Label-mapped integration branches
 
-- Repository setting: a list of `{label, branch}` pairs, validated like
-  maintainer labels. Branch existence is checked on GitHub at save time and
-  again before dispatch.
+- Repository setting: a list of `{label, branch, active}` entries, validated
+  like maintainer labels. Branch existence is checked on GitHub at save time
+  and again before dispatch.
+- Suggestions, not automatic routing: synchronization lists the remote
+  branches, and the repository page suggests a mapping when a label `x` has a
+  matching `feature/x` branch. The maintainer adds it with one click. A label
+  and branch that merely share a name (`cleanup`, an old `feature/cleanup`)
+  never change where a pull request goes without that decision.
+- An inactive mapping keeps its entry but routes nothing: issues with that
+  label target the default branch again. Removing the mapping once the feature
+  reaches the default branch ends it. Jobs already approved keep their stored
+  base either way.
 - `jobs.base_branch` and `pr_publications.base_branch`, backfilled from
   `default_branch`.
 - Approval resolves the base from the issue's labels, shows "→ feature/ska" on
-  the approval card, and stores it. Two labels that map to different branches
+  the approval card, and stores it. The card offers "→ develop instead" for a
+  single issue that should skip the feature branch; the choice is recorded with
+  the approval. A collection run offers the same choice once, at start. Two labels that map to different branches
   block approval with a reason. A collection run resolves the base from the
   umbrella issue, and every member inherits it.
 - Every use listed under "The base branch is the repository's
@@ -167,6 +178,8 @@ Each step is one pull request and is useful on its own.
 - `DeliveryLane` gains `:integrated`. `delivery_board_items` includes merged
   managed PRs whose base is not the default branch and whose linked issue is
   still open, grouped by branch. Planning shows the same badge.
+- The Delivery board and Planning get a branch filter (all, default branch
+  only, or one integration branch), remembered per viewer.
 - A blocker is satisfied when it is closed as completed, or when it has a PR
   merged into the base branch the dependent issue targets. Dependency
   admission and `Collections.Structure.validate/1` use the same rule, so an
@@ -248,12 +261,9 @@ Its api work (#122, then #128 → #125) can become a small api collection once
 step 1 is integrated. Web work needs `tyraorg/web` onboarded with its own
 collection.
 
-## Open questions
+## Resolved questions
 
-- #127 (guardian capability) and #129 (log redaction) are listed under #123.
-  Do they go to `feature/ska` with the rest, or must either reach `develop`
-  first?
-- #128 → #125 (parse-server `iss`) carries `ska` but is step-2 hardening. Is it
-  `feature/ska` or `develop`?
-- `feature/ska` drifts from `develop` over the run. Keeping it current stays
-  manual for now. Should the Integrated lane flag how far behind it is?
+- All `ska` issues, including #127, #129, and #128 → #125, target
+  `feature/ska`.
+- The Integrated lane does not track how far `feature/ska` is behind
+  `develop`. Keeping it current stays manual.
