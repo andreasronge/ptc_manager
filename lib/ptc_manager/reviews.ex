@@ -597,7 +597,9 @@ defmodule PtcManager.Reviews do
        when is_map(settings) do
     report = job.stop_report || %{}
 
-    not is_nil(job.stop_reported_at) and report["progress"] == "partial" and
+    not is_nil(job.stop_reported_at) and
+      (report["progress"] == "partial" or
+         PtcManager.Operations.StopReport.retained_work?(job)) and
       PtcManager.Operations.StopReport.allows?(report, :retry) and
       not Repo.exists?(
         from newer in Job, where: newer.issue_id == ^job.issue_id and newer.id > ^job.id

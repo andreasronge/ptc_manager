@@ -748,7 +748,7 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
       GitHub: #{github_instruction}
       Expensive commands: when PTC_OPERATION_WRAPPER is set, run it as `\$PTC_OPERATION_WRAPPER run --label <build|test|lint|verify> -- <command>`; otherwise run the command directly.
       Session: nobody is watching this session. No question you ask here will be answered, and waiting for input only stalls the work until PtcManager times it out.
-      If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{StopReport.path_for(job)} matching the schema at #{StopReport.schema_path_for(job)}, then stop. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait.
+      If you cannot start: if you cannot start, or discover part-way that you cannot continue — a missing credential or tool, a broken environment, a requirement you cannot resolve, or something you judge unsafe — write #{StopReport.path_for(job)} matching the schema at #{StopReport.schema_path_for(job)}, then stop. Set progress to partial if you left any work in the worktree, committed or not; use none only when you left no work. Describe what is missing in plain language and name no secrets. Do not guess, do not work around it, and do not wait.
       </context>
       <issue_data>
       Number: #{issue.number}

@@ -202,9 +202,16 @@
                   Missing: <span class="font-mono">{report["prerequisite"]}</span>
                 </p>
                 <p class="mt-1 text-[11px] leading-4 text-slate-500">
-                  {if report["progress"] == "partial",
-                    do: "It had committed something; its worktree is kept on Operations.",
-                    else: "It committed nothing, so a fresh attempt loses no work."}
+                  {cond do
+                    PtcManager.Operations.StopReport.retained_work?(item.active_job) ->
+                      "Retry starts a fresh attempt and discards the work observed in the retained worktree. Continue existing work to keep it."
+
+                    report["progress"] == "partial" ->
+                      "It left work in the worktree, committed or not; its worktree is kept on Operations."
+
+                    true ->
+                      "It reported leaving no work in the worktree. Retry starts a fresh attempt."
+                  end}
                 </p>
               </div>
             </div>

@@ -706,7 +706,7 @@ defmodule PtcManager.OperationsTest do
       assert {:ok, report} = StopReport.read(job)
       assert report["reason_code"] == "missing_prerequisite"
       assert StopReport.prerequisite(report) == "OPENROUTER_API_KEY"
-      assert StopReport.nothing_committed?(report)
+      assert report["progress"] == "none"
 
       # A report PtcManager cannot understand is not a stop: the ordinary
       # "no usable result" path has to stay in charge.

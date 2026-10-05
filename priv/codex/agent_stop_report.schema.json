@@ -34,7 +34,7 @@
       "maxLength": 120
     },
     "progress": {
-      "description": "Whether anything was committed to the branch before stopping.",
+      "description": "Whether the agent left any work in the worktree, committed or not. Use partial for committed changes, modified files, or new files; use none only when no work was left.",
       "type": "string",
       "enum": ["none", "partial"]
     }
