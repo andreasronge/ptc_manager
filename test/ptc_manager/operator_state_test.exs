@@ -81,6 +81,7 @@ defmodule PtcManager.OperatorStateTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       repository_id: repository.id,
       state: "published",

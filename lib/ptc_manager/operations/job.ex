@@ -38,6 +38,7 @@ defmodule PtcManager.Operations.Job do
     field :result_checked_at, :utc_datetime_usec
     field :result_attempt_token, :string
     field :result_attempt_expires_at, :utc_datetime_usec
+    field :base_branch, :string
     field :pre_publication_bootstrap_command, :string
     field :pre_publication_bootstrap_timeout_ms, :integer
     field :pre_publication_command, :string
@@ -107,6 +108,7 @@ defmodule PtcManager.Operations.Job do
       :result_checked_at,
       :result_attempt_token,
       :result_attempt_expires_at,
+      :base_branch,
       :pre_publication_bootstrap_command,
       :pre_publication_bootstrap_timeout_ms,
       :pre_publication_command,
@@ -130,7 +132,8 @@ defmodule PtcManager.Operations.Job do
       :approval_id,
       :kind,
       :state,
-      :fencing_token
+      :fencing_token,
+      :base_branch
     ])
     |> validate_inclusion(:kind, ["implementation"])
     |> validate_inclusion(:state, @states)

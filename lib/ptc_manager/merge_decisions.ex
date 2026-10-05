@@ -117,7 +117,7 @@ defmodule PtcManager.MergeDecisions do
       status.head_sha != publication.remote_head_sha ->
         {:error, :pull_request_head_changed}
 
-      not intended_base?(status, PrPublication.repository(publication)) ->
+      not intended_base?(status, publication) ->
         {:error, :pull_request_base_changed}
 
       true ->
@@ -153,7 +153,7 @@ defmodule PtcManager.MergeDecisions do
       publication.diff_digest != analysis.diff_digest ->
         {:error, :merge_analysis_stale}
 
-      not intended_base?(status, PrPublication.repository(publication)) ->
+      not intended_base?(status, publication) ->
         {:error, :pull_request_base_changed}
 
       true ->
@@ -266,8 +266,10 @@ defmodule PtcManager.MergeDecisions do
     end
   end
 
-  defp intended_base?(status, repository) do
-    status.base_ref == repository.default_branch and
+  defp intended_base?(status, publication) do
+    repository = PrPublication.repository(publication)
+
+    status.base_ref == publication.base_branch and
       String.downcase(status.base_repository) ==
         String.downcase("#{repository.github_owner}/#{repository.github_name}")
   end

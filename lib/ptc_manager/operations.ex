@@ -14,6 +14,7 @@ defmodule PtcManager.Operations do
   alias PtcManager.RepoTransaction
   alias PtcManager.RuntimeIncarnation
   alias PtcManager.Repository.Checkout
+  alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.WorktreeSecurity
   alias PtcManager.Operations.DependencyGraph
 
@@ -635,6 +636,100 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc """
+  Maps a label to an integration branch, after GitHub confirms the branch.
+
+  A mapping is the maintainer's decision; nothing adds one on a name match.
+  """
+  def add_integration_branch(repository_id, label, branch, actor)
+      when is_integer(repository_id) and is_binary(actor) do
+    branch = if is_binary(branch), do: String.trim(branch), else: branch
+
+    with %Repository{} = repository <-
+           Repo.get(Repository, repository_id) || {:error, :repository_not_found},
+         {:ok, _stored} <- IntegrationBranches.add(repository, label, branch),
+         :ok <- github_branch_exists(repository, branch) do
+      update_integration_branches(
+        repository_id,
+        &IntegrationBranches.add(&1, label, branch),
+        actor,
+        %{"added" => %{"label" => String.trim(label), "branch" => branch}}
+      )
+    end
+  end
+
+  @doc "Switches a mapping on or off. An inactive one keeps its entry and routes nothing."
+  def set_integration_branch_active(repository_id, label, active, actor)
+      when is_integer(repository_id) and is_binary(label) and is_boolean(active) and
+             is_binary(actor) do
+    update_integration_branches(
+      repository_id,
+      &{:ok, IntegrationBranches.set_active(&1, label, active)},
+      actor,
+      %{"label" => label, "active" => active}
+    )
+  end
+
+  @doc "Removes a mapping. Jobs already approved keep the base they stored."
+  def remove_integration_branch(repository_id, label, actor)
+      when is_integer(repository_id) and is_binary(label) and is_binary(actor) do
+    update_integration_branches(
+      repository_id,
+      &{:ok, IntegrationBranches.remove(&1, label)},
+      actor,
+      %{"removed" => label}
+    )
+  end
+
+  # The list is rewritten as a whole, so it is computed from the stored row
+  # inside the write transaction.
+  defp update_integration_branches(repository_id, change, actor, details) do
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+
+        with {:ok, stored} <- change.(repository),
+             {:ok, updated} <-
+               repository
+               |> Repository.changeset(%{integration_branches: stored})
+               |> Repo.update() do
+          insert_audit!(%{
+            actor: actor,
+            action: "repository.integration_branches_updated",
+            target_type: "repository",
+            target_id: repository_id,
+            details: Map.put(details, "mappings", stored["mappings"])
+          })
+
+          updated
+        else
+          {:error, %Ecto.Changeset{}} -> Repo.rollback(:invalid_integration_branches)
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Whether GitHub reports the branch, through the read-only client."
+  def github_branch_exists(%Repository{} = repository, branch) do
+    client = Application.fetch_env!(:ptc_manager, :github_client)
+    {module, arity} = if is_atom(client), do: {client, 2}, else: {client.__struct__, 3}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :branch_exists?, arity) do
+      case Gateway.call(client, :branch_exists?, [repository, branch]) do
+        {:ok, true} -> :ok
+        {:ok, false} -> {:error, :branch_not_found}
+        {:error, _reason} -> {:error, :github_unavailable}
+      end
+    else
+      {:error, :github_unavailable}
+    end
+  end
+
   @doc "Records that a maintainer added or removed one label on GitHub."
   def record_issue_label_change(%Issue{} = issue, operation, name, actor)
       when operation in [:add, :remove] and is_binary(name) and is_binary(actor) do
@@ -831,6 +926,20 @@ defmodule PtcManager.Operations do
   def cancel_queued_job(job_id, actor)
       when is_integer(job_id) and is_binary(actor) and actor != "" do
     cancel_queued(Job, job_id, actor, "job.cancelled")
+  end
+
+  @doc """
+  Ends a queued job whose integration branch GitHub no longer has.
+
+  It would otherwise stay the oldest queued job and stop every other job from
+  starting. The issue can be approved again, against another base.
+  """
+  def cancel_queued_job_for_missing_base(job_id, branch)
+      when is_integer(job_id) and is_binary(branch) do
+    cancel_queued(Job, job_id, "coordinator", "job.cancelled", %{
+      last_error: "The integration branch #{branch} no longer exists on GitHub.",
+      details: %{"reason" => "base_branch_missing", "base_branch" => branch}
+    })
   end
 
   def cancel_queued_agent_action(action_id, actor)
@@ -1178,6 +1287,7 @@ defmodule PtcManager.Operations do
             repository_id: stopped.repository_id,
             issue_id: stopped.issue_id,
             approval_id: approval.id,
+            base_branch: stopped.base_branch,
             automation_definition_version_id: stopped.automation_definition_version_id,
             prompt_instructions: stopped.prompt_instructions,
             kind: stopped.kind,
@@ -1229,7 +1339,9 @@ defmodule PtcManager.Operations do
       source_updated_at: issue.github_updated_at,
       source_digest: issue.content_digest,
       proposal_digest: previous.proposal_digest,
-      approved_at: now
+      approved_at: now,
+      base_branch: previous.base_branch,
+      base_override: previous.base_override
     })
     |> Repo.insert!()
   end
@@ -1491,15 +1603,16 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp cancel_queued(schema, id, actor, audit_action) do
+  defp cancel_queued(schema, id, actor, audit_action, extra \\ %{}) do
     now = utc_now()
+    error = if extra[:last_error], do: [last_error: extra.last_error], else: []
 
     outcome =
       Repo.transaction(fn ->
         {updated, _rows} =
           schema
           |> where([record], record.id == ^id and record.state == "queued")
-          |> Repo.update_all(set: [state: "cancelled", ended_at: now, updated_at: now])
+          |> Repo.update_all(set: [state: "cancelled", ended_at: now, updated_at: now] ++ error)
 
         if updated != 1, do: Repo.rollback(:work_no_longer_queued)
 
@@ -1508,7 +1621,11 @@ defmodule PtcManager.Operations do
           action: audit_action,
           target_type: if(schema == Job, do: "job", else: "agent_action"),
           target_id: id,
-          details: %{"cancelled_at" => DateTime.to_iso8601(now)}
+          details:
+            Map.merge(
+              %{"cancelled_at" => DateTime.to_iso8601(now)},
+              Map.get(extra, :details, %{})
+            )
         })
 
         Repo.get!(schema, id)
@@ -2766,6 +2883,7 @@ defmodule PtcManager.Operations do
               idempotency_key: publication_key(job, result),
               fencing_token: fencing_token,
               branch_name: job.branch_name,
+              base_branch: job.base_branch,
               base_sha: result.base_sha,
               head_sha: result.head_sha,
               diff_digest: result.diff_digest,
@@ -3784,10 +3902,10 @@ defmodule PtcManager.Operations do
     broadcast_change(outcome)
   end
 
-  def approve_issue(issue_id, actor, requested_review_count \\ nil, profile \\ nil)
+  def approve_issue(issue_id, actor, requested_review_count \\ nil, profile \\ nil, opts \\ [])
       when is_integer(issue_id) and is_binary(actor) do
     with :ok <- valid_requested_review_count(requested_review_count) do
-      do_approve_issue(issue_id, actor, requested_review_count, :prepared, profile)
+      do_approve_issue(issue_id, actor, requested_review_count, :prepared, profile, opts)
     end
   end
 
@@ -3800,16 +3918,22 @@ defmodule PtcManager.Operations do
   because a small issue does not need a preparation round. The click is the
   approval.
   """
-  def approve_issue_directly(issue_id, actor, requested_review_count \\ nil, profile \\ nil)
+  def approve_issue_directly(
+        issue_id,
+        actor,
+        requested_review_count \\ nil,
+        profile \\ nil,
+        opts \\ []
+      )
       when is_integer(issue_id) and is_binary(actor) do
     with :ok <- valid_requested_review_count(requested_review_count) do
-      do_approve_issue(issue_id, actor, requested_review_count, :direct, profile)
+      do_approve_issue(issue_id, actor, requested_review_count, :direct, profile, opts)
     end
   end
 
   @doc "Queues one ready issue under the repository's explicit automatic implementation policy."
   def auto_approve_issue(issue_id) when is_integer(issue_id) do
-    do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil)
+    do_approve_issue(issue_id, "system:auto-fix", nil, :automatic, nil, [])
   end
 
   @doc """
@@ -3819,7 +3943,7 @@ defmodule PtcManager.Operations do
   and its daily limit, and keeps every other gate.
   """
   def approve_collection_issue(issue_id) when is_integer(issue_id) do
-    do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil)
+    do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil, [])
   end
 
   @doc "True when every projected blocker of the issue is closed as completed and no cycle exists."
@@ -3834,12 +3958,21 @@ defmodule PtcManager.Operations do
   def dependency_projection_matches?(%Issue{} = issue, remote_issue) when is_map(remote_issue),
     do: issue_dependency_projection_matches(Repo, issue, remote_issue) == :ok
 
-  defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile) do
+  # `base: :default` is the maintainer's "default branch instead" choice for an
+  # issue a mapping would otherwise send to an integration branch.
+  defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile, opts) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    base_choice = Keyword.get(opts, :base, :mapped)
 
     Multi.new()
     |> Multi.run(:snapshot, fn repo, _changes ->
       current_approvable_snapshot(repo, issue_id, mode)
+    end)
+    |> Multi.run(:base, fn repo, %{snapshot: {issue, _proposal, repository}} ->
+      with {:ok, base} <- approval_base(repo, issue, repository, mode, base_choice),
+           :ok <- not_already_integrated(repo, issue, repository, base) do
+        {:ok, base}
+      end
     end)
     |> Multi.run(:execution, fn _repo, %{snapshot: {_issue, proposal, _repository}} ->
       case PtcManager.ExecutionProfiles.freeze(proposal, profile, requested_review_count) do
@@ -3858,7 +3991,7 @@ defmodule PtcManager.Operations do
           )}}
       end
     end)
-    |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}} ->
+    |> Multi.insert(:approval, fn %{snapshot: {issue, proposal, _repository}, base: base} ->
       Approval.changeset(%Approval{}, %{
         proposal_id: proposal && proposal.id,
         decision: approval_decision(mode),
@@ -3866,19 +3999,23 @@ defmodule PtcManager.Operations do
         source_updated_at: issue.github_updated_at,
         source_digest: issue.content_digest,
         proposal_digest: proposal && proposal.proposal_digest,
-        approved_at: now
+        approved_at: now,
+        base_branch: base.branch,
+        base_override: base.override
       })
     end)
     |> Multi.insert(:job, fn %{
                                snapshot: {issue, _proposal, _repository},
                                approval: approval,
                                automation: {version, prompt_instructions},
-                               execution: execution
+                               execution: execution,
+                               base: base
                              } ->
       Job.changeset(%Job{}, %{
         repository_id: issue.repository_id,
         issue_id: issue.id,
         approval_id: approval.id,
+        base_branch: base.branch,
         automation_definition_version_id: version.id,
         prompt_instructions: prompt_instructions,
         kind: "implementation",
@@ -3899,6 +4036,7 @@ defmodule PtcManager.Operations do
     end)
     |> Multi.insert(:audit_event, fn %{
                                        snapshot: {issue, proposal, _repository},
+                                       approval: approval,
                                        job: job
                                      } ->
       AuditEvent.changeset(%AuditEvent{}, %{
@@ -3913,7 +4051,9 @@ defmodule PtcManager.Operations do
           "required_review_count" => job.required_review_count,
           "execution_settings" => job.execution_settings,
           "proposal_digest" => proposal && proposal.proposal_digest,
-          "source_digest" => issue.content_digest
+          "source_digest" => issue.content_digest,
+          "base_branch" => job.base_branch,
+          "base_override" => approval.base_override
         }
       })
     end)
@@ -3924,6 +4064,81 @@ defmodule PtcManager.Operations do
       _result -> :ok
     end)
     |> broadcast_change()
+  end
+
+  # A collection member inherits the base its run resolved at start. Any other
+  # approval resolves it from the issue's labels and the repository's active
+  # mappings now, and the job keeps it whatever changes later.
+  # A member of a live collection run inherits the base the run resolved at
+  # start, however it is approved, so a later label, mapping, or competing
+  # admission path cannot split the collection across branches.
+  defp approval_base(repo, issue, repository, mode, choice) do
+    case PtcManager.Collections.member_run(repo, issue) do
+      %{base_branch: branch, base_override: override} when is_binary(branch) ->
+        {:ok, %{branch: branch, override: override}}
+
+      _no_run ->
+        label_base(repo, issue, repository, mode, choice)
+    end
+  end
+
+  defp label_base(repo, issue, repository, _mode, choice) do
+    case IntegrationBranches.resolve(repository, route_labels(repo, issue)) do
+      {:ok, nil} ->
+        {:ok, %{branch: repository.default_branch, override: false}}
+
+      {:ok, _mapping} when choice == :default ->
+        {:ok, %{branch: repository.default_branch, override: true}}
+
+      {:ok, %{"branch" => branch}} ->
+        {:ok, %{branch: branch, override: false}}
+
+      {:error, {:conflicting_integration_branches, _mappings}} ->
+        {:error, :conflicting_integration_branches}
+    end
+  end
+
+  @doc """
+  The labels that decide where an issue's work goes: its own and, for a
+  collection member, its umbrella's.
+  """
+  def route_labels(repo \\ Repo, %Issue{} = issue) do
+    own = PtcManager.Repository.MaintainerLabels.reported_names(issue)
+
+    case issue.parent_issue_number do
+      nil ->
+        own
+
+      number ->
+        case repo.get_by(Issue, repository_id: issue.repository_id, number: number) do
+          %Issue{} = umbrella ->
+            own ++ PtcManager.Repository.MaintainerLabels.reported_names(umbrella)
+
+          nil ->
+            own
+        end
+    end
+  end
+
+  # An issue whose work already merged into its integration branch stays open
+  # until that branch reaches the default branch; implementing it again would
+  # duplicate the work.
+  defp not_already_integrated(repo, issue, repository, %{branch: branch}) do
+    if branch != repository.default_branch and integrated_into?(repo, issue.id, branch),
+      do: {:error, :already_integrated},
+      else: :ok
+  end
+
+  @doc "True when a managed pull request for the issue merged into this branch."
+  def integrated_into?(repo \\ Repo, issue_id, branch) do
+    repo.exists?(
+      from publication in PrPublication,
+        join: job in Job,
+        on: job.id == publication.job_id,
+        where:
+          job.issue_id == ^issue_id and publication.pr_state == "merged" and
+            publication.base_branch == ^branch
+    )
   end
 
   defp approval_decision(:automatic), do: "start_implementation_automatic"
@@ -5614,6 +5829,7 @@ defmodule PtcManager.Operations do
       job.issue_id in ^issue_ids and job.state in ^@active_job_states
     )
     |> order_by([job], desc: job.inserted_at)
+    |> preload(:approval)
     |> Repo.all()
     |> Map.new(&{&1.issue_id, &1})
   end

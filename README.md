@@ -928,6 +928,39 @@ on it, check the members it created or related on GitHub, then **Run
 collection**. The reconciler runs after every GitHub sync, pull-request
 status change, and finished agent action, and once a minute as a backstop.
 
+#### Integration branches
+
+A repository can send labelled work to an integration branch instead of its
+default branch, for a feature that is delivered as several pull requests and
+reaches the default branch together. On the repository's Configuration page,
+**Integration branches** maps a label such as `ska` to a branch such as
+`feature/ska`. GitHub must report the branch when the mapping is saved, and
+dispatch fetches it again before every job. When synchronization finds a label
+`x` and a `feature/x` branch, the page suggests that mapping with one button;
+nothing routes on a matching name alone. A mapping switched off keeps its
+entry and routes nothing.
+
+Approval resolves the base once and stores it on the approval and the job:
+
+- an issue whose own labels, or whose collection umbrella's labels, include an
+  active mapping's label targets that branch, and the card shows
+  **→ feature/ska** with a **→ main instead** checkbox for one issue that
+  should skip it;
+- labels that map to two different branches block approval until one is
+  removed;
+- **Run collection** resolves the base from the umbrella, offers the same
+  choice once, and every member inherits it;
+- an issue that already has a pull request merged into its integration branch
+  is not approved for that branch again.
+
+The worktree starts from the stored base, the agent's pull request targets it,
+and merge, repair, and broker checks compare against it. A label or mapping
+changed after approval does not retarget the job; the card shows the mismatch.
+Deployments, daily updates, source snapshots, toolchain bumps, and repository
+health stay on the default branch. GitHub closes an issue only when its pull
+request merges into the default branch, so integrated issues stay open until
+the integration branch itself is merged.
+
 ### When an agent cannot finish
 
 Nothing watches a managed pane. An agent that asks a question there is asking

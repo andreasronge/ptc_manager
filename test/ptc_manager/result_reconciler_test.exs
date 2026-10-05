@@ -195,6 +195,7 @@ defmodule PtcManager.ResultReconcilerTest do
     old_publication =
       %PrPublication{}
       |> PrPublication.changeset(%{
+        base_branch: "main",
         job_id: job.id,
         repository_id: job.repository_id,
         state: "blocked",

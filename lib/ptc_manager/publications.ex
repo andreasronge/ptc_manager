@@ -549,7 +549,7 @@ defmodule PtcManager.Publications do
                     now
                   )
 
-                not intended_base?(result, repository) ->
+                not intended_base?(result, repository, job.base_branch) ->
                   block_agent_publication!(
                     publication,
                     job,
@@ -925,7 +925,7 @@ defmodule PtcManager.Publications do
                 not reconcilable_remote_status?(publication, job) ->
                   Repo.rollback(:publication_not_open)
 
-                not intended_base?(result, repository) ->
+                not intended_base?(result, repository, job.base_branch) ->
                   message = "GitHub reports a different pull-request base."
 
                   publication
@@ -1123,7 +1123,7 @@ defmodule PtcManager.Publications do
             result.state != "open" ->
               Repo.rollback(:pull_request_not_open)
 
-            not intended_base?(result, repository) ->
+            not intended_base?(result, repository, job.base_branch) ->
               Repo.rollback(:unexpected_pull_request_base)
 
             result.head_ref != publication.branch_name ->
@@ -1314,6 +1314,7 @@ defmodule PtcManager.Publications do
       idempotency_key: external_key(repository.id, pull.pr_number),
       fencing_token: 0,
       branch_name: pull.head_ref,
+      base_branch: pull.base_ref,
       base_sha: pull.base_sha,
       head_sha: pull.head_sha,
       diff_digest: external_version_digest(pull),
@@ -1366,7 +1367,7 @@ defmodule PtcManager.Publications do
   end
 
   defp record_external_remote_status!(publication, repository, result, now) do
-    if not intended_base?(result, repository) do
+    if not intended_base?(result, repository, repository.default_branch) do
       Repo.rollback(:unexpected_pull_request_base)
     end
 
@@ -1801,8 +1802,10 @@ defmodule PtcManager.Publications do
 
   defp repair_lineage_open?(_publication, _job), do: false
 
-  defp intended_base?(result, repository) do
-    result.base_ref == repository.default_branch and
+  # A managed pull request must target the base its job stored at approval;
+  # an imported one, the default branch.
+  defp intended_base?(result, repository, branch) do
+    result.base_ref == branch and
       String.downcase(result.base_repository) ==
         String.downcase("#{repository.github_owner}/#{repository.github_name}")
   end

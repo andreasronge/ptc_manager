@@ -496,6 +496,49 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     assert Repo.get!(Repository, repository.id).workspace_setup_timeout_minutes == 15
   end
 
+  test "maps a label to an integration branch from a suggestion, switches it off, and removes it",
+       %{conn: conn} do
+    Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])
+    on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+    repository =
+      repository_fixture(%{
+        github_label_names: %{"names" => ["ska", "cleanup"]},
+        github_branch_names: %{"names" => ["main", "feature/ska"]}
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+
+    assert has_element?(view, "#integration-branch-suggestions", "Add ska → feature/ska")
+    refute has_element?(view, "#integration-branch-suggestions", "cleanup")
+
+    view |> form("#suggest-integration-branch-ska") |> render_submit()
+
+    assert has_element?(view, "#integration-branch-ska", "feature/ska")
+    refute has_element?(view, "#integration-branch-suggestions")
+
+    html =
+      view
+      |> form("#add-integration-branch", %{
+        "mapping" => %{"label" => "cleanup", "branch" => "feature/cleanup"}
+      })
+      |> render_submit()
+
+    assert html =~ "GitHub reports no such branch"
+
+    view
+    |> element("#integration-branch-ska button", "Switch off")
+    |> render_click()
+
+    assert has_element?(view, "#integration-branch-ska", "off")
+
+    view
+    |> element("#integration-branch-ska button", "Remove")
+    |> render_click()
+
+    refute has_element?(view, "#integration-branch-ska")
+  end
+
   test "an unknown repository returns to the Configuration list", %{conn: conn} do
     for id <- ["999999", "not-a-number"] do
       assert {:error, {:live_redirect, %{to: "/configuration", flash: flash}}} =

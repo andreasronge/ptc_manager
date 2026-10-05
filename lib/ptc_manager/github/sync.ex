@@ -56,7 +56,8 @@ defmodule PtcManager.GitHub.Sync do
         %{
           viewer_login: viewer_login(client),
           label_names: Operations.read_repository_labels(client, syncing_repository),
-          github_default_branch: github_default_branch(client, syncing_repository)
+          github_default_branch: github_default_branch(client, syncing_repository),
+          branch_names: branch_names(client, syncing_repository)
         },
         opts
       )
@@ -94,6 +95,19 @@ defmodule PtcManager.GitHub.Sync do
     end
   end
 
+  # Branch names feed the repository page's integration-branch suggestions. A
+  # failed read keeps the last list rather than clearing it.
+  defp branch_names(client, repository) do
+    {module, arity} = if is_atom(client), do: {client, 1}, else: {client.__struct__, 2}
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :list_branches, arity) do
+      case Gateway.call(client, :list_branches, [repository]) do
+        {:ok, names} when is_list(names) -> names
+        _unavailable -> nil
+      end
+    end
+  end
+
   defp persist_snapshot(repository, remote_issues, missing_issues, remote, opts) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -120,6 +134,7 @@ defmodule PtcManager.GitHub.Sync do
                   remote.github_default_branch || projection.repository.github_default_branch
               }
               |> put_label_names(remote.label_names, now)
+              |> put_branch_names(remote.branch_names, now)
             )
             |> Repo.update!()
 
@@ -158,6 +173,12 @@ defmodule PtcManager.GitHub.Sync do
 
       PtcManager.Collections.reconcile(summary.repository.id)
     end
+  end
+
+  defp put_branch_names(attrs, nil, _now), do: attrs
+
+  defp put_branch_names(attrs, names, now) do
+    Map.merge(attrs, %{github_branch_names: %{"names" => names}, github_branches_checked_at: now})
   end
 
   defp put_label_names(attrs, nil, _now), do: attrs

@@ -32,5 +32,21 @@ defmodule PtcManager.GitHub do
   """
   @callback list_labels(Repository.t()) :: {:ok, [String.t()]} | {:error, term()}
 
-  @optional_callbacks get_repository: 2, viewer_login: 0, list_labels: 1, review_context: 2
+  @doc """
+  The branch names that exist in one repository.
+
+  The repository page suggests a label → integration-branch mapping when a
+  label `x` has a `feature/x` branch; it never routes on that match by itself.
+  """
+  @callback list_branches(Repository.t()) :: {:ok, [String.t()]} | {:error, term()}
+
+  @doc "Whether one branch exists, checked when a mapping is saved and before dispatch."
+  @callback branch_exists?(Repository.t(), String.t()) :: {:ok, boolean()} | {:error, term()}
+
+  @optional_callbacks get_repository: 2,
+                      viewer_login: 0,
+                      list_labels: 1,
+                      review_context: 2,
+                      list_branches: 1,
+                      branch_exists?: 2
 end

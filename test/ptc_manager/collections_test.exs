@@ -135,6 +135,7 @@ defmodule PtcManager.CollectionsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       repository_id: issue.repository_id,
       state: "published",
@@ -238,6 +239,68 @@ defmodule PtcManager.CollectionsTest do
   end
 
   describe "admission" do
+    test "a run on a mapped umbrella sends every member to its integration branch" do
+      Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])
+      on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+      repository = repository_fixture()
+
+      {:ok, repository} =
+        Operations.add_integration_branch(repository.id, "ska", "feature/ska", "andreas")
+
+      {umbrella, [first, _second]} = collection_fixture(repository, [1, 2], chain: true)
+
+      umbrella =
+        umbrella
+        |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+        |> Repo.update!()
+
+      run = start!(umbrella)
+      assert run.base_branch == "feature/ska"
+      refute run.base_override
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Job{base_branch: "feature/ska"} = job_for(first)
+
+      {:ok, _cancelled} = Collections.cancel(run.id, "andreas")
+      Repo.delete_all(Job)
+
+      instead = start!(Repo.reload!(umbrella), %{base: :default})
+      assert instead.base_branch == "main"
+      assert instead.base_override
+
+      # Every approval path follows the run, not the member's labels.
+      first |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]}) |> Repo.update!()
+
+      assert {:ok, %Job{base_branch: "main"}} =
+               Operations.approve_issue_directly(first.id, "andreas")
+    end
+
+    test "a run does not start on a base other than a member's existing work" do
+      Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])
+      on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+      repository = repository_fixture()
+
+      {:ok, repository} =
+        Operations.add_integration_branch(repository.id, "ska", "feature/ska", "andreas")
+
+      {umbrella, [first, _second]} = collection_fixture(repository, [1, 2])
+
+      # Approved before the umbrella was labelled, so it targets main.
+      {:ok, %Job{base_branch: "main"}} = Operations.approve_issue_directly(first.id, "andreas")
+
+      umbrella
+      |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+      |> Repo.update!()
+
+      assert {:error, {:member_work_on_another_branch, [1]}} =
+               Collections.start(umbrella.id, %{}, "andreas")
+
+      assert {:ok, %{base_branch: "main"}} =
+               Collections.start(umbrella.id, %{base: :default}, "andreas")
+    end
+
     test "admits only ready, unblocked members, once each, under the run's own approval" do
       repository = repository_fixture()
       {umbrella, [first, second]} = collection_fixture(repository, [1, 2], chain: true)
@@ -777,6 +840,74 @@ defmodule PtcManager.CollectionsTest do
       :ok = Collections.reconcile(repository.id)
       assert %Run{state: "paused", pause_kind: "membership_changed"} = Repo.get!(Run, run.id)
       assert {:error, {:member_in_flight, 1}} = Collections.accept_changes(run.id, "andreas")
+    end
+
+    test "accepting changes refuses a new member whose work targets another base" do
+      Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])
+      on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+      repository = repository_fixture()
+
+      {:ok, repository} =
+        Operations.add_integration_branch(repository.id, "ska", "feature/ska", "andreas")
+
+      {umbrella, _members} = collection_fixture(repository, [1, 2])
+
+      umbrella
+      |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+      |> Repo.update!()
+
+      run = start!(Repo.reload!(umbrella))
+      assert run.base_branch == "feature/ska"
+
+      # Approved on its own, before it joined the collection.
+      outsider = issue_fixture(repository, %{number: 3, workflow_label: "ptc:ready"})
+      {:ok, %Job{base_branch: "main"}} = Operations.approve_issue_directly(outsider.id, "andreas")
+
+      outsider
+      |> Ecto.Changeset.change(parent_issue_number: umbrella.number)
+      |> Repo.update!()
+
+      refresh_umbrella(umbrella, repository, [1, 2, 3], %{})
+      :ok = Collections.reconcile(repository.id)
+      assert %Run{pause_kind: "membership_changed"} = Repo.get!(Run, run.id)
+
+      assert {:error, {:member_work_on_another_branch, [3]}} =
+               Collections.accept_changes(run.id, "andreas")
+    end
+
+    test "a member's recoverable failed work on another base blocks a run on this one" do
+      Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])
+      on_exit(fn -> Application.delete_env(:ptc_manager, :test_github_branches) end)
+
+      repository = repository_fixture()
+
+      {:ok, repository} =
+        Operations.add_integration_branch(repository.id, "ska", "feature/ska", "andreas")
+
+      {umbrella, [first, _second]} = collection_fixture(repository, [1, 2])
+      {:ok, job} = Operations.approve_issue_directly(first.id, "andreas")
+
+      job
+      |> Job.changeset(%{
+        state: "failed",
+        stop_reported_at: DateTime.utc_now(),
+        stop_report: %{"reason_code" => "environment_broken"}
+      })
+      |> Repo.update!()
+
+      umbrella
+      |> Ecto.Changeset.change(github_labels: %{"names" => ["ska"]})
+      |> Repo.update!()
+
+      # A retry would recover the work on main under a run on feature/ska.
+      assert {:error, {:member_work_on_another_branch, [1]}} =
+               Collections.start(umbrella.id, %{}, "andreas")
+
+      {:ok, _job} = Operations.acknowledge_job_stop(job.id, "andreas")
+
+      assert {:ok, %Run{base_branch: "feature/ska"}} =
+               Collections.start(umbrella.id, %{}, "andreas")
     end
 
     test "issues a handoff created are adopted as members" do

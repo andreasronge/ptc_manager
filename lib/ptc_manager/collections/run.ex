@@ -30,6 +30,8 @@ defmodule PtcManager.Collections.Run do
     field :state, :string, default: "active"
     field :auto_merge, :boolean, default: true
     field :auto_recover, :boolean, default: true
+    field :base_branch, :string
+    field :base_override, :boolean, default: false
     field :pause_sequence, :integer, default: 0
     field :pause_kind, :string
     field :pause_reason, :string
@@ -63,6 +65,8 @@ defmodule PtcManager.Collections.Run do
       :state,
       :auto_merge,
       :auto_recover,
+      :base_branch,
+      :base_override,
       :pause_sequence,
       :pause_kind,
       :pause_reason,

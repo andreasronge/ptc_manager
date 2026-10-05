@@ -22,6 +22,7 @@ defmodule PtcManager.Collections do
   alias PtcManager.{OperationalMode, RepoTransaction, Reviews}
   alias PtcManager.Collections.{Member, Run, Step, Structure}
   alias PtcManager.Operations.{AgentAction, Issue, Job, PrPublication, Repository}
+  alias PtcManager.Repository.{IntegrationBranches, MaintainerLabels}
 
   @actor "system:collection"
   @outstanding_states PtcManager.Operations.AgentAction.pending_states()
@@ -89,6 +90,8 @@ defmodule PtcManager.Collections do
 
           with :ok <- validate_structure(issue) do
             now = utc_now()
+            base = run_base(issue, Map.get(attrs, :base, :mapped))
+            members_on_base!(Structure.members(issue), base.branch)
 
             run =
               %Run{}
@@ -98,6 +101,8 @@ defmodule PtcManager.Collections do
                 state: "active",
                 auto_merge: Map.get(attrs, :auto_merge, true) == true,
                 auto_recover: Map.get(attrs, :auto_recover, true) == true,
+                base_branch: base.branch,
+                base_override: base.override,
                 actor: actor,
                 started_at: now
               })
@@ -122,6 +127,8 @@ defmodule PtcManager.Collections do
                 issue_number: issue.number,
                 auto_merge: run.auto_merge,
                 auto_recover: run.auto_recover,
+                base_branch: run.base_branch,
+                base_override: run.base_override,
                 members: Enum.map(members, & &1.number)
               },
               "collection_run"
@@ -212,6 +219,8 @@ defmodule PtcManager.Collections do
       end
 
       with :ok <- validate_structure(umbrella) do
+        members_on_base!(current, run.base_branch)
+
         for member <- existing,
             not MapSet.member?(current_numbers, member.issue_number),
             do: Repo.delete!(member)
@@ -263,6 +272,9 @@ defmodule PtcManager.Collections do
         :ok
     end
   end
+
+  @doc "The live run a member issue belongs to, whose base branch it inherits."
+  def member_run(repo, %Issue{} = issue), do: parent_run(repo, issue)
 
   @doc false
   def dispatch_allowed(%Job{} = job, remote) do
@@ -1397,6 +1409,51 @@ defmodule PtcManager.Collections do
             umbrella.number == ^issue.parent_issue_number and run.state in ^Run.live_states(),
         limit: 1
     )
+  end
+
+  # Every member inherits the base the umbrella's labels resolve to now, or the
+  # default branch when the maintainer chose it once at start.
+  defp run_base(issue, choice) do
+    repository = issue.repository
+
+    case IntegrationBranches.resolve(repository, MaintainerLabels.reported_names(issue)) do
+      {:ok, nil} ->
+        %{branch: repository.default_branch, override: false}
+
+      {:ok, _mapping} when choice == :default ->
+        %{branch: repository.default_branch, override: true}
+
+      {:ok, %{"branch" => branch}} ->
+        %{branch: branch, override: false}
+
+      {:error, {:conflicting_integration_branches, _mappings}} ->
+        Repo.rollback(:conflicting_integration_branches)
+    end
+  end
+
+  # Work a member already has keeps the base it was approved with. A run on a
+  # different base would merge that work into the wrong branch, or recover it
+  # there, so a member joins only when no such work is live, open as a pull
+  # request, or still recoverable: an unanswered stop report or a retained
+  # worktree.
+  defp members_on_base!(members, branch) do
+    numbers =
+      for %{issue: %Issue{id: issue_id}, number: number} <- members,
+          Repo.exists?(
+            from job in Job,
+              left_join: publication in PrPublication,
+              on: publication.job_id == job.id,
+              left_join: allocation in assoc(job, :worktree_allocation),
+              where:
+                job.issue_id == ^issue_id and job.base_branch != ^branch and
+                  (job.state in ^Job.live_states() or publication.pr_state == "open" or
+                     (job.state in ["failed", "lost"] and
+                        ((not is_nil(job.stop_reported_at) and is_nil(job.stop_acknowledged_at)) or
+                           (not is_nil(allocation.id) and allocation.state != "removed"))))
+          ),
+          do: number
+
+    if numbers != [], do: Repo.rollback({:member_work_on_another_branch, numbers})
   end
 
   defp validate_structure(issue) do

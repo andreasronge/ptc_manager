@@ -801,10 +801,10 @@ defmodule PtcManager.MaintainerActions.Catalog do
     repo = "#{repository.github_owner}/#{repository.github_name}"
 
     """
-    <runtime_context action="merge_reviewed_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="true" authorized_head="#{publication.remote_head_sha}" push_authorized="false" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" allowed_outcomes="repaired,repair-blocked" />
+    <runtime_context action="merge_reviewed_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="true" authorized_head="#{publication.remote_head_sha}" push_authorized="false" default_branch="#{repository.default_branch}" base_branch="#{publication.base_branch}" retained_workspace="#{PrPublication.managed?(publication)}" allowed_outcomes="repaired,repair-blocked" />
     <pull_request_data>
     PR: ##{publication.pr_number}
-    Branch: #{publication.branch_name}
+    Branch: #{publication.branch_name}#{base_note(repository, publication)}
     Authorized head: #{publication.remote_head_sha}
     Draft: #{publication.draft}
     Checks: #{publication.checks_state}
@@ -872,18 +872,30 @@ defmodule PtcManager.MaintainerActions.Catalog do
     """
   end
 
+  # A pull request into an integration branch is brought up to date with that
+  # branch; "the default branch" in the action's prompt means its base here.
+  defp base_note(repository, publication) do
+    case publication.base_branch do
+      base when base == repository.default_branch ->
+        ""
+
+      base ->
+        "\nBase: #{base}, an integration branch. Wherever this action says the default branch, use #{base}."
+    end
+  end
+
   defp repair_prompt(repository, issue, publication, opts \\ []) do
     repo = "#{repository.github_owner}/#{repository.github_name}"
     merge_authorized? = Keyword.get(opts, :merge_authorized?, false)
 
     """
-    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" draft_pull_request="#{if merge_authorized?, do: "mark ready for review before merging", else: "leave as is"}" default_branch="#{repository.default_branch}" retained_workspace="#{PrPublication.managed?(publication)}" review_policy="ci_is_the_gate" push_authorized="true" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
+    <runtime_context action="repair_pr" repository="#{repo}" github_access="trusted_direct" merge_authorized="#{merge_authorized?}" draft_pull_request="#{if merge_authorized?, do: "mark ready for review before merging", else: "leave as is"}" default_branch="#{repository.default_branch}" base_branch="#{publication.base_branch}" retained_workspace="#{PrPublication.managed?(publication)}" review_policy="ci_is_the_gate" push_authorized="true" allowed_outcomes="repaired,repair-blocked" expensive_commands="when PTC_OPERATION_WRAPPER is set, use $PTC_OPERATION_WRAPPER run --label &lt;build|test|lint|verify&gt; -- &lt;command&gt;; otherwise run commands directly" />
     <repair_policy>
     The managed review is not available inside this action: `$PTC_OPERATION_WRAPPER review` answers review_unavailable_in_action. That is not an outage. If your implementation task told you that a passed managed review must precede a push, that rule does not apply to this repair. Validate the repair with the repository's own checks, commit it, and push the existing branch; the pull request's CI is the gate for a repair. Do not stop to wait for a review that cannot come.
     </repair_policy>
     <pull_request_data>
     PR: ##{publication.pr_number}
-    Branch: #{publication.branch_name}
+    Branch: #{publication.branch_name}#{base_note(repository, publication)}
     Last observed head: #{publication.remote_head_sha}
     Draft: #{publication.draft}
     Checks: #{publication.checks_state}
@@ -990,6 +1002,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
       issue_id: issue.id,
       fencing_token: 7,
       branch_name: "ptc-manager/issue-123-job-42",
+      base_branch: repository.default_branch,
       publication_source: "agent",
       required_review_count: 2,
       prompt_instructions: instructions
@@ -1006,6 +1019,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
       pr_state: "open",
       pr_number: 456,
       branch_name: "ptc-manager/issue-123-job-42",
+      base_branch: repository.default_branch,
       head_ref: "ptc-manager/issue-123-job-42",
       head_repository: "andreasronge/example_repository",
       base_sha: String.duplicate("a", 40),

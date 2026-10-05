@@ -602,6 +602,7 @@ defmodule PtcManager.OperationsTest do
 
       %PtcManager.Operations.PrPublication{}
       |> PtcManager.Operations.PrPublication.changeset(%{
+        base_branch: "main",
         job_id: second.id,
         state: "published",
         idempotency_key: String.duplicate("7", 64),
@@ -864,6 +865,7 @@ defmodule PtcManager.OperationsTest do
 
       %Job{}
       |> Job.changeset(%{
+        base_branch: "main",
         repository_id: stopped.repository_id,
         issue_id: stopped.issue_id,
         approval_id: stopped.approval_id,
@@ -1723,6 +1725,7 @@ defmodule PtcManager.OperationsTest do
 
       %Job{}
       |> Job.changeset(%{
+        base_branch: "main",
         repository_id: job.repository_id,
         issue_id: job.issue_id,
         approval_id: job.approval_id,

@@ -519,6 +519,7 @@ defmodule PtcManager.DeliveryEvidenceTest do
           %{
             job_id: job.id,
             repository_id: job.repository_id,
+            base_branch: "main",
             pr_number: number,
             state: "published",
             idempotency_key:

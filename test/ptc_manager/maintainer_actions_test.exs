@@ -401,7 +401,7 @@ defmodule PtcManager.MaintainerActionsTest do
   end
 
   defmodule RepairBaseFetcher do
-    def fetch_base_for_verification(path, repository, expected_sha) do
+    def fetch_base_for_verification(path, repository, _base, expected_sha) do
       send(
         Process.get(:agent_action_test_pid),
         {:repair_base_fetch, path, repository.id, expected_sha}
@@ -3327,6 +3327,14 @@ defmodule PtcManager.MaintainerActionsTest do
       assert preview =~ "blocked_implementation"
     end
 
+    test "pull-request previews name the base they would target" do
+      for key <- ["merge_reviewed_pr", "repair_pr"] do
+        preview = Catalog.preview(key)
+        assert preview =~ ~s(base_branch="main")
+        refute preview =~ "an integration branch"
+      end
+    end
+
     test "issue preparation never carries a blocker at all" do
       repository = repository_fixture()
       issue = issue_fixture(repository)
@@ -3431,6 +3439,7 @@ defmodule PtcManager.MaintainerActionsTest do
       external =
         %PrPublication{}
         |> PrPublication.changeset(%{
+          base_branch: "main",
           repository_id: repository.id,
           source: "external",
           state: "published",
@@ -3551,6 +3560,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
       %PrPublication{}
       |> PrPublication.changeset(%{
+        base_branch: "main",
         repository_id: repository.id,
         source: "external",
         state: "published",
@@ -3583,6 +3593,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       state: "published",
       idempotency_key:
@@ -3624,6 +3635,7 @@ defmodule PtcManager.MaintainerActionsTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       state: "published",
       idempotency_key:

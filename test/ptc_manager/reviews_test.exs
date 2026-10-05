@@ -426,6 +426,7 @@ defmodule PtcManager.ReviewsTest do
 
     %Job{}
     |> Job.changeset(%{
+      base_branch: "main",
       repository_id: job.repository_id,
       issue_id: job.issue_id,
       approval_id: job.approval_id,

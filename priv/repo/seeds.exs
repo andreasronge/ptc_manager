@@ -273,6 +273,7 @@ if Repo.aggregate(Repository, :count) == 0 do
 
     %PtcManager.Operations.PrPublication{}
     |> PtcManager.Operations.PrPublication.changeset(%{
+      base_branch: "main",
       job_id: merged_job.id,
       state: "published",
       idempotency_key: String.duplicate("e", 64),
@@ -495,14 +496,47 @@ if Repo.aggregate(Repository, :count) == 0 do
             github_owner: "tyraorg",
             github_name: "api",
             github_default_branch: "develop",
-            enabled: false
+            enabled: false,
+            github_label_names: %{"names" => ~w(ska legacy billing reports bug)},
+            github_labels_checked_at: now,
+            github_branch_names: %{
+              "names" =>
+                ~w(main develop feature/ska feature/legacy feature/billing feature/reports)
+            },
+            github_branches_checked_at: now,
+            # An active and a switched-off mapping, a second active one to make a
+            # conflict, and `reports`, whose feature/ branch is only suggested.
+            integration_branches: %{
+              "mappings" => [
+                %{"label" => "ska", "branch" => "feature/ska", "active" => true},
+                %{"label" => "legacy", "branch" => "feature/legacy", "active" => false},
+                %{"label" => "billing", "branch" => "feature/billing", "active" => true}
+              ]
+            }
           }
         ] do
-      {:ok, _repository} =
+      {:ok, repository} =
         attrs
         |> Map.put_new(:default_branch, "main")
         |> Map.put(:local_path, nil)
         |> Operations.create_repository()
+
+      if repository.github_name == "api" do
+        for {number, title, labels} <- [
+              {117, "SKA: import the course plan", ["ska"]},
+              {118, "SKA: validate attendance codes", ["ska", "legacy"]},
+              {125, "SKA billing export", ["ska", "billing"]}
+            ] do
+          {:ok, _issue} =
+            number
+            |> issue_attrs.(title, 30, %{
+              repository_id: repository.id,
+              html_url: "https://github.com/tyraorg/api/issues/#{number}",
+              github_labels: %{"names" => labels}
+            })
+            |> Operations.create_issue()
+        end
+      end
     end
   end
 

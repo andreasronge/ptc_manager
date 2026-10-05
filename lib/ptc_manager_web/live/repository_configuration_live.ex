@@ -8,6 +8,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
   alias PtcManager.Operations.AgentEnvironmentVariable
   alias PtcManager.Operations.Repository
   alias PtcManager.Repository.Health
+  alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.Repository.MaintainerLabels
 
   @impl true
@@ -127,6 +128,71 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
 
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "The workspace setup could not be saved.")}
+    end
+  end
+
+  def handle_event("add-integration-branch", %{"mapping" => params}, socket) do
+    case Operations.add_integration_branch(
+           socket.assigns.repository.id,
+           params["label"] || "",
+           params["branch"] || "",
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        socket
+        |> put_flash(
+          :info,
+          "Issues labelled #{String.trim(params["label"] || "")} now target #{String.trim(params["branch"] || "")}."
+        )
+        |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, mapping_error(reason))}
+    end
+  end
+
+  def handle_event(
+        "set-integration-branch-active",
+        %{"label" => label, "active" => active},
+        socket
+      )
+      when active in ["true", "false"] do
+    case Operations.set_integration_branch_active(
+           socket.assigns.repository.id,
+           label,
+           active == "true",
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        message =
+          if active == "true",
+            do: "#{label} routes to its integration branch again.",
+            else:
+              "#{label} is off: its issues target #{socket.assigns.repository.default_branch}."
+
+        socket |> put_flash(:info, message) |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, mapping_error(reason))}
+    end
+  end
+
+  def handle_event("remove-integration-branch", %{"label" => label}, socket) do
+    case Operations.remove_integration_branch(
+           socket.assigns.repository.id,
+           label,
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        socket
+        |> put_flash(
+          :info,
+          "#{label} no longer maps to an integration branch. Approved jobs keep their base."
+        )
+        |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, mapping_error(reason))}
     end
   end
 
@@ -300,6 +366,8 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
            repository: repository,
            health: Health.summarize(repository),
            maintainer_labels: MaintainerLabels.list(repository),
+           integration_branches: IntegrationBranches.list(repository),
+           integration_suggestions: IntegrationBranches.suggestions(repository),
            agent_environment_variables: AgentEnvironmentVariables.list_metadata(repository.id)
          )}
 
@@ -314,6 +382,26 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
       _invalid -> nil
     end
   end
+
+  defp mapping_error(:invalid_label_name),
+    do: "Use 1 to 50 characters from letters, digits, spaces, and . _ / : - for the label."
+
+  defp mapping_error(:reserved_label_name),
+    do: "Labels starting with ptc: are PtcManager's own and cannot route work."
+
+  defp mapping_error(:invalid_branch),
+    do: "Use a branch name of letters, digits, and . _ / - that does not start with - or /."
+
+  defp mapping_error(:label_already_mapped), do: "That label already has a mapping here."
+  defp mapping_error(:too_many_mappings), do: "Twenty mappings per repository is the limit."
+
+  defp mapping_error(:branch_not_found),
+    do: "GitHub reports no such branch, or the read token cannot see this repository."
+
+  defp mapping_error(:github_unavailable),
+    do: "GitHub could not confirm the branch right now. Try again."
+
+  defp mapping_error(_reason), do: "The mapping could not be saved."
 
   defp label_error(:invalid_label_role), do: "Choose either badge or park."
 

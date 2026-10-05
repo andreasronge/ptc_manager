@@ -36,7 +36,8 @@ defmodule PtcManager.DemoSeedTest do
     assert Repo.get_by!(Repository, github_owner: "tyraorg", github_name: "web").sync_status ==
              "error"
 
-    assert Repo.aggregate(Issue, :count) == 9
+    # Nine ptc_runner issues and three tyraorg/api issues routed by labels.
+    assert Repo.aggregate(Issue, :count) == 12
     assert Repo.aggregate(AgentRun, :count) == 3
     assert Enum.count(Repo.all(AgentRun), &(&1.state == "working")) == 2
     assert Repo.aggregate(ResourceOperation, :count) == 10

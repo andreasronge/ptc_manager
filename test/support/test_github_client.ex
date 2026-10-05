@@ -6,6 +6,12 @@ defmodule PtcManager.TestGitHubClient do
   def get_issue(_repository, _number), do: {:error, :not_implemented}
   def review_context(_repository, _target), do: {:ok, %{"body" => ""}}
 
+  def list_branches(_repository),
+    do: {:ok, Application.get_env(:ptc_manager, :test_github_branches, ["main"])}
+
+  def branch_exists?(_repository, branch),
+    do: {:ok, branch in Application.get_env(:ptc_manager, :test_github_branches, ["main"])}
+
   defp response(key) do
     case Application.get_env(:ptc_manager, :test_github_repositories, :all) do
       :all ->

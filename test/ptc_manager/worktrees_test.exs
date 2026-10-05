@@ -609,6 +609,7 @@ defmodule PtcManager.WorktreesTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: leased.id,
       state: "published",
       idempotency_key: String.duplicate("b", 64),

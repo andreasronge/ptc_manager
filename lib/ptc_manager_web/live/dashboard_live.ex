@@ -15,6 +15,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PlanningGroup
+  alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.Repository.MaintainerLabels
   alias PtcManager.Worktrees
   alias PtcManager.Publications
@@ -129,7 +130,8 @@ defmodule PtcManagerWeb.DashboardLive do
         |> PtcManager.Collections.start(
           %{
             auto_merge: params["auto-merge"] == "true",
-            auto_recover: params["auto-recover"] == "true"
+            auto_recover: params["auto-recover"] == "true",
+            base: if(params["base"] == "default", do: :default, else: :mapped)
           },
           socket.assigns.actor
         )
@@ -174,9 +176,11 @@ defmodule PtcManagerWeb.DashboardLive do
   def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
          {:ok, review_count} <- parse_review_count(params["review-count"]) do
+      opts = if params["base"] == "default", do: [base: :default], else: []
+
       if params["direct"] == "true",
-        do: approve_directly(issue_id, review_count, params["execution-profile"], socket),
-        else: approve_issue(issue_id, review_count, params["execution-profile"], socket)
+        do: approve_directly(issue_id, review_count, params["execution-profile"], opts, socket),
+        else: approve_issue(issue_id, review_count, params["execution-profile"], opts, socket)
     else
       {:error, :invalid_issue_id} ->
         {:noreply, put_flash(socket, :error, "That issue could not be found.")}
@@ -413,6 +417,13 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  defp collection_run_error(:conflicting_integration_branches),
+    do: "The umbrella's labels map to different integration branches. Remove one label first."
+
+  defp collection_run_error({:member_work_on_another_branch, numbers}),
+    do:
+      "Members #{Enum.map_join(numbers, ", ", &"##{&1}")} have work on another branch. Resolve it before starting a run on this one."
+
   defp collection_run_error(:not_a_collection), do: "This issue has no sub-issues."
   defp collection_run_error(:run_already_live), do: "This collection already has a run."
   defp collection_run_error(:issue_closed), do: "This issue is closed."
@@ -449,15 +460,15 @@ defmodule PtcManagerWeb.DashboardLive do
   defp collection_run_error(reason),
     do: "The collection run could not be changed: #{inspect(reason)}"
 
-  defp approve_directly(issue_id, review_count, profile, socket) do
+  defp approve_directly(issue_id, review_count, profile, opts, socket) do
     issue_id
-    |> Operations.approve_issue_directly(socket.assigns.actor, review_count, profile)
+    |> Operations.approve_issue_directly(socket.assigns.actor, review_count, profile, opts)
     |> approval_result(review_count, socket, "Started directly, without a preparation round.")
   end
 
-  defp approve_issue(issue_id, review_count, profile, socket) do
+  defp approve_issue(issue_id, review_count, profile, opts, socket) do
     issue_id
-    |> Operations.approve_issue(socket.assigns.actor, review_count, profile)
+    |> Operations.approve_issue(socket.assigns.actor, review_count, profile, opts)
     |> approval_result(review_count, socket, "Approved.")
   end
 
@@ -480,6 +491,22 @@ defmodule PtcManagerWeb.DashboardLive do
 
       {:error, :already_active} ->
         {:noreply, put_flash(socket, :error, "This issue already has active work.")}
+
+      {:error, :conflicting_integration_branches} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "This issue's labels map to different integration branches. Remove one label first."
+         )}
+
+      {:error, :already_integrated} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "This issue's work is already merged into its integration branch."
+         )}
 
       {:error, :stale_proposal} ->
         {:noreply, put_flash(socket, :error, "The issue changed. Investigate it again first.")}
@@ -899,6 +926,98 @@ defmodule PtcManagerWeb.DashboardLive do
         not Operations.worktree_consumes_execution_slot?(allocation)
 
   def discardable_worktree?(_allocation), do: false
+
+  @doc """
+  Where approving this issue now would send its work: the default branch, an
+  integration branch its labels or umbrella map to, or a conflict to resolve.
+  """
+  def issue_route(%{issue: %{repository: repository} = issue}) do
+    # A live collection run fixed its members' base when it started.
+    case PtcManager.Collections.member_run(PtcManager.Repo, issue) do
+      %{base_branch: branch} when is_binary(branch) ->
+        {:run, branch}
+
+      _no_run ->
+        case IntegrationBranches.resolve(repository, Operations.route_labels(issue)) do
+          {:ok, nil} -> :default
+          {:ok, %{"branch" => branch}} -> {:integration, branch}
+          {:error, {:conflicting_integration_branches, mappings}} -> {:conflict, mappings}
+        end
+    end
+  end
+
+  def route_conflict?(item), do: match?({:conflict, _mappings}, issue_route(item))
+
+  @doc """
+  A note when an approved job's base no longer matches what its labels say.
+  The job keeps its base; only a new approval follows the labels.
+  """
+  # A base the maintainer chose over a mapping is a decision, not a mismatch.
+  def base_mismatch(%{active_job: %{approval: %{base_override: true}}}), do: nil
+
+  def base_mismatch(%{active_job: %{base_branch: base}, issue: %{repository: repository}} = item)
+      when is_binary(base) do
+    expected =
+      case issue_route(item) do
+        {:integration, branch} -> branch
+        {:run, branch} -> branch
+        :default -> repository.default_branch
+        {:conflict, _mappings} -> nil
+      end
+
+    if expected && expected != base, do: expected
+  end
+
+  def base_mismatch(_item), do: nil
+
+  attr :item, :map, required: true
+  attr :route, :any, required: true
+  attr :prefix, :string, default: "approval"
+
+  def approval_route(assigns) do
+    ~H"""
+    <%= case @route do %>
+      <% {:integration, branch} -> %>
+        <span
+          id={"#{@prefix}-base-#{@item.issue.id}"}
+          class="self-center rounded-xl border border-teal-400/25 bg-teal-400/[0.07] px-3 py-2.5 font-mono text-xs font-semibold text-teal-200"
+          title="A mapped label sends this work to its integration branch; the issue stays open after the merge."
+        >
+          → {branch}
+        </span>
+        <label class="flex items-center gap-2 self-center text-xs font-medium text-slate-400">
+          <input
+            id={"#{@prefix}-default-instead-#{@item.issue.id}"}
+            type="checkbox"
+            name="base"
+            value="default"
+            class="rounded border-white/20 bg-slate-950"
+          /> → {@item.issue.repository.default_branch} instead
+        </label>
+      <% {:run, branch} -> %>
+        <span
+          :if={branch != @item.issue.repository.default_branch}
+          id={"#{@prefix}-base-#{@item.issue.id}"}
+          class="self-center rounded-xl border border-teal-400/25 bg-teal-400/[0.07] px-3 py-2.5 font-mono text-xs font-semibold text-teal-200"
+          title="The collection run chose this base when it started; every member follows it."
+        >
+          → {branch} · collection run
+        </span>
+      <% {:conflict, mappings} -> %>
+        <p
+          id={"#{@prefix}-base-conflict-#{@item.issue.id}"}
+          class="self-center text-xs text-amber-200"
+        >
+          Labels map to different branches ({Enum.map_join(
+            mappings,
+            ", ",
+            &"#{&1["label"]} → #{&1["branch"]}"
+          )}). Remove one label before approving.
+        </p>
+      <% :default -> %>
+    <% end %>
+    """
+  end
 
   def required_reviews(repository), do: ReviewPolicy.default_count(repository)
 

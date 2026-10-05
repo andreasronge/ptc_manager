@@ -1516,6 +1516,7 @@ defmodule PtcManagerWeb.DashboardLiveTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       repository_id: repository.id,
       source: "external",
       state: "published",
@@ -1887,6 +1888,116 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert is_nil(Repo.get!(PtcManager.Operations.Approval, job.approval_id).proposal_id)
   end
 
+  test "the card shows a mapped integration branch and can send the work to the default branch",
+       %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        integration_branches: %{
+          "mappings" => [
+            %{"label" => "ska", "branch" => "feature/ska", "active" => true},
+            %{"label" => "x", "branch" => "feature/x", "active" => true}
+          ]
+        }
+      })
+
+    issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+    conflicting = issue_fixture(repository, %{github_labels: %{"names" => ["ska", "x"]}})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#approval-base-#{issue.id}", "→ feature/ska")
+    assert has_element?(view, "#approval-default-instead-#{issue.id}")
+
+    assert has_element?(view, "#approval-base-conflict-#{conflicting.id}", "different branches")
+    assert has_element?(view, "#fix-directly-issue-#{conflicting.id}[disabled]")
+
+    view
+    |> form("#approve-form-issue-#{issue.id}", %{
+      "issue-id" => Integer.to_string(issue.id),
+      "base" => "default"
+    })
+    |> render_submit(%{"direct" => "true"})
+
+    job = Repo.get_by!(Job, issue_id: issue.id)
+    assert job.base_branch == "main"
+    assert Repo.get!(PtcManager.Operations.Approval, job.approval_id).base_override
+    open_issue(view, issue)
+    assert has_element?(view, "#in-delivery-#{issue.id}")
+    refute has_element?(view, "#job-base-mismatch-#{job.id}")
+  end
+
+  test "a member of a live run shows the run's base and no per-issue choice", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        integration_branches: %{
+          "mappings" => [
+            %{"label" => "ska", "branch" => "feature/ska", "active" => true},
+            %{"label" => "x", "branch" => "feature/x", "active" => true}
+          ]
+        }
+      })
+
+    umbrella =
+      issue_fixture(repository, %{
+        number: 900,
+        github_labels: %{"names" => ["ska"]},
+        sub_issues: %{
+          "nodes" =>
+            for number <- [901, 902] do
+              %{
+                "number" => number,
+                "state" => "open",
+                "repository_full_name" =>
+                  PtcManager.Collections.Structure.repository_full_name(repository)
+              }
+            end,
+          "total" => 2
+        }
+      })
+
+    # The member's own labels would conflict; the run decides its base.
+    member =
+      issue_fixture(repository, %{
+        number: 901,
+        parent_issue_number: 900,
+        workflow_label: "ptc:ready",
+        github_labels: %{"names" => ["ska", "x"]}
+      })
+
+    issue_fixture(repository, %{
+      number: 902,
+      parent_issue_number: 900,
+      workflow_label: "ptc:ready"
+    })
+
+    {:ok, _run} = PtcManager.Collections.start(umbrella.id, %{}, "andreas")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(view, "#approval-base-#{member.id}", "→ feature/ska · collection run")
+    refute has_element?(view, "#approval-default-instead-#{member.id}")
+    refute has_element?(view, "#approval-base-conflict-#{member.id}")
+  end
+
+  test "an approved job keeps its base and the card shows a later label change", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        integration_branches: %{
+          "mappings" => [%{"label" => "ska", "branch" => "feature/ska", "active" => true}]
+        }
+      })
+
+    issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+    {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+    issue |> Ecto.Changeset.change(github_labels: %{"names" => []}) |> Repo.update!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    open_issue(view, issue)
+    assert has_element?(view, "#job-base-#{job.id}", "→ feature/ska")
+    assert has_element?(view, "#job-base-mismatch-#{job.id}", "Labels now point to main")
+  end
+
   test "offers no direct start for an issue GitHub says cannot start", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository, %{workflow_label: "ptc:blocked"})
@@ -2031,7 +2142,8 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       published_at: if(state == "published", do: now),
       pr_state: if(state == "published", do: "open"),
       pr_checked_at: if(state == "published", do: now),
-      source: "broker"
+      source: "broker",
+      base_branch: "main"
     }
 
     publication = %PrPublication{} |> PrPublication.changeset(attrs) |> Repo.insert!()

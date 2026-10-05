@@ -19,19 +19,22 @@ defmodule PtcManager.GitHub.AppBroker do
   import Bitwise, only: [band: 2]
 
   @impl true
+  # The pull request targets the base the job stored at approval: the default
+  # branch, or the integration branch its label or collection mapped it to.
   def publish(%PrPublication{job: %{issue: issue, repository: repository}} = publication) do
+    base = publication.job.base_branch
+
     with :ok <- configured?(),
          {:ok, source_path} <- valid_context(repository, issue, publication),
          {:ok, token} <- installation_token(),
          {:ok, existing_pull_request} <- existing_pull_request(token, repository, publication),
-         {:ok, authoritative_base_sha} <- authoritative_base(token, repository),
+         {:ok, authoritative_base_sha} <- authoritative_base(token, repository, base),
          :ok <- renew_claim(publication),
          {:ok, result} <-
            with_trusted_repository(source_path, publication, fn trusted_path ->
-             with :ok <- fetch_authoritative_base(trusted_path, token, repository),
+             with :ok <- fetch_authoritative_base(trusted_path, token, repository, base),
                   :ok <- renew_claim(publication),
-                  :ok <-
-                    authoritative_base_matches(trusted_path, repository, authoritative_base_sha),
+                  :ok <- authoritative_base_matches(trusted_path, base, authoritative_base_sha),
                   :ok <- renew_claim(publication),
                   :ok <- trusted_result_matches(trusted_path, repository, publication),
                   :ok <- renew_claim(publication),
@@ -46,7 +49,7 @@ defmodule PtcManager.GitHub.AppBroker do
                       publication,
                       trusted_path
                     ) do
-               normalize_pull_request(pull_request, publication.head_sha, repository)
+               normalize_pull_request(pull_request, publication.head_sha, repository, base)
              end
            end) do
       {:ok, result}
@@ -105,14 +108,14 @@ defmodule PtcManager.GitHub.AppBroker do
 
   def status(_publication), do: {:blocked, :invalid_publication_context}
 
-  @doc "Fetches and pins the current default-branch commit for trusted repair verification."
-  def fetch_base_for_verification(path, repository, expected_sha)
-      when is_binary(path) and is_binary(expected_sha) do
+  @doc "Fetches and pins the current commit of a job's base for trusted repair verification."
+  def fetch_base_for_verification(path, repository, base, expected_sha)
+      when is_binary(path) and is_binary(base) and is_binary(expected_sha) do
     with :ok <- configured?(),
-         :ok <- valid_verification_context(path, repository, expected_sha),
+         :ok <- valid_verification_context(path, repository, base, expected_sha),
          {:ok, token} <- installation_token(),
-         :ok <- fetch_authoritative_base(path, token, repository),
-         :ok <- authoritative_base_matches(path, repository, expected_sha) do
+         :ok <- fetch_authoritative_base(path, token, repository, base),
+         :ok <- authoritative_base_matches(path, base, expected_sha) do
       :ok
     else
       {:blocked, reason} -> {:blocked, reason}
@@ -121,7 +124,7 @@ defmodule PtcManager.GitHub.AppBroker do
     end
   end
 
-  def fetch_base_for_verification(_path, _repository, _expected_sha),
+  def fetch_base_for_verification(_path, _repository, _base, _expected_sha),
     do: {:blocked, :invalid_repair_verification_context}
 
   @doc false
@@ -165,8 +168,8 @@ defmodule PtcManager.GitHub.AppBroker do
       not safe_repository_component?(repository.github_name) ->
         {:blocked, :invalid_repository_name}
 
-      not PtcManager.GitHub.Ref.safe?(repository.default_branch) ->
-        {:blocked, :invalid_default_branch}
+      not PtcManager.GitHub.Ref.safe?(publication.job.base_branch) ->
+        {:blocked, :invalid_base_branch}
 
       publication.branch_name != expected_branch ->
         {:blocked, :unexpected_job_branch}
@@ -193,7 +196,7 @@ defmodule PtcManager.GitHub.AppBroker do
     end
   end
 
-  defp valid_verification_context(path, repository, expected_sha) do
+  defp valid_verification_context(path, repository, base, expected_sha) do
     cond do
       Path.type(path) != :absolute or not File.dir?(path) ->
         {:blocked, :invalid_repository_path}
@@ -204,8 +207,8 @@ defmodule PtcManager.GitHub.AppBroker do
       not safe_repository_component?(repository.github_name) ->
         {:blocked, :invalid_repository_name}
 
-      not PtcManager.GitHub.Ref.safe?(repository.default_branch) ->
-        {:blocked, :invalid_default_branch}
+      not PtcManager.GitHub.Ref.safe?(base) ->
+        {:blocked, :invalid_base_branch}
 
       not Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, expected_sha) ->
         {:blocked, :invalid_repair_base}
@@ -310,8 +313,8 @@ defmodule PtcManager.GitHub.AppBroker do
   defp select_pull_request(_response, _publication),
     do: {:error, :invalid_github_pull_list_response}
 
-  defp authoritative_base(token, repository) do
-    case remote_branch(token, repository, repository.default_branch) do
+  defp authoritative_base(token, repository, base) do
+    case remote_branch(token, repository, base) do
       {:ok, nil} -> {:blocked, :github_base_branch_missing}
       {:ok, sha} -> {:ok, sha}
       {:error, reason} -> {:error, reason}
@@ -490,7 +493,7 @@ defmodule PtcManager.GitHub.AppBroker do
     :ok
   end
 
-  defp fetch_authoritative_base(path, token, repository) do
+  defp fetch_authoritative_base(path, token, repository, base) do
     case run_git(
            path,
            [
@@ -499,7 +502,7 @@ defmodule PtcManager.GitHub.AppBroker do
              "--no-write-fetch-head",
              "--force",
              repository_url(repository),
-             "refs/heads/#{repository.default_branch}:refs/remotes/origin/#{repository.default_branch}"
+             "refs/heads/#{base}:refs/remotes/origin/#{base}"
            ],
            token
          ) do
@@ -508,8 +511,8 @@ defmodule PtcManager.GitHub.AppBroker do
     end
   end
 
-  defp authoritative_base_matches(path, repository, expected_sha) do
-    case revision(path, "refs/remotes/origin/#{repository.default_branch}") do
+  defp authoritative_base_matches(path, base, expected_sha) do
+    case revision(path, "refs/remotes/origin/#{base}") do
       {:ok, ^expected_sha} -> :ok
       {:ok, _changed_sha} -> {:error, :github_base_changed_during_publication}
       {:error, reason} -> {:error, reason}
@@ -606,7 +609,7 @@ defmodule PtcManager.GitHub.AppBroker do
         "title" => title,
         "body" => body,
         "head" => publication.branch_name,
-        "base" => repository.default_branch,
+        "base" => publication.job.base_branch,
         "draft" => true
       }
     )
@@ -694,11 +697,12 @@ defmodule PtcManager.GitHub.AppBroker do
            "base" => %{"ref" => base_ref, "repo" => %{"full_name" => base_repository}}
          },
          expected_head,
-         repository
+         repository,
+         base
        )
        when is_integer(number) and number > 0 and is_binary(url) and head_sha == expected_head and
               is_binary(base_ref) and is_binary(base_repository) do
-    if base_ref == repository.default_branch and
+    if base_ref == base and
          String.downcase(base_repository) ==
            String.downcase("#{repository.github_owner}/#{repository.github_name}") do
       {:ok, %{pr_number: number, pr_url: url, head_sha: head_sha}}
@@ -707,10 +711,15 @@ defmodule PtcManager.GitHub.AppBroker do
     end
   end
 
-  defp normalize_pull_request(%{"head" => %{"sha" => _head_sha}}, _expected_head, _repository),
-    do: {:blocked, :pull_request_head_changed}
+  defp normalize_pull_request(
+         %{"head" => %{"sha" => _head_sha}},
+         _expected_head,
+         _repository,
+         _base
+       ),
+       do: {:blocked, :pull_request_head_changed}
 
-  defp normalize_pull_request(_pull_request, _expected_head, _repository),
+  defp normalize_pull_request(_pull_request, _expected_head, _repository, _base),
     do: {:error, :invalid_github_pull_response}
 
   defp normalize_status(

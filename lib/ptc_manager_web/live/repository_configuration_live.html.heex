@@ -133,6 +133,109 @@
       </.form>
     </section>
 
+    <section
+      id="integration-branches"
+      class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+    >
+      <h2 class="text-lg font-semibold text-white">Integration branches</h2>
+      <p class="mt-1 text-xs leading-5 text-slate-500">
+        An issue with a mapped label, or a member of a collection whose umbrella has one, gets a pull request into that branch instead of <code>{@repository.default_branch}</code>,
+        and its issue stays open after the merge. A switched-off mapping keeps its entry and routes nothing. Jobs already approved keep the base they stored.
+      </p>
+
+      <ul :if={@integration_branches != []} class="mt-3 max-w-3xl space-y-2">
+        <li
+          :for={mapping <- @integration_branches}
+          id={"integration-branch-#{mapping["label"]}"}
+          class="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-white/[0.035] px-3 py-2"
+        >
+          <span class="text-sm text-slate-200">
+            <span class="font-medium">{mapping["label"]}</span>
+            <span class="text-slate-500">→</span>
+            <code class="text-teal-200">{mapping["branch"]}</code>
+            <span
+              :if={!mapping["active"]}
+              class="ml-2 rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-slate-400"
+            >
+              off
+            </span>
+          </span>
+          <span class="flex gap-3">
+            <button
+              type="button"
+              phx-click="set-integration-branch-active"
+              phx-value-label={mapping["label"]}
+              phx-value-active={to_string(!mapping["active"])}
+              class="text-xs font-semibold text-slate-300 hover:text-white"
+            >
+              {if mapping["active"], do: "Switch off", else: "Switch on"}
+            </button>
+            <button
+              type="button"
+              phx-click="remove-integration-branch"
+              phx-value-label={mapping["label"]}
+              data-confirm={"Remove the #{mapping["label"]} mapping? Approved jobs keep their base."}
+              class="text-xs font-semibold text-rose-300 hover:text-rose-200"
+            >
+              Remove
+            </button>
+          </span>
+        </li>
+      </ul>
+
+      <div :if={@integration_suggestions != []} id="integration-branch-suggestions" class="mt-4">
+        <p class="text-xs font-medium text-slate-400">
+          Suggested from GitHub: a label with a matching <code>feature/</code>
+          branch. Nothing routes until you add it.
+        </p>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <.form
+            :for={suggestion <- @integration_suggestions}
+            for={%{}}
+            as={:mapping}
+            id={"suggest-integration-branch-#{suggestion["label"]}"}
+            phx-submit="add-integration-branch"
+          >
+            <input type="hidden" name="mapping[label]" value={suggestion["label"]} />
+            <input type="hidden" name="mapping[branch]" value={suggestion["branch"]} />
+            <button class="rounded-full border border-teal-400/30 px-3 py-1 text-xs font-semibold text-teal-200 hover:bg-teal-400/10">
+              Add {suggestion["label"]} → {suggestion["branch"]}
+            </button>
+          </.form>
+        </div>
+      </div>
+
+      <.form
+        for={%{}}
+        as={:mapping}
+        id="add-integration-branch"
+        phx-submit="add-integration-branch"
+        class="mt-4 flex flex-wrap items-end gap-2"
+      >
+        <label class="text-xs text-slate-400">
+          Label<input
+            required
+            name="mapping[label]"
+            maxlength="50"
+            placeholder="ska"
+            class="mt-1 block w-40 rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+          />
+        </label>
+        <label class="text-xs text-slate-400">
+          Branch<input
+            required
+            name="mapping[branch]"
+            maxlength="240"
+            placeholder="feature/ska"
+            class="mt-1 block w-56 rounded-lg border border-white/10 bg-slate-950 p-2 font-mono text-sm"
+          />
+        </label>
+        <button class="rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15">
+          Add mapping
+        </button>
+      </.form>
+    </section>
+
     <section id="workspace-setup" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
       <h2 class="text-lg font-semibold text-white">Workspace setup</h2>
       <p class="mt-1 text-xs leading-5 text-slate-500">

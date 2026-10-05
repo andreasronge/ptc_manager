@@ -398,7 +398,7 @@ defmodule PtcManager.MaintainerActions.Sync do
       {:error, :repair_base_missing} ->
         fetcher = Application.get_env(:ptc_manager, :repair_base_fetcher, AppBroker)
 
-        case fetcher.fetch_base_for_verification(path, job.repository, base_sha) do
+        case fetcher.fetch_base_for_verification(path, job.repository, job.base_branch, base_sha) do
           :ok -> GitProbe.verify_repair_at(job.repository, job, path, base_sha)
           {:retry, _reason} -> {:error, :repair_base_missing}
           {:blocked, reason} -> {:error, {:repair_base_fetch_blocked, reason}}
@@ -497,7 +497,7 @@ defmodule PtcManager.MaintainerActions.Sync do
     case Repo.get(PrPublication, publication.id) do
       %PrPublication{state: "published", pr_state: "merged"} = settled ->
         if settled.remote_head_sha == result.head_sha and settled.pr_url == result.pr_url and
-             result.base_ref == repository.default_branch and
+             result.base_ref == settled.base_branch and
              String.downcase(result.base_repository) ==
                String.downcase("#{repository.github_owner}/#{repository.github_name}") do
           {:ok, %{pull_request: result, publication: settled}}

@@ -768,6 +768,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     # was ever published, so there is no pull request to orphan.
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: blocked.id,
       state: "blocked",
       idempotency_key: String.duplicate("8", 64),
@@ -895,6 +896,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     %PrPublication{}
     |> PrPublication.changeset(%{
+      base_branch: "main",
       job_id: job.id,
       state: "published",
       idempotency_key: String.duplicate(Integer.to_string(rem(job.id, 10)), 64),

@@ -13,6 +13,7 @@ defmodule PtcManager.Operations.PrPublication do
     field :idempotency_key, :string
     field :fencing_token, :integer
     field :branch_name, :string
+    field :base_branch, :string
     field :base_sha, :string
     field :head_sha, :string
     field :diff_digest, :string
@@ -63,6 +64,7 @@ defmodule PtcManager.Operations.PrPublication do
       :idempotency_key,
       :fencing_token,
       :branch_name,
+      :base_branch,
       :base_sha,
       :head_sha,
       :diff_digest,
@@ -179,10 +181,11 @@ defmodule PtcManager.Operations.PrPublication do
         :remote_base_sha,
         :head_ref,
         :head_repository,
-        :pr_state
+        :pr_state,
+        :base_branch
       ])
     else
-      validate_required(changeset, [:job_id])
+      validate_required(changeset, [:job_id, :base_branch])
     end
   end
 

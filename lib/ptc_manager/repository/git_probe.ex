@@ -81,11 +81,11 @@ defmodule PtcManager.Repository.GitProbe do
   end
 
   @doc false
-  def verify_at(%Repository{} = repository, %Job{} = job, path) when is_binary(path) do
+  def verify_at(%Repository{}, %Job{} = job, path) when is_binary(path) do
     with true <- Path.type(path) == :absolute and File.dir?(path),
          :ok <- valid_branch(job),
          {:ok, head_sha} <- revision(path, "refs/heads/#{job.branch_name}^{commit}"),
-         {:ok, base_ref} <- base_ref(path, repository.default_branch),
+         {:ok, base_ref} <- base_ref(path, job.base_branch),
          {:ok, base_sha} <- merge_base(path, base_ref, head_sha) do
       verify_range(path, base_sha, head_sha)
     else

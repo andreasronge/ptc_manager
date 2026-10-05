@@ -9,6 +9,9 @@ defmodule PtcManager.Operations.Repository do
     field :github_name, :string
     field :default_branch, :string, default: "main"
     field :github_default_branch, :string
+    field :integration_branches, :map, default: %{"mappings" => []}
+    field :github_branch_names, :map, default: %{"names" => []}
+    field :github_branches_checked_at, :utc_datetime_usec
     field :workspace_setup_command, :string
     field :workspace_setup_timeout_minutes, :integer
     field :enabled, :boolean, default: true
@@ -49,6 +52,9 @@ defmodule PtcManager.Operations.Repository do
       :github_default_branch,
       :workspace_setup_command,
       :workspace_setup_timeout_minutes,
+      :integration_branches,
+      :github_branch_names,
+      :github_branches_checked_at,
       :enabled,
       :auto_fix_issues,
       :auto_fix_daily_limit,
@@ -70,6 +76,7 @@ defmodule PtcManager.Operations.Repository do
         else: [default_branch: "is not a safe branch name"]
     end)
     |> MaintainerLabels.validate()
+    |> PtcManager.Repository.IntegrationBranches.validate()
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,
       less_than_or_equal_to: 3
