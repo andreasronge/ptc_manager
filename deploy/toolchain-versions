@@ -27,9 +27,9 @@ cursor_agent_sha256=b1308f5a2fc05458b9d8966752986bb23a971bbcc67c842c1df94c4b8132
 # version bump must verify and update both values. Mise publishes SHASUMS256.txt
 # beside each release. The deployment refuses a download whose sha256 is not
 # exactly the one named here.
-herdr=0.9.1
+herdr=0.9.3
 herdr_protocol=22
-herdr_sha256=2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7
+herdr_sha256=18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7
 mise=2026.8.14
 mise_sha256=7cd12d6002d5b3c83a89cad79023712faf2a36f9e8b2ee2061dac5135b3de0ed
 
