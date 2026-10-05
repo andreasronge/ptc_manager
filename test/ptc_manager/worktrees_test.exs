@@ -2,7 +2,7 @@ defmodule PtcManager.WorktreesTest do
   use PtcManager.DataCase, async: false
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{AuditEvent, Job, PrPublication, WorktreeAllocation}
+  alias PtcManager.Operations.{AuditEvent, Issue, Job, PrPublication, WorktreeAllocation}
   alias PtcManager.Repo
   alias PtcManager.Worktrees
 
@@ -121,6 +121,45 @@ defmodule PtcManager.WorktreesTest do
       observed_again = Repo.get!(WorktreeAllocation, allocation.id)
       assert observed_again.retained_observed_at == retained.retained_observed_at
       assert observed_again.updated_at == retained.updated_at
+    end
+
+    test "a retained worktree whose issue was closed as completed is discarded automatically" do
+      allocation = attention_allocation!(existing_path(), issue_state: {"closed", "completed"})
+      Process.put(:worktree_empty_result, {:error, :worktree_has_changes})
+
+      assert :ok = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+
+      assert_receive {:discard_worktree, allocation_id}
+      assert allocation_id == allocation.id
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "removed"
+
+      assert %{actor: "coordinator", details: %{"reason" => reason}} =
+               Repo.get_by!(AuditEvent, action: "worktree.removed", target_id: allocation.id)
+
+      assert reason =~ "closed as completed"
+    end
+
+    test "a retained worktree whose issue was closed as not planned waits for the maintainer" do
+      allocation = attention_allocation!(existing_path(), issue_state: {"closed", "not_planned"})
+      Process.put(:worktree_empty_result, {:error, :worktree_has_changes})
+
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+
+      refute_receive {:discard_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
+    test "a closed issue does not release a worktree whose agent is still active" do
+      allocation =
+        attention_allocation!(existing_path(),
+          job_state: "working",
+          issue_state: {"closed", "completed"}
+        )
+
+      assert {:ok, :empty} = Worktrees.cleanup_abandoned_once(FakeAdapter, FakeProbe)
+
+      refute_receive {:discard_worktree, _allocation_id}
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
     end
 
     test "a retained worktree outside the managed root is never touched automatically" do
@@ -682,6 +721,12 @@ defmodule PtcManager.WorktreesTest do
       ended_at: if(job_state in ~w(lost failed), do: now)
     })
     |> Repo.update!()
+
+    with {state, reason} <- Keyword.get(opts, :issue_state) do
+      Repo.get!(Issue, leased.issue_id)
+      |> Ecto.Changeset.change(state: state, github_state_reason: reason)
+      |> Repo.update!()
+    end
 
     Repo.get_by!(WorktreeAllocation, job_id: leased.id)
     |> WorktreeAllocation.changeset(%{

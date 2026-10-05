@@ -13,6 +13,7 @@ defmodule PtcManager.Worktrees do
 
   @missing_worktree_reason "Removed automatically: the worktree no longer existed on disk."
   @empty_worktree_reason "Removed automatically: the worktree was clean with no commits beyond the default branch."
+  @superseded_worktree_reason "Discarded automatically: the job's issue was closed as completed, so the retained work was superseded."
 
   def ensure_slot(worker_key, capacity, adapter, probe \\ GitProbe)
 
@@ -68,10 +69,11 @@ defmodule PtcManager.Worktrees do
   Removes one retained `attention` worktree that provably holds nothing worth keeping.
 
   A lost or failed attempt keeps its worktree because the coordinator cannot
-  know whether uncommitted work matters. Two cases carry no such risk: the
-  directory no longer exists inside a healthy worktree root, or a credential-free
+  know whether uncommitted work matters. Three cases carry no such risk: the
+  directory no longer exists inside a healthy worktree root, a credential-free
   Git check proves the checkout is clean with no commit beyond the default
-  branch. Everything else waits for a maintainer's explicit discard.
+  branch, or GitHub reports the job's issue closed as completed, so other work
+  resolved it. Everything else waits for a maintainer's explicit discard.
   """
   def cleanup_abandoned_once(adapter \\ configured_adapter(), probe \\ GitProbe) do
     :ok = Operations.recover_expired_worktree_preservations()
@@ -83,7 +85,7 @@ defmodule PtcManager.Worktrees do
       |> Enum.sort_by(&{&1.last_used_at, &1.id})
       |> Enum.find_value(fn allocation ->
         case abandoned_reason(allocation, probe) do
-          {:ok, reason} -> {allocation, reason}
+          {:ok, reason, function} -> {allocation, reason, function}
           :keep -> nil
         end
       end)
@@ -92,8 +94,8 @@ defmodule PtcManager.Worktrees do
       nil ->
         {:ok, :empty}
 
-      {allocation, reason} ->
-        remove_retained(allocation, adapter, :remove_worktree, %{
+      {allocation, reason, function} ->
+        remove_retained(allocation, adapter, function, %{
           actor: "coordinator",
           reason: reason
         })
@@ -235,12 +237,17 @@ defmodule PtcManager.Worktrees do
       PtcManager.Reviews.held?(allocation.job) -> :keep
       Operations.worktree_consumes_execution_slot?(allocation) -> :keep
       not managed_path?(allocation.path) -> :keep
-      not File.exists?(allocation.path) -> {:ok, @missing_worktree_reason}
+      not File.exists?(allocation.path) -> {:ok, @missing_worktree_reason, :remove_worktree}
       not real_directory?(allocation.path) -> :keep
-      empty_worktree?(allocation, probe) -> {:ok, @empty_worktree_reason}
+      empty_worktree?(allocation, probe) -> {:ok, @empty_worktree_reason, :remove_worktree}
+      issue_completed?(allocation.job) -> {:ok, @superseded_worktree_reason, :discard_worktree}
       true -> observe_retained_work(allocation, probe)
     end
   end
+
+  # Not planned stays with the maintainer: that close records no other fix.
+  defp issue_completed?(%{issue: %{state: "closed", github_state_reason: "completed"}}), do: true
+  defp issue_completed?(_job), do: false
 
   # A missing directory only proves abandonment when the managed root itself
   # is present and intact. Managed allocations are direct children: accepting

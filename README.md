@@ -2064,7 +2064,9 @@ there is no fallback deletion outside its cleanup claim. An old run can still be
 cleaned after the action's source snapshot changes or is cleared. A retained worktree
 that no longer exists inside a healthy worktree root, or that a credential-free
 Git check proves clean with no commit beyond the default branch, is removed
-automatically because nothing can be lost. Every other retained worktree waits
+automatically because nothing can be lost. A retained worktree whose issue
+GitHub reports closed as completed is force-removed too, because other work
+resolved the issue; an issue closed as not planned still waits. Every other retained worktree waits
 until the maintainer chooses **Discard worktree** on the dashboard, which
 force-removes it and records who discarded it. Cancelling a running agent uses
 the same path: its worktree is retained for attention so the partial work can be
