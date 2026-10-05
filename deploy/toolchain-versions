@@ -39,6 +39,12 @@ mise_sha256=7cd12d6002d5b3c83a89cad79023712faf2a36f9e8b2ee2061dac5135b3de0ed
 deno=2.8.2
 deno_sha256=184da7a5267ab649bc08821b3bc3ce6805d8e6985fb82707cb8d5e9fd6535362
 
+# Helm lints and renders the charts that repositories ship for Kubernetes.
+# Helm publishes a .sha256sum beside each release archive at get.helm.sh; the
+# deployment refuses an archive whose digest differs.
+helm=4.3.0
+helm_sha256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+
 # The pre-publication gate builds with these. Hex is pinned by version, while
 # Rebar has no version to ask for, so it is pinned by the digest of the script
 # Hex's CDN serves; the deployment hashes what it installed, because mix accepts

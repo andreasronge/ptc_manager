@@ -91,6 +91,9 @@ worker_mise_dir=
 deno_version=
 deno_sha256=
 worker_deno_dir=
+helm_version=
+helm_sha256=
+worker_helm_dir=
 hex_version=
 rebar3_sha512=
 erlang_version=
@@ -624,6 +627,9 @@ read_pinned_versions() {
   deno_version=$("$toolchain_reader" "$toolchain_manifest" deno)
   deno_sha256=$("$toolchain_reader" "$toolchain_manifest" deno_sha256)
   worker_deno_dir="/opt/ptc-manager-deno-${deno_version}"
+  helm_version=$("$toolchain_reader" "$toolchain_manifest" helm)
+  helm_sha256=$("$toolchain_reader" "$toolchain_manifest" helm_sha256)
+  worker_helm_dir="/opt/ptc-manager-helm-${helm_version}"
   hex_version=$("$toolchain_reader" "$toolchain_manifest" hex)
   rebar3_sha512=$("$toolchain_reader" "$toolchain_manifest" rebar3_sha512)
   erlang_version=$("$toolchain_reader" "$toolchain_manifest" erlang)
@@ -1010,6 +1016,37 @@ install_worker_deno() {
 
   if [ "$installed_deno" != "$deno_version" ]; then
     echo "installed Deno has an unexpected version: $installed_deno" >&2
+    return 1
+  fi
+}
+
+# Helm serves repositories that ship Kubernetes charts, so agents can lint and
+# render them as those repositories' CI does. It needs no cluster.
+install_worker_helm() {
+  if ! sudo test -f "$worker_helm_dir/helm"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-helm-${release_id}.XXXXXX")
+
+    curl -fsSL -o "$worker_tool_staging/helm.tar.gz" \
+      "https://get.helm.sh/helm-v${helm_version}-linux-amd64.tar.gz"
+
+    if [ "$(sha256sum "$worker_tool_staging/helm.tar.gz" | cut -d ' ' -f 1)" != "$helm_sha256" ]; then
+      echo "downloaded Helm does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
+    tar -xzf "$worker_tool_staging/helm.tar.gz" -C "$worker_tool_staging" linux-amd64/helm
+    sudo install -d -o root -g root -m 0755 "$worker_helm_dir"
+    sudo install -o root -g root -m 0755 "$worker_tool_staging/linux-amd64/helm" "$worker_helm_dir/helm"
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  sudo ln -sfn "$worker_helm_dir/helm" /usr/local/bin/helm
+
+  installed_helm=$(sudo -u ptc-manager-worker -H sh -c 'cd / && /usr/local/bin/helm version --template "{{.Version}}"')
+
+  if [ "$installed_helm" != "v$helm_version" ]; then
+    echo "installed Helm has an unexpected version: $installed_helm" >&2
     return 1
   fi
 }
@@ -1755,6 +1792,7 @@ sudo rm -f -- \
 sudo systemctl daemon-reload
 install_worker_mise
 install_worker_deno
+install_worker_helm
 install_worker_node
 install_worker_pnpm
 install_worker_codex
