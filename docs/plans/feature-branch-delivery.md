@@ -75,9 +75,15 @@ for more `tyraorg` repositories.
 
 - Issues close only when their work reaches the default branch. GitHub does
   that itself through `Closes #N`, so `develop` merges keep closing issues.
-- An issue labelled with a mapped label, or a member of a collection whose
-  umbrella carries it, targets that label's integration branch. Its issue stays
+- A label maps to an integration branch only by the maintainer's decision. The
+  console suggests a mapping when a label `x` has a `feature/x` branch, but
+  never routes on a name match by itself.
+- An issue with an active mapped label, or a member of a collection whose
+  umbrella carries one, targets that label's integration branch. Its issue stays
   open after the merge and counts as integrated.
+- Feature branches can be bypassed: a mapping can be switched off, and one
+  approval or collection run can choose the default branch instead. An approved
+  job keeps its stored base whatever changes later.
 - "Integrated" is derived from the merged PR PtcManager already records from
   GitHub. It is not a new label or a stored issue state.
 - Integrated work is not implemented again, unblocks dependents that target the
@@ -160,11 +166,13 @@ Each step is one pull request and is useful on its own.
 - `jobs.base_branch` and `pr_publications.base_branch`, backfilled from
   `default_branch`.
 - Approval resolves the base from the issue's labels, shows "→ feature/ska" on
-  the approval card, and stores it. The card offers "→ develop instead" for a
-  single issue that should skip the feature branch; the choice is recorded with
-  the approval. A collection run offers the same choice once, at start. Two labels that map to different branches
-  block approval with a reason. A collection run resolves the base from the
-  umbrella issue, and every member inherits it.
+  the approval card, and stores it. Two labels that map to different branches
+  block approval with a reason.
+- The approval card offers "→ develop instead" for a single issue that should
+  skip the feature branch. The choice is recorded with the approval.
+- A collection run resolves the base from the umbrella issue, and every member
+  inherits it. The run offers the same "→ develop instead" choice once, at
+  start.
 - Every use listed under "The base branch is the repository's
   `default_branch`" reads the stored base instead. Deployments, digests, source
   updates, and health stay on `default_branch`.
@@ -208,8 +216,8 @@ port 4100). Extend `mix ptc.demo.reset` so each new surface has seed data:
 | 1 | Four repositories, one with sync errors and missing labels | `/configuration` stays short; each repository page shows its sections; enable, auto-fix, labels, variables, and Remove still work |
 | 2 | One repository whose GitHub default branch differs | The mismatch warning; editing refused while work is active |
 | 4 | Repositories with and without a setup command | Setup form; health shows a missing command |
-| 5 | A `ska → feature/ska` mapping; an issue with two conflicting labels | Approval card shows "→ feature/ska"; conflict blocks approval |
-| 6 | Merged-but-open members on `feature/ska`; a collection with every member merged | Integrated lane grouped by branch; Planning badge; run ends `integrated`; `Closes` list |
+| 5 | An active `ska → feature/ska` mapping, an inactive mapping, an unmapped label with a matching `feature/` branch, an issue with two conflicting labels | Suggestion offered and added with one click; approval card shows "→ feature/ska" and "→ develop instead"; inactive mapping targets the default branch; conflict blocks approval |
+| 6 | Merged-but-open members on `feature/ska`; a collection with every member merged | Integrated lane grouped by branch; Planning badge; branch filter on Delivery and Planning; run ends `integrated`; `Closes` list |
 
 Static screenshots and Playwright click-throughs, as for earlier page work.
 Screenshots go in the pull request.
@@ -231,10 +239,14 @@ Agent actions stay disabled, so nothing writes to GitHub. Check:
 1. Onboarding `tyraorg/api` prefills `develop` and proposes
    `/srv/tyraorg/api`. For this run, point `local_path` at the absolute path of
    `tmp/tyraorg-api` from `iex -S mix`.
-2. Synchronization brings in the 13 `ska` issues. The repository page reports
-   the missing `ptc:*` labels.
-3. The `ska → feature/ska` mapping saves, and an unknown branch is refused.
-4. The approval card for a `ska` issue shows "→ feature/ska".
+2. Enable the repository, since synchronization covers enabled repositories
+   only, with auto-fix off. Synchronization brings in the 13 `ska` issues, and
+   the repository page reports the missing `ptc:*` labels.
+3. The page suggests `ska → feature/ska` and nothing for the other labels. The
+   mapping saves, and an unknown branch is refused.
+4. The approval card for a `ska` issue shows "→ feature/ska" and
+   "→ develop instead". With the mapping switched off it shows "→ develop".
+   Close the page without approving.
 5. #123 is refused as a collection while it has no sub-issues. After the
    GitHub preparation below, it validates with members in dependency order.
 6. The workspace setup command, called through
