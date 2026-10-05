@@ -555,7 +555,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     card = "#lane-stuck #board-job-#{stopped.id}"
     assert has_element?(view, card, "Work stopped · Missing prerequisite")
     assert has_element?(view, card, "OPENROUTER_API_KEY is not set")
-    assert has_element?(view, card, "committed nothing")
+    assert has_element?(view, card, "reported leaving no work")
+    refute has_element?(view, "#resume-worktree-#{stopped.id}")
     # The technical branch error must not replace the agent's own explanation.
     refute has_element?(view, card, "The agent stopped before completing the task.")
 
@@ -571,14 +572,16 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#board-job-#{stopped.id}")
   end
 
-  test "a stopped job with a retained worktree offers Resume", %{conn: conn} do
+  test "a stopped job with observed dirty work offers Resume despite no reported progress", %{
+    conn: conn
+  } do
     failed =
       stop_job("Verify the retained branch", %{
         "reason_code" => "environment_broken",
         "summary" => "The test database was locked.",
         "detail" =>
           "Two commits are on the branch; the last test run could not open the database.",
-        "progress" => "partial"
+        "progress" => "none"
       })
 
     worker = worker_fixture(%{worker_key: "herdr:resume-#{System.unique_integer([:positive])}"})
@@ -589,6 +592,8 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
       worker_id: worker.id,
       job_id: failed.id,
       state: "attention",
+      retained_dirty: true,
+      retained_local_commits: 0,
       path: "/tmp/resume-board-worktree",
       last_used_at: now
     })
@@ -610,6 +615,7 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
     assert has_element?(view, "#resume-worktree-#{failed.id}")
+    assert has_element?(view, "#board-job-#{failed.id}", "discards the work observed")
 
     view |> element("#resume-worktree-#{failed.id}") |> render_click()
     assert render(view) =~ "Resuming on the retained worktree"

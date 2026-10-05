@@ -181,8 +181,10 @@ new assessment or needing another maintainer retry.
 without starting another implementer. A passing result queues a continuation to
 publish that exact commit; a high or medium finding pauses for a decision. **Continue existing
 work** instead starts an implementer to address the failure or change the code.
-Unacknowledged partial failures that permit retry can also continue their retained
-work, provided no newer job supersedes them. Unsafe stop reports retain their
+Unacknowledged stops that permit retry can also continue when the agent reports
+partial progress or the retained worktree has observed dirty files or local commits,
+provided no newer job supersedes them. Retry warns when it would discard observed
+retained work. Unsafe stop reports retain their
 existing restriction on restarting.
 A failed broker publication check offers continuation from the review page; the
 old publication remains blocked while the implementation is repaired.
@@ -926,7 +928,7 @@ and exit rather than wait.
 The report is a small JSON file validated against
 `priv/codex/agent_stop_report.schema.json`: a `reason_code`, one plain sentence,
 a detail paragraph, optionally the exact `prerequisite` that is missing, and
-whether anything was committed. It is data. It records a reason and never causes
+whether any work was left in the worktree, committed or not. It is data. It records a reason and never causes
 a state transition by itself. Once you acknowledge the report or continue the
 retained work, its explanation and recovery buttons disappear from the live card.
 The report remains stored; a later stop produces a new actionable report.
