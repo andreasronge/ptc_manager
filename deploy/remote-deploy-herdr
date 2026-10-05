@@ -88,6 +88,9 @@ worker_herdr_dir=
 mise_version=
 mise_sha256=
 worker_mise_dir=
+deno_version=
+deno_sha256=
+worker_deno_dir=
 hex_version=
 rebar3_sha512=
 erlang_version=
@@ -618,6 +621,9 @@ read_pinned_versions() {
   mise_version=$("$toolchain_reader" "$toolchain_manifest" mise)
   mise_sha256=$("$toolchain_reader" "$toolchain_manifest" mise_sha256)
   worker_mise_dir="/opt/ptc-manager-mise-${mise_version}"
+  deno_version=$("$toolchain_reader" "$toolchain_manifest" deno)
+  deno_sha256=$("$toolchain_reader" "$toolchain_manifest" deno_sha256)
+  worker_deno_dir="/opt/ptc-manager-deno-${deno_version}"
   hex_version=$("$toolchain_reader" "$toolchain_manifest" hex)
   rebar3_sha512=$("$toolchain_reader" "$toolchain_manifest" rebar3_sha512)
   erlang_version=$("$toolchain_reader" "$toolchain_manifest" erlang)
@@ -975,6 +981,37 @@ gate_rebar_series() {
 
 gate_rebar_digest() {
   sudo sha512sum "$gate_mix_home/elixir/$1/rebar3" 2>/dev/null | cut -d ' ' -f 1
+}
+
+# Deno serves repositories whose setup and agents run TypeScript. It is one
+# self-contained binary, linked like every other program on the worker's PATH.
+install_worker_deno() {
+  if ! sudo test -f "$worker_deno_dir/deno"; then
+    worker_tool_staging=$(mktemp -d "/tmp/ptc-manager-deno-${release_id}.XXXXXX")
+
+    curl -fsSL -o "$worker_tool_staging/deno.zip" \
+      "https://github.com/denoland/deno/releases/download/v${deno_version}/deno-x86_64-unknown-linux-gnu.zip"
+
+    if [ "$(sha256sum "$worker_tool_staging/deno.zip" | cut -d ' ' -f 1)" != "$deno_sha256" ]; then
+      echo "downloaded Deno does not match the sha256 this revision pins" >&2
+      return 1
+    fi
+
+    unzip -q "$worker_tool_staging/deno.zip" deno -d "$worker_tool_staging"
+    sudo install -d -o root -g root -m 0755 "$worker_deno_dir"
+    sudo install -o root -g root -m 0755 "$worker_tool_staging/deno" "$worker_deno_dir/deno"
+    rm -rf -- "$worker_tool_staging"
+    worker_tool_staging=
+  fi
+
+  sudo ln -sfn "$worker_deno_dir/deno" /usr/local/bin/deno
+
+  installed_deno=$(sudo -u ptc-manager-worker -H sh -c 'cd / && /usr/local/bin/deno --version' | sed -n '1s/^deno \([^ ]*\).*/\1/p')
+
+  if [ "$installed_deno" != "$deno_version" ]; then
+    echo "installed Deno has an unexpected version: $installed_deno" >&2
+    return 1
+  fi
 }
 
 install_gate_beam_toolchain() {
@@ -1717,6 +1754,7 @@ sudo rm -f -- \
   /etc/systemd/system/ptc_manager.service.d/99-ptc-manager-agent-results.conf
 sudo systemctl daemon-reload
 install_worker_mise
+install_worker_deno
 install_worker_node
 install_worker_pnpm
 install_worker_codex

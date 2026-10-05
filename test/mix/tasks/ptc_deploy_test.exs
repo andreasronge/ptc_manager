@@ -970,8 +970,17 @@ defmodule Mix.Tasks.PtcDeployTest do
     refute script =~ "/home/agent/.local/bin/mise"
     assert script =~ ~s|"$worker_mise" install "node@${node_version}"|
 
-    assert byte_index(script, "install_worker_mise\ninstall_worker_node") <
+    assert byte_index(script, "install_worker_mise\ninstall_worker_deno\ninstall_worker_node") <
              byte_index(script, "echo \"Building production release...\"")
+  end
+
+  test "remote deployment installs the pinned Deno and links it onto the worker's PATH" do
+    script = File.read!(@remote_script)
+
+    assert script =~ "install_worker_deno"
+    assert script =~ ~s|/releases/download/v${deno_version}/deno-x86_64-unknown-linux-gnu.zip|
+    assert script =~ ~s|!= "$deno_sha256"|
+    assert script =~ ~s|sudo ln -sfn "$worker_deno_dir/deno" /usr/local/bin/deno|
   end
 
   test "remote production builds consume the persistent keyed workspace cache" do
