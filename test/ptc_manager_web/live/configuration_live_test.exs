@@ -77,7 +77,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
       Repo.get_by!(Repository, github_owner: "andreasronge", github_name: "ptc_manager")
 
     refute repository.enabled
-    assert repository.local_path == "/srv/ptc_manager"
+    assert repository.local_path == "/srv/andreasronge/ptc_manager"
     assert length(PtcManager.Automations.list_definitions(repository)) == 19
     assert has_element?(view, "#repository-#{repository.id}", "Disabled")
     # Its checkout does not exist here, so the badge shows the most urgent check.
@@ -229,7 +229,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
     assert repository.github_owner == "andreasronge"
     assert repository.github_name == "ptc-fs-mcp"
     assert repository.default_branch == "main"
-    assert repository.local_path == "/srv/ptc-fs-mcp"
+    assert repository.local_path == "/srv/andreasronge/ptc-fs-mcp"
   end
 
   test "normalizes string-keyed onboarding attributes and keeps repositories disabled" do
@@ -242,7 +242,7 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
                "local_path" => "/tmp/not-used"
              })
 
-    assert repository.local_path == "/srv/string-keys"
+    assert repository.local_path == "/srv/andreasronge/string-keys"
     assert repository.default_branch == "trunk"
     refute repository.enabled
   end

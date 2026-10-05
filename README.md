@@ -489,9 +489,13 @@ onto the Delivery board, also grant
 **Commit statuses: Read** and **Checks: Read**. PtcManager uses the token only
 through its read-only GitHub client. If either CI source is unavailable, the
 board reports CI as unknown and will not place that PR in **Ready to merge**.
+The token may also be the `gh` OAuth token of the account that already reads
+the repositories (`gh auth token`); its owner's access decides which private
+repositories, of any owner, PtcManager can read.
 
 Automatic draft-PR publishing is a separate, off-by-default capability. Create
-a GitHub App installed only on the managed repository with repository
+a GitHub App installed only on the managed repositories, one installation per
+owner, with repository
 **Contents: Read and write** and **Pull requests: Read and write** permissions.
 Store its private key outside the repository, readable only by the coordinator.
 Configure the App ID, installation ID, and PEM path, then set
@@ -1266,17 +1270,21 @@ To onboard another public or private repository:
    issue; the fourth is how an implementation agent marks its own pull request as
    having left work behind. Any triage label configured under **Your triage
    labels** has to exist on GitHub for the same reason. The repository's
-   health checks name whichever are still missing, so this can be done after registering the
-   repository and checked before enabling it;
+   health checks name whichever are still missing, so this can be done after
+   registering the repository and checked before enabling it;
 3. use **Configuration → Add another GitHub repository** to register its exact
    GitHub `owner/name`; PtcManager verifies access with the configured read-only
    GitHub credentials, prefills GitHub's default branch, derives
-   `/srv/<repository-name>` as the checkout path, and creates the repository
-   disabled;
+   `/srv/<owner>/<name>` as the checkout path, and creates the repository
+   disabled. Repositories onboarded before this keep their `/srv/<name>` path,
+   which is also in the service units and retained worktrees;
 4. press **Prepare checkouts** on Configuration, or deploy. Either clones any
-   configured checkout that does not exist yet, gives it to the worker identity,
-   and regenerates the drop-in that grants every configured checkout to both
-   services; the button does it without building a release;
+   configured checkout that does not exist yet as the worker identity, whose
+   `gh` credential helper reads private repositories, and regenerates the
+   drop-in that grants every configured checkout to both services; the button
+   does it without building a release. A clone that fails is named in the
+   unit's log and leaves nothing behind; the other checkouts and the drop-ins
+   are still prepared. A checkout cloned by hand as the worker is kept;
 5. verify checkout, GitHub, and gate health, then review or copy the desired
    definitions on **Automations**;
 6. enable the repository on **Configuration**, then enable only the definitions
@@ -1325,8 +1333,8 @@ protects 512 MB of its memory from reclaim.
 
 The repository page under Configuration displays the derived checkout path. A
 repository can be removed there after explicit confirmation, but only when all
-managed jobs, actions, automation invocations, deployments, resource operations, and worktree
-lifecycles are terminal. Removal transactionally deletes PtcManager-owned
+managed jobs, actions, automation invocations, deployments, resource
+operations, and worktree lifecycles are terminal. Removal transactionally deletes PtcManager-owned
 configuration and synchronized database records. It never changes the GitHub
 repository or deletes server checkouts, worktrees, branches, pull requests, or
 issues. Existing configured repository paths are preserved during upgrades.

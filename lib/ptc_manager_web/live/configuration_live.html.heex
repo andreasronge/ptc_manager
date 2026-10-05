@@ -140,7 +140,9 @@
           Add another GitHub repository
         </summary>
         <p class="mt-2 text-sm leading-6 text-slate-400">
-          Register an accessible GitHub repository. The default branch is read from GitHub once owner and name are entered; change it if work should target another branch. Its checkout is expected at <code>/srv/&lt;repository-name&gt;</code>. The repository starts disabled and receives its own editable automation definitions.
+          Register an accessible GitHub repository. The default branch is read from GitHub once owner and name are entered; change it if work should target another branch. Its checkout is expected at <code>/srv/&lt;owner&gt;/&lt;name&gt;</code>;
+          <strong>Prepare checkouts</strong>
+          clones it, private repositories included, with the worker's GitHub credentials. The repository starts disabled and receives its own editable automation definitions.
         </p>
         <.form
           for={@repository_form}

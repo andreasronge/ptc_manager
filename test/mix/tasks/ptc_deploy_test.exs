@@ -56,6 +56,18 @@ defmodule Mix.Tasks.PtcDeployTest do
     end
   end
 
+  # Deployment and the Prepare checkouts button share one implementation, so a
+  # private repository is cloned as the worker either way.
+  test "deployment prepares checkouts through the provisioning script" do
+    script = File.read!(@remote_script)
+
+    assert script =~
+             ~s|PTC_PROVISION_DATABASE_PATH="$database_path" \\\n  /usr/local/bin/ptc-manager-provision-repository|
+
+    refute script =~ "git clone"
+    assert File.read!(@provision) =~ "sudo -n -H -u ptc-manager-worker env GIT_TERMINAL_PROMPT=0"
+  end
+
   test "the worker Claude trust helper records and removes one exact path" do
     home =
       Path.join(

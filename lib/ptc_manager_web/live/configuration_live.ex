@@ -172,12 +172,12 @@ defmodule PtcManagerWeb.ConfigurationLive do
 
   defp repository_error(:unsafe_repository_name),
     do:
-      "Enter the owner and the repository name in their own fields, using only letters, digits, dots, underscores and hyphens. A pasted URL, or an owner/name pair in one field, cannot form a single /srv checkout path."
+      "Enter the owner and the repository name in their own fields, using only letters, digits, dots, underscores and hyphens. A pasted URL, or an owner/name pair in one field, cannot form a /srv/<owner>/<name> checkout path."
 
   defp repository_error(%Ecto.Changeset{errors: errors}) do
     if Keyword.has_key?(errors, :local_path),
       do:
-        "Another configured repository already uses this repository name's derived /srv checkout path.",
+        "Another configured repository already uses this repository's derived /srv/<owner>/<name> checkout path.",
       else: "The repository configuration is invalid or already exists."
   end
 

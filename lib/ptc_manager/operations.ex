@@ -196,7 +196,9 @@ defmodule PtcManager.Operations do
          github_owner: owner,
          github_name: name,
          default_branch: default_branch,
-         local_path: "/srv/#{name}",
+         # Existing repositories keep the /srv/<name> they were onboarded with;
+         # their path is also in the service units and retained worktrees.
+         local_path: "/srv/#{owner}/#{name}",
          enabled: false
        }}
     else
