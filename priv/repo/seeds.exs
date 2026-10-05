@@ -536,6 +536,81 @@ if Repo.aggregate(Repository, :count) == 0 do
             })
             |> Operations.create_issue()
         end
+
+        # A collection delivered into feature/ska: both members merged there and
+        # stay open, so they sit in the Integrated lane, and its run ended
+        # integrated.
+        sub_issues = %{
+          "nodes" =>
+            for number <- [121, 127] do
+              %{"number" => number, "state" => "open", "repository_full_name" => "tyraorg/api"}
+            end,
+          "total" => 2
+        }
+
+        {:ok, umbrella} =
+          123
+          |> issue_attrs.("SKA step 1", 20, %{
+            repository_id: repository.id,
+            html_url: "https://github.com/tyraorg/api/issues/123",
+            github_labels: %{"names" => ["ska"]},
+            workflow_label: nil,
+            sub_issues: sub_issues
+          })
+          |> Operations.create_issue()
+
+        for {number, title} <- [{121, "SKA: course plan schema"}, {127, "SKA: attendance API"}] do
+          {:ok, member} =
+            number
+            |> issue_attrs.(title, 25, %{
+              repository_id: repository.id,
+              html_url: "https://github.com/tyraorg/api/issues/#{number}",
+              github_labels: %{"names" => ["ska"]},
+              parent_issue_number: 123
+            })
+            |> Operations.create_issue()
+
+          {:ok, job} = Operations.approve_issue_directly(member.id, "demo-maintainer")
+          job = job |> Job.changeset(%{state: "done", fencing_token: 1}) |> Repo.update!()
+          sha = Base.encode16(:crypto.hash(:sha, "demo-ska-#{number}"), case: :lower)
+
+          %PtcManager.Operations.PrPublication{}
+          |> PtcManager.Operations.PrPublication.changeset(%{
+            job_id: job.id,
+            repository_id: repository.id,
+            base_branch: job.base_branch,
+            state: "published",
+            idempotency_key: Base.encode16(:crypto.hash(:sha256, sha), case: :lower),
+            fencing_token: 1,
+            branch_name: "ptc-manager/issue-#{number}-job-#{job.id}",
+            base_sha: sha,
+            head_sha: sha,
+            diff_digest: Base.encode16(:crypto.hash(:sha256, "diff-#{number}"), case: :lower),
+            attempt_count: 1,
+            pr_number: 300 + number,
+            pr_url: "https://github.com/tyraorg/api/pull/#{300 + number}",
+            remote_head_sha: sha,
+            remote_base_sha: sha,
+            published_at: DateTime.add(now, -90, :minute),
+            pr_state: "merged",
+            pr_checked_at: DateTime.add(now, -60, :minute),
+            source: "agent",
+            title: title
+          })
+          |> Repo.insert!()
+        end
+
+        Repo.insert!(%PtcManager.Collections.Run{
+          repository_id: repository.id,
+          issue_id: umbrella.id,
+          state: "integrated",
+          base_branch: "feature/ska",
+          actor: "demo-maintainer",
+          started_at: DateTime.add(now, -3, :hour),
+          ended_at: DateTime.add(now, -30, :minute),
+          end_reason:
+            "Every member merged into feature/ska; the issues stay open until it reaches main."
+        })
       end
     end
   end

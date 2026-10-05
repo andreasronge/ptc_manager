@@ -1352,7 +1352,7 @@ defmodule PtcManager.MaintainerActions do
           %{claimed_outcome: outcome, workflow_label: issue.workflow_label}}}
 
       outcome == "no-changes" and action.action_key == "collection_closeout" and
-          issue.state == "open" ->
+        issue.state == "open" and not integration_closeout?(issue) ->
         {:error,
          {:github_outcome_mismatch, %{claimed_outcome: outcome, issue_state: issue.state}}}
 
@@ -1375,6 +1375,18 @@ defmodule PtcManager.MaintainerActions do
 
       true ->
         :ok
+    end
+  end
+
+  # A collection delivered into an integration branch keeps its umbrella open
+  # until that branch reaches the default branch, so its close-out reports
+  # no-changes with the umbrella still open.
+  defp integration_closeout?(%Issue{} = umbrella) do
+    repository = Repo.get!(PtcManager.Operations.Repository, umbrella.repository_id)
+
+    case PtcManager.Collections.current_run(umbrella.id) do
+      %{base_branch: base} when is_binary(base) -> base != repository.default_branch
+      _no_run -> false
     end
   end
 

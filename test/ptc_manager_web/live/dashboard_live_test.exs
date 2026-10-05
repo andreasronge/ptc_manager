@@ -1979,6 +1979,69 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     refute has_element?(view, "#approval-base-conflict-#{member.id}")
   end
 
+  test "Planning filters by target branch and badges integrated work", %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        integration_branches: %{
+          "mappings" => [%{"label" => "ska", "branch" => "feature/ska", "active" => true}]
+        }
+      })
+
+    ska = issue_fixture(repository, %{title: "SKA issue", github_labels: %{"names" => ["ska"]}})
+    plain = issue_fixture(repository, %{title: "Plain issue"})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/?branch=feature/ska")
+    assert has_element?(view, "#branch-selector option[selected][value='feature/ska']")
+    assert has_element?(view, "#issue-#{ska.id}")
+    refute has_element?(view, "#issue-#{plain.id}")
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/?branch=default")
+    refute has_element?(view, "#issue-#{ska.id}")
+    assert has_element?(view, "#issue-#{plain.id}")
+
+    # Merged into feature/ska, the issue stays open and moves to delivery.
+    {:ok, job} = Operations.approve_issue_directly(ska.id, "andreas")
+    job = job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+    Repo.update_all(PtcManager.Automations.Invocation, set: [state: "succeeded"])
+
+    %PtcManager.Operations.PrPublication{}
+    |> PtcManager.Operations.PrPublication.changeset(%{
+      job_id: job.id,
+      repository_id: job.repository_id,
+      base_branch: "feature/ska",
+      state: "published",
+      idempotency_key: String.duplicate("9", 64),
+      fencing_token: job.fencing_token,
+      branch_name: "ptc-manager/issue-#{ska.number}-job-#{job.id}",
+      base_sha: String.duplicate("a", 40),
+      head_sha: String.duplicate("a", 40),
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      pr_number: 4321,
+      pr_url: "https://github.com/example/repo/pull/4321",
+      remote_head_sha: String.duplicate("a", 40),
+      remote_base_sha: String.duplicate("a", 40),
+      published_at: DateTime.utc_now(),
+      pr_state: "merged",
+      pr_checked_at: DateTime.utc_now(),
+      source: "agent"
+    })
+    |> Repo.insert!()
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+    assert has_element?(view, "#planning-group-in_delivery")
+    open_issue(view, ska)
+    assert has_element?(view, "#in-delivery-#{ska.id}", "Integrated")
+  end
+
+  test "a branch filter whose mapping is gone can still be cleared", %{conn: conn} do
+    repository_fixture()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/?branch=feature/gone")
+
+    assert has_element?(view, "#branch-selector option[selected][value='feature/gone']")
+    assert has_element?(view, "#branch-selector option[value='all']")
+  end
+
   test "an approved job keeps its base and the card shows a later label change", %{conn: conn} do
     repository =
       repository_fixture(%{

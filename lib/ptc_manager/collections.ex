@@ -44,6 +44,17 @@ defmodule PtcManager.Collections do
     |> Repo.one()
   end
 
+  @doc "The latest integrated run of many umbrella issues, keyed by issue id."
+  def integrated_runs_by_issue([]), do: %{}
+
+  def integrated_runs_by_issue(issue_ids) when is_list(issue_ids) do
+    Run
+    |> where([run], run.issue_id in ^issue_ids and run.state == "integrated")
+    |> order_by([run], asc: run.ended_at, asc: run.id)
+    |> Repo.all()
+    |> Map.new(&{&1.issue_id, &1})
+  end
+
   @doc "The live runs of many umbrella issues, keyed by issue id, for the Planning page."
   def live_runs_by_issue([]), do: %{}
 
@@ -88,9 +99,10 @@ defmodule PtcManager.Collections do
             true -> :ok
           end
 
-          with :ok <- validate_structure(issue) do
+          base = run_base(issue, Map.get(attrs, :base, :mapped))
+
+          with :ok <- validate_structure(issue, base.branch) do
             now = utc_now()
-            base = run_base(issue, Map.get(attrs, :base, :mapped))
             members_on_base!(Structure.members(issue), base.branch)
 
             run =
@@ -218,7 +230,7 @@ defmodule PtcManager.Collections do
           do: Repo.rollback({:member_in_flight, member.issue_number})
       end
 
-      with :ok <- validate_structure(umbrella) do
+      with :ok <- validate_structure(umbrella, run.base_branch) do
         members_on_base!(current, run.base_branch)
 
         for member <- existing,
@@ -423,13 +435,39 @@ defmodule PtcManager.Collections do
       admissible(run, statuses) != [] ->
         Enum.each(admissible(run, statuses), &admit(run, &1))
 
-      Enum.all?(statuses, &(&1.status == :closed_completed)) and statuses != [] ->
+      delivered?(run, umbrella, statuses) ->
         closeout_or_finish(run, umbrella, statuses)
 
       true ->
         :ok
     end
   end
+
+  # On the default branch a member is delivered when GitHub closes it. On an
+  # integration branch it never closes before that branch is merged, so its
+  # own merged pull request is the delivery.
+  defp delivered?(_run, _umbrella, []), do: false
+
+  defp delivered?(run, umbrella, statuses) do
+    if integration_run?(run, umbrella),
+      do: Enum.all?(statuses, &integrated_member?(&1, run.base_branch)),
+      else: Enum.all?(statuses, &(&1.status == :closed_completed))
+  end
+
+  # Only a pull request merged into this run's own base delivers a member; one
+  # merged into another branch before the run started did not.
+  defp integrated_member?(%{status: :closed_completed}, _base), do: true
+
+  defp integrated_member?(
+         %{status: :merged, publication: %{pr_state: "merged", base_branch: base}},
+         base
+       ),
+       do: true
+
+  defp integrated_member?(_status, _base), do: false
+
+  defp integration_run?(run, umbrella),
+    do: is_binary(run.base_branch) and run.base_branch != umbrella.repository.default_branch
 
   defp enqueue_closeout(run, umbrella, statuses, attempt) do
     members =
@@ -445,7 +483,7 @@ defmodule PtcManager.Collections do
       MaintainerActions.enqueue_collection_action(
         "collection_closeout",
         umbrella.id,
-        %{members: members},
+        %{members: members, base_branch: run.base_branch},
         @actor
       )
     end)
@@ -1109,8 +1147,18 @@ defmodule PtcManager.Collections do
           # It created the missing members. They were adopted, and this
           # function runs again only once they are delivered too, so the
           # collection closes out again against the complete membership.
-          "completed" -> closeout_again(run, umbrella, statuses, action)
-          _decided -> apply_transition(run, &finish/1, "collection_run.finishing", %{})
+          "completed" ->
+            closeout_again(run, umbrella, statuses, action)
+
+          _decided ->
+            if integration_run?(run, umbrella),
+              do:
+                apply_end(
+                  run,
+                  "integrated",
+                  "Every member merged into #{run.base_branch}; the issues stay open until it reaches #{umbrella.repository.default_branch}."
+                ),
+              else: apply_transition(run, &finish/1, "collection_run.finishing", %{})
         end
 
       {:exhausted, action} ->
@@ -1456,8 +1504,8 @@ defmodule PtcManager.Collections do
     if numbers != [], do: Repo.rollback({:member_work_on_another_branch, numbers})
   end
 
-  defp validate_structure(issue) do
-    case Structure.validate(issue) do
+  defp validate_structure(issue, base) do
+    case Structure.validate(issue, base) do
       :ok -> :ok
       {:error, reason} -> Repo.rollback({:structure_invalid, reason})
     end

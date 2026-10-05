@@ -2245,7 +2245,7 @@ defmodule PtcManager.Operations do
              :ok <- heavy_delivery_priority_unlocked(),
              :ok <- repository_dispatch_unlocked(job.repository_id),
              :ok <- issue_dependency_projection_matches(Repo, job.issue, remote_issue),
-             :ok <- issue_dependencies_resolved(Repo, job.issue),
+             :ok <- issue_dependencies_resolved(Repo, job.issue, job.base_branch),
              {:ok, worker} <- ensure_capacity_worker(Repo, worker_key, capacity, lifecycle_now),
              :ok <- dispatch_capacity_available(Repo, worker, capacity, lifecycle_now),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
@@ -3013,7 +3013,7 @@ defmodule PtcManager.Operations do
     issue_ids = Enum.map(issues, & &1.id)
     proposals = latest_proposals(issue_ids)
     jobs = active_jobs(issue_ids)
-    dependencies = dashboard_dependencies(issue_ids, jobs)
+    dependencies = dashboard_dependencies(issues, jobs)
     dependency_cycles = dependency_cycles(issue_ids)
     latest_jobs = latest_jobs(issue_ids)
     publications = publications_for_jobs(Map.values(jobs) ++ Map.values(latest_jobs))
@@ -3025,11 +3025,24 @@ defmodule PtcManager.Operations do
     retrospective_issue_actions = retrospective_issue_actions()
     external_publications = external_publications_by_issue(issues)
     collection_runs = PtcManager.Collections.live_runs_by_issue(issue_ids)
+    integrated_runs = PtcManager.Collections.integrated_runs_by_issue(issue_ids)
 
     Enum.map(issues, fn issue ->
+      active_job = Map.get(jobs, issue.id)
+
+      publication =
+        publication_for_issue(publications, active_job, Map.get(latest_jobs, issue.id))
+
       %{
         issue: issue,
+        # The branch this issue's work targets: its job's or its merged pull
+        # request's stored base, else where approval would send it now.
+        base:
+          (active_job && active_job.base_branch) ||
+            (publication && publication.pr_state == "merged" && publication.base_branch) ||
+            target_base(Repo, issue, issue.repository),
         collection_run: Map.get(collection_runs, issue.id),
+        integrated_run: Map.get(integrated_runs, issue.id),
         external_publication: Map.get(external_publications, issue.id),
         dependencies: Map.get(dependencies, issue.id, []),
         dependency_cycle: Map.get(dependency_cycles, issue.id),
@@ -3170,6 +3183,8 @@ defmodule PtcManager.Operations do
         })
       end)
 
+    integrated_items = integrated_board_items()
+
     external_publications =
       PrPublication
       |> where(
@@ -3208,15 +3223,107 @@ defmodule PtcManager.Operations do
           pr_agent_action: Map.get(actions, {"pull_request", publication.id}),
           pr_retrospective_action: nil,
           pr_retrospective_issue_actions: [],
-          linked_issues: Map.get(linked_issues, publication.id, [])
+          linked_issues: Map.get(linked_issues, publication.id, []),
+          base: publication.base_branch
         }
       end)
 
-    managed_items ++ stopped_items ++ external_items
+    managed_items ++ stopped_items ++ integrated_items ++ external_items
   end
 
   # A stopped job is no longer active, so it holds no capacity, but its card has
   # to stay until the maintainer decides what to do about it.
+  # Managed pull requests merged into an integration branch while an issue they
+  # deliver is still open: the job's own issue and every issue the pull request
+  # links. Done there, waiting for that branch to reach the default branch;
+  # GitHub closing the last of them takes the card away.
+  defp integrated_board_items do
+    rows =
+      from(publication in PrPublication,
+        join: job in Job,
+        on: job.id == publication.job_id,
+        join: issue in Issue,
+        on: issue.id == job.issue_id,
+        join: repository in Repository,
+        on: repository.id == job.repository_id,
+        where:
+          publication.source in ["broker", "agent"] and publication.pr_state == "merged" and
+            publication.base_branch != repository.default_branch,
+        order_by: [asc: publication.base_branch, asc: issue.number],
+        select: {publication, job, issue, repository}
+      )
+      |> Repo.all()
+
+    open_issues = open_linked_issues(rows)
+
+    Enum.flat_map(rows, fn {publication, job, issue, repository} ->
+      numbers =
+        Enum.uniq([issue.number | get_in(publication.linked_issue_numbers, ["numbers"]) || []])
+
+      linked =
+        numbers
+        |> Enum.map(&Map.get(open_issues, {repository.id, &1}))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.map(&%{&1 | repository: repository})
+
+      case linked do
+        [] ->
+          []
+
+        [first | _rest] ->
+          [
+            %{
+              managed?: true,
+              repository: repository,
+              title: publication.title || issue.title,
+              number: publication.pr_number,
+              url: publication.pr_url,
+              started_at: publication.pr_checked_at || publication.published_at,
+              issue:
+                if(issue.state == "open", do: %{issue | repository: repository}, else: first),
+              dependencies: [],
+              dependency_cycle: nil,
+              proposal: nil,
+              active_job: nil,
+              latest_job: job,
+              publication: publication,
+              external_publication: nil,
+              pr_analysis: nil,
+              merge_approval: nil,
+              issue_agent_action: nil,
+              pr_agent_action: nil,
+              pr_retrospective_action: nil,
+              pr_retrospective_issue_actions: [],
+              linked_issues: linked,
+              base: publication.base_branch
+            }
+          ]
+      end
+    end)
+  end
+
+  defp open_linked_issues([]), do: %{}
+
+  defp open_linked_issues(rows) do
+    wanted =
+      for {publication, _job, issue, repository} <- rows,
+          number <- [issue.number | get_in(publication.linked_issue_numbers, ["numbers"]) || []],
+          uniq: true,
+          do: {repository.id, number}
+
+    wanted
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.flat_map(fn {repository_id, numbers} ->
+      Repo.all(
+        from issue in Issue,
+          where:
+            issue.repository_id == ^repository_id and issue.number in ^numbers and
+              issue.state == "open"
+      )
+    end)
+    |> Map.new(&{{&1.repository_id, &1.number}, &1})
+  end
+
   defp stopped_board_items do
     Enum.map(unacknowledged_stopped_jobs(), fn job ->
       %{
@@ -3241,7 +3348,8 @@ defmodule PtcManager.Operations do
         pr_agent_action: nil,
         pr_retrospective_action: nil,
         pr_retrospective_issue_actions: [],
-        linked_issues: [job.issue]
+        linked_issues: [job.issue],
+        base: job.base_branch
       }
     end)
   end
@@ -3946,7 +4054,10 @@ defmodule PtcManager.Operations do
     do_approve_issue(issue_id, PtcManager.Collections.actor(), nil, :collection, nil, [])
   end
 
-  @doc "True when every projected blocker of the issue is closed as completed and no cycle exists."
+  @doc """
+  True when every projected blocker is closed as completed, or merged into the
+  integration branch this issue targets, and no cycle exists.
+  """
   def dependencies_resolved?(%Issue{} = issue),
     do: issue_dependencies_resolved(Repo, issue) == :ok
 
@@ -3969,7 +4080,10 @@ defmodule PtcManager.Operations do
       current_approvable_snapshot(repo, issue_id, mode)
     end)
     |> Multi.run(:base, fn repo, %{snapshot: {issue, _proposal, repository}} ->
+      # Blockers are judged against the base this approval chose, so "default
+      # branch instead" needs them completed, not merely integrated.
       with {:ok, base} <- approval_base(repo, issue, repository, mode, base_choice),
+           :ok <- issue_dependencies_resolved(repo, issue, base.branch),
            :ok <- not_already_integrated(repo, issue, repository, base) do
         {:ok, base}
       end
@@ -4099,6 +4213,45 @@ defmodule PtcManager.Operations do
   end
 
   @doc """
+  The branch an issue's work targets now: its live collection run's base, else
+  the branch its labels or umbrella's labels map to, else the default branch.
+  Conflicting mappings fall back to the default branch here; approval refuses
+  them separately.
+  """
+  def target_base(repo \\ Repo, %Issue{} = issue, %Repository{} = repository) do
+    case PtcManager.Collections.member_run(repo, issue) do
+      %{base_branch: branch} when is_binary(branch) ->
+        branch
+
+      _no_run ->
+        case IntegrationBranches.resolve(repository, route_labels(repo, issue)) do
+          {:ok, %{"branch" => branch}} -> branch
+          _default_or_conflict -> repository.default_branch
+        end
+    end
+  end
+
+  @doc """
+  True when a blocker no longer holds back work targeting `base`: it closed as
+  completed, or, for an integration branch, a pull request for it merged there.
+  """
+  def blocker_satisfied?(repo \\ Repo, dependency, base, default_branch)
+
+  def blocker_satisfied?(
+        _repo,
+        %{lookup_state: "resolved", blocking_state: "closed", blocking_state_reason: "completed"},
+        _base,
+        _default_branch
+      ),
+      do: true
+
+  def blocker_satisfied?(repo, %{blocking_issue_id: blocker_id}, base, default_branch)
+      when is_integer(blocker_id) and base != default_branch,
+      do: integrated_into?(repo, blocker_id, base)
+
+  def blocker_satisfied?(_repo, _dependency, _base, _default_branch), do: false
+
+  @doc """
   The labels that decide where an issue's work goes: its own and, for a
   collection member, its umbrella's.
   """
@@ -4129,16 +4282,31 @@ defmodule PtcManager.Operations do
       else: :ok
   end
 
-  @doc "True when a managed pull request for the issue merged into this branch."
+  @doc """
+  True when a managed pull request merged into this branch for the issue: its
+  own job's, or another job's whose pull request links the issue.
+  """
   def integrated_into?(repo \\ Repo, issue_id, branch) do
-    repo.exists?(
-      from publication in PrPublication,
-        join: job in Job,
-        on: job.id == publication.job_id,
-        where:
-          job.issue_id == ^issue_id and publication.pr_state == "merged" and
-            publication.base_branch == ^branch
-    )
+    case repo.get(Issue, issue_id) do
+      nil ->
+        false
+
+      issue ->
+        repo.exists?(
+          from publication in PrPublication,
+            join: job in Job,
+            on: job.id == publication.job_id,
+            where:
+              job.repository_id == ^issue.repository_id and publication.pr_state == "merged" and
+                publication.base_branch == ^branch and
+                (job.issue_id == ^issue_id or
+                   fragment(
+                     "EXISTS (SELECT 1 FROM json_each(?, '$.numbers') WHERE value = ?)",
+                     publication.linked_issue_numbers,
+                     ^issue.number
+                   ))
+        )
+    end
   end
 
   defp approval_decision(:automatic), do: "start_implementation_automatic"
@@ -4158,7 +4326,6 @@ defmodule PtcManager.Operations do
          :ok <- issue_is_open(issue),
          :ok <- issue_unclaimed(issue, repository),
          :ok <- issue_workflow_allows_implementation(issue),
-         :ok <- issue_dependencies_resolved(repo, issue),
          :ok <- issue_not_collection(issue),
          {:ok, proposal} <- approvable_proposal(repo, issue, mode) do
       {:ok, {issue, proposal, repository}}
@@ -5716,32 +5883,35 @@ defmodule PtcManager.Operations do
   defp issue_workflow_allows_implementation(%Issue{}),
     do: {:error, :issue_workflow_not_ready}
 
-  defp issue_dependencies_resolved(_repo, %Issue{dependencies_projected: false}),
+  # `base` is the branch the work targets: an approval's or job's stored base,
+  # or, for a question asked before approval, where approval would send it.
+  defp issue_dependencies_resolved(repo, issue, base \\ nil)
+
+  defp issue_dependencies_resolved(_repo, %Issue{dependencies_projected: false}, _base),
     do: {:error, :issue_dependencies_unresolved}
 
-  defp issue_dependencies_resolved(_repo, %Issue{dependency_overflow: true}),
+  defp issue_dependencies_resolved(_repo, %Issue{dependency_overflow: true}, _base),
     do: {:error, :issue_dependencies_unresolved}
 
-  defp issue_dependencies_resolved(_repo, %Issue{dependency_unknown_count: count})
+  defp issue_dependencies_resolved(_repo, %Issue{dependency_unknown_count: count}, _base)
        when count > 0,
        do: {:error, :issue_dependencies_unresolved}
 
-  defp issue_dependencies_resolved(repo, %Issue{} = issue) do
+  defp issue_dependencies_resolved(repo, %Issue{} = issue, base) do
     dependencies =
       IssueDependency
       |> where([dependency], dependency.issue_id == ^issue.id)
-      |> join(:left, [dependency], blocker in Issue,
-        on: blocker.id == dependency.blocking_issue_id
-      )
-      |> select([dependency, blocker], {dependency, blocker})
       |> repo.all()
 
+    repository = repo.get!(Repository, issue.repository_id)
+    base = base || target_base(repo, issue, repository)
     cycles = dependency_cycles([issue.id])
 
     if is_nil(Map.get(cycles, issue.id)) and
-         Enum.all?(dependencies, fn {dependency, blocker} ->
-           dependency_satisfied?(dependency, blocker)
-         end) do
+         Enum.all?(
+           dependencies,
+           &blocker_satisfied?(repo, &1, base, repository.default_branch)
+         ) do
       :ok
     else
       {:error, :issue_dependencies_unresolved}
@@ -5836,13 +6006,37 @@ defmodule PtcManager.Operations do
 
   defp dashboard_dependencies([], _jobs), do: %{}
 
-  defp dashboard_dependencies(issue_ids, jobs) do
-    IssueDependency
-    |> where([dependency], dependency.issue_id in ^issue_ids)
-    |> order_by([dependency], asc: dependency.blocking_issue_number)
-    |> preload([:blocking_issue, :blocking_repository])
-    |> Repo.all()
-    |> Enum.group_by(& &1.issue_id, fn dependency ->
+  # Each entry carries `satisfied`, decided by blocker_satisfied?/4 against the
+  # base its dependent targets, so Planning shows what approval will decide.
+  defp dashboard_dependencies(issues, jobs) do
+    dependencies =
+      IssueDependency
+      |> where([dependency], dependency.issue_id in ^Enum.map(issues, & &1.id))
+      |> order_by([dependency], asc: dependency.blocking_issue_number)
+      |> preload([:blocking_issue, :blocking_repository])
+      |> Repo.all()
+
+    integrated =
+      dependencies
+      |> Enum.map(& &1.blocking_issue_id)
+      |> Enum.reject(&is_nil/1)
+      |> integrated_bases()
+
+    bases =
+      for issue <- issues,
+          Enum.any?(dependencies, &(&1.issue_id == issue.id)),
+          into: %{},
+          do:
+            {issue.id,
+             {target_base(Repo, issue, issue.repository), issue.repository.default_branch}}
+
+    Enum.group_by(dependencies, & &1.issue_id, fn dependency ->
+      {base, default_branch} = Map.fetch!(bases, dependency.issue_id)
+      merged_into = Map.get(integrated, dependency.blocking_issue_id, MapSet.new())
+
+      integrated_base =
+        if base != default_branch and MapSet.member?(merged_into, base), do: base
+
       %{
         number: dependency.blocking_issue_number,
         repository_full_name: dependency.blocking_repository_full_name,
@@ -5852,9 +6046,51 @@ defmodule PtcManager.Operations do
         state_reason: dependency.blocking_state_reason,
         lookup_state: dependency.lookup_state,
         issue: dependency.blocking_issue,
-        active_job: dependency.blocking_issue && Map.get(jobs, dependency.blocking_issue.id)
+        active_job: dependency.blocking_issue && Map.get(jobs, dependency.blocking_issue.id),
+        integrated_base: integrated_base,
+        satisfied:
+          not is_nil(integrated_base) or
+            blocker_satisfied?(Repo, dependency, default_branch, default_branch)
       }
     end)
+  end
+
+  # The branches each issue's work merged into, through its own job's pull
+  # request or another one that links it, as integrated_into?/3 decides.
+  defp integrated_bases([]), do: %{}
+
+  defp integrated_bases(issue_ids) do
+    issues =
+      Repo.all(
+        from issue in Issue,
+          where: issue.id in ^issue_ids,
+          select: {issue.id, issue.repository_id, issue.number}
+      )
+
+    by_number =
+      Map.new(issues, fn {id, repository_id, number} -> {{repository_id, number}, id} end)
+
+    repository_ids = issues |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
+
+    from(publication in PrPublication,
+      join: job in Job,
+      on: job.id == publication.job_id,
+      where: job.repository_id in ^repository_ids and publication.pr_state == "merged",
+      select:
+        {job.issue_id, job.repository_id, publication.linked_issue_numbers,
+         publication.base_branch}
+    )
+    |> Repo.all()
+    |> Enum.flat_map(fn {issue_id, repository_id, linked, branch} ->
+      linked_ids =
+        for number <- get_in(linked || %{}, ["numbers"]) || [],
+            id = Map.get(by_number, {repository_id, number}),
+            do: id
+
+      for id <- Enum.uniq([issue_id | linked_ids]), id in issue_ids, do: {id, branch}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Map.new(fn {issue_id, branches} -> {issue_id, MapSet.new(branches)} end)
   end
 
   defp dependency_cycles(issue_ids) do
@@ -5866,13 +6102,6 @@ defmodule PtcManager.Operations do
     cycles = DependencyGraph.cycles(issues)
     Map.take(cycles, issue_ids)
   end
-
-  defp dependency_satisfied?(%IssueDependency{lookup_state: "resolved"} = dependency, _blocker),
-    do:
-      dependency.blocking_state == "closed" and
-        dependency.blocking_state_reason == "completed"
-
-  defp dependency_satisfied?(_dependency, _blocker), do: false
 
   defp latest_jobs([]), do: %{}
 

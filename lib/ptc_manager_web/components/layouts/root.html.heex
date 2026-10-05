@@ -57,6 +57,43 @@
 
         window.addEventListener("DOMContentLoaded", restoreRepository);
         window.addEventListener("phx:page-loading-stop", restoreRepository);
+
+        const branchKey = "ptc-manager:branch";
+        const remember = (key, value) => {
+          try { localStorage.setItem(key, value); } catch (_error) {}
+        };
+        const recall = (key) => {
+          try { return localStorage.getItem(key); } catch (_error) { return null; }
+        };
+
+        window.ptcSelectBranch = (branch) => {
+          remember(branchKey, branch);
+
+          const url = new URL(window.location.href);
+          url.searchParams.set("branch", branch);
+          window.location.assign(url.toString());
+        };
+
+        const restoreBranch = () => {
+          const selector = document.querySelector("[data-branch-selector]");
+          if (!selector) return;
+
+          const url = new URL(window.location.href);
+          const requested = url.searchParams.get("branch");
+          if (requested) {
+            remember(branchKey, requested);
+            return;
+          }
+
+          const stored = recall(branchKey);
+          if (stored && stored !== "all" && Array.from(selector.options).some((option) => option.value === stored)) {
+            url.searchParams.set("branch", stored);
+            window.location.replace(url.toString());
+          }
+        };
+
+        window.addEventListener("DOMContentLoaded", restoreBranch);
+        window.addEventListener("phx:page-loading-stop", restoreBranch);
       })();
     </script>
   </head>

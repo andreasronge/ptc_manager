@@ -487,6 +487,62 @@ defmodule PtcManager.DispatchTest do
     assert Repo.get!(Job, job.id).state == "cancelled"
   end
 
+  # The job keeps the base it was approved with, so its blockers are judged
+  # there even after the mapping that chose it is gone.
+  test "dispatch judges blockers against the job's stored base" do
+    {repository, issue, _proposal, job, remote} = approved_job_fixture()
+    job = job |> Job.changeset(%{base_branch: "feature/ska"}) |> Repo.update!()
+    blocker = issue_fixture(repository, %{number: issue.number + 1})
+    {:ok, blocker_job} = Operations.approve_issue_directly(blocker.id, "andreas")
+    blocker_job = blocker_job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+
+    %PtcManager.Operations.PrPublication{}
+    |> PtcManager.Operations.PrPublication.changeset(%{
+      job_id: blocker_job.id,
+      repository_id: repository.id,
+      base_branch: "feature/ska",
+      state: "published",
+      idempotency_key: String.duplicate("8", 64),
+      fencing_token: 0,
+      branch_name: "ptc-manager/issue-#{blocker.number}-job-#{blocker_job.id}",
+      base_sha: String.duplicate("a", 40),
+      head_sha: String.duplicate("a", 40),
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      pr_number: 9100,
+      pr_url: "https://github.com/example/repo/pull/9100",
+      remote_head_sha: String.duplicate("a", 40),
+      remote_base_sha: String.duplicate("a", 40),
+      published_at: DateTime.utc_now(),
+      pr_state: "merged",
+      pr_checked_at: DateTime.utc_now(),
+      source: "agent"
+    })
+    |> Repo.insert!()
+
+    issue_dependency_fixture(issue, %{blocking_issue: blocker, blocking_repository: repository})
+
+    remote =
+      Map.put(remote, "blocked_by", [
+        %{
+          "id" => blocker.number + 10_000,
+          "node_id" => "ISSUE_#{blocker.number}",
+          "number" => blocker.number,
+          "title" => blocker.title,
+          "html_url" => blocker.html_url,
+          "state" => "open",
+          "repository" => %{
+            "full_name" => "#{repository.github_owner}/#{repository.github_name}"
+          }
+        }
+      ])
+
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:ok, %{job: dispatched}} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    assert dispatched.id == job.id
+  end
+
   test "dispatch does not treat dependency prose as the machine-readable contract" do
     repository = repository_fixture()
 

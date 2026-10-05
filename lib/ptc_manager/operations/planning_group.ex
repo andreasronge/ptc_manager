@@ -165,6 +165,15 @@ defmodule PtcManager.Operations.PlanningGroup do
   defp in_delivery?(%{active_job: %{}}), do: true
   defp in_delivery?(%{publication: %{state: "published", pr_state: "open"}}), do: true
   defp in_delivery?(%{external_publication: %{}}), do: true
+
+  defp in_delivery?(%{issue: %{repository: repository}} = item),
+    do:
+      PtcManager.Operations.DeliveryLane.integrated?(%{
+        active_job: item.active_job,
+        publication: item.publication,
+        repository: repository
+      })
+
   defp in_delivery?(_item), do: false
 
   defp needs_decision?(item) do
@@ -193,10 +202,16 @@ defmodule PtcManager.Operations.PlanningGroup do
 
   defp stale?(_updated_at, _now, _stale_after_days), do: false
 
-  defp dependency_completed?(%{lookup_state: "resolved", state: "closed", state_reason: reason}),
+  @doc """
+  True when a Planning dependency no longer holds its dependent back: the
+  `satisfied` verdict Operations computed, or a completed closure.
+  """
+  def dependency_completed?(%{satisfied: satisfied}) when is_boolean(satisfied), do: satisfied
+
+  def dependency_completed?(%{lookup_state: "resolved", state: "closed", state_reason: reason}),
     do: reason == "completed"
 
-  defp dependency_completed?(_dependency), do: false
+  def dependency_completed?(_dependency), do: false
 
   defp closed_without_completion?(%{
          lookup_state: "resolved",

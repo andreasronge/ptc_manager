@@ -95,7 +95,12 @@
     <section aria-labelledby="issue-inbox-title" class="min-w-0">
       <div class="mb-4 flex items-center justify-between">
         <h2 id="issue-inbox-title" class="text-lg font-semibold">Issue inbox</h2>
-        <span class="text-xs text-slate-500">Grouped by what you can do next</span>
+        <span class="flex items-center gap-3 text-xs text-slate-500">
+          <PtcManagerWeb.BranchFilter.branch_selector
+            branches={@branches}
+            selected={@selected_branch}
+          /> Grouped by what you can do next
+        </span>
       </div>
 
       <div id="issue-inbox" class="space-y-5">
@@ -282,6 +287,13 @@
                         </button>
                       </div>
                     <% else %>
+                      <p
+                        :if={item.integrated_run}
+                        id={"collection-integrated-#{item.issue.id}"}
+                        class="w-full text-xs text-violet-200"
+                      >
+                        Integrated into <code>{item.integrated_run.base_branch}</code>: every member merged there, and the issues stay open until it reaches <code>{item.issue.repository.default_branch}</code>.
+                      </p>
                       <form
                         id={"collection-run-form-#{item.issue.id}"}
                         phx-submit="start-collection-run"

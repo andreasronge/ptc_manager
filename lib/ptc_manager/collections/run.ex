@@ -12,7 +12,9 @@ defmodule PtcManager.Collections.Run do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @states ~w(active paused finishing completed cancelled)
+  # `integrated` ends a run whose members all merged into its integration
+  # branch; their issues stay open until that branch reaches the default one.
+  @states ~w(active paused finishing completed integrated cancelled)
   @live_states ~w(active paused finishing)
   @pause_kinds ~w(
     child_attempt_failed

@@ -67,6 +67,25 @@ defmodule PtcManager.OperationsFixtures do
     |> Repo.update!()
   end
 
+  @doc """
+  A repository whose `label` routes to `branch`, with the test GitHub client
+  reporting that branch for the rest of the test.
+  """
+  def mapped_repository_fixture(label \\ "ska", branch \\ "feature/ska", attrs \\ %{}) do
+    previous = Application.get_env(:ptc_manager, :test_github_branches)
+    Application.put_env(:ptc_manager, :test_github_branches, ["main", branch])
+
+    ExUnit.Callbacks.on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ptc_manager, :test_github_branches, previous),
+        else: Application.delete_env(:ptc_manager, :test_github_branches)
+    end)
+
+    repository = repository_fixture(attrs)
+    {:ok, repository} = Operations.add_integration_branch(repository.id, label, branch, "andreas")
+    repository
+  end
+
   def issue_fixture(repository, attrs \\ %{}) do
     number = Map.get(attrs, :number, System.unique_integer([:positive]))
     title = Map.get(attrs, :title, "Issue #{number}")

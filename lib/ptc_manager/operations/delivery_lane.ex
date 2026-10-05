@@ -11,11 +11,12 @@ defmodule PtcManager.Operations.DeliveryLane do
     queued: "Queued",
     working: "In progress",
     stuck: "Needs attention",
-    ready: "Ready to merge"
+    ready: "Ready to merge",
+    integrated: "Integrated"
   }
 
-  @doc "The lane keys in board order."
-  def keys, do: [:queued, :working, :stuck, :ready]
+  @doc "The lane keys in board order; integrated work is drawn apart, grouped by branch."
+  def keys, do: [:queued, :working, :stuck, :ready, :integrated]
 
   @doc "The maintainer-facing name of one lane."
   def label(key) when is_map_key(@labels, key), do: Map.fetch!(@labels, key)
@@ -23,6 +24,7 @@ defmodule PtcManager.Operations.DeliveryLane do
   @doc "The lane this delivery item belongs to."
   def lane_for(item) do
     cond do
+      integrated?(item) -> :integrated
       stopped?(item) -> :stuck
       job_state(item) == "queued" or continuation_queued?(item) -> :queued
       stuck?(item) -> :stuck
@@ -31,6 +33,21 @@ defmodule PtcManager.Operations.DeliveryLane do
       true -> :working
     end
   end
+
+  @doc """
+  True when this item's pull request merged into an integration branch and no
+  job is running for it: the work is done there, and its issue stays open until
+  that branch reaches the default branch.
+  """
+  def integrated?(%{
+        active_job: nil,
+        publication: %{pr_state: "merged", base_branch: base},
+        repository: %{default_branch: default}
+      })
+      when is_binary(base),
+      do: base != default
+
+  def integrated?(_item), do: false
 
   @doc "True when this card is a job whose agent reported that it could not finish."
   def stopped?(%{active_job: %{stop_reported_at: %DateTime{}, stop_acknowledged_at: nil}}),

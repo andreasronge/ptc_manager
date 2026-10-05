@@ -37,6 +37,7 @@ defmodule PtcManagerWeb.DashboardLive do
      |> assign(:page_title, "Dashboard")
      |> assign(:actor, session["actor"] || "maintainer")
      |> assign(:selected_repository, nil)
+     |> assign(:selected_branch, nil)
      |> assign(:now, DateTime.utc_now())
      |> assign(:github_syncing, false)
      |> assign(:reconciling_results, MapSet.new())
@@ -51,6 +52,7 @@ defmodule PtcManagerWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:selected_repository, selected_repository(params, Operations.list_repositories()))
+     |> assign(:selected_branch, PtcManagerWeb.BranchFilter.from_params(params))
      |> load_dashboard()}
   end
 
@@ -704,7 +706,8 @@ defmodule PtcManagerWeb.DashboardLive do
   def delivery_lane(item) do
     DeliveryLane.lane_for(%{
       active_job: item.active_job,
-      publication: item.publication || item.external_publication
+      publication: item.publication || item.external_publication,
+      repository: item.issue.repository
     })
   end
 
@@ -1042,6 +1045,9 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def dependency_status(%{lookup_state: state}) when state != "resolved", do: "unknown"
 
+  def dependency_status(%{integrated_base: base}) when is_binary(base),
+    do: "integrated into #{base}"
+
   def dependency_status(%{state: "closed", state_reason: "completed"}), do: "completed"
   def dependency_status(%{state: "closed"}), do: "closed without completion"
 
@@ -1085,10 +1091,7 @@ defmodule PtcManagerWeb.DashboardLive do
     )
   end
 
-  defp dependency_completed?(%{lookup_state: "resolved", state: "closed", state_reason: reason}),
-    do: reason == "completed"
-
-  defp dependency_completed?(_dependency), do: false
+  defp dependency_completed?(dependency), do: PlanningGroup.dependency_completed?(dependency)
 
   defp load_dashboard(socket, opts \\ []) do
     repositories = Operations.list_repositories()
@@ -1097,6 +1100,10 @@ defmodule PtcManagerWeb.DashboardLive do
     issues =
       Operations.dashboard_issues(state: "open")
       |> filter_repository(selected_repository, & &1.issue.repository)
+      |> PtcManagerWeb.BranchFilter.apply(
+        socket.assigns.selected_branch,
+        &{&1.base, &1.issue.repository.default_branch}
+      )
 
     follow_ups =
       Operations.follow_up_items()
@@ -1110,6 +1117,7 @@ defmodule PtcManagerWeb.DashboardLive do
     end)
     |> assign(
       repositories: repositories,
+      branches: PtcManagerWeb.BranchFilter.branches(repositories),
       execution_profiles: PtcManager.ExecutionProfiles.list(),
       issues: issues,
       grouped_issues: group_issues(issues, follow_ups, socket.assigns.now),

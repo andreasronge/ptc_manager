@@ -811,6 +811,84 @@ defmodule PtcManagerWeb.DeliveryBoardLiveTest do
     refute has_element?(view, "#abandon-job-#{claimed.id}")
   end
 
+  describe "integration branches" do
+    setup do
+      {:ok, repository: mapped_repository_fixture()}
+    end
+
+    test "merged integration work waits in the Integrated lane with its Closes lines",
+         %{conn: conn, repository: repository} do
+      integrated =
+        for number <- [117, 118] do
+          issue =
+            issue_fixture(repository, %{number: number, github_labels: %{"names" => ["ska"]}})
+
+          merged_into!(issue)
+        end
+
+      main_issue = issue_fixture(repository, %{number: 200})
+      {:ok, main_job} = Operations.approve_issue_directly(main_issue.id, "andreas")
+
+      {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/board")
+
+      group = "#integrated-#{repository.id}-feature-ska"
+      assert has_element?(view, group, "feature/ska")
+
+      for publication <- integrated do
+        assert has_element?(view, "#{group} #board-pr-#{publication.id}")
+      end
+
+      assert render(view) =~ "Closes #117\nCloses #118"
+      assert has_element?(view, "#board-job-#{main_job.id}")
+
+      # The branch filter shows one branch's work at a time.
+      {:ok, ska_only, _html} =
+        conn |> authenticated_conn() |> live(~p"/board?branch=feature/ska")
+
+      assert has_element?(ska_only, group)
+      refute has_element?(ska_only, "#board-job-#{main_job.id}")
+
+      {:ok, default_only, _html} =
+        conn |> authenticated_conn() |> live(~p"/board?branch=default")
+
+      refute has_element?(default_only, "#lane-integrated")
+      assert has_element?(default_only, "#board-job-#{main_job.id}")
+    end
+  end
+
+  defp merged_into!(issue) do
+    {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+    job = job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+    Repo.update_all(PtcManager.Automations.Invocation, set: [state: "succeeded"])
+    now = DateTime.utc_now()
+    sha = String.duplicate("a", 40)
+
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      job_id: job.id,
+      repository_id: job.repository_id,
+      base_branch: job.base_branch,
+      state: "published",
+      idempotency_key: :crypto.hash(:sha256, "pub-#{job.id}") |> Base.encode16(case: :lower),
+      fencing_token: job.fencing_token,
+      branch_name: "ptc-manager/issue-#{issue.number}-job-#{job.id}",
+      base_sha: sha,
+      head_sha: sha,
+      diff_digest: String.duplicate("c", 64),
+      attempt_count: 1,
+      pr_number: 900 + issue.number,
+      pr_url: "https://github.com/example/repo/pull/#{900 + issue.number}",
+      remote_head_sha: sha,
+      remote_base_sha: sha,
+      published_at: now,
+      pr_state: "merged",
+      pr_checked_at: now,
+      source: "agent",
+      title: issue.title
+    })
+    |> Repo.insert!()
+  end
+
   defp stop_job(title, report) do
     title |> approved_job() |> set_job_state("working") |> report_stop(report)
   end

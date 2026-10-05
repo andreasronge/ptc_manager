@@ -3335,6 +3335,37 @@ defmodule PtcManager.MaintainerActionsTest do
       end
     end
 
+    test "merging into an integration branch asks for the comment GitHub will not imply" do
+      repository = repository_fixture()
+
+      publication = %PrPublication{
+        state: "published",
+        pr_state: "open",
+        pr_number: 77,
+        branch_name: "ptc-manager/issue-1-job-1",
+        base_branch: "feature/ska",
+        remote_head_sha: String.duplicate("b", 40),
+        draft: false,
+        checks_state: "success",
+        source: "agent",
+        job_id: 1
+      }
+
+      issue = issue_fixture(repository)
+
+      assert {:ok, %{prompt: prompt}} =
+               Catalog.build("merge_reviewed_pr", %{
+                 publication: publication,
+                 repository: repository,
+                 issue: issue
+               })
+
+      assert prompt =~ ~s(base_branch="feature/ska")
+
+      assert prompt =~
+               "Merged into `feature/ska` in #77; stays open until `feature/ska` reaches `main`."
+    end
+
     test "issue preparation never carries a blocker at all" do
       repository = repository_fixture()
       issue = issue_fixture(repository)

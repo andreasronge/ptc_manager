@@ -123,7 +123,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
             collection_closeout_prompt(
               repository,
               preview_umbrella(repository),
-              preview_members()
+              preview_members(),
+              repository.default_branch
             ),
             instructions
           )
@@ -338,7 +339,10 @@ defmodule PtcManager.MaintainerActions.Catalog do
      }}
   end
 
-  def build("collection_closeout", %{issue: umbrella, repository: repository, members: members})
+  def build(
+        "collection_closeout",
+        %{issue: umbrella, repository: repository, members: members} = target
+      )
       when is_list(members) do
     {:ok,
      %{
@@ -350,7 +354,12 @@ defmodule PtcManager.MaintainerActions.Catalog do
        prompt:
          configured(
            "collection_closeout",
-           collection_closeout_prompt(repository, umbrella, members)
+           collection_closeout_prompt(
+             repository,
+             umbrella,
+             members,
+             Map.get(target, :base_branch) || repository.default_branch
+           )
          )
      }}
   end
@@ -768,20 +777,37 @@ defmodule PtcManager.MaintainerActions.Catalog do
     """
   end
 
-  defp collection_closeout_prompt(repository, umbrella, members) do
+  defp collection_closeout_prompt(repository, umbrella, members, base) do
     """
     <runtime_context action="collection_closeout" repository="#{repository.github_owner}/#{repository.github_name}" github_access="trusted_direct" allowed_outcomes="needs-decision,completed,no-changes" />
     #{@collection_protocol}<collection_state>
     Parent: ##{umbrella.number} #{umbrella.title}
-    Members, all closed as completed:
+    #{closeout_members_heading(repository, base)}
     #{member_lines(members)}
-    </collection_state>
+    </collection_state>#{integration_closeout(repository, base)}
     <issue_data>
     Number: #{umbrella.number}
     Title: #{umbrella.title}
     Body:
     #{String.slice(umbrella.body || "", 0, 20_000)}
     </issue_data>
+    """
+  end
+
+  defp closeout_members_heading(%{default_branch: base}, base),
+    do: "Members, all closed as completed:"
+
+  defp closeout_members_heading(_repository, base),
+    do: "Members, all merged into #{base} and still open:"
+
+  defp integration_closeout(%{default_branch: base}, base), do: ""
+
+  defp integration_closeout(repository, base) do
+    """
+
+    <integration_branch>
+    This collection was delivered into #{base}, which has not reached #{repository.default_branch}. Wherever your task says the default branch, use #{base}; the read-only snapshot shows #{repository.default_branch}, so read #{base} from GitHub. Post one comment on the parent that lists every member with its merged pull request and says the members stay open until #{base} reaches #{repository.default_branch}. Do not offer to close the parent: report `no-changes` once the comment is posted, or `completed` if you created missing members.
+    </integration_branch>
     """
   end
 
@@ -880,7 +906,9 @@ defmodule PtcManager.MaintainerActions.Catalog do
         ""
 
       base ->
-        "\nBase: #{base}, an integration branch. Wherever this action says the default branch, use #{base}."
+        "\nBase: #{base}, an integration branch. Wherever this action says the default branch, use #{base}. " <>
+          "GitHub does not close issues on this merge. After you merge, comment on each issue the pull request closes: " <>
+          "\"Merged into `#{base}` in ##{publication.pr_number}; stays open until `#{base}` reaches `#{repository.default_branch}`.\""
     end
   end
 

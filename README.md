@@ -957,9 +957,34 @@ The worktree starts from the stored base, the agent's pull request targets it,
 and merge, repair, and broker checks compare against it. A label or mapping
 changed after approval does not retarget the job; the card shows the mismatch.
 Deployments, daily updates, source snapshots, toolchain bumps, and repository
-health stay on the default branch. GitHub closes an issue only when its pull
-request merges into the default branch, so integrated issues stay open until
-the integration branch itself is merged.
+health stay on the default branch.
+
+GitHub closes an issue only when its pull request merges into the default
+branch, so an issue whose pull request merged into an integration branch stays
+open. PtcManager derives **integrated** from that merged pull request; it is not
+a label or a stored issue state:
+
+- the Delivery board's **Integrated** section lists such work grouped by
+  repository and branch, and offers the `Closes #…` lines to paste into the
+  `feature/ska → main` pull request, which you open yourself. When GitHub
+  closes the issues, the cards leave. Planning shows the same **Integrated**
+  badge;
+- the merge action on an integration-branch pull request also comments on each
+  linked issue: "Merged into `feature/ska` in #N; stays open until
+  `feature/ska` reaches `main`.";
+- a blocker counts as done for a dependent that targets the same integration
+  branch once its pull request merged there, for approval, collection
+  admission, and collection structure alike, so a blocker outside the
+  collection is accepted when it is integrated;
+- a collection run on an integration branch closes out once every member
+  merged there: the close-out comment on the umbrella lists the members and
+  their pull requests, and the run ends **integrated** instead of waiting for
+  the umbrella to close.
+
+Planning and the Delivery board have a **Branch** filter (all branches, default
+branches only, or one integration branch), remembered in the browser like the
+repository filter. Keeping an integration branch current with the default
+branch stays manual.
 
 ### When an agent cannot finish
 
