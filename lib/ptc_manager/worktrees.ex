@@ -210,11 +210,14 @@ defmodule PtcManager.Worktrees do
     {:error, {:worktree_preservation_failed, reason}}
   end
 
-  defp discardable?(allocation) do
+  @doc "Whether a maintainer may preserve or discard this retained worktree now."
+  def discardable?(%WorktreeAllocation{state: "attention"} = allocation) do
     not ((PtcManager.Reviews.held?(allocation.job) and
             not cancelled_agent_stopped?(allocation.job)) or
            Operations.worktree_consumes_execution_slot?(allocation))
   end
+
+  def discardable?(_allocation), do: false
 
   # Synchronization still holds cancelled jobs; only an explicit discard may
   # release their workspace after durable stop confirmation.

@@ -149,6 +149,9 @@ defmodule PtcManager.ReviewCapacityTest do
     assert :ok = PtcManager.Reviews.CancelWorker.perform(args)
     assert Repo.get!(AgentRun, run.id).state == "lost"
     assert Reviews.held?(Repo.get!(Job, job.id))
+
+    assert Worktrees.discardable?(Operations.get_worktree_allocation(allocation.id))
+
     assert :ok = Worktrees.discard_attention(allocation.id, "maintainer", TransientStopAdapter)
   end
 

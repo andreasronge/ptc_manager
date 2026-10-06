@@ -945,13 +945,6 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def worktree_state_label(state), do: state |> String.replace("_", " ")
 
-  def discardable_worktree?(%{state: "attention"} = allocation),
-    do:
-      not PtcManager.Reviews.held?(allocation.job) and
-        not Operations.worktree_consumes_execution_slot?(allocation)
-
-  def discardable_worktree?(_allocation), do: false
-
   @doc """
   Where approving this issue now would send its work: the default branch, an
   integration branch its labels or umbrella map to, or a conflict to resolve.

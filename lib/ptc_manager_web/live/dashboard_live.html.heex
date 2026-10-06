@@ -1130,7 +1130,7 @@
                   · {allocation.retained_unpushed_commits} unpushed
                 </span>
               </p>
-              <div :if={discardable_worktree?(allocation)} class="mt-2 flex flex-wrap gap-2">
+              <div :if={Worktrees.discardable?(allocation)} class="mt-2 flex flex-wrap gap-2">
                 <button
                   type="button"
                   phx-click="preserve-worktree"
