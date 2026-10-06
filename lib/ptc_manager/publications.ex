@@ -1366,8 +1366,10 @@ defmodule PtcManager.Publications do
     end
   end
 
+  # An external pull request may target any branch, such as an integration
+  # branch, and may be retargeted; only the repository it targets is fixed.
   defp record_external_remote_status!(publication, repository, result, now) do
-    if not intended_base?(result, repository, repository.default_branch) do
+    if not intended_base?(result, repository, result.base_ref) do
       Repo.rollback(:unexpected_pull_request_base)
     end
 
@@ -1388,6 +1390,7 @@ defmodule PtcManager.Publications do
         author_login: Map.get(result, :author_login) || publication.author_login,
         head_ref: result.head_ref,
         head_repository: result.head_repository,
+        base_branch: result.base_ref,
         linked_issue_numbers: %{"numbers" => linked_issue_numbers(result, repository)},
         last_error: nil
       }

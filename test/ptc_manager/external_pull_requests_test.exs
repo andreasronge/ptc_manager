@@ -172,6 +172,59 @@ defmodule PtcManager.ExternalPullRequestsTest do
     assert Repo.get!(PrPublication, publication.id).pr_state == "closed"
   end
 
+  test "an external pull request merged into an integration branch is recorded as merged" do
+    repository = repository_fixture()
+
+    pull = %{
+      external_pr_status(repository, 134, String.duplicate("b", 40))
+      | base_ref: "feature/ska"
+    }
+
+    assert {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [pull])
+    assert {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [])
+
+    Process.put(:external_pull_listing, [])
+    Process.put(:external_pull_statuses, [%{pull | state: "merged"}])
+
+    assert {:ok, _summary} =
+             PtcManager.PublicationStatusReconciler.run_once(
+               client: ListingClient,
+               external: true
+             )
+
+    merged = Repo.get_by!(PrPublication, repository_id: repository.id, pr_number: 134)
+    assert merged.pr_state == "merged"
+    assert merged.base_branch == "feature/ska"
+    assert merged.last_error == nil
+  end
+
+  test "one repository's failed external status does not stop the next repository" do
+    failing = repository_fixture()
+    healthy = repository_fixture()
+    stuck = external_pr_status(failing, 7, String.duplicate("d", 40))
+    finished = external_pr_status(healthy, 8, String.duplicate("e", 40))
+
+    for {repository, pull} <- [{failing, stuck}, {healthy, finished}] do
+      assert {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [pull])
+      assert {:ok, _summary} = Publications.sync_external_open_pull_requests(repository, [])
+    end
+
+    # The failing repository's pull request has no status, so its check is refused.
+    Process.put(:external_pull_listing, [])
+    Process.put(:external_pull_statuses, [%{finished | state: "closed"}])
+
+    assert {:error, _reason} =
+             PtcManager.PublicationStatusReconciler.run_once(
+               client: ListingClient,
+               external: true
+             )
+
+    assert Repo.get_by!(PrPublication, repository_id: healthy.id, pr_number: 8).pr_state ==
+             "closed"
+
+    assert Repo.get_by!(PrPublication, repository_id: failing.id, pr_number: 7).pr_state == "open"
+  end
+
   test "external snapshot application performs no reads inside its write transaction" do
     repository = repository_fixture()
     pull = external_pr_status(repository, 97, String.duplicate("a", 40))

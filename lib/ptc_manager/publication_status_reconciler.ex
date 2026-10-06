@@ -1,6 +1,8 @@
 defmodule PtcManager.PublicationStatusReconciler do
   @moduledoc "Discovers agent-created PRs and reconciles canonical status through completion."
 
+  require Logger
+
   alias PtcManager.Gateway
   alias PtcManager.Operations
   alias PtcManager.Publications
@@ -49,19 +51,34 @@ defmodule PtcManager.PublicationStatusReconciler do
     if supports?(client, :list_open, 1) do
       PtcManager.Operations.list_repositories()
       |> Enum.filter(& &1.enabled)
-      |> Enum.reduce_while({:ok, :empty}, fn repository, _acc ->
+      # A rate limit pauses every repository; any other failure is one
+      # repository's, so the rest are still reconciled and the first error is
+      # reported once the pass ends.
+      |> Enum.reduce_while({{:ok, :empty}, nil}, fn repository, {last, first_error} ->
         result =
           Operations.with_repository_lifecycle_lock(repository.id, fn ->
             reconcile_external_repository(client, repository)
           end)
 
         case result do
-          {:ok, :repository_removed} -> {:cont, {:ok, :empty}}
-          {:ok, _summary} = success -> {:cont, success}
-          {:retry_after, _delay_ms} = retry -> {:halt, retry}
-          {:error, _reason} = error -> {:halt, error}
+          {:ok, :repository_removed} ->
+            {:cont, {last, first_error}}
+
+          {:ok, _summary} = success ->
+            {:cont, {success, first_error}}
+
+          {:retry_after, _delay_ms} = retry ->
+            {:halt, {retry, nil}}
+
+          {:error, reason} = error ->
+            Logger.warning(
+              "External pull request reconciliation failed for repository #{repository.id}: #{inspect(reason)}"
+            )
+
+            {:cont, {last, first_error || error}}
         end
       end)
+      |> then(fn {last, first_error} -> first_error || last end)
     else
       {:ok, :empty}
     end
