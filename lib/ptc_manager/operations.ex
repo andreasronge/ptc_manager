@@ -3012,13 +3012,15 @@ defmodule PtcManager.Operations do
     end
   end
 
-  @doc "End a finished agent's attempt when reconciliation found no commits past its deadline."
-  def fail_result_without_commits(job_id, fencing_token, attempt_token) do
+  @doc """
+  End a finished agent's attempt when reconciliation found nothing to deliver
+  past its deadline: no commits, or commits whose tree matches the base.
+  """
+  def fail_result_without_commits(job_id, fencing_token, attempt_token, reason \\ :no_commits)
+      when reason in [:no_commits, :no_tree_changes] do
     now = utc_now()
     cutoff = DateTime.add(now, -result_no_commits_timeout_ms(), :millisecond)
-
-    message =
-      "The agent finished without committing and did not report why; its partial worktree was preserved."
+    message = without_commits_message(reason)
 
     Repo.transaction(fn ->
       {updated, _} =
@@ -3051,6 +3053,7 @@ defmodule PtcManager.Operations do
         details: %{
           "fencing_token" => fencing_token,
           "worktree_preserved" => true,
+          "probe_result" => Atom.to_string(reason),
           "reason" => message
         }
       })
@@ -3059,6 +3062,14 @@ defmodule PtcManager.Operations do
     end)
     |> notify_and_return()
   end
+
+  defp without_commits_message(:no_commits),
+    do:
+      "The agent finished without committing and did not report why; its partial worktree was preserved."
+
+  defp without_commits_message(:no_tree_changes),
+    do:
+      "The agent finished with commits that change nothing against the base and did not report why; its partial worktree was preserved."
 
   def result_no_commits_timeout_ms,
     do: Application.get_env(:ptc_manager, :result_no_commits_timeout_ms, 900_000)
@@ -5856,20 +5867,25 @@ defmodule PtcManager.Operations do
 
       if updated != 1, do: Repo.rollback(:job_not_idle)
 
-      AgentRun
-      |> where(
-        [run],
-        run.job_id == ^job.id and run.fencing_token == ^job.fencing_token and
-          run.state == "idle"
-      )
-      |> Repo.update_all(
-        set: [
-          state: "done",
-          status_text: "Idle past its deadline; its result is being reconciled.",
-          ended_at: lifecycle_now,
-          updated_at: lifecycle_now
-        ]
-      )
+      {finished, _rows} =
+        AgentRun
+        |> where(
+          [run],
+          run.job_id == ^job.id and run.fencing_token == ^job.fencing_token and
+            run.state == "idle"
+        )
+        |> Repo.update_all(
+          set: [
+            state: "done",
+            status_text: "Idle past its deadline; its result is being reconciled.",
+            ended_at: lifecycle_now,
+            updated_at: lifecycle_now
+          ]
+        )
+
+      # Only a run Herdr last saw idle is known to be finished. Any other run
+      # could still write, so the attempt is released instead.
+      if finished != 1, do: Repo.rollback(:run_not_idle)
 
       insert_audit!(%{
         actor: "coordinator",
@@ -5884,8 +5900,27 @@ defmodule PtcManager.Operations do
         PtcManager.ResultPoller.wake()
         true
 
+      {:error, :run_not_idle} ->
+        release_expired_idle_job(job, lease_now, lifecycle_now)
+
       {:error, _reason} ->
         false
+    end
+  end
+
+  defp release_expired_idle_job(job, lease_now, lifecycle_now) do
+    message =
+      "The implementation agent remained idle past its deadline; its partial worktree was preserved."
+
+    case do_release_idle_job(
+           job.id,
+           {job.fencing_token, lease_now},
+           "coordinator",
+           message,
+           lifecycle_now
+         ) do
+      {:ok, _job} -> true
+      {:error, _reason} -> false
     end
   end
 

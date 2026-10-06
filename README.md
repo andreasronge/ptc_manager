@@ -2274,10 +2274,11 @@ finished implementation agent `idle` rather than `done`. An idle agent gets one
 bounded `PTC_IMPLEMENTATION_IDLE_TIMEOUT_MS` deadline (five minutes by
 default). When it expires, the run is treated as done: a stop report is
 recorded, otherwise the branch and any pull request the agent published go to
-result reconciliation, which ends an attempt without commits after its own
-deadline and keeps the partial worktree for inspection. A finished pane that
-later shows `idle` never takes the job back from reconciliation; only an
-active status does.
+result reconciliation, which ends an attempt with nothing to deliver (no
+commits, or commits that change nothing) after its own deadline and keeps the
+partial worktree for inspection. A run Herdr no longer reports idle is
+released instead. A finished pane that later shows `idle` never takes the job
+back from reconciliation; only an active status does.
 Queued implementation jobs and generic agent actions can also be cancelled
 from Operations; cancellation is atomic and fails if a worker already claimed
 the item.

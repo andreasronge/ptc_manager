@@ -471,6 +471,22 @@ defmodule PtcManager.OperationsTest do
 
       assert {:ok, %Job{state: "verifying_result"}} = Operations.claim_result_job(job.id)
     end
+
+    test "an expired idle attempt whose run is no longer idle is released, not reconciled" do
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("idle")
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      job
+      |> Job.changeset(%{lease_expires_at: DateTime.add(now, -1, :second)})
+      |> Repo.update!()
+
+      run |> AgentRun.changeset(%{state: "unknown"}) |> Repo.update!()
+
+      assert Operations.expire_job_leases(now, now) == 1
+      assert Repo.get!(Job, job.id).state == "lost"
+      assert Repo.get!(AgentRun, run.id).state == "lost"
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
   end
 
   describe "cancel_running_job/2" do
