@@ -1335,6 +1335,21 @@ defmodule PtcManager.MaintainerActionsTest do
     refute changeset.errors[:action_key]
   end
 
+  test "missing commit identity refuses a maintainer action before preflight or agent start" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    {:ok, queued} = MaintainerActions.enqueue("prepare_issue", issue.id, "andreas")
+    Repo.delete_all(PtcManager.Operations.CommitIdentity)
+
+    assert {:ok, failed} = MaintainerActions.run_once(adapter: FakeAdapter, sync: FakeSync)
+    assert failed.id == queued.id
+    assert failed.state == "failed"
+    assert failed.last_error =~ "No agent commit identity"
+    refute_receive {:ran_agent_action, _action}
+    refute_receive {:synced_repository, _id}
+    assert Repo.aggregate(AgentRun, :count) == 0
+  end
+
   test "runs a queued action, records agent activity, and resynchronizes GitHub" do
     repository = repository_fixture()
     issue = issue_fixture(repository)

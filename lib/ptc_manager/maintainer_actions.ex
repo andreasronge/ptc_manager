@@ -380,7 +380,8 @@ defmodule PtcManager.MaintainerActions do
              end
 
            if match?(%AgentAction{state: "queued"}, current) do
-             with {:ok, prepared} <- prepare_for_execution(current, adapter, sync),
+             with :ok <- ensure_commit_identity(current),
+                  {:ok, prepared} <- prepare_for_execution(current, adapter, sync),
                   {:ok, {_action, _token}} = claimed <-
                     Operations.claim_agent_action(prepared.id) do
                claimed
@@ -392,6 +393,13 @@ defmodule PtcManager.MaintainerActions do
       :aborted -> {:error, :agent_action_preflight_lock_failed}
       {:aborted, reason} -> {:error, {:agent_action_preflight_lock_failed, reason}}
       result -> result
+    end
+  end
+
+  defp ensure_commit_identity(action) do
+    case PtcManager.CommitIdentities.ensure(action.repository_id) do
+      :ok -> :ok
+      {:error, reason} -> fail_preflight(action.id, reason)
     end
   end
 

@@ -216,7 +216,10 @@ config :ptc_manager,
   resource_operation_context_dir:
     System.get_env(
       "PTC_OPERATION_CONTEXT_DIR",
-      "/var/lib/ptc_manager-worker/agent-results/operation-contexts"
+      if(config_env() == :prod,
+        do: "/var/lib/ptc_manager-worker/agent-results/operation-contexts",
+        else: Path.join(System.tmp_dir!(), "ptc-manager-operation-contexts")
+      )
     ),
   resource_operation_cgroups:
     env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default) == "true",

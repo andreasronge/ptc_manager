@@ -1,5 +1,24 @@
 <Layouts.app flash={@flash} current_path="/configuration">
   <div class="space-y-8">
+    <section
+      id="resolved-commit-identity"
+      class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+    >
+      <h2 class="text-xl font-semibold">Agent commit identity</h2>
+      <%= case @commit_identity do %>
+        <% {:ok, identity} -> %>
+          <p class="mt-2">
+            {identity.name} &lt;{identity.email}&gt; ({PtcManager.CommitIdentities.source(
+              identity
+            )})
+          </p>
+        <% {:error, reason} -> %>
+          <p class="mt-2 text-rose-300">{reason}</p>
+      <% end %>
+      <.link navigate={~p"/configuration"} class="mt-2 inline-block text-teal-300">
+        Configure commit identities
+      </.link>
+    </section>
     <section class="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
       <div>
         <.link

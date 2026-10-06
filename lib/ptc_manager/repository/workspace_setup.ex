@@ -8,7 +8,6 @@ defmodule PtcManager.Repository.WorkspaceSetup do
   worktree with the repository's agent environment variables.
   """
 
-  alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.CommandEnvironment
   alias PtcManager.Operations.{AgentAction, Job, Repository}
   alias PtcManager.Repository.GitProbe
@@ -116,12 +115,9 @@ defmodule PtcManager.Repository.WorkspaceSetup do
     case PtcManager.Repo.get(Repository, repository_id) do
       %Repository{workspace_setup_command: command, workspace_setup_timeout_minutes: timeout}
       when is_binary(command) and is_integer(timeout) ->
-        {:ok,
-         %{
-           command: command,
-           timeout_minutes: timeout,
-           environment: AgentEnvironmentVariables.list(repository_id)
-         }}
+        with {:ok, environment} <- PtcManager.CommitIdentities.environment(repository_id) do
+          {:ok, %{command: command, timeout_minutes: timeout, environment: environment}}
+        end
 
       _unconfigured ->
         {:error, :workspace_setup_not_configured}

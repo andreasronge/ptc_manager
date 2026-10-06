@@ -433,7 +433,7 @@ The authenticated routes are:
   complete editable prompt with a runtime preview, advanced settings, its own
   run history, versions, and cross-repository copying. `/automations/new`
   creates a paused custom automation with a key derived from its name;
-- `/configuration` — worker capacity, safe registration of dedicated repository
+- `/configuration` — worker capacity, agent commit identities, safe registration of dedicated repository
   checkouts, a short list of repositories with their enabled, synchronization,
   and health state, and the **Integrations** section describing what GitHub
   synchronization, publication, private analysis, and the dispatcher currently
@@ -447,6 +447,25 @@ The authenticated routes are:
   and automation settings. Repository variables are passed to workspace setup
   through a protected file and sourced from protected per-pane files by
   implementation agents; they are never supplied to maintainer-action agents.
+
+### Agent commit identity
+
+On `/configuration`, set the default agent commit name and email. Optionally
+save an override for a GitHub owner, such as `tyraorg`; owner matching is
+case-insensitive and the owner override wins over the default. Names and emails
+are stored in plain text and remain visible and editable. Each repository's
+configuration page shows its resolved identity and whether it came from the
+default or an owner override. Remove an override to fall back to the default.
+
+Implementation jobs and maintainer actions refuse to start without a resolved
+identity, and record a clear error in the console. Configure an identity before
+approving work. The generated environment file supplies `GIT_AUTHOR_NAME`,
+`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` for jobs,
+actions, and workspace setup. These values win over repository agent variables
+and checkout-local Git configuration; hand-set checkout `user.name` and
+`user.email` are unnecessary. Changing a setting applies to future agent starts;
+existing sessions retain their environment. Commit signing is not configured.
+
 
 To choose a different local password:
 
@@ -1497,6 +1516,7 @@ constant time; a console with no `PTC_OPERATOR_TOKEN` answers 404 on both
 routes. The routes never write, and there is no rate limit: they sit behind
 the same Tailscale boundary as the console. The token belongs in the
 coordinator's environment file and in no worker or agent environment.
+
 
 ## Verify
 
