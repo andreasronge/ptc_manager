@@ -44,6 +44,9 @@ defmodule PtcManager.AutomationsTest do
   defmodule GenericHerdrCommand do
     def run(args, _timeout \\ nil) do
       cond do
+        Enum.take(args, 2) in [["pane", "run"], ["pane", "wait-output"]] ->
+          {:ok, "{}"}
+
         Enum.take(args, 2) == ["workspace", "create"] ->
           send(self(), {:workspace_event, :created})
           workspace_path = Enum.at(args, Enum.find_index(args, &(&1 == "--cwd")) + 1)
@@ -212,6 +215,9 @@ defmodule PtcManager.AutomationsTest do
       send(Process.get(:investigation_test_pid), {:investigation_command, args})
 
       cond do
+        Enum.take(args, 2) in [["pane", "run"], ["pane", "wait-output"]] ->
+          {:ok, "{}"}
+
         Enum.take(args, 2) == ["worktree", "create"] ->
           path = args |> Enum.drop_while(&(&1 != "--path")) |> Enum.at(1)
           File.mkdir_p!(path)

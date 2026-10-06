@@ -65,7 +65,12 @@ defmodule PtcManager.Dispatch do
         source: source
       }
 
-      adapter_result = Gateway.call(adapter, :dispatch, [context])
+      adapter_result =
+        case PtcManager.CommitIdentities.ensure(leased.repository) do
+          :ok -> Gateway.call(adapter, :dispatch, [context])
+          {:error, reason} -> {:error, {:safe, reason}}
+        end
+
       acknowledgement_lease_now = Clock.utc_now(clock)
       acknowledgement_lifecycle_now = Clock.utc_now(PtcManager.Clock.System)
 

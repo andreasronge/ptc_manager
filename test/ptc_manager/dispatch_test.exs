@@ -99,6 +99,19 @@ defmodule PtcManager.DispatchTest do
     :ok
   end
 
+  test "missing commit identity refuses dispatch and persists a visible reason" do
+    {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
+    Repo.delete_all(PtcManager.Operations.CommitIdentity)
+    Process.put(:dispatch_github_result, {:ok, remote})
+
+    assert {:error, reason} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+    assert reason =~ "No agent commit identity"
+    failed = Repo.get!(Job, job.id)
+    assert failed.state == "failed"
+    assert failed.last_error =~ "Configure a default or owner override"
+    refute_receive {:dispatch_context, _context}
+  end
+
   test "leaves work queued when the synchronized worker is degraded" do
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
     Process.put(:dispatch_github_result, {:ok, remote})
@@ -882,6 +895,9 @@ defmodule PtcManager.DispatchTest do
       case "$*" in
         *"worktree create"*)
           printf '%s' '{"result":{"workspace":{"workspace_id":"w-slow"},"root_pane":{"pane_id":"w-slow:p1"}}}'
+          ;;
+        *"pane run"*|*"pane wait-output"*)
+          printf '%s' '{"result":{}}'
           ;;
         *"agent start"*)
           sleep 1.5

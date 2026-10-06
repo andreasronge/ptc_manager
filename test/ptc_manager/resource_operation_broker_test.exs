@@ -259,10 +259,12 @@ defmodule PtcManager.ResourceOperationBrokerTest do
 
     assert {:ok, rebound} = ManagedOperationContext.rebind_action("pane-operation-test", action)
     environment_path = Path.rootname(rebound.path, ".json") <> ".env"
+    File.chmod!(environment_path, 0o640)
     File.write!(environment_path, "SHOULD_NOT_REACH_ACTIONS='secret'\n")
     assert {:ok, repeated} = ManagedOperationContext.rebind_action("pane-operation-test", action)
     assert repeated.path == rebound.path
-    refute File.exists?(environment_path)
+    assert File.read!(environment_path) =~ "GIT_AUTHOR_NAME='Test Agent'"
+    refute File.read!(environment_path) =~ "SHOULD_NOT_REACH_ACTIONS"
     assert {:ok, payload} = ManagedOperationContext.verify(rebound.token)
     assert payload["owner_type"] == "agent_action"
     assert payload["owner_id"] == action.id

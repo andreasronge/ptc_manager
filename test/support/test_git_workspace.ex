@@ -228,6 +228,9 @@ defmodule PtcManager.TestGitWorkspace do
   @doc "Implements the Herdr command boundary with real disposable Git worktrees."
   def run(%__MODULE__{runner: runner} = workspace, args, _timeout) when not is_nil(runner) do
     case args do
+      ["pane", operation | _] when operation in ["run", "wait-output"] ->
+        {:ok, "{}"}
+
       ["worktree", "create" | _options] ->
         cwd = command_option!(args, "--cwd")
         branch = command_option!(args, "--branch")

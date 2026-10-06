@@ -5,12 +5,12 @@ defmodule PtcManager.ManagedOperationContextTest do
   alias PtcManager.AgentEnvironmentVariables
 
   defmodule TransientPaneCommand do
-    def run(["pane", "run", pane_id, command]) do
+    def run(["pane", "run", pane_id, command], _timeout) do
       send(Process.get(:managed_context_test_pid), {:pane_run, pane_id, command})
       {:ok, "{}"}
     end
 
-    def run(["pane", "wait-output" | _rest] = args) do
+    def run(["pane", "wait-output" | _rest] = args, _timeout) do
       test_pid = Process.get(:managed_context_test_pid)
       attempt = Process.get(:managed_context_wait_attempt, 0) + 1
       Process.put(:managed_context_wait_attempt, attempt)
@@ -31,14 +31,14 @@ defmodule PtcManager.ManagedOperationContextTest do
       end
     end
 
-    def run(["pane", "read" | _rest] = args) do
+    def run(["pane", "read" | _rest] = args, _timeout) do
       send(Process.get(:managed_context_test_pid), {:pane_read, args})
       {:ok, ~s({"result":{"text":"shell prompt without the marker"}})}
     end
   end
 
   defmodule SnapshotRecoveryPaneCommand do
-    def run(["pane", "run", pane_id, command]) do
+    def run(["pane", "run", pane_id, command], _timeout) do
       [context_id] =
         Regex.run(~r/'PTC_OPERATION_CONTEXT_READY' '([^']+)'/, command, capture: :all_but_first)
 
@@ -47,7 +47,7 @@ defmodule PtcManager.ManagedOperationContextTest do
       {:ok, "{}"}
     end
 
-    def run(["pane", "wait-output" | _rest] = args) do
+    def run(["pane", "wait-output" | _rest] = args, _timeout) do
       send(Process.get(:managed_context_test_pid), {:pane_wait, 1, args})
 
       {:error,
@@ -61,7 +61,7 @@ defmodule PtcManager.ManagedOperationContextTest do
         })}}
     end
 
-    def run(["pane", "read" | _rest] = args) do
+    def run(["pane", "read" | _rest] = args, _timeout) do
       marker = Process.get(:managed_context_marker)
       send(Process.get(:managed_context_test_pid), {:pane_read, args})
       {:ok, Jason.encode!(%{"result" => %{"text" => "#{marker}\\n$"}})}
@@ -69,20 +69,37 @@ defmodule PtcManager.ManagedOperationContextTest do
   end
 
   defmodule TerminalPaneCommand do
-    def run(["pane", "run", _pane_id, _command]), do: {:ok, "{}"}
+    def run(["pane", "run", _pane_id, _command], _timeout), do: {:ok, "{}"}
 
-    def run(["pane", "wait-output" | _rest]) do
+    def run(["pane", "wait-output" | _rest], _timeout) do
       send(Process.get(:managed_context_test_pid), :terminal_wait)
 
       {:error,
        {:herdr_exit, 1, ~s({"id":"cli:pane:wait-output","error":{"code":"pane_not_found"}})}}
     end
 
-    def run(["pane", "read" | _rest]), do: flunk("pane read must not run")
+    def run(["pane", "read" | _rest], _timeout), do: flunk("pane read must not run")
+  end
+
+  defmodule IdentityPaneCommand do
+    def run(["pane", "run", _pane_id, command], _timeout) do
+      {output, status} =
+        System.cmd(
+          "sh",
+          ["-c", command <> " && printf '%s|%s' \"$GIT_AUTHOR_NAME\" \"$GIT_COMMITTER_EMAIL\""],
+          env: [{"PTC_MANAGED_OPERATION_CONTEXT", nil}, {"PTC_OPERATION_WRAPPER", nil}]
+        )
+
+      send(Process.get(:managed_context_test_pid), {:identity_output, output, status, command})
+      {:ok, output}
+    end
+
+    def run(["pane", "wait-output" | _rest], _timeout), do: {:ok, "ready"}
   end
 
   defmodule UnusedPaneCommand do
-    def run(_args), do: flunk("dispatch must stop before touching the implementation pane")
+    def run(_args, _timeout),
+      do: flunk("dispatch must stop before touching the implementation pane")
   end
 
   setup do
@@ -103,6 +120,163 @@ defmodule PtcManager.ManagedOperationContextTest do
     end)
 
     :ok
+  end
+
+  test "missing commit identity prevents the agent pane from starting" do
+    repository = repository_fixture()
+    Repo.delete_all(PtcManager.Operations.CommitIdentity)
+
+    assert {:error, reason} =
+             ManagedOperationContext.prepare_job(
+               UnusedPaneCommand,
+               "missing:identity",
+               job(repository.id)
+             )
+
+    assert reason =~ "commit identity"
+  end
+
+  test "maintainer actions receive only the resolved commit identity" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    {:ok, queued} = PtcManager.MaintainerActions.enqueue("prepare_issue", issue.id, "maintainer")
+    {:ok, {action, _token}} = PtcManager.Operations.claim_agent_action(queued.id)
+
+    {:ok, _} =
+      AgentEnvironmentVariables.put(
+        repository.id,
+        %{"name" => "SECRET", "value" => "private"},
+        "maintainer"
+      )
+
+    assert {:ok, context} =
+             ManagedOperationContext.prepare_action(
+               SnapshotRecoveryPaneCommand,
+               "action:identity",
+               action
+             )
+
+    assert_receive {:pane_run, "action:identity", command}
+    environment_path = Path.rootname(context.path, ".json") <> ".env"
+    assert command =~ environment_path
+    body = File.read!(environment_path)
+    assert body =~ "GIT_AUTHOR_NAME='Test Agent'"
+    assert body =~ "GIT_AUTHOR_EMAIL='agent@example.test'"
+    assert body =~ "GIT_COMMITTER_NAME='Test Agent'"
+    assert body =~ "GIT_COMMITTER_EMAIL='agent@example.test'"
+    refute body =~ "SECRET"
+  end
+
+  @tag :nightly
+  test "a real commit through the generated pane environment needs no checkout identity" do
+    repository = repository_fixture()
+
+    {:ok, _} =
+      PtcManager.CommitIdentities.put(
+        %{owner: repository.github_owner, name: "Owner's Agent", email: "owner@example.test"},
+        "maintainer"
+      )
+
+    assert {:ok, _context} =
+             ManagedOperationContext.prepare_job(
+               SnapshotRecoveryPaneCommand,
+               "git:identity",
+               job(repository.id)
+             )
+
+    assert_receive {:pane_run, "git:identity", command}
+
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-identity-git-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    environment = [
+      {"GIT_CONFIG_GLOBAL", "/dev/null"},
+      {"GIT_CONFIG_NOSYSTEM", "1"},
+      {"GIT_AUTHOR_NAME", nil},
+      {"GIT_AUTHOR_EMAIL", nil},
+      {"GIT_COMMITTER_NAME", nil},
+      {"GIT_COMMITTER_EMAIL", nil}
+    ]
+
+    assert {_, 0} =
+             System.cmd("git", ["init", directory], env: environment, stderr_to_stdout: true)
+
+    assert {_, 1} =
+             System.cmd("git", ["config", "--local", "user.name"],
+               cd: directory,
+               env: environment
+             )
+
+    assert {_, 1} =
+             System.cmd("git", ["config", "--local", "user.email"],
+               cd: directory,
+               env: environment
+             )
+
+    assert {_, 0} =
+             System.cmd(
+               "sh",
+               [
+                 "-c",
+                 command <> " && git -c commit.gpgsign=false commit --allow-empty -m identity"
+               ],
+               cd: directory,
+               env: environment,
+               stderr_to_stdout: true
+             )
+
+    assert {"Owner's Agent|owner@example.test|Owner's Agent|owner@example.test\n", 0} =
+             System.cmd("git", ["show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD"],
+               cd: directory,
+               env: environment
+             )
+
+    # Checkout-local configuration cannot replace the injected author or committer.
+    assert {_, 0} =
+             System.cmd("git", ["config", "user.name", "Checkout Maintainer"], cd: directory)
+
+    assert {_, 0} =
+             System.cmd("git", ["config", "user.email", "checkout@example.test"], cd: directory)
+
+    assert {_, 0} =
+             System.cmd(
+               "sh",
+               [
+                 "-c",
+                 command <> " && git -c commit.gpgsign=false commit --allow-empty -m override"
+               ],
+               cd: directory,
+               env: environment,
+               stderr_to_stdout: true
+             )
+
+    assert {"Owner's Agent|owner@example.test|Owner's Agent|owner@example.test\n", 0} =
+             System.cmd("git", ["show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD"],
+               cd: directory,
+               env: environment
+             )
+  end
+
+  test "Git identity reaches the pane when operation coordination is disabled" do
+    repository = repository_fixture()
+    Application.delete_env(:ptc_manager, :resource_operation_socket_path)
+
+    assert {:ok, nil} =
+             ManagedOperationContext.prepare_job(
+               IdentityPaneCommand,
+               "plain:identity",
+               job(repository.id)
+             )
+
+    assert_receive {:identity_output, output, 0, command}
+    assert output =~ "Test Agent|agent@example.test"
+    refute command =~ "export PTC_MANAGED_OPERATION_CONTEXT"
+
+    assert {:ok, []} =
+             File.ls(Application.fetch_env!(:ptc_manager, :resource_operation_context_dir))
   end
 
   test "workspace setup variables go to a protected, quoted file" do
@@ -194,7 +368,7 @@ defmodule PtcManager.ManagedOperationContextTest do
 
     assert command =~ "set -a && . '#{environment_path}' && set +a"
     refute command =~ "secret with"
-    assert File.read!(environment_path) == "OPENROUTER_API_KEY='secret with '\\'' quotes'\n"
+    assert File.read!(environment_path) =~ "OPENROUTER_API_KEY='secret with '\\'' quotes'\n"
     assert {:ok, %{mode: mode}} = File.stat(environment_path)
     assert Bitwise.band(mode, 0o777) == 0o440
 
@@ -330,10 +504,10 @@ defmodule PtcManager.ManagedOperationContextTest do
     refute_receive :terminal_wait
   end
 
-  defp job(repository_id \\ 7) do
+  defp job(repository_id \\ nil) do
     %{
       id: 42,
-      repository_id: repository_id,
+      repository_id: repository_id || repository_fixture().id,
       fencing_token: 3,
       worktree_allocation: %{worker_id: 11}
     }

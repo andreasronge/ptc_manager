@@ -6,6 +6,42 @@ defmodule PtcManagerWeb.ConfigurationLiveTest do
   alias PtcManager.Operations.Repository
   alias PtcManager.{CapacitySettings, Operations, Repo}
 
+  test "saves, displays, edits and removes public default and owner identities", %{conn: conn} do
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/configuration")
+
+    view
+    |> form("#add-commit-identity",
+      identity: %{owner: "", name: "Console Agent", email: "agent@example.test"}
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#commit-identities input[value='Console Agent']")
+
+    view
+    |> form("#add-commit-identity",
+      identity: %{owner: "TyraOrg", name: "Owner Agent", email: "owner@example.test"}
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#commit-identities", "owner override: tyraorg")
+
+    view
+    |> form("#commit-identities form:has(input[value='tyraorg'])",
+      identity: %{name: "Updated Agent", email: "updated@example.test"}
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#commit-identities input[value='Updated Agent']")
+    view |> element("#commit-identities button[phx-value-owner='tyraorg']") |> render_click()
+    refute has_element?(view, "#commit-identities", "owner override: tyraorg")
+
+    assert render_submit(view, "save-commit-identity", %{
+             "identity" => %{"name" => "", "email" => "invalid"}
+           }) =~ "Enter a Git identity name"
+
+    assert has_element?(view, "#commit-identities input[value='Console Agent']")
+  end
+
   test "edits independent light, heavy, and expensive-operation limits", %{conn: conn} do
     original = CapacitySettings.current()
 

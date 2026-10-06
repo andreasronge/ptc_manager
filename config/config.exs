@@ -73,7 +73,11 @@ config :ptc_manager,
   operation_capacity: 1,
   resource_operation_socket_path: nil,
   resource_operation_wrapper: "/usr/local/bin/ptc-operation",
-  resource_operation_context_dir: "/var/lib/ptc_manager-worker/agent-results/operation-contexts",
+  resource_operation_context_dir:
+    if(config_env() == :prod,
+      do: "/var/lib/ptc_manager-worker/agent-results/operation-contexts",
+      else: nil
+    ),
   resource_operation_cgroups: false,
   execution_artifact_root: nil,
   execution_artifact_max_bytes: 256_000_000,

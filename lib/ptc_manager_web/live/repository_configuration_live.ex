@@ -36,7 +36,13 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
 
   @impl true
   def handle_info({:operations_changed, source}, socket)
-      when source in [Repository, Operations, AgentEnvironmentVariable, PtcManager.GitHub.Sync],
+      when source in [
+             Repository,
+             Operations,
+             AgentEnvironmentVariable,
+             PtcManager.GitHub.Sync,
+             PtcManager.CommitIdentities
+           ],
       do: reload(socket)
 
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
@@ -424,6 +430,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
            page_title: full_name(repository),
            repository: repository,
            health: Health.summarize(repository),
+           commit_identity: PtcManager.CommitIdentities.resolve(repository),
            maintainer_labels: MaintainerLabels.list(repository),
            integration_branches: IntegrationBranches.list(repository),
            integration_suggestions: IntegrationBranches.suggestions(repository),

@@ -7,6 +7,25 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
   alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.{Operations, Repo}
 
+  test "shows the resolved identity, its source and a missing identity reason", %{conn: conn} do
+    repository = repository_fixture(%{github_owner: "tyraorg"})
+    {:ok, view, _} = conn |> authenticated_conn() |> live(repository_path(repository))
+    assert has_element?(view, "#resolved-commit-identity", "Test Agent")
+    assert has_element?(view, "#resolved-commit-identity", "default")
+
+    {:ok, _} =
+      PtcManager.CommitIdentities.put(
+        %{owner: "tyraorg", name: "Owner Agent", email: "owner@example.test"},
+        "maintainer"
+      )
+
+    assert has_element?(view, "#resolved-commit-identity", "Owner Agent")
+    assert has_element?(view, "#resolved-commit-identity", "owner override: tyraorg")
+    {:ok, _} = PtcManager.CommitIdentities.delete("tyraorg", "maintainer")
+    {:ok, _} = PtcManager.CommitIdentities.delete("", "maintainer")
+    assert has_element?(view, "#resolved-commit-identity", "No agent commit identity")
+  end
+
   test "toggles automatic implementation for only the selected repository", %{conn: conn} do
     repository = repository_fixture()
     other = repository_fixture()

@@ -26,7 +26,13 @@ defmodule PtcManagerWeb.ConfigurationLive do
 
   @impl true
   def handle_info({:operations_changed, source}, socket)
-      when source in [Repository, Operations, PtcManager.GitHub.Sync, CapacitySettings],
+      when source in [
+             Repository,
+             Operations,
+             PtcManager.GitHub.Sync,
+             CapacitySettings,
+             PtcManager.CommitIdentities
+           ],
       do: {:noreply, load_configuration(socket)}
 
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
@@ -139,12 +145,39 @@ defmodule PtcManagerWeb.ConfigurationLive do
     end
   end
 
+  def handle_event("save-commit-identity", %{"identity" => params}, socket) do
+    case PtcManager.CommitIdentities.put(params, socket.assigns.actor) do
+      {:ok, _identity} ->
+        {:noreply,
+         socket |> put_flash(:info, "Agent commit identity saved.") |> load_configuration()}
+
+      {:error, _changeset} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Enter a Git identity name, a valid email, and a GitHub owner (or leave owner empty for the default)."
+         )}
+    end
+  end
+
+  def handle_event("delete-commit-identity", %{"owner" => owner}, socket) do
+    case PtcManager.CommitIdentities.delete(owner, socket.assigns.actor) do
+      {:ok, _identity} ->
+        {:noreply, load_configuration(socket)}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "That commit identity no longer exists.")}
+    end
+  end
+
   defp load_configuration(socket) do
     repositories = Operations.list_repositories()
     availability = PtcManager.Repository.Checkout.availability(repositories)
 
     assign(socket,
       repositories: repositories,
+      commit_identities: PtcManager.CommitIdentities.list(),
       capacity_setting: CapacitySettings.current(),
       agent_actions_enabled: MaintainerActions.enabled?(),
       dispatch_enabled: Application.get_env(:ptc_manager, :dispatch_enabled, false),

@@ -34,6 +34,79 @@
       </.link>
     </aside>
 
+    <section id="commit-identities" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
+      <h2 class="text-2xl font-semibold">Agent commit identity</h2>
+      <p class="mt-2 text-sm text-slate-400">
+        Set a default name and email, or an override for a GitHub owner. Owner overrides win.
+        These settings are public. New jobs and maintainer actions require a resolved identity.
+      </p>
+      <div :for={identity <- @commit_identities} class="mt-4 rounded-xl bg-white/5 p-4">
+        <p>{PtcManager.CommitIdentities.source(identity)}</p>
+        <.form
+          for={%{}}
+          as={:identity}
+          phx-submit="save-commit-identity"
+          class="mt-2 flex flex-wrap gap-3"
+        >
+          <input type="hidden" name="identity[owner]" value={identity.owner} />
+          <input
+            aria-label="Commit name"
+            name="identity[name]"
+            value={identity.name}
+            required
+            class="rounded bg-slate-800 p-2"
+          />
+          <input
+            aria-label="Commit email"
+            type="email"
+            name="identity[email]"
+            value={identity.email}
+            required
+            class="rounded bg-slate-800 p-2"
+          />
+          <button class="rounded bg-teal-300 px-3 py-2 text-slate-950">Save identity</button>
+        </.form>
+        <button
+          phx-click="delete-commit-identity"
+          phx-value-owner={identity.owner}
+          data-confirm="Remove this commit identity? New agents require a default or owner override."
+          class="mt-2 text-sm text-rose-300"
+        >
+          Remove identity
+        </button>
+      </div>
+      <.form
+        id="add-commit-identity"
+        for={%{}}
+        as={:identity}
+        phx-submit="save-commit-identity"
+        class="mt-4 flex flex-wrap gap-3"
+      >
+        <input
+          aria-label="GitHub owner (empty for default)"
+          name="identity[owner]"
+          placeholder="Owner (empty for default)"
+          class="rounded bg-slate-800 p-2"
+        />
+        <input
+          aria-label="New commit name"
+          name="identity[name]"
+          placeholder="Commit name"
+          required
+          class="rounded bg-slate-800 p-2"
+        />
+        <input
+          aria-label="New commit email"
+          type="email"
+          name="identity[email]"
+          placeholder="Commit email"
+          required
+          class="rounded bg-slate-800 p-2"
+        />
+        <button class="rounded bg-teal-300 px-3 py-2 text-slate-950">Save identity</button>
+      </.form>
+    </section>
+
     <section
       id="agent-capacity"
       class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"

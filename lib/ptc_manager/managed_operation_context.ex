@@ -4,39 +4,47 @@ defmodule PtcManager.ManagedOperationContext do
   @max_age_seconds 7 * 24 * 60 * 60
   @pane_handshake_attempts 2
 
-  alias PtcManager.AgentEnvironmentVariables
+  alias PtcManager.CommitIdentities
   alias PtcManager.Operations.AgentRun
   alias PtcManager.Repo
 
   def prepare_job(command, pane_id, job) do
-    prepare(
-      command,
-      pane_id,
-      %{
-        owner_type: "job",
-        owner_id: job.id,
-        repository_id: job.repository_id,
-        worker_id: job.worktree_allocation.worker_id,
-        pane_id: pane_id,
-        fencing_token: job.fencing_token
-      },
-      environment: AgentEnvironmentVariables.list(job.repository_id)
-    )
+    with {:ok, environment} <- CommitIdentities.environment(job.repository_id) do
+      prepare(
+        command,
+        pane_id,
+        %{
+          owner_type: "job",
+          owner_id: job.id,
+          repository_id: job.repository_id,
+          worker_id: job.worktree_allocation.worker_id,
+          pane_id: pane_id,
+          fencing_token: job.fencing_token
+        },
+        environment: environment
+      )
+    end
   end
 
   def prepare_action(command, pane_id, action) do
-    prepare(command, pane_id, action_attrs(action, pane_id))
+    with {:ok, environment} <-
+           CommitIdentities.environment(action.repository_id, repository_variables: false) do
+      prepare(command, pane_id, action_attrs(action, pane_id), environment: environment)
+    end
   end
 
   def rebind_action(pane_id, action) do
-    if enabled?() do
-      with {:ok, context} <-
-             issue(action_attrs(action, pane_id), path: pane_context_path(pane_id)),
-           {:ok, nil} <- write_environment(context.path, nil) do
-        {:ok, context}
+    with {:ok, environment} <-
+           CommitIdentities.environment(action.repository_id, repository_variables: false) do
+      if enabled?() do
+        with {:ok, context} <-
+               issue(action_attrs(action, pane_id), path: pane_context_path(pane_id)),
+             {:ok, _path} <- write_environment(context.path, environment) do
+          {:ok, context}
+        end
+      else
+        {:ok, nil}
       end
-    else
-      {:ok, nil}
     end
   end
 
@@ -118,39 +126,43 @@ defmodule PtcManager.ManagedOperationContext do
         " " <>
         shell_quote(payload["context_id"])
 
-    if payload["cgroups"] do
-      context_exports =
-        [
-          {"PTC_CONTEXT_PATH", path},
-          {"PTC_CONTEXT_ID", payload["context_id"]},
-          {"PTC_AGENT_MEMORY_HIGH",
-           max(
-             Application.get_env(:ptc_manager, :agent_memory_high_bytes, 2_684_354_560),
-             Map.get(payload, "verify_agent_memory_high_bytes", 2_952_790_016)
-           )},
-          {"PTC_AGENT_MEMORY_MAX",
-           Application.get_env(:ptc_manager, :agent_memory_max_bytes, 3_221_225_472)},
-          {"PTC_OPERATION_WRAPPER", wrapper_path()}
-        ]
-        |> Enum.map_join(" ", fn {name, value} ->
-          name <> "=" <> shell_quote(to_string(value))
-        end)
-
-      environment_prefix <>
-        "export " <>
-        context_exports <>
-        " && . " <>
-        shell_quote(agent_context_path()) <>
-        " && " <>
-        marker_command
+    if Keyword.get(opts, :managed_context, true) == false do
+      environment_prefix <> marker_command
     else
-      environment_prefix <>
-        "export PTC_MANAGED_OPERATION_CONTEXT=" <>
-        shell_quote(path) <>
-        " PTC_OPERATION_WRAPPER=" <>
-        shell_quote(wrapper_path()) <>
-        " && " <>
-        marker_command
+      if payload["cgroups"] do
+        context_exports =
+          [
+            {"PTC_CONTEXT_PATH", path},
+            {"PTC_CONTEXT_ID", payload["context_id"]},
+            {"PTC_AGENT_MEMORY_HIGH",
+             max(
+               Application.get_env(:ptc_manager, :agent_memory_high_bytes, 2_684_354_560),
+               Map.get(payload, "verify_agent_memory_high_bytes", 2_952_790_016)
+             )},
+            {"PTC_AGENT_MEMORY_MAX",
+             Application.get_env(:ptc_manager, :agent_memory_max_bytes, 3_221_225_472)},
+            {"PTC_OPERATION_WRAPPER", wrapper_path()}
+          ]
+          |> Enum.map_join(" ", fn {name, value} ->
+            name <> "=" <> shell_quote(to_string(value))
+          end)
+
+        environment_prefix <>
+          "export " <>
+          context_exports <>
+          " && . " <>
+          shell_quote(agent_context_path()) <>
+          " && " <>
+          marker_command
+      else
+        environment_prefix <>
+          "export PTC_MANAGED_OPERATION_CONTEXT=" <>
+          shell_quote(path) <>
+          " PTC_OPERATION_WRAPPER=" <>
+          shell_quote(wrapper_path()) <>
+          " && " <>
+          marker_command
+      end
     end
   end
 
@@ -200,7 +212,7 @@ defmodule PtcManager.ManagedOperationContext do
     :ok
   end
 
-  defp prepare(command, pane_id, attrs, opts \\ []) do
+  defp prepare(command, pane_id, attrs, opts) do
     if enabled?() do
       case issue(attrs, path: pane_context_path(pane_id)) do
         {:ok, context} ->
@@ -224,7 +236,28 @@ defmodule PtcManager.ManagedOperationContext do
           error
       end
     else
-      {:ok, nil}
+      prepare_environment(command, pane_id, opts[:environment])
+    end
+  end
+
+  # Git identity is needed even when expensive-operation coordination is disabled.
+  defp prepare_environment(command, pane_id, variables) do
+    with {:ok, path} <- write_setup_environment(variables) do
+      context = %{
+        path: "",
+        payload: %{
+          "context_id" => Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+        }
+      }
+
+      try do
+        case establish_pane_context(command, pane_id, context, path, @pane_handshake_attempts) do
+          {:ok, _output} -> {:ok, nil}
+          error -> error
+        end
+      after
+        File.rm(path)
+      end
     end
   end
 
@@ -232,18 +265,24 @@ defmodule PtcManager.ManagedOperationContext do
     marker = "PTC_OPERATION_CONTEXT_READY:#{context.payload["context_id"]}"
 
     with {:ok, _output} <-
-           command.run([
-             "pane",
-             "run",
-             pane_id,
-             shell_command(context.path, context.payload, environment: environment_path)
+           PtcManager.Gateway.call(command, :run, [
+             [
+               "pane",
+               "run",
+               pane_id,
+               shell_command(context.path, context.payload,
+                 environment: environment_path,
+                 managed_context: enabled?()
+               )
+             ],
+             nil
            ]) do
       await_pane_context(command, pane_id, marker, attempts_left)
     end
   end
 
   defp await_pane_context(command, pane_id, marker, attempts_left) do
-    case command.run(pane_wait_args(pane_id, marker)) do
+    case PtcManager.Gateway.call(command, :run, [pane_wait_args(pane_id, marker), nil]) do
       {:error, reason} when attempts_left > 0 ->
         if pane_wait_timeout?(reason) do
           case read_visible_pane(command, pane_id, marker) do
@@ -269,16 +308,19 @@ defmodule PtcManager.ManagedOperationContext do
   end
 
   defp read_visible_pane(command, pane_id, marker) do
-    case command.run([
-           "pane",
-           "read",
-           pane_id,
-           "--source",
-           "visible",
-           "--lines",
-           "30",
-           "--format",
-           "text"
+    case PtcManager.Gateway.call(command, :run, [
+           [
+             "pane",
+             "read",
+             pane_id,
+             "--source",
+             "visible",
+             "--lines",
+             "30",
+             "--format",
+             "text"
+           ],
+           nil
          ]) do
       {:ok, output} when is_binary(output) ->
         if String.contains?(output, marker), do: {:ok, output}, else: :not_found
@@ -356,11 +398,6 @@ defmodule PtcManager.ManagedOperationContext do
     end
   end
 
-  defp write_environment(context_path, nil) do
-    File.rm(environment_path(context_path))
-    {:ok, nil}
-  end
-
   defp write_environment(context_path, variables) do
     path = environment_path(context_path)
 
@@ -371,9 +408,9 @@ defmodule PtcManager.ManagedOperationContext do
   end
 
   @doc """
-  Writes a repository's agent environment variables for one workspace setup
-  run, in the directory the worker already reads pane environment files from.
-  The caller removes it when the run ends.
+  Writes an environment file for workspace setup or a pane without operation
+  coordination, in the directory the worker reads environment files from.
+  The caller removes it after consumption.
   """
   def write_setup_environment(variables, directory \\ context_directory()) do
     id = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
@@ -446,13 +483,10 @@ defmodule PtcManager.ManagedOperationContext do
     end
   end
 
-  defp context_directory,
-    do:
-      Application.get_env(
-        :ptc_manager,
-        :resource_operation_context_dir,
-        "/var/lib/ptc_manager-worker/agent-results/operation-contexts"
-      )
+  defp context_directory do
+    Application.get_env(:ptc_manager, :resource_operation_context_dir) ||
+      Path.join(System.tmp_dir!(), "ptc-manager-operation-contexts")
+  end
 
   defp agent_context_path,
     do:

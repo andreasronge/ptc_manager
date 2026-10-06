@@ -5,6 +5,18 @@ defmodule PtcManager.OperationsFixtures do
   alias PtcManager.Repo
 
   def repository_fixture(attrs \\ %{}) do
+    retry_sqlite_sandbox_handoff(fn ->
+      unless Repo.get_by(PtcManager.Operations.CommitIdentity, owner: "") do
+        %PtcManager.Operations.CommitIdentity{}
+        |> PtcManager.Operations.CommitIdentity.changeset(%{
+          owner: "",
+          name: "Test Agent",
+          email: "agent@example.test"
+        })
+        |> Repo.insert!()
+      end
+    end)
+
     suffix = System.unique_integer([:positive])
 
     defaults = %{
