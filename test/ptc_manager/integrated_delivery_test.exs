@@ -247,6 +247,56 @@ defmodule PtcManager.IntegratedDeliveryTest do
       assert PtcManagerWeb.DeliveryBoardLive.closes_lines([item]) == "Closes ##{issue.number}"
     end
 
+    test "a finished member delivered to the run's branch by a later pull request counts as merged",
+         %{repository: repository} do
+      issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+      {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+      job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+      publication = external_merged!(repository, [issue.number], "feature/ska")
+      run = %PtcManager.Collections.Run{base_branch: "feature/ska"}
+
+      assert %{status: :merged, publication: %{id: id}} =
+               PtcManager.Collections.classify(
+                 %{number: issue.number, issue: Repo.reload!(issue)},
+                 run
+               )
+
+      assert id == publication.id
+    end
+
+    test "a run starts when one pull request already delivered two members",
+         %{repository: repository} do
+      umbrella =
+        issue_fixture(repository, %{
+          number: 200,
+          github_labels: %{"names" => ["ska"]},
+          sub_issues: %{
+            "nodes" =>
+              for number <- [201, 202] do
+                %{
+                  "number" => number,
+                  "state" => "open",
+                  "repository_full_name" => Structure.repository_full_name(repository)
+                }
+              end,
+            "total" => 2
+          }
+        })
+
+      for number <- [201, 202] do
+        issue_fixture(repository, %{
+          number: number,
+          parent_issue_number: 200,
+          workflow_label: "ptc:ready"
+        })
+      end
+
+      external_merged!(repository, [201, 202], "feature/ska")
+
+      assert {:ok, %PtcManager.Collections.Run{base_branch: "feature/ska"}} =
+               PtcManager.Collections.start(umbrella.id, %{}, "andreas")
+    end
+
     test "a collection member whose attempt was lost counts as merged", %{repository: repository} do
       issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
       {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")

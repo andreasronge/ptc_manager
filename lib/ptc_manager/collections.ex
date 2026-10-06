@@ -125,11 +125,14 @@ defmodule PtcManager.Collections do
 
             # Publications merged before the run exist as history, not as
             # handoffs to run: record their steps so the reconciler skips them.
+            # One pull request can deliver several members, so each is recorded once.
             for member <- members,
                 %Issue{} = member_issue <- [member.issue],
-                publication <- merged_publications(member_issue) do
-              record_step!(run, "handoff", "#{publication.id}:attempt:1", actor, %{})
+                publication <- merged_publications(member_issue),
+                uniq: true do
+              publication.id
             end
+            |> Enum.each(&record_step!(run, "handoff", "#{&1}:attempt:1", actor, %{}))
 
             ExecutionProfiles.audit(
               actor,
@@ -578,7 +581,7 @@ defmodule PtcManager.Collections do
     publication = job && job.pr_publication
 
     case delivered_without_job(issue, job, run) do
-      %PrPublication{} = delivered -> base(member, :merged, job, delivered)
+      %PrPublication{} = delivered -> merged_status(member, issue, job, delivered)
       nil when is_nil(job) -> classify_unstarted(member, issue)
       nil -> classify_job(member, issue, job, publication, run)
     end
@@ -586,10 +589,11 @@ defmodule PtcManager.Collections do
 
   # A member with no live attempt is still delivered when GitHub shows a pull
   # request merged into the run's branch that closes it, such as an external
-  # one or one whose job ended before it was linked; starting it again would
-  # implement it twice.
+  # one, one whose job ended before it was linked, or a later one after a
+  # finished job delivered elsewhere; starting it again would implement it twice.
   defp delivered_without_job(issue, job, %Run{base_branch: branch})
-       when is_binary(branch) and (is_nil(job) or job.state in @retired_job_states),
+       when is_binary(branch) and
+              (is_nil(job) or job.state in @retired_job_states or job.state == "done"),
        do: Operations.integration_publication(issue.id, branch)
 
   defp delivered_without_job(_issue, _job, _run), do: nil
@@ -644,24 +648,28 @@ defmodule PtcManager.Collections do
     end
   end
 
+  # GitHub's merge is recorded as truth, but a merge at a head the run never
+  # authorized is not delivery: it waits for the maintainer.
+  defp merged_status(member, issue, job, publication) do
+    case unauthorized_merge(publication) do
+      nil ->
+        base(member, :merged, job, publication)
+
+      action ->
+        base(member, :attention, job, publication)
+        |> attention(
+          "action_failed",
+          "The pull request for ##{issue.number} was merged at a head the run did not authorize; review that merge before continuing.",
+          action.id,
+          "action:#{action.id}"
+        )
+    end
+  end
+
   defp classify_job(member, issue, job, publication, run) do
     cond do
       publication && publication.pr_state == "merged" ->
-        # GitHub's merge is recorded as truth, but a merge at a head the run
-        # never authorized is not delivery: it waits for the maintainer.
-        case unauthorized_merge(publication) do
-          nil ->
-            base(member, :merged, job, publication)
-
-          action ->
-            base(member, :attention, job, publication)
-            |> attention(
-              "action_failed",
-              "The pull request for ##{issue.number} was merged at a head the run did not authorize; review that merge before continuing.",
-              action.id,
-              "action:#{action.id}"
-            )
-        end
+        merged_status(member, issue, job, publication)
 
       job.state == "done" ->
         base(member, :merged, job, publication)

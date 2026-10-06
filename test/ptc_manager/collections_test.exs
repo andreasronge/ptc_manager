@@ -449,6 +449,52 @@ defmodule PtcManager.CollectionsTest do
       assert length(collection_actions(repository)) == 1
     end
 
+    test "a member delivered by another member's pull request needs an authorized merge too" do
+      repository = repository_fixture()
+      {umbrella, [first, second]} = collection_fixture(repository, [1, 2])
+      run = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+      job = job_for(first)
+      publication = open_publication!(first, job)
+
+      publication
+      |> PrPublication.changeset(%{linked_issue_numbers: %{"numbers" => [1, 2]}})
+      |> Repo.update!()
+
+      {:ok, merge} =
+        PtcManager.MaintainerActions.enqueue(
+          "merge_reviewed_pr",
+          publication.id,
+          "system:collection"
+        )
+
+      publication
+      |> Repo.reload!()
+      |> PrPublication.changeset(%{pr_state: "merged"})
+      |> Repo.update!()
+
+      job |> Repo.reload!() |> Job.changeset(%{state: "done"}) |> Repo.update!()
+
+      merge
+      |> AgentAction.changeset(%{
+        state: "failed",
+        last_error: "postflight_failed: :unexpected_merge_head",
+        target_snapshot: %{"authorized_head_sha" => String.duplicate("a", 40)}
+      })
+      |> Repo.update!()
+
+      if second_job = job_for(second),
+        do: second_job |> Job.changeset(%{state: "cancelled"}) |> Repo.update!()
+
+      assert %{status: :attention, publication: %{id: id}} =
+               Collections.classify(
+                 %{number: 2, issue: Repo.reload!(second)},
+                 Repo.get!(Run, run.id)
+               )
+
+      assert id == publication.id
+    end
+
     test "a merge at an unauthorized head is not delivery until the maintainer says so" do
       repository = repository_fixture()
       {umbrella, [first]} = collection_fixture(repository, [1])
