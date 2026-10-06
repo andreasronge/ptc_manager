@@ -814,11 +814,8 @@ defmodule PtcManager.Herdr.Sync do
         })
         |> Repo.update!()
 
-      # A finished pane that Herdr later shows idle, after it is viewed or
-      # restored, is not a writer; only an active status may take the job back
-      # from the reconciler.
-      returning_from_reconciler?(run, job, attrs.state) ->
-        :ok
+      finished_pane_idle?(run, job, attrs.state) ->
+        settle_finished_job(job, lease_now)
 
       job && job.state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
         update_job_from_agent(job, attrs.state, agent_now, lease_now)
@@ -830,12 +827,33 @@ defmodule PtcManager.Herdr.Sync do
     :ok
   end
 
-  defp returning_from_reconciler?(%AgentRun{state: run_state}, %Job{} = job, agent_state),
+  # A finished pane that Herdr later shows idle, after it is viewed, restored,
+  # or briefly resumed, is not a writer: like `done`, it hands the job to the
+  # result reconciler. Only an active status takes the job back from it, and a
+  # held review keeps settling to blocked through update_job_from_agent/4.
+  defp finished_pane_idle?(%AgentRun{state: run_state}, %Job{} = job, agent_state),
     do:
       run_state in @terminal_states and agent_state not in @terminal_states and
-        job.state == "awaiting_reconciliation" and not PtcManager.Reviews.held?(job)
+        agent_state not in @active_agent_states and
+        job.state in ~w(reconciling awaiting_reconciliation) and
+        not PtcManager.Reviews.held?(job)
 
-  defp returning_from_reconciler?(_run, _job, _agent_state), do: false
+  defp finished_pane_idle?(_run, _job, _agent_state), do: false
+
+  defp settle_finished_job(%Job{state: "awaiting_reconciliation"}, _lease_now), do: :ok
+
+  defp settle_finished_job(job, lease_now) do
+    job
+    |> Job.changeset(%{
+      state: "awaiting_reconciliation",
+      lease_expires_at: nil,
+      reconciling_at: lease_now,
+      absence_observed_at: nil
+    })
+    |> Repo.update!()
+
+    :ok
+  end
 
   defp persist_agents_snapshot(
          worker,
@@ -1655,10 +1673,20 @@ defmodule PtcManager.Herdr.Sync do
 
   # Herdr restores every pane as `idle` after a restart, and a finished agent
   # keeps its pane until the retained worktree is removed. Neither is a writer,
-  # so only an active status may re-park a job whose run already ended.
-  defp reconcile_job(%AgentRun{state: run_state}, agent_state, _agent_now, _lease_now)
-       when run_state in @terminal_states and agent_state not in @terminal_states,
-       do: :ok
+  # so only an active status may re-park a job whose run already ended; a job
+  # re-parked by a brief resume returns to the result reconciler.
+  defp reconcile_job(%AgentRun{state: run_state} = run, agent_state, _agent_now, lease_now)
+       when run_state in @terminal_states and agent_state not in @terminal_states do
+    case owned_job(run) do
+      %Job{fencing_token: token} = job when token == run.fencing_token ->
+        if finished_pane_idle?(run, job, agent_state),
+          do: settle_finished_job(job, lease_now),
+          else: :ok
+
+      _job ->
+        :ok
+    end
+  end
 
   defp reconcile_job(%AgentRun{} = run, agent_state, agent_now, lease_now) do
     case owned_job(run) do

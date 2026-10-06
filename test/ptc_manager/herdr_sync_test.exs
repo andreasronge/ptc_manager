@@ -682,6 +682,40 @@ defmodule PtcManager.HerdrSyncTest do
     Process.put(:herdr_result, {:ok, [Map.put(remote, "agent_status", "working")]})
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-expired")
     assert Repo.get!(Job, job.id).state == "reconciling"
+
+    Process.put(:herdr_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-expired")
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+  end
+
+  test "a finished pane that resumes and returns idle goes back to the reconciler on a steady snapshot" do
+    %{job: job, run: run, worker: worker} =
+      managed_job_fixture("resumed-idle", %{
+        agent_name: :deterministic,
+        state: "done",
+        ended_at: now()
+      })
+
+    worker
+    |> Worker.changeset(%{
+      worker_incarnation_id: "terminal-worker",
+      herdr_incarnation_id: "terminal-herdr",
+      snapshot_sequence: 1,
+      healthy_snapshot_count: 2,
+      coordinator_incarnation_id: RuntimeIncarnation.current()
+    })
+    |> Repo.update!()
+
+    working = remote_agent("working") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([working], 2)})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "resumed-idle")
+    assert Repo.get!(Job, job.id).state == "reconciling"
+
+    idle = Map.put(working, "agent_status", "idle")
+    Process.put(:herdr_result, {:ok, authoritative_snapshot([idle], 3)})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "resumed-idle")
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+    assert Repo.get!(AgentRun, run.id).state == "done"
   end
 
   test "reconciles a lost agent to its later authoritative terminal state" do
