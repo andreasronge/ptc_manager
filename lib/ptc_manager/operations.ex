@@ -1180,23 +1180,28 @@ defmodule PtcManager.Operations do
   def record_job_stop_report(job_id, fencing_token, attempt_token, report, actor \\ "coordinator")
       when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) and
              is_map(report) and is_binary(actor) do
+    # Same fencing as every other result write: only the verifier that
+    # currently holds this attempt may end the job, and only from the state
+    # it claimed. A stale verifier must never overwrite a newer success or a
+    # job that already published.
+    Job
+    |> where(
+      [job],
+      job.id == ^job_id and job.state == "verifying_result" and
+        job.fencing_token == ^fencing_token and
+        job.result_attempt_token == ^attempt_token
+    )
+    |> stop_job(job_id, report, actor)
+  end
+
+  defp stop_job(query, job_id, report, actor) do
     now = utc_now()
     summary = StopReport.summary(report)
 
     outcome =
       Repo.transaction(fn ->
-        # Same fencing as every other result write: only the verifier that
-        # currently holds this attempt may end the job, and only from the state
-        # it claimed. A stale verifier must never overwrite a newer success or a
-        # job that already published.
         {updated, _rows} =
-          Job
-          |> where(
-            [job],
-            job.id == ^job_id and job.state == "verifying_result" and
-              job.fencing_token == ^fencing_token and
-              job.result_attempt_token == ^attempt_token
-          )
+          query
           |> Repo.update_all(
             set: [
               state: "failed",
@@ -5747,7 +5752,35 @@ defmodule PtcManager.Operations do
   defp expire_job_lease(%Job{review_state: state}, _lease_now, _lifecycle_now)
        when state in ~w(paused manual cancelled resume_pending running), do: false
 
+  # Codex ends its turn instead of exiting, so an agent that wrote a stop report
+  # can sit idle and never reach the reconciler that reads it.
   defp expire_job_lease(%Job{state: "idle"} = job, lease_now, lifecycle_now) do
+    case StopReport.read(job) do
+      {:ok, report} -> expire_stopped_idle_job(job, lease_now, report)
+      _no_usable_report -> release_expired_idle_job(job, lease_now, lifecycle_now)
+    end
+  end
+
+  defp expire_job_lease(job, lease_now, lifecycle_now) do
+    expire_running_job_lease(job, lease_now, lifecycle_now)
+  end
+
+  defp expire_stopped_idle_job(job, lease_now, report) do
+    Job
+    |> where([candidate], candidate.id == ^job.id and candidate.state == "idle")
+    |> maybe_guard_idle_expiry({job.fencing_token, lease_now})
+    |> stop_job(job.id, report, "coordinator")
+    |> case do
+      {:ok, _job} ->
+        StopReport.discard(job)
+        true
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  defp release_expired_idle_job(job, lease_now, lifecycle_now) do
     message =
       "The implementation agent remained idle past its deadline; its partial worktree was preserved."
 
@@ -5763,7 +5796,7 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp expire_job_lease(job, lease_now, lifecycle_now) do
+  defp expire_running_job_lease(job, lease_now, lifecycle_now) do
     Repo.transaction(fn ->
       {updated, _rows} =
         Job
