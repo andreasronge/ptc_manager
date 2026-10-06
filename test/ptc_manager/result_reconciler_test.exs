@@ -69,6 +69,22 @@ defmodule PtcManager.ResultReconcilerTest do
            ]
   end
 
+  test "commits that change nothing end an overdue attempt instead of retrying forever" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+    now = DateTime.utc_now()
+    job |> Job.changeset(%{reconciling_at: DateTime.add(now, -1200, :second)}) |> Repo.update!()
+    Process.put(:result_probe_result, {:error, :no_tree_changes})
+
+    assert {:error, :no_tree_changes} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    failed = Repo.get!(Job, job.id)
+    assert failed.state == "failed"
+    assert failed.last_error =~ "change nothing against the base"
+
+    assert Repo.get_by!(AuditEvent, target_id: job.id, action: "job.finished_without_commits").details[
+             "probe_result"
+           ] == "no_tree_changes"
+  end
+
   test "no commits within the deadline remains pending" do
     {_repository, _issue, job} = awaiting_job_fixture()
 

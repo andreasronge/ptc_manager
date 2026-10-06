@@ -1124,7 +1124,8 @@ An agent that crashes or wedges writes no report, so the contract does not
 replace the timeouts. A run that sits `blocked` or `idle` past the grace period
 is reported as **Waiting for a person** on both the Delivery board and
 Operations, and an implementation job that stays idle past its deadline is
-released with its worktree preserved.
+treated as finished: its branch is reconciled, and an attempt without commits
+ends with its worktree preserved.
 
 Maintainer actions use two deliberately separate resource pools. Heavy delivery
 work is ordered **merge → repair → new implementation**, with oldest work first
@@ -2268,10 +2269,16 @@ shown as `lost`, while managed agents become `unknown` and their jobs remain in
 reconciliation so a duplicate cannot start. After
 `PTC_DISPATCH_RECONCILE_AFTER_MS`, a successful Herdr snapshot that confirms a
 managed attempt never appeared can safely release that attempt.
-An implementation agent that returns to an idle prompt without completing gets
-one bounded `PTC_IMPLEMENTATION_IDLE_TIMEOUT_MS` deadline (five minutes by
-default). When it expires, the execution slot is released and the partial
-worktree is kept for inspection instead of blocking queued work indefinitely.
+Codex ends its turn at its prompt instead of exiting, so Herdr can report a
+finished implementation agent `idle` rather than `done`. An idle agent gets one
+bounded `PTC_IMPLEMENTATION_IDLE_TIMEOUT_MS` deadline (five minutes by
+default). When it expires, the run is treated as done: a stop report is
+recorded, otherwise the branch and any pull request the agent published go to
+result reconciliation, which ends an attempt with nothing to deliver (no
+commits, or commits that change nothing) after its own deadline and keeps the
+partial worktree for inspection. A run Herdr no longer reports idle is
+released instead. A finished pane that later shows `idle` never takes the job
+back from reconciliation; only an active status does.
 Queued implementation jobs and generic agent actions can also be cancelled
 from Operations; cancellation is atomic and fails if a worker already claimed
 the item.

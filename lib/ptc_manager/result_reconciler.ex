@@ -95,20 +95,23 @@ defmodule PtcManager.ResultReconciler do
     end
   end
 
-  defp record_failure(job, :no_commits) do
+  # Nothing to deliver is final once the agent has finished: an idle or done
+  # pane does not commit again, so the attempt ends after the same deadline.
+  defp record_failure(job, reason) when reason in [:no_commits, :no_tree_changes] do
     if job.reconciling_at &&
          DateTime.diff(DateTime.utc_now(), job.reconciling_at, :millisecond) >=
            Operations.result_no_commits_timeout_ms() do
       case Operations.fail_result_without_commits(
              job.id,
              job.fencing_token,
-             job.result_attempt_token
+             job.result_attempt_token,
+             reason
            ) do
-        {:ok, _job} -> {:error, :no_commits}
+        {:ok, _job} -> {:error, reason}
         {:error, _reason} = error -> error
       end
     else
-      record_pending(job, :no_commits)
+      record_pending(job, reason)
     end
   end
 

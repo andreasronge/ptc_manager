@@ -3012,13 +3012,15 @@ defmodule PtcManager.Operations do
     end
   end
 
-  @doc "End a finished agent's attempt when reconciliation found no commits past its deadline."
-  def fail_result_without_commits(job_id, fencing_token, attempt_token) do
+  @doc """
+  End a finished agent's attempt when reconciliation found nothing to deliver
+  past its deadline: no commits, or commits whose tree matches the base.
+  """
+  def fail_result_without_commits(job_id, fencing_token, attempt_token, reason \\ :no_commits)
+      when reason in [:no_commits, :no_tree_changes] do
     now = utc_now()
     cutoff = DateTime.add(now, -result_no_commits_timeout_ms(), :millisecond)
-
-    message =
-      "The agent finished without committing and did not report why; its partial worktree was preserved."
+    message = without_commits_message(reason)
 
     Repo.transaction(fn ->
       {updated, _} =
@@ -3051,6 +3053,7 @@ defmodule PtcManager.Operations do
         details: %{
           "fencing_token" => fencing_token,
           "worktree_preserved" => true,
+          "probe_result" => Atom.to_string(reason),
           "reason" => message
         }
       })
@@ -3059,6 +3062,14 @@ defmodule PtcManager.Operations do
     end)
     |> notify_and_return()
   end
+
+  defp without_commits_message(:no_commits),
+    do:
+      "The agent finished without committing and did not report why; its partial worktree was preserved."
+
+  defp without_commits_message(:no_tree_changes),
+    do:
+      "The agent finished with commits that change nothing against the base and did not report why; its partial worktree was preserved."
 
   def result_no_commits_timeout_ms,
     do: Application.get_env(:ptc_manager, :result_no_commits_timeout_ms, 900_000)
@@ -5805,12 +5816,14 @@ defmodule PtcManager.Operations do
   defp expire_job_lease(%Job{review_state: state}, _lease_now, _lifecycle_now)
        when state in ~w(paused manual cancelled resume_pending running), do: false
 
-  # Codex ends its turn instead of exiting, so an agent that wrote a stop report
-  # can sit idle and never reach the reconciler that reads it.
+  # Codex ends its turn instead of exiting, so Herdr can report a finished agent
+  # idle rather than done. Past the idle deadline the agent is treated as
+  # finished: a stop report is recorded, and otherwise its branch or published
+  # pull request goes to the reconciler, which ends an attempt without commits.
   defp expire_job_lease(%Job{state: "idle"} = job, lease_now, lifecycle_now) do
     case StopReport.read(job) do
       {:ok, report} -> expire_stopped_idle_job(job, lease_now, report)
-      _no_usable_report -> release_expired_idle_job(job, lease_now, lifecycle_now)
+      _no_usable_report -> reconcile_expired_idle_job(job, lease_now, lifecycle_now)
     end
   end
 
@@ -5827,6 +5840,68 @@ defmodule PtcManager.Operations do
       {:ok, _job} ->
         StopReport.discard(job)
         true
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  # The run ends as done in the same transaction, so a pane that still shows idle
+  # is a finished agent to the Herdr sync and cannot re-park the job; only an
+  # active status reopens it, as for any done run.
+  defp reconcile_expired_idle_job(job, lease_now, lifecycle_now) do
+    Repo.transaction(fn ->
+      {updated, _rows} =
+        Job
+        |> where([candidate], candidate.id == ^job.id and candidate.state == "idle")
+        |> maybe_guard_idle_expiry({job.fencing_token, lease_now})
+        |> Repo.update_all(
+          set: [
+            state: "awaiting_reconciliation",
+            lease_expires_at: nil,
+            reconciling_at: lease_now,
+            absence_observed_at: nil,
+            updated_at: lifecycle_now
+          ]
+        )
+
+      if updated != 1, do: Repo.rollback(:job_not_idle)
+
+      {finished, _rows} =
+        AgentRun
+        |> where(
+          [run],
+          run.job_id == ^job.id and run.fencing_token == ^job.fencing_token and
+            run.state == "idle"
+        )
+        |> Repo.update_all(
+          set: [
+            state: "done",
+            status_text: "Idle past its deadline; its result is being reconciled.",
+            ended_at: lifecycle_now,
+            updated_at: lifecycle_now
+          ]
+        )
+
+      # Only a run Herdr last saw idle is known to be finished. Any other run
+      # could still write, so the attempt is released instead.
+      if finished != 1, do: Repo.rollback(:run_not_idle)
+
+      insert_audit!(%{
+        actor: "coordinator",
+        action: "job.idle_result_reconciliation_required",
+        target_type: "job",
+        target_id: job.id,
+        details: %{"fencing_token" => job.fencing_token}
+      })
+    end)
+    |> case do
+      {:ok, _audit} ->
+        PtcManager.ResultPoller.wake()
+        true
+
+      {:error, :run_not_idle} ->
+        release_expired_idle_job(job, lease_now, lifecycle_now)
 
       {:error, _reason} ->
         false
