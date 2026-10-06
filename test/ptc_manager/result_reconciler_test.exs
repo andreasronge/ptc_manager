@@ -36,6 +36,90 @@ defmodule PtcManager.ResultReconcilerTest do
     :ok
   end
 
+  test "no commits ends an overdue attempt and preserves its allocation" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+    now = DateTime.utc_now()
+    job |> Job.changeset(%{reconciling_at: DateTime.add(now, -1200, :second)}) |> Repo.update!()
+    worker = worker_fixture()
+
+    allocation =
+      %PtcManager.Operations.WorktreeAllocation{}
+      |> PtcManager.Operations.WorktreeAllocation.changeset(%{
+        job_id: job.id,
+        worker_id: worker.id,
+        state: "active",
+        last_used_at: now
+      })
+      |> Repo.insert!()
+
+    Process.put(:result_probe_result, {:error, :no_commits})
+
+    assert {:error, :no_commits} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    failed = Repo.get!(Job, job.id)
+    assert failed.state == "failed"
+    assert failed.ended_at
+
+    assert failed.last_error ==
+             "The agent finished without committing and did not report why; its partial worktree was preserved."
+
+    assert Repo.get!(PtcManager.Operations.WorktreeAllocation, allocation.id).state == "attention"
+
+    assert Repo.get_by!(AuditEvent, target_id: job.id, action: "job.finished_without_commits").details[
+             "worktree_preserved"
+           ]
+  end
+
+  test "no commits within the deadline remains pending" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+
+    job
+    |> Job.changeset(%{reconciling_at: DateTime.add(DateTime.utc_now(), -120, :second)})
+    |> Repo.update!()
+
+    Process.put(:result_probe_result, {:error, :no_commits})
+    assert {:error, :no_commits} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+  end
+
+  test "no commits without a completion timestamp stays pending" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+    Process.put(:result_probe_result, {:error, :no_commits})
+    assert {:error, :no_commits} = ResultReconciler.run_job(job.id, probe: FakeProbe)
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+  end
+
+  test "ending without commits rejects stale fencing, replaced attempts, and revived panes" do
+    {_repository, _issue, job} = awaiting_job_fixture()
+
+    job
+    |> Job.changeset(%{reconciling_at: DateTime.add(DateTime.utc_now(), -1200, :second)})
+    |> Repo.update!()
+
+    {:ok, claimed} = Operations.claim_result_job(job.id)
+
+    assert {:error, :stale_fencing_token} =
+             Operations.fail_result_without_commits(
+               job.id,
+               job.fencing_token - 1,
+               claimed.result_attempt_token
+             )
+
+    assert {:error, :stale_result_attempt} =
+             Operations.fail_result_without_commits(job.id, job.fencing_token, "replaced")
+
+    claimed |> Job.changeset(%{state: "working", reconciling_at: nil}) |> Repo.update!()
+
+    assert {:error, :invalid_job_state} =
+             Operations.fail_result_without_commits(
+               job.id,
+               job.fencing_token,
+               claimed.result_attempt_token
+             )
+
+    assert Repo.get!(Job, job.id).state == "working"
+    refute Repo.get_by(AuditEvent, target_id: job.id, action: "job.finished_without_commits")
+  end
+
   test "a committed branch becomes ready for the credential-isolated PR gate" do
     {_repository, _issue, job} = awaiting_job_fixture()
 

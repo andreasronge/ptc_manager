@@ -3012,6 +3012,67 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @doc "End a finished agent's attempt when reconciliation found no commits past its deadline."
+  def fail_result_without_commits(job_id, fencing_token, attempt_token) do
+    now = utc_now()
+    cutoff = DateTime.add(now, -result_no_commits_timeout_ms(), :millisecond)
+
+    message =
+      "The agent finished without committing and did not report why; its partial worktree was preserved."
+
+    Repo.transaction(fn ->
+      {updated, _} =
+        result_attempt_query(job_id, fencing_token, attempt_token, now)
+        |> where([job], not is_nil(job.reconciling_at) and job.reconciling_at <= ^cutoff)
+        |> Repo.update_all(
+          set: [
+            state: "failed",
+            ended_at: now,
+            lease_expires_at: nil,
+            result_attempt_expires_at: nil,
+            result_checked_at: now,
+            last_error: message,
+            updated_at: now
+          ]
+        )
+
+      if updated != 1 do
+        job = Repo.get!(Job, job_id)
+        Repo.rollback(result_attempt_failure(job, fencing_token, attempt_token, now))
+      end
+
+      mark_allocation!(job_id, %{state: "attention", last_used_at: now, last_error: message})
+
+      insert_audit!(%{
+        actor: "coordinator",
+        action: "job.finished_without_commits",
+        target_type: "job",
+        target_id: job_id,
+        details: %{
+          "fencing_token" => fencing_token,
+          "worktree_preserved" => true,
+          "reason" => message
+        }
+      })
+
+      Repo.get!(Job, job_id)
+    end)
+    |> notify_and_return()
+  end
+
+  def result_no_commits_timeout_ms,
+    do: Application.get_env(:ptc_manager, :result_no_commits_timeout_ms, 900_000)
+
+  defp result_attempt_query(job_id, fencing_token, attempt_token, now) do
+    Job
+    |> where(
+      [job],
+      job.id == ^job_id and job.state == "verifying_result" and
+        job.fencing_token == ^fencing_token and job.result_attempt_token == ^attempt_token and
+        not is_nil(job.result_attempt_expires_at) and job.result_attempt_expires_at > ^now
+    )
+  end
+
   def record_result_error(job_id, fencing_token, attempt_token, reason)
       when is_integer(job_id) and is_integer(fencing_token) and is_binary(attempt_token) do
     message = bounded_error(reason)
@@ -3022,15 +3083,7 @@ defmodule PtcManager.Operations do
         previous = Repo.get!(Job, job_id)
 
         {updated, _rows} =
-          Job
-          |> where(
-            [job],
-            job.id == ^job_id and job.state == "verifying_result" and
-              job.fencing_token == ^fencing_token and
-              job.result_attempt_token == ^attempt_token and
-              not is_nil(job.result_attempt_expires_at) and
-              job.result_attempt_expires_at > ^now
-          )
+          result_attempt_query(job_id, fencing_token, attempt_token, now)
           |> Repo.update_all(
             set: [
               state: "awaiting_reconciliation",

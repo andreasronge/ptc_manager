@@ -660,6 +660,14 @@ running, failed, and completed investigations remain visible in Operations.
 
 ### The Planning page
 
+When a finished implementation agent leaves no commits and no usable stop
+report, reconciliation retries for 15 minutes from the first `done` observation
+(`PTC_RESULT_NO_COMMITS_TIMEOUT_MS`, default `900000`). An overdue `:no_commits`
+result fails the attempt and preserves its worktree for attention. A failed
+attempt consumes auto-fix eligibility; a maintainer decides what happens next.
+The dashboard surfaces recorded reconciliation errors after a three-minute
+grace (`:stall_result_reconciliation_ms`), before that deadline.
+
 Above the backlog, a **Needs attention** section lists the stalls the console
 can compute from its own records: a collection run pausing and resuming within
 a minute, a run whose every member is delivered but has no close-out, a run

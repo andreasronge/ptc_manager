@@ -1686,7 +1686,7 @@ defmodule PtcManager.Herdr.Sync do
           %{
             state: state,
             lease_expires_at: nil,
-            reconciling_at: lease_now,
+            reconciling_at: job.reconciling_at || lease_now,
             absence_observed_at: nil
           }
 
