@@ -12,7 +12,17 @@ import sys
 import tempfile
 
 TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
-BRANCH = re.compile(r"^ptc-manager/issue-[0-9]+-job-[0-9]+$")
+# The job's branch prefix, as BranchPrefixes.valid_prefix?/1 accepts it: one to
+# three segments, none a git ref namespace, then the fixed job suffix.
+BRANCH = re.compile(
+    r"^(?!(?i:refs|origin|head|remotes)/)"
+    r"(?:[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/){1,3}"
+    r"issue-[0-9]+-job-[0-9]+$"
+)
+
+
+def valid_branch(branch):
+    return len(branch) <= 240 and ".lock/" not in branch and BRANCH.fullmatch(branch)
 MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_ARTIFACT_FILE_BYTES = MAX_ARTIFACT_BYTES // 2
 
@@ -74,7 +84,7 @@ def preserve(root, target, artifact_root, allocation_id, token, expected_branch)
             or os.path.dirname(target) != root or not os.path.isabs(artifact_root)
             or artifact_root != os.path.normpath(artifact_root)
             or not allocation_id.isdecimal() or not TOKEN.fullmatch(token)
-            or not BRANCH.fullmatch(expected_branch)):
+            or not valid_branch(expected_branch)):
         return 2
 
     root_fd = owned_directory(root)

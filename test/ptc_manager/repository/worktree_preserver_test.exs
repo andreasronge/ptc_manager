@@ -3,6 +3,42 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
 
   alias PtcManager.Repository.WorktreePreserver
 
+  test "the helper refuses a branch outside the job branch format before touching anything" do
+    script = Application.app_dir(:ptc_manager, "priv/worktree_preserve.py")
+    token = String.duplicate("d", 24)
+
+    for branch <- [
+          "main",
+          "issue-1-job-2",
+          "bugfix/issue-1-job-2/x",
+          "a/b/c/d/issue-1-job-2",
+          "refs/heads/issue-1-job-2",
+          "Origin/issue-1-job-2",
+          "bug..fix/issue-1-job-2",
+          "bugfix./issue-1-job-2",
+          "bugfix.lock/issue-1-job-2",
+          "-bugfix/issue-1-job-2"
+        ] do
+      {_output, status} =
+        System.cmd(
+          "/usr/bin/python3",
+          [
+            "-I",
+            script,
+            "/nonexistent",
+            "/nonexistent/job",
+            "/nonexistent-artifacts",
+            "7",
+            token,
+            branch
+          ],
+          stderr_to_stdout: true
+        )
+
+      assert status == 2, branch
+    end
+  end
+
   test "creates a recoverable bundle and binary patch without changing the worktree" do
     base = Path.join(System.tmp_dir!(), "preserver-#{System.unique_integer([:positive])}")
     root = Path.join(base, "worktrees")
@@ -10,7 +46,8 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
     artifacts = Path.join(base, "artifacts")
     write_only_artifacts = Path.join(base, "write-only-artifacts")
     recovered = Path.join(base, "recovered")
-    branch = "ptc-manager/issue-12-job-34"
+    # A configured multi-segment prefix, not only the legacy ptc-manager/.
+    branch = "team/bugfix/issue-12-job-34"
 
     File.mkdir_p!(path)
     File.mkdir_p!(artifacts)
