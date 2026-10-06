@@ -63,6 +63,7 @@ defmodule PtcManager.Stalls do
       &run_flapping/1,
       &run_stalls/1,
       &stop_unacknowledged/1,
+      &result_reconciliation_stuck/1,
       &action_repeating_failure/1,
       &review_snoozing/1,
       &review_repeated_finding/1,
@@ -81,6 +82,7 @@ defmodule PtcManager.Stalls do
   def label(:run_flapping), do: "Run pausing and resuming"
   def label(:run_idle_complete), do: "Run delivered but not closed out"
   def label(:run_no_progress), do: "Run without progress"
+  def label(:result_reconciliation_stuck), do: "Finished job awaiting reconciliation"
   def label(:stop_unacknowledged), do: "Agent stop waiting for an answer"
   def label(:action_repeating_failure), do: "Action failing the same way twice"
   def label(:review_snoozing), do: "Review waiting on the console's mode"
@@ -180,6 +182,36 @@ defmodule PtcManager.Stalls do
   already delivered in full.
   """
   def run_no_progress(now), do: now |> run_stalls() |> of_kind(:run_no_progress)
+
+  @doc "A finished job with a recorded reconciliation error past a short grace period."
+  def result_reconciliation_stuck(now) do
+    cutoff =
+      DateTime.add(
+        now,
+        -Application.get_env(:ptc_manager, :stall_result_reconciliation_ms, 180_000),
+        :millisecond
+      )
+
+    for job <-
+          Repo.all(
+            from job in Job,
+              where:
+                job.state == "awaiting_reconciliation" and not is_nil(job.last_error) and
+                  job.reconciling_at <= ^cutoff
+          ) do
+      %{
+        kind: :result_reconciliation_stuck,
+        severity: :alarm,
+        target_type: "job",
+        target_id: job.id,
+        repository_id: job.repository_id,
+        issue_id: job.issue_id,
+        since: job.reconciling_at,
+        detail:
+          "The agent finished, but its result remains unreconciled: #{truncate(job.last_error)}"
+      }
+    end
+  end
 
   @doc "A job whose agent stopped with a report the maintainer has not answered."
   def stop_unacknowledged(_now) do

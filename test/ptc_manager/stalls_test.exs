@@ -23,6 +23,46 @@ defmodule PtcManager.StallsTest do
     %{repository: repository_fixture()}
   end
 
+  test "reconciliation errors surface after grace and disappear when the job resumes or ends" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+
+    attrs = %{
+      state: "awaiting_reconciliation",
+      last_error: ":no_commits",
+      reconciling_at: DateTime.add(@now, -240, :second)
+    }
+
+    job = job |> Job.changeset(attrs) |> Repo.update!()
+
+    assert [%{kind: :result_reconciliation_stuck, target_id: id, since: since}] =
+             Stalls.result_reconciliation_stuck(@now)
+
+    assert id == job.id
+    assert since == job.reconciling_at
+    assert Enum.any?(Stalls.detect(@now), &(&1.kind == :result_reconciliation_stuck))
+
+    for attrs <- [
+          %{reconciling_at: DateTime.add(@now, -120, :second)},
+          %{last_error: nil},
+          %{state: "working"},
+          %{state: "failed"}
+        ] do
+      job
+      |> Job.changeset(
+        Map.merge(
+          %{state: "awaiting_reconciliation", last_error: ":no_commits", reconciling_at: since},
+          attrs
+        )
+      )
+      |> Repo.update!()
+
+      assert Stalls.result_reconciliation_stuck(@now) == []
+    end
+  end
+
   describe "run_flapping/1" do
     test "a live run that paused and resumed twice within a minute is an alarm", %{
       repository: repository

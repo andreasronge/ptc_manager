@@ -319,6 +319,8 @@ config :ptc_manager,
     System.get_env("PTC_WORKTREE_RECONCILE_INTERVAL_MS", "30000") |> String.to_integer(),
   result_reconcile_interval_ms:
     System.get_env("PTC_RESULT_RECONCILE_INTERVAL_MS", "0") |> String.to_integer(),
+  result_no_commits_timeout_ms:
+    System.get_env("PTC_RESULT_NO_COMMITS_TIMEOUT_MS", "900000") |> String.to_integer(),
   result_claim_timeout_ms:
     System.get_env("PTC_RESULT_CLAIM_TIMEOUT_MS", "180000") |> String.to_integer(),
   pr_reconcile_enabled: pr_reconcile_enabled,

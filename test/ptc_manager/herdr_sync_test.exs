@@ -744,9 +744,20 @@ defmodule PtcManager.HerdrSyncTest do
        ]}
     )
 
+    uncertainty_at = DateTime.add(now(), -1200, :second)
+
+    Repo.get!(Job, job.id)
+    |> Job.changeset(%{state: "reconciling", reconciling_at: uncertainty_at})
+    |> Repo.update!()
+
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
     completed = Repo.get!(Job, job.id)
+    assert DateTime.compare(completed.reconciling_at, uncertainty_at) == :gt
     assert completed.state == "awaiting_reconciliation"
+    first_done_at = DateTime.add(now(), -240, :second)
+    completed |> Job.changeset(%{reconciling_at: first_done_at}) |> Repo.update!()
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "managed")
+    assert Repo.get!(Job, job.id).reconciling_at == first_done_at
     refute completed.ended_at
     refute completed.lease_expires_at
     assert {:error, :already_active} = Operations.approve_issue(issue.id, "andreas")

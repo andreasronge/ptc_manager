@@ -95,7 +95,26 @@ defmodule PtcManager.ResultReconciler do
     end
   end
 
-  defp record_failure(job, reason) do
+  defp record_failure(job, :no_commits) do
+    if job.reconciling_at &&
+         DateTime.diff(DateTime.utc_now(), job.reconciling_at, :millisecond) >=
+           Operations.result_no_commits_timeout_ms() do
+      case Operations.fail_result_without_commits(
+             job.id,
+             job.fencing_token,
+             job.result_attempt_token
+           ) do
+        {:ok, _job} -> {:error, :no_commits}
+        {:error, _reason} = error -> error
+      end
+    else
+      record_pending(job, :no_commits)
+    end
+  end
+
+  defp record_failure(job, reason), do: record_pending(job, reason)
+
+  defp record_pending(job, reason) do
     _ =
       Operations.record_result_error(
         job.id,
