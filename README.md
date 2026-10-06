@@ -989,7 +989,9 @@ health stay on the default branch.
 GitHub closes an issue only when its pull request merges into the default
 branch, so an issue whose pull request merged into an integration branch stays
 open. PtcManager derives **integrated** from that merged pull request; it is not
-a label or a stored issue state:
+a label or a stored issue state. The pull request is the job's own or any that
+closes the issue, including one PtcManager did not open or one whose job ended
+before it was linked, so merged work is never implemented again:
 
 - the Delivery board's **Integrated** section lists such work grouped by
   repository and branch, and offers the `Closes #…` lines to paste into the

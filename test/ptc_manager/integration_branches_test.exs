@@ -250,6 +250,7 @@ defmodule PtcManager.IntegrationBranchesTest do
     %PrPublication{}
     |> PrPublication.changeset(%{
       job_id: job.id,
+      repository_id: job.repository_id,
       base_branch: job.base_branch,
       state: "published",
       idempotency_key: String.duplicate("7", 64),

@@ -207,6 +207,146 @@ defmodule PtcManager.IntegratedDeliveryTest do
     end
   end
 
+  # A pull request PtcManager did not open, or whose job ended before it was
+  # linked, still delivers what it closes once GitHub merged it.
+  describe "external pull requests" do
+    test "a blocker merged by an external pull request unblocks and is not implemented again",
+         %{repository: repository} do
+      blocker = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+      external_merged!(repository, [blocker.number], "feature/ska")
+      dependent = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+
+      issue_dependency_fixture(dependent, %{
+        blocking_issue: Repo.reload!(blocker),
+        blocking_repository: repository
+      })
+
+      assert Operations.integrated_into?(blocker.id, "feature/ska")
+      assert Operations.dependencies_resolved?(Repo.reload!(dependent))
+
+      item = Enum.find(Operations.dashboard_issues(), &(&1.issue.id == dependent.id))
+      assert [%{satisfied: true, integrated_base: "feature/ska"}] = item.dependencies
+
+      assert {:error, :already_integrated} =
+               Operations.approve_issue_directly(blocker.id, "andreas")
+    end
+
+    test "waits in the Integrated lane with the issue it closes", %{repository: repository} do
+      issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+      publication = external_merged!(repository, [issue.number], "feature/ska")
+
+      [item] =
+        Enum.filter(
+          Operations.delivery_board_items(),
+          &(&1.publication && &1.publication.id == publication.id)
+        )
+
+      assert DeliveryLane.lane_for(item) == :integrated
+      assert item.issue.id == issue.id
+      refute item.managed?
+      assert PtcManagerWeb.DeliveryBoardLive.closes_lines([item]) == "Closes ##{issue.number}"
+    end
+
+    test "a finished member delivered to the run's branch by a later pull request counts as merged",
+         %{repository: repository} do
+      issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+      {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+      job |> Job.changeset(%{state: "done"}) |> Repo.update!()
+      publication = external_merged!(repository, [issue.number], "feature/ska")
+      run = %PtcManager.Collections.Run{base_branch: "feature/ska"}
+
+      assert %{status: :merged, publication: %{id: id}} =
+               PtcManager.Collections.classify(
+                 %{number: issue.number, issue: Repo.reload!(issue)},
+                 run
+               )
+
+      assert id == publication.id
+    end
+
+    test "a run starts when one pull request already delivered two members",
+         %{repository: repository} do
+      umbrella =
+        issue_fixture(repository, %{
+          number: 200,
+          github_labels: %{"names" => ["ska"]},
+          sub_issues: %{
+            "nodes" =>
+              for number <- [201, 202] do
+                %{
+                  "number" => number,
+                  "state" => "open",
+                  "repository_full_name" => Structure.repository_full_name(repository)
+                }
+              end,
+            "total" => 2
+          }
+        })
+
+      for number <- [201, 202] do
+        issue_fixture(repository, %{
+          number: number,
+          parent_issue_number: 200,
+          workflow_label: "ptc:ready"
+        })
+      end
+
+      external_merged!(repository, [201, 202], "feature/ska")
+
+      assert {:ok, %PtcManager.Collections.Run{base_branch: "feature/ska"}} =
+               PtcManager.Collections.start(umbrella.id, %{}, "andreas")
+    end
+
+    test "a collection member whose attempt was lost counts as merged", %{repository: repository} do
+      issue = issue_fixture(repository, %{github_labels: %{"names" => ["ska"]}})
+      {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
+      job |> Job.changeset(%{state: "lost"}) |> Repo.update!()
+      publication = external_merged!(repository, [issue.number], "feature/ska")
+      run = %PtcManager.Collections.Run{base_branch: "feature/ska"}
+
+      assert %{status: :merged, publication: %{id: id}} =
+               PtcManager.Collections.classify(
+                 %{number: issue.number, issue: Repo.reload!(issue)},
+                 run
+               )
+
+      assert id == publication.id
+    end
+  end
+
+  defp external_merged!(repository, linked_numbers, base_branch) do
+    now = DateTime.utc_now()
+    sha = String.duplicate("b", 40)
+    number = 9000 + System.unique_integer([:positive])
+
+    %PrPublication{}
+    |> PrPublication.changeset(%{
+      repository_id: repository.id,
+      base_branch: base_branch,
+      state: "published",
+      idempotency_key: :crypto.hash(:sha256, "external-#{number}") |> Base.encode16(case: :lower),
+      fencing_token: 0,
+      branch_name: "feature/issue-#{number}",
+      base_sha: sha,
+      head_sha: sha,
+      diff_digest: String.duplicate("d", 64),
+      attempt_count: 0,
+      pr_number: number,
+      pr_url: "https://github.com/example/repo/pull/#{number}",
+      remote_head_sha: sha,
+      remote_base_sha: sha,
+      published_at: now,
+      pr_state: "merged",
+      pr_checked_at: now,
+      source: "external",
+      title: "Merged elsewhere",
+      head_ref: "feature/issue-#{number}",
+      head_repository: "#{repository.github_owner}/#{repository.github_name}",
+      linked_issue_numbers: %{"numbers" => linked_numbers}
+    })
+    |> Repo.insert!()
+  end
+
   defp integrate!(issue) do
     {:ok, job} = Operations.approve_issue_directly(issue.id, "andreas")
     assert job.base_branch == "feature/ska"
