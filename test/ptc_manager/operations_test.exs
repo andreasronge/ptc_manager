@@ -786,6 +786,25 @@ defmodule PtcManager.OperationsTest do
       assert audit.details["reason_code"] == "missing_prerequisite"
     end
 
+    test "an agent that reported a stop and stayed idle is stopped, not lost, at its deadline" do
+      # Codex ends its turn instead of exiting, so Herdr reports the pane idle
+      # and the reconciler that reads stop reports never runs.
+      %{job: job, run: run, allocation: allocation} = running_job_fixture("idle")
+      {:ok, job} = Operations.issue_stop_report_token(job)
+      write_stop_report(job, stop_report_attrs())
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      assert Operations.expire_job_leases(DateTime.add(now, 601, :second)) == 1
+
+      stopped = Repo.get!(Job, job.id)
+      assert stopped.state == "failed"
+      assert stopped.stop_reported_at
+      assert stopped.stop_report["prerequisite"] == "OPENROUTER_API_KEY"
+      assert StopReport.read(stopped) == :none
+      assert Repo.get!(AgentRun, run.id).state == "lost"
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
+    end
+
     test "a stale verifier cannot overwrite a newer result or a published job" do
       job = stoppable_job_fixture()
       report = stop_report_attrs()
