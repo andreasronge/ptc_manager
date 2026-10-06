@@ -7,6 +7,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentEnvironmentVariable
   alias PtcManager.Operations.Repository
+  alias PtcManager.Repository.BranchPrefixes
   alias PtcManager.Repository.Health
   alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.Repository.MaintainerLabels
@@ -196,6 +197,64 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  def handle_event("set-default-branch-prefix", %{"prefix" => prefix}, socket) do
+    case Operations.set_default_branch_prefix(
+           socket.assigns.repository.id,
+           prefix,
+           socket.assigns.actor
+         ) do
+      {:ok, repository} ->
+        socket
+        |> put_flash(
+          :info,
+          "New branches start with #{BranchPrefixes.default(repository)} unless a label maps elsewhere."
+        )
+        |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, prefix_error(reason))}
+    end
+  end
+
+  def handle_event("add-branch-prefix", %{"mapping" => params}, socket) do
+    case Operations.add_branch_prefix_mapping(
+           socket.assigns.repository.id,
+           params["label"] || "",
+           params["prefix"] || "",
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        socket
+        |> put_flash(
+          :info,
+          "Issues labelled #{String.trim(params["label"] || "")} now get #{String.trim(params["prefix"] || "")} branches."
+        )
+        |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, prefix_error(reason))}
+    end
+  end
+
+  def handle_event("remove-branch-prefix", %{"label" => label}, socket) do
+    case Operations.remove_branch_prefix_mapping(
+           socket.assigns.repository.id,
+           label,
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        socket
+        |> put_flash(
+          :info,
+          "#{label} no longer picks a branch prefix. Approved jobs keep theirs."
+        )
+        |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, prefix_error(reason))}
+    end
+  end
+
   def handle_event("set-auto-fix", %{"enabled" => enabled}, socket)
       when enabled in ["true", "false"] do
     case PtcManager.AutoImplementation.configure(
@@ -368,6 +427,8 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
            maintainer_labels: MaintainerLabels.list(repository),
            integration_branches: IntegrationBranches.list(repository),
            integration_suggestions: IntegrationBranches.suggestions(repository),
+           branch_prefix_default: BranchPrefixes.default(repository),
+           branch_prefix_mappings: BranchPrefixes.list(repository),
            agent_environment_variables: AgentEnvironmentVariables.list_metadata(repository.id)
          )}
 
@@ -402,6 +463,15 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     do: "GitHub could not confirm the branch right now. Try again."
 
   defp mapping_error(_reason), do: "The mapping could not be saved."
+
+  defp prefix_error(:invalid_branch_prefix),
+    do:
+      "Use one to three segments of letters, digits, and . _ -, each ending in /, such as bugfix/."
+
+  defp prefix_error(:branch_prefix_collides),
+    do: "GitHub has a branch with that name, so git cannot create branches under it."
+
+  defp prefix_error(reason), do: mapping_error(reason)
 
   defp label_error(:invalid_label_role), do: "Choose either badge or park."
 

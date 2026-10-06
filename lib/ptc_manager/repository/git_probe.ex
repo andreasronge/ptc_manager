@@ -4,7 +4,7 @@ defmodule PtcManager.Repository.GitProbe do
   @behaviour PtcManager.Repository.ResultProbe
 
   alias PtcManager.Operations.{AgentAction, Job, Repository}
-  alias PtcManager.Repository.{Checkout, InvestigationWorkspace}
+  alias PtcManager.Repository.{BranchPrefixes, Checkout, InvestigationWorkspace}
 
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
   @small_output_limit 64 * 1024
@@ -345,11 +345,14 @@ defmodule PtcManager.Repository.GitProbe do
     end
   end
 
-  defp valid_branch(%Job{id: id, issue_id: issue_id, branch_name: branch})
+  # The job arrives without its issue, so any issue number passes here; the
+  # broker checks the exact name before anything reaches GitHub.
+  defp valid_branch(%Job{id: id, issue_id: issue_id, branch_name: branch, branch_prefix: prefix})
        when is_binary(branch) and is_integer(id) and is_integer(issue_id) do
-    if Regex.match?(~r/\Aptc-manager\/issue-\d+-job-#{id}\z/, branch),
-      do: :ok,
-      else: {:error, :unexpected_branch}
+    if BranchPrefixes.valid_prefix?(prefix) and
+         Regex.match?(~r/\A#{Regex.escape(prefix)}issue-\d+-job-#{id}\z/, branch),
+       do: :ok,
+       else: {:error, :unexpected_branch}
   end
 
   defp valid_branch(_job), do: {:error, :unexpected_branch}

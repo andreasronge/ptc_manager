@@ -15,6 +15,7 @@ defmodule PtcManagerWeb.DashboardLive do
   alias PtcManager.Operations.AgentHealth
   alias PtcManager.Operations.DeliveryLane
   alias PtcManager.Operations.PlanningGroup
+  alias PtcManager.Repository.BranchPrefixes
   alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.Repository.MaintainerLabels
   alias PtcManager.Worktrees
@@ -178,7 +179,12 @@ defmodule PtcManagerWeb.DashboardLive do
   def handle_event("approve", %{"issue-id" => issue_id} = params, socket) do
     with {:ok, issue_id} <- parse_issue_id(issue_id),
          {:ok, review_count} <- parse_review_count(params["review-count"]) do
-      opts = if params["base"] == "default", do: [base: :default], else: []
+      opts =
+        if(params["base"] == "default", do: [base: :default], else: []) ++
+          if(Map.has_key?(params, "branch-prefix"),
+            do: [branch_prefix: params["branch-prefix"]],
+            else: []
+          )
 
       if params["direct"] == "true",
         do: approve_directly(issue_id, review_count, params["execution-profile"], opts, socket),
@@ -500,6 +506,22 @@ defmodule PtcManagerWeb.DashboardLive do
            socket,
            :error,
            "This issue's labels map to different integration branches. Remove one label first."
+         )}
+
+      {:error, :conflicting_branch_prefixes} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "This issue's labels map to different branch prefixes. Choose one."
+         )}
+
+      {:error, :invalid_branch_prefix} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "That branch prefix is no longer configured for this repository."
          )}
 
       {:error, :already_integrated} ->
@@ -1018,6 +1040,67 @@ defmodule PtcManagerWeb.DashboardLive do
           )}). Remove one label before approving.
         </p>
       <% :default -> %>
+    <% end %>
+    """
+  end
+
+  @doc """
+  The branch prefix approving this issue would freeze: the one its own labels
+  resolve to, or the conflicting mappings, with every prefix the maintainer may
+  pick instead.
+  """
+  def branch_prefix_route(%{issue: %{repository: repository} = issue}) do
+    choices = BranchPrefixes.choices(repository)
+
+    case BranchPrefixes.resolve(repository, MaintainerLabels.reported_names(issue)) do
+      {:ok, prefix} -> {:resolved, prefix, choices}
+      {:error, {:conflicting_branch_prefixes, mappings}} -> {:conflict, mappings, choices}
+    end
+  end
+
+  attr :item, :map, required: true
+
+  def branch_prefix_field(assigns) do
+    assigns = assign(assigns, :route, branch_prefix_route(assigns.item))
+
+    ~H"""
+    <%= case @route do %>
+      <% {:resolved, prefix, [_only]} -> %>
+        <span
+          id={"approval-branch-#{@item.issue.id}"}
+          class="self-center font-mono text-xs text-slate-400"
+          title="The branch this job will push."
+        >
+          {prefix}issue-{@item.issue.number}-job-…
+        </span>
+      <% {:resolved, prefix, choices} -> %>
+        <label class="text-xs font-medium text-slate-400">
+          Branch
+          <select
+            id={"approval-branch-prefix-#{@item.issue.id}"}
+            name="branch-prefix"
+            class="mt-1 block rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5 font-mono text-sm text-white"
+          >
+            <option :for={choice <- choices} value={choice} selected={choice == prefix}>
+              {choice}issue-{@item.issue.number}-job-…
+            </option>
+          </select>
+        </label>
+      <% {:conflict, mappings, choices} -> %>
+        <label class="text-xs font-medium text-amber-200">
+          Branch ({Enum.map_join(mappings, ", ", &"#{&1["label"]} → #{&1["prefix"]}")})
+          <select
+            id={"approval-branch-prefix-#{@item.issue.id}"}
+            name="branch-prefix"
+            required
+            class="mt-1 block rounded-xl border border-amber-300/40 bg-slate-950 px-3 py-2.5 font-mono text-sm text-white"
+          >
+            <option value="" selected>Choose a prefix</option>
+            <option :for={choice <- choices} value={choice}>
+              {choice}issue-{@item.issue.number}-job-…
+            </option>
+          </select>
+        </label>
     <% end %>
     """
   end

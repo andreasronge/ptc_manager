@@ -13,6 +13,7 @@ defmodule PtcManager.Operations do
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
   alias PtcManager.RuntimeIncarnation
+  alias PtcManager.Repository.BranchPrefixes
   alias PtcManager.Repository.Checkout
   alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.WorktreeSecurity
@@ -681,9 +682,72 @@ defmodule PtcManager.Operations do
     )
   end
 
-  # The list is rewritten as a whole, so it is computed from the stored row
-  # inside the write transaction.
-  defp update_integration_branches(repository_id, change, actor, details) do
+  defp update_integration_branches(repository_id, change, actor, details),
+    do: update_label_setting(:integration_branches, repository_id, change, actor, details)
+
+  @doc """
+  Sets the prefix an implementation branch gets when no mapped label applies.
+  Jobs already approved keep the prefix they stored.
+  """
+  def set_default_branch_prefix(repository_id, prefix, actor)
+      when is_integer(repository_id) and is_binary(actor) do
+    prefix = if is_binary(prefix), do: String.trim(prefix), else: prefix
+
+    update_label_setting(
+      :branch_prefixes,
+      repository_id,
+      fn repository ->
+        with {:ok, stored} <- BranchPrefixes.set_default(repository, prefix),
+             :ok <- no_colliding_branch(repository, prefix),
+             do: {:ok, stored}
+      end,
+      actor,
+      %{"default_set" => prefix}
+    )
+  end
+
+  @doc "Maps a label to a branch prefix. A mapping is the maintainer's decision."
+  def add_branch_prefix_mapping(repository_id, label, prefix, actor)
+      when is_integer(repository_id) and is_binary(actor) do
+    prefix = if is_binary(prefix), do: String.trim(prefix), else: prefix
+
+    update_label_setting(
+      :branch_prefixes,
+      repository_id,
+      fn repository ->
+        with {:ok, stored} <- BranchPrefixes.add(repository, label, prefix),
+             :ok <- no_colliding_branch(repository, prefix),
+             do: {:ok, stored}
+      end,
+      actor,
+      %{"added" => %{"label" => String.trim(to_string(label)), "prefix" => prefix}}
+    )
+  end
+
+  @doc "Removes a label's prefix mapping. Jobs already approved keep their prefix."
+  def remove_branch_prefix_mapping(repository_id, label, actor)
+      when is_integer(repository_id) and is_binary(label) and is_binary(actor) do
+    update_label_setting(
+      :branch_prefixes,
+      repository_id,
+      &{:ok, BranchPrefixes.remove(&1, label)},
+      actor,
+      %{"removed" => label}
+    )
+  end
+
+  # Checked only for a prefix being introduced, so a branch that appears later
+  # never blocks removing a mapping or synchronizing the repository.
+  defp no_colliding_branch(repository, prefix) do
+    case BranchPrefixes.colliding_branch(repository, prefix) do
+      nil -> :ok
+      _branch -> {:error, :branch_prefix_collides}
+    end
+  end
+
+  # A label setting is rewritten as a whole, so it is computed from the stored
+  # row inside the write transaction.
+  defp update_label_setting(field, repository_id, change, actor, details) do
     result =
       RepoTransaction.immediate(fn ->
         repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
@@ -691,19 +755,19 @@ defmodule PtcManager.Operations do
         with {:ok, stored} <- change.(repository),
              {:ok, updated} <-
                repository
-               |> Repository.changeset(%{integration_branches: stored})
+               |> Repository.changeset(%{field => stored})
                |> Repo.update() do
           insert_audit!(%{
             actor: actor,
-            action: "repository.integration_branches_updated",
+            action: "repository.#{field}_updated",
             target_type: "repository",
             target_id: repository_id,
-            details: Map.put(details, "mappings", stored["mappings"])
+            details: Map.merge(details, stored)
           })
 
           updated
         else
-          {:error, %Ecto.Changeset{}} -> Repo.rollback(:invalid_integration_branches)
+          {:error, %Ecto.Changeset{}} -> Repo.rollback(invalid_setting(field))
           {:error, reason} -> Repo.rollback(reason)
         end
       end)
@@ -713,6 +777,9 @@ defmodule PtcManager.Operations do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp invalid_setting(:integration_branches), do: :invalid_integration_branches
+  defp invalid_setting(:branch_prefixes), do: :invalid_branch_prefixes
 
   @doc "Whether GitHub reports the branch, through the read-only client."
   def github_branch_exists(%Repository{} = repository, branch) do
@@ -1292,6 +1359,7 @@ defmodule PtcManager.Operations do
             issue_id: stopped.issue_id,
             approval_id: approval.id,
             base_branch: stopped.base_branch,
+            branch_prefix: stopped.branch_prefix,
             automation_definition_version_id: stopped.automation_definition_version_id,
             prompt_instructions: stopped.prompt_instructions,
             kind: stopped.kind,
@@ -2254,9 +2322,10 @@ defmodule PtcManager.Operations do
              :ok <- dispatch_capacity_available(Repo, worker, capacity, lifecycle_now),
              {:ok, worktree_path} <- worktree_path(job.repository, job.id, job.fencing_token + 1),
              :ok <- remote_issue_still_approvable(remote_issue, job.repository),
-             {:ok, freshness} <- approval_freshness(remote_issue, job) do
+             {:ok, freshness} <- approval_freshness(remote_issue, job),
+             {:ok, branch_name} <-
+               BranchPrefixes.branch_name(job.branch_prefix, job.issue.number, job.id) do
           fencing_token = job.fencing_token + 1
-          branch_name = "ptc-manager/issue-#{job.issue.number}-job-#{job.id}"
           lease_expires_at = DateTime.add(lease_now, lease_ms, :millisecond)
 
           {updated, _rows} =
@@ -4077,9 +4146,11 @@ defmodule PtcManager.Operations do
 
   # `base: :default` is the maintainer's "default branch instead" choice for an
   # issue a mapping would otherwise send to an integration branch.
+  # `branch_prefix:` is the maintainer's pick among the configured prefixes.
   defp do_approve_issue(issue_id, actor, requested_review_count, mode, profile, opts) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     base_choice = Keyword.get(opts, :base, :mapped)
+    prefix_choice = Keyword.get(opts, :branch_prefix)
 
     Multi.new()
     |> Multi.run(:snapshot, fn repo, _changes ->
@@ -4093,6 +4164,9 @@ defmodule PtcManager.Operations do
            :ok <- not_already_integrated(repo, issue, repository, base) do
         {:ok, base}
       end
+    end)
+    |> Multi.run(:branch_prefix, fn _repo, %{snapshot: {issue, _proposal, repository}} ->
+      approval_branch_prefix(issue, repository, mode, prefix_choice)
     end)
     |> Multi.run(:execution, fn _repo, %{snapshot: {_issue, proposal, _repository}} ->
       case PtcManager.ExecutionProfiles.freeze(proposal, profile, requested_review_count) do
@@ -4129,13 +4203,15 @@ defmodule PtcManager.Operations do
                                approval: approval,
                                automation: {version, prompt_instructions},
                                execution: execution,
-                               base: base
+                               base: base,
+                               branch_prefix: branch_prefix
                              } ->
       Job.changeset(%Job{}, %{
         repository_id: issue.repository_id,
         issue_id: issue.id,
         approval_id: approval.id,
         base_branch: base.branch,
+        branch_prefix: branch_prefix.prefix,
         automation_definition_version_id: version.id,
         prompt_instructions: prompt_instructions,
         kind: "implementation",
@@ -4157,7 +4233,8 @@ defmodule PtcManager.Operations do
     |> Multi.insert(:audit_event, fn %{
                                        snapshot: {issue, proposal, _repository},
                                        approval: approval,
-                                       job: job
+                                       job: job,
+                                       branch_prefix: branch_prefix
                                      } ->
       AuditEvent.changeset(%AuditEvent{}, %{
         actor: actor,
@@ -4165,6 +4242,9 @@ defmodule PtcManager.Operations do
         target_type: "job",
         target_id: job.id,
         details: %{
+          "branch_prefix" => job.branch_prefix,
+          "branch_prefix_override" => branch_prefix.override,
+          "branch_prefix_conflict" => branch_prefix.conflict,
           "issue_id" => issue.id,
           "issue_number" => issue.number,
           "proposal_id" => proposal && proposal.id,
@@ -4185,6 +4265,45 @@ defmodule PtcManager.Operations do
     end)
     |> broadcast_change()
   end
+
+  # The issue's own labels decide its prefix, not an umbrella's: a bug filed in
+  # a feature collection is still a bug. A maintainer may pick any configured
+  # prefix. An unattended approval has nobody to settle a conflict, so it takes
+  # the default, which the maintainer configured as always acceptable; refusing
+  # would leave a collection run retrying the member forever.
+  defp approval_branch_prefix(issue, repository, mode, choice) do
+    labels = PtcManager.Repository.MaintainerLabels.reported_names(issue)
+
+    {resolved, conflict} =
+      case BranchPrefixes.resolve(repository, labels) do
+        {:ok, prefix} -> {prefix, nil}
+        {:error, {:conflicting_branch_prefixes, mappings}} -> {nil, conflict_labels(mappings)}
+      end
+
+    cond do
+      mode in [:automatic, :collection] ->
+        {:ok,
+         %{
+           prefix: resolved || BranchPrefixes.default(repository),
+           override: false,
+           conflict: conflict
+         }}
+
+      choice in [nil, ""] and is_binary(resolved) ->
+        {:ok, %{prefix: resolved, override: false, conflict: nil}}
+
+      choice in [nil, ""] ->
+        {:error, :conflicting_branch_prefixes}
+
+      choice in BranchPrefixes.choices(repository) ->
+        {:ok, %{prefix: choice, override: choice != resolved, conflict: conflict}}
+
+      true ->
+        {:error, :invalid_branch_prefix}
+    end
+  end
+
+  defp conflict_labels(mappings), do: Enum.map(mappings, & &1["label"])
 
   # A collection member inherits the base its run resolved at start. Any other
   # approval resolves it from the issue's labels and the repository's active

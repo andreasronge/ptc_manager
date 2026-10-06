@@ -18,8 +18,6 @@ defmodule PtcManager.Repository.IntegrationBranches do
   alias PtcManager.Repository.MaintainerLabels
 
   @max_mappings 20
-  @max_label_length 50
-  @label_format ~r{\A[A-Za-z0-9 ._/:-]+\z}
   @suggested_prefix "feature/"
 
   @doc "Every configured mapping, each `%{\"label\", \"branch\", \"active\"}`."
@@ -156,10 +154,5 @@ defmodule PtcManager.Repository.IntegrationBranches do
 
   defp valid_mapping?(_mapping), do: false
 
-  defp valid_label?(label) when is_binary(label),
-    do:
-      label != "" and String.length(label) <= @max_label_length and
-        Regex.match?(@label_format, label)
-
-  defp valid_label?(_label), do: false
+  defp valid_label?(label), do: MaintainerLabels.valid_name?(label)
 end

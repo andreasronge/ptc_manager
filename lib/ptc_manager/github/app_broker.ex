@@ -6,7 +6,7 @@ defmodule PtcManager.GitHub.AppBroker do
   alias PtcManager.Operations.PrPublication
   alias PtcManager.Publications
   alias PtcManager.Repository.Checkout
-  alias PtcManager.Repository.{Contract, GitProbe}
+  alias PtcManager.Repository.{BranchPrefixes, Contract, GitProbe}
 
   @api "https://api.github.com"
   @api_version "2022-11-28"
@@ -159,7 +159,10 @@ defmodule PtcManager.GitHub.AppBroker do
   end
 
   defp valid_target_context(repository, issue, publication) do
-    expected_branch = "ptc-manager/issue-#{issue.number}-job-#{publication.job_id}"
+    # Built from the prefix the approval froze on the job; a missing or unsafe
+    # stored prefix builds nothing, so nothing matches.
+    expected_branch =
+      BranchPrefixes.branch_name(publication.job.branch_prefix, issue.number, publication.job_id)
 
     cond do
       not safe_repository_component?(repository.github_owner) ->
@@ -171,7 +174,7 @@ defmodule PtcManager.GitHub.AppBroker do
       not PtcManager.GitHub.Ref.safe?(publication.job.base_branch) ->
         {:blocked, :invalid_base_branch}
 
-      publication.branch_name != expected_branch ->
+      expected_branch != {:ok, publication.branch_name} ->
         {:blocked, :unexpected_job_branch}
 
       publication.fencing_token != publication.job.fencing_token or

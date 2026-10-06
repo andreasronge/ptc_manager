@@ -61,15 +61,24 @@ defmodule PtcManager.Repository.MaintainerLabels do
 
     cond do
       role not in @roles -> {:error, :invalid_label_role}
-      name == "" -> {:error, :invalid_label_name}
       reserved?(name) -> {:error, :reserved_label_name}
-      String.length(name) > @max_name_length -> {:error, :invalid_label_name}
-      not Regex.match?(@name_format, name) -> {:error, :invalid_label_name}
+      not valid_name?(name) -> {:error, :invalid_label_name}
       configured?(repository, name) -> {:error, :label_already_configured}
       length(list(repository)) >= @max_labels -> {:error, :too_many_labels}
       true -> {:ok, %{"labels" => list(repository) ++ [%{"name" => name, "role" => role}]}}
     end
   end
+
+  @doc """
+  Whether a label name is one any label setting may store: 1 to 50 characters
+  GitHub allows. Whether it is reserved is a separate question.
+  """
+  def valid_name?(name) when is_binary(name),
+    do:
+      name != "" and String.length(name) <= @max_name_length and
+        Regex.match?(@name_format, name)
+
+  def valid_name?(_name), do: false
 
   @doc "The stored shape without one name."
   def remove(repository, name) do
@@ -106,8 +115,7 @@ defmodule PtcManager.Repository.MaintainerLabels do
 
   defp valid_label?(%{"name" => name, "role" => role})
        when is_binary(name) and is_binary(role) do
-    role in @roles and name != "" and String.length(name) <= @max_name_length and
-      not reserved?(name) and Regex.match?(@name_format, name)
+    role in @roles and valid_name?(name) and not reserved?(name)
   end
 
   defp valid_label?(_label), do: false

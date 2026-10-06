@@ -986,6 +986,36 @@ branches only, or one integration branch), remembered in the browser like the
 repository filter. Keeping an integration branch current with the default
 branch stays manual.
 
+#### Branch names
+
+An implementation job's branch is a prefix followed by `issue-<n>-job-<id>`.
+Every repository starts with `ptc-manager/`. A repository whose rulesets
+require names such as `feature/…` or `bugfix/…` sets them under **Branch
+names** on its Configuration page:
+
+- a **default prefix** for work with no mapped label;
+- **label → prefix** mappings, such as `bug` → `bugfix/`. Only a mapped label
+  changes the prefix, and only the issue's own labels count. A collection
+  umbrella's labels do not rename its members' branches.
+
+A prefix is one to three segments, each ending in `/`. The page refuses a
+prefix when GitHub reports a branch git would collide with, such as a branch
+named `bugfix` blocking `bugfix/`.
+
+When you approve, the card shows the branch the job will get. When more than
+one prefix is configured, a **Branch** select offers all of them, with the
+labels' choice preselected. If the issue's labels map to different prefixes,
+nothing is preselected and you must choose. Automatic and collection approvals
+take the labels' prefix, or the default when the labels conflict; the audit
+records the conflict.
+
+The job stores its prefix at approval. Changing the mappings or labels later
+does not rename approved work, and the publication broker pushes only the
+exact branch built from the stored prefix. GitHub's own ruleset remains the
+final check on what may be pushed. Repair and investigation worktrees keep
+their local `ptc-manager/…` names, because a repair pushes to the pull
+request's existing branch.
+
 ### When an agent cannot finish
 
 Nothing watches a managed pane. An agent that asks a question there is asking

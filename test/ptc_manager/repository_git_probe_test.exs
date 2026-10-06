@@ -26,6 +26,31 @@ defmodule PtcManager.RepositoryGitProbeTest do
     assert result.diff_digest =~ ~r/\A[0-9a-f]{64}\z/
   end
 
+  test "verifies a branch under the job's own prefix and refuses any other prefix" do
+    path = repository_with_base()
+    branch = "bugfix/issue-42-job-7"
+    git!(path, ["switch", "-c", branch])
+    File.write!(Path.join(path, "README.md"), "base\nprefixed change\n")
+    git!(path, ["commit", "-am", "implementation"])
+    repository = %Repository{local_path: path, default_branch: "main"}
+
+    job = %Job{
+      id: 7,
+      issue_id: 42,
+      branch_prefix: "bugfix/",
+      branch_name: branch,
+      base_branch: "main"
+    }
+
+    assert {:ok, _result} = GitProbe.verify(repository, job)
+
+    for prefix <- ["ptc-manager/", nil, "bugfix"] do
+      assert {:error, :unexpected_branch} =
+               GitProbe.verify(repository, %{job | branch_prefix: prefix}),
+             inspect(prefix)
+    end
+  end
+
   test "review evidence matches publication exactly and refuses dirty work" do
     path = repository_with_base()
     branch = "ptc-manager/issue-42-job-7"

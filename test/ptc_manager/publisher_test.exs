@@ -1524,6 +1524,41 @@ defmodule PtcManager.PublisherTest do
     end)
   end
 
+  test "the GitHub App broker expects the branch from the prefix frozen on the job" do
+    {job, publication, _result} = verified_publication_fixture()
+    publication = Repo.preload(publication, [job: [:issue, :repository]], force: true)
+    number = publication.job.issue.number
+    frozen = %{publication.job | branch_prefix: "bugfix/"}
+    exact = "bugfix/issue-#{number}-job-#{job.id}"
+
+    with_github_app_config(fn ->
+      # Past the branch check, the gate evidence is what stops this one.
+      assert {:blocked, :pre_publication_gate_not_passed} =
+               PtcManager.GitHub.AppBroker.publish(%{
+                 publication
+                 | job: frozen,
+                   branch_name: exact
+               })
+
+      for {job, branch} <- [
+            {frozen, "ptc-manager/issue-#{number}-job-#{job.id}"},
+            {frozen, "bugfix/issue-#{number + 1}-job-#{job.id}"},
+            {frozen, "bugfix/issue-#{number}-job-#{job.id + 1}"},
+            {frozen, "feature/issue-#{number}-job-#{job.id}"},
+            {%{frozen | branch_prefix: nil}, exact},
+            {%{frozen | branch_prefix: "refs/heads/"}, "refs/heads/issue-#{number}-job-#{job.id}"}
+          ] do
+        assert {:blocked, :unexpected_job_branch} =
+                 PtcManager.GitHub.AppBroker.publish(%{
+                   publication
+                   | job: job,
+                     branch_name: branch
+                 }),
+               branch
+      end
+    end)
+  end
+
   test "the GitHub App broker rejects an exact job branch without matching gate evidence" do
     {_job, publication, _result} = verified_publication_fixture()
     publication = Repo.preload(publication, [job: [:issue, :repository]], force: true)
