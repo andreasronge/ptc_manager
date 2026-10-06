@@ -403,7 +403,10 @@ defmodule PtcManager.OperationsTest do
       assert Repo.aggregate(AuditEvent, :count, :id) == 3
     end
 
-    test "an expired idle attempt releases capacity and preserves its worktree" do
+    # Codex ends its turn at its prompt instead of exiting, so Herdr can report a
+    # finished agent idle rather than done; its branch or published pull request
+    # must still reach the reconciler.
+    test "an expired idle attempt without a stop report is reconciled like a finished one" do
       repository = repository_fixture()
       issue = issue_fixture(repository)
       proposal_fixture(issue)
@@ -445,13 +448,28 @@ defmodule PtcManager.OperationsTest do
           fencing_token: 1
         })
 
-      assert Operations.expire_job_leases(now) == 1
-      assert Repo.get!(Job, job.id).state == "lost"
-      assert Repo.get!(AgentRun, run.id).state == "lost"
+      assert Operations.expire_job_leases(now, now) == 1
 
-      preserved = Repo.get!(WorktreeAllocation, allocation.id)
-      assert preserved.state == "attention"
-      assert preserved.last_error =~ "partial worktree was preserved"
+      awaiting = Repo.get!(Job, job.id)
+      assert awaiting.state == "awaiting_reconciliation"
+      assert awaiting.reconciling_at == now
+      assert is_nil(awaiting.lease_expires_at)
+      refute awaiting.ended_at
+
+      finished = Repo.get!(AgentRun, run.id)
+      assert finished.state == "done"
+      assert finished.ended_at == now
+
+      assert Repo.get!(WorktreeAllocation, allocation.id).state == "active"
+
+      assert Repo.exists?(
+               from audit in AuditEvent,
+                 where:
+                   audit.target_id == ^job.id and
+                     audit.action == "job.idle_result_reconciliation_required"
+             )
+
+      assert {:ok, %Job{state: "verifying_result"}} = Operations.claim_result_job(job.id)
     end
   end
 

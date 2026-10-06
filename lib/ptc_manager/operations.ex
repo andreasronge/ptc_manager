@@ -5805,12 +5805,14 @@ defmodule PtcManager.Operations do
   defp expire_job_lease(%Job{review_state: state}, _lease_now, _lifecycle_now)
        when state in ~w(paused manual cancelled resume_pending running), do: false
 
-  # Codex ends its turn instead of exiting, so an agent that wrote a stop report
-  # can sit idle and never reach the reconciler that reads it.
+  # Codex ends its turn instead of exiting, so Herdr can report a finished agent
+  # idle rather than done. Past the idle deadline the agent is treated as
+  # finished: a stop report is recorded, and otherwise its branch or published
+  # pull request goes to the reconciler, which ends an attempt without commits.
   defp expire_job_lease(%Job{state: "idle"} = job, lease_now, lifecycle_now) do
     case StopReport.read(job) do
       {:ok, report} -> expire_stopped_idle_job(job, lease_now, report)
-      _no_usable_report -> release_expired_idle_job(job, lease_now, lifecycle_now)
+      _no_usable_report -> reconcile_expired_idle_job(job, lease_now, lifecycle_now)
     end
   end
 
@@ -5833,19 +5835,57 @@ defmodule PtcManager.Operations do
     end
   end
 
-  defp release_expired_idle_job(job, lease_now, lifecycle_now) do
-    message =
-      "The implementation agent remained idle past its deadline; its partial worktree was preserved."
+  # The run ends as done in the same transaction, so a pane that still shows idle
+  # is a finished agent to the Herdr sync and cannot re-park the job; only an
+  # active status reopens it, as for any done run.
+  defp reconcile_expired_idle_job(job, lease_now, lifecycle_now) do
+    Repo.transaction(fn ->
+      {updated, _rows} =
+        Job
+        |> where([candidate], candidate.id == ^job.id and candidate.state == "idle")
+        |> maybe_guard_idle_expiry({job.fencing_token, lease_now})
+        |> Repo.update_all(
+          set: [
+            state: "awaiting_reconciliation",
+            lease_expires_at: nil,
+            reconciling_at: lease_now,
+            absence_observed_at: nil,
+            updated_at: lifecycle_now
+          ]
+        )
 
-    case do_release_idle_job(
-           job.id,
-           {job.fencing_token, lease_now},
-           "coordinator",
-           message,
-           lifecycle_now
-         ) do
-      {:ok, _job} -> true
-      {:error, _reason} -> false
+      if updated != 1, do: Repo.rollback(:job_not_idle)
+
+      AgentRun
+      |> where(
+        [run],
+        run.job_id == ^job.id and run.fencing_token == ^job.fencing_token and
+          run.state == "idle"
+      )
+      |> Repo.update_all(
+        set: [
+          state: "done",
+          status_text: "Idle past its deadline; its result is being reconciled.",
+          ended_at: lifecycle_now,
+          updated_at: lifecycle_now
+        ]
+      )
+
+      insert_audit!(%{
+        actor: "coordinator",
+        action: "job.idle_result_reconciliation_required",
+        target_type: "job",
+        target_id: job.id,
+        details: %{"fencing_token" => job.fencing_token}
+      })
+    end)
+    |> case do
+      {:ok, _audit} ->
+        PtcManager.ResultPoller.wake()
+        true
+
+      {:error, _reason} ->
+        false
     end
   end
 

@@ -648,6 +648,42 @@ defmodule PtcManager.HerdrSyncTest do
     assert Repo.get!(Job, job.id).lease_expires_at == first_deadline
   end
 
+  test "a finished agent whose pane turns idle stays with the reconciler" do
+    %{job: job, run: run} =
+      managed_job_fixture("done-then-idle", %{agent_name: :deterministic})
+
+    remote = remote_agent("done") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "done-then-idle")
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+
+    Process.put(:herdr_result, {:ok, [Map.put(remote, "agent_status", "idle")]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "done-then-idle")
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+    assert Repo.get!(AgentRun, run.id).state == "done"
+  end
+
+  test "an expired idle agent stays with the reconciler while its pane still shows idle" do
+    %{job: job, run: run} =
+      managed_job_fixture("idle-expired", %{agent_name: :deterministic})
+
+    remote = remote_agent("idle") |> Map.put("name", run.agent_name)
+    Process.put(:herdr_result, {:ok, [remote]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-expired")
+
+    deadline = Repo.get!(Job, job.id).lease_expires_at
+    assert Operations.expire_job_leases(DateTime.add(deadline, 1, :second)) == 1
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-expired")
+    assert Repo.get!(Job, job.id).state == "awaiting_reconciliation"
+    assert Repo.get!(AgentRun, run.id).state == "done"
+
+    Process.put(:herdr_result, {:ok, [Map.put(remote, "agent_status", "working")]})
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "idle-expired")
+    assert Repo.get!(Job, job.id).state == "reconciling"
+  end
+
   test "reconciles a lost agent to its later authoritative terminal state" do
     Process.put(:herdr_result, {:ok, [remote_agent("working")]})
     assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "recovered")

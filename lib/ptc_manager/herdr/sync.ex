@@ -814,6 +814,12 @@ defmodule PtcManager.Herdr.Sync do
         })
         |> Repo.update!()
 
+      # A finished pane that Herdr later shows idle, after it is viewed or
+      # restored, is not a writer; only an active status may take the job back
+      # from the reconciler.
+      returning_from_reconciler?(run, job, attrs.state) ->
+        :ok
+
       job && job.state in ~w(starting working idle blocked reconciling awaiting_reconciliation) ->
         update_job_from_agent(job, attrs.state, agent_now, lease_now)
 
@@ -823,6 +829,13 @@ defmodule PtcManager.Herdr.Sync do
 
     :ok
   end
+
+  defp returning_from_reconciler?(%AgentRun{state: run_state}, %Job{} = job, agent_state),
+    do:
+      run_state in @terminal_states and agent_state not in @terminal_states and
+        job.state == "awaiting_reconciliation" and not PtcManager.Reviews.held?(job)
+
+  defp returning_from_reconciler?(_run, _job, _agent_state), do: false
 
   defp persist_agents_snapshot(
          worker,
