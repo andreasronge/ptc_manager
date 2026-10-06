@@ -3377,23 +3377,26 @@ defmodule PtcManager.Operations do
 
   # A stopped job is no longer active, so it holds no capacity, but its card has
   # to stay until the maintainer decides what to do about it.
-  # Managed pull requests merged into an integration branch while an issue they
-  # deliver is still open: the job's own issue and every issue the pull request
-  # links. Done there, waiting for that branch to reach the default branch;
-  # GitHub closing the last of them takes the card away.
+  # Pull requests merged into an integration branch while an issue they deliver
+  # is still open: a managed job's own issue and every issue the pull request
+  # links, including an external pull request's. Done there, waiting for that
+  # branch to reach the default branch; GitHub closing the last of them takes
+  # the card away.
   defp integrated_board_items do
     rows =
       from(publication in PrPublication,
-        join: job in Job,
+        left_join: job in Job,
         on: job.id == publication.job_id,
-        join: issue in Issue,
+        left_join: issue in Issue,
         on: issue.id == job.issue_id,
         join: repository in Repository,
-        on: repository.id == job.repository_id,
+        on: repository.id == publication.repository_id,
         where:
-          publication.source in ["broker", "agent"] and publication.pr_state == "merged" and
-            publication.base_branch != repository.default_branch,
-        order_by: [asc: publication.base_branch, asc: issue.number],
+          publication.pr_state == "merged" and
+            publication.base_branch != repository.default_branch and
+            ((publication.source in ["broker", "agent"] and not is_nil(issue.id)) or
+               publication.source == "external"),
+        order_by: [asc: publication.base_branch, asc: publication.pr_number],
         select: {publication, job, issue, repository}
       )
       |> Repo.all()
@@ -3401,8 +3404,7 @@ defmodule PtcManager.Operations do
     open_issues = open_linked_issues(rows)
 
     Enum.flat_map(rows, fn {publication, job, issue, repository} ->
-      numbers =
-        Enum.uniq([issue.number | get_in(publication.linked_issue_numbers, ["numbers"]) || []])
+      numbers = delivered_issue_numbers(publication, issue)
 
       linked =
         numbers
@@ -3417,14 +3419,17 @@ defmodule PtcManager.Operations do
         [first | _rest] ->
           [
             %{
-              managed?: true,
+              managed?: not is_nil(job),
               repository: repository,
-              title: publication.title || issue.title,
+              title: publication.title || (issue && issue.title),
               number: publication.pr_number,
               url: publication.pr_url,
               started_at: publication.pr_checked_at || publication.published_at,
               issue:
-                if(issue.state == "open", do: %{issue | repository: repository}, else: first),
+                if(issue && issue.state == "open",
+                  do: %{issue | repository: repository},
+                  else: first
+                ),
               dependencies: [],
               dependency_cycle: nil,
               proposal: nil,
@@ -3446,12 +3451,17 @@ defmodule PtcManager.Operations do
     end)
   end
 
+  defp delivered_issue_numbers(publication, issue) do
+    own = if issue, do: [issue.number], else: []
+    Enum.uniq(own ++ (get_in(publication.linked_issue_numbers || %{}, ["numbers"]) || []))
+  end
+
   defp open_linked_issues([]), do: %{}
 
   defp open_linked_issues(rows) do
     wanted =
       for {publication, _job, issue, repository} <- rows,
-          number <- [issue.number | get_in(publication.linked_issue_numbers, ["numbers"]) || []],
+          number <- delivered_issue_numbers(publication, issue),
           uniq: true,
           do: {repository.id, number}
 
@@ -4480,27 +4490,42 @@ defmodule PtcManager.Operations do
   True when a managed pull request merged into this branch for the issue: its
   own job's, or another job's whose pull request links the issue.
   """
-  def integrated_into?(repo \\ Repo, issue_id, branch) do
+  def integrated_into?(repo \\ Repo, issue_id, branch),
+    do: not is_nil(integration_publication(repo, issue_id, branch))
+
+  @doc """
+  The newest pull request merged into `branch` that delivers the issue: its own
+  job's, or any that links it, including an external one. GitHub's merge is
+  the evidence, whether or not PtcManager opened the pull request.
+  """
+  def integration_publication(repo \\ Repo, issue_id, branch) do
     case repo.get(Issue, issue_id) do
       nil ->
-        false
+        nil
 
       issue ->
-        repo.exists?(
-          from publication in PrPublication,
-            join: job in Job,
-            on: job.id == publication.job_id,
-            where:
-              job.repository_id == ^issue.repository_id and publication.pr_state == "merged" and
-                publication.base_branch == ^branch and
-                (job.issue_id == ^issue_id or
-                   fragment(
-                     "EXISTS (SELECT 1 FROM json_each(?, '$.numbers') WHERE value = ?)",
-                     publication.linked_issue_numbers,
-                     ^issue.number
-                   ))
-        )
+        issue
+        |> delivering_publications()
+        |> where([publication], publication.base_branch == ^branch)
+        |> order_by([publication], desc: publication.id)
+        |> limit(1)
+        |> repo.one()
     end
+  end
+
+  @doc "Merged pull requests that deliver the issue, managed or external."
+  def delivering_publications(%Issue{} = issue) do
+    from publication in PrPublication,
+      left_join: job in Job,
+      on: job.id == publication.job_id,
+      where:
+        publication.repository_id == ^issue.repository_id and publication.pr_state == "merged" and
+          (job.issue_id == ^issue.id or
+             fragment(
+               "EXISTS (SELECT 1 FROM json_each(?, '$.numbers') WHERE value = ?)",
+               publication.linked_issue_numbers,
+               ^issue.number
+             ))
   end
 
   defp approval_decision(:automatic), do: "start_implementation_automatic"
@@ -6359,11 +6384,11 @@ defmodule PtcManager.Operations do
     repository_ids = issues |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
 
     from(publication in PrPublication,
-      join: job in Job,
+      left_join: job in Job,
       on: job.id == publication.job_id,
-      where: job.repository_id in ^repository_ids and publication.pr_state == "merged",
+      where: publication.repository_id in ^repository_ids and publication.pr_state == "merged",
       select:
-        {job.issue_id, job.repository_id, publication.linked_issue_numbers,
+        {job.issue_id, publication.repository_id, publication.linked_issue_numbers,
          publication.base_branch}
     )
     |> Repo.all()
@@ -6373,7 +6398,9 @@ defmodule PtcManager.Operations do
             id = Map.get(by_number, {repository_id, number}),
             do: id
 
-      for id <- Enum.uniq([issue_id | linked_ids]), id in issue_ids, do: {id, branch}
+      for id <- Enum.uniq([issue_id | linked_ids]),
+          id in issue_ids,
+          do: {id, branch}
     end)
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Map.new(fn {issue_id, branches} -> {issue_id, MapSet.new(branches)} end)

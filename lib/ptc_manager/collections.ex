@@ -577,11 +577,22 @@ defmodule PtcManager.Collections do
     job = latest_job(issue)
     publication = job && job.pr_publication
 
-    cond do
-      is_nil(job) -> classify_unstarted(member, issue)
-      true -> classify_job(member, issue, job, publication, run)
+    case delivered_without_job(issue, job, run) do
+      %PrPublication{} = delivered -> base(member, :merged, job, delivered)
+      nil when is_nil(job) -> classify_unstarted(member, issue)
+      nil -> classify_job(member, issue, job, publication, run)
     end
   end
+
+  # A member with no live attempt is still delivered when GitHub shows a pull
+  # request merged into the run's branch that closes it, such as an external
+  # one or one whose job ended before it was linked; starting it again would
+  # implement it twice.
+  defp delivered_without_job(issue, job, %Run{base_branch: branch})
+       when is_binary(branch) and (is_nil(job) or job.state in @retired_job_states),
+       do: Operations.integration_publication(issue.id, branch)
+
+  defp delivered_without_job(_issue, _job, _run), do: nil
 
   defp closed_member(member, status, issue, job, publication) do
     base(member, status, job, publication)
@@ -1675,13 +1686,8 @@ defmodule PtcManager.Collections do
     |> Repo.one()
   end
 
-  defp merged_publications(%Issue{id: issue_id}) do
-    Repo.all(
-      from publication in PrPublication,
-        join: job in assoc(publication, :job),
-        where: job.issue_id == ^issue_id and publication.pr_state == "merged"
-    )
-  end
+  defp merged_publications(%Issue{} = issue),
+    do: issue |> Operations.delivering_publications() |> Repo.all()
 
   defp linked_publication?(repo, issue),
     do: PtcManager.AutoImplementation.linked_publication?(repo, issue)
