@@ -539,6 +539,45 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     refute has_element?(view, "#integration-branch-ska")
   end
 
+  test "branch names: the default prefix and label mappings are edited on the page",
+       %{conn: conn} do
+    repository =
+      repository_fixture(%{
+        github_label_names: %{"names" => ["bug"]},
+        github_branch_names: %{"names" => ["main", "hotfix"]}
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+
+    assert has_element?(view, "#branch-prefix-preview", "ptc-manager/issue-123-job-42")
+
+    html =
+      view
+      |> form("#default-branch-prefix-form", %{"prefix" => "feature"})
+      |> render_submit()
+
+    assert html =~ "each ending in /"
+
+    view |> form("#default-branch-prefix-form", %{"prefix" => "feature/"}) |> render_submit()
+    assert has_element?(view, "#branch-prefix-preview", "feature/issue-123-job-42")
+
+    view
+    |> form("#add-branch-prefix", %{"mapping" => %{"label" => "bug", "prefix" => "bugfix/"}})
+    |> render_submit()
+
+    assert has_element?(view, "#branch-prefix-bug", "bugfix/")
+
+    html =
+      view
+      |> form("#add-branch-prefix", %{"mapping" => %{"label" => "urgent", "prefix" => "hotfix/"}})
+      |> render_submit()
+
+    assert html =~ "GitHub has a branch with that name"
+
+    view |> element("#branch-prefix-bug button", "Remove") |> render_click()
+    refute has_element?(view, "#branch-prefix-bug")
+  end
+
   test "an unknown repository returns to the Configuration list", %{conn: conn} do
     for id <- ["999999", "not-a-number"] do
       assert {:error, {:live_redirect, %{to: "/configuration", flash: flash}}} =

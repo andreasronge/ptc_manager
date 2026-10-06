@@ -190,11 +190,13 @@ defmodule PtcManager.ExternalPullRequestsTest do
     proposal_fixture(issue)
     {:ok, job} = Operations.approve_issue(issue.id, "andreas")
 
-    branch = "ptc-manager/issue-#{issue.number}-job-#{job.id}"
+    # A configured prefix is still recognized as the job's own branch.
+    branch = "feature/issue-#{issue.number}-job-#{job.id}"
 
     job
     |> Job.changeset(%{
       state: "working",
+      branch_prefix: "feature/",
       branch_name: branch,
       publication_source: "agent",
       fencing_token: 1

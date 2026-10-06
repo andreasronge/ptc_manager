@@ -1926,6 +1926,69 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     refute has_element?(view, "#job-base-mismatch-#{job.id}")
   end
 
+  test "the card shows the branch the job will get and lets the maintainer pick a prefix",
+       %{conn: conn} do
+    plain = repository_fixture()
+    unconfigured = issue_fixture(plain)
+
+    repository =
+      repository_fixture(%{
+        branch_prefixes: %{
+          "default" => "feature/",
+          "mappings" => [
+            %{"label" => "bug", "prefix" => "bugfix/"},
+            %{"label" => "urgent", "prefix" => "hotfix/"}
+          ]
+        }
+      })
+
+    issue = issue_fixture(repository, %{github_labels: %{"names" => ["bug"]}})
+    conflicting = issue_fixture(repository, %{github_labels: %{"names" => ["bug", "urgent"]}})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    # One choice: shown, nothing to pick.
+    assert has_element?(
+             view,
+             "#approval-branch-#{unconfigured.id}",
+             "ptc-manager/issue-#{unconfigured.number}-job-"
+           )
+
+    refute has_element?(view, "#approval-branch-prefix-#{unconfigured.id}")
+
+    assert has_element?(
+             view,
+             "#approval-branch-prefix-#{issue.id} option[selected][value='bugfix/']"
+           )
+
+    assert has_element?(view, "#approval-branch-prefix-#{conflicting.id}[required]")
+
+    refute has_element?(
+             view,
+             "#approval-branch-prefix-#{conflicting.id} option[selected][value='bugfix/']"
+           )
+
+    html =
+      view
+      |> form("#approve-form-issue-#{conflicting.id}", %{
+        "issue-id" => Integer.to_string(conflicting.id),
+        "branch-prefix" => ""
+      })
+      |> render_submit(%{"direct" => "true"})
+
+    assert html =~ "different branch prefixes"
+    refute Repo.get_by(Job, issue_id: conflicting.id)
+
+    view
+    |> form("#approve-form-issue-#{issue.id}", %{
+      "issue-id" => Integer.to_string(issue.id),
+      "branch-prefix" => "hotfix/"
+    })
+    |> render_submit(%{"direct" => "true"})
+
+    assert Repo.get_by!(Job, issue_id: issue.id).branch_prefix == "hotfix/"
+  end
+
   test "a member of a live run shows the run's base and no per-issue choice", %{conn: conn} do
     repository =
       repository_fixture(%{

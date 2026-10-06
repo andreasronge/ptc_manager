@@ -101,7 +101,7 @@ defmodule Mix.Tasks.Ptc.HerdrWorkspaceCanary do
   end
 
   defp run_setup!(worktree, branch, id, creation_ms, setup) do
-    job = %Job{id: id, issue_id: 0, branch_name: branch}
+    job = %Job{id: id, issue_id: 0, branch_name: branch, branch_prefix: "ptc-manager/"}
 
     case WorkspaceSetup.run(worktree, job, setup: setup) do
       {:ok, report} ->

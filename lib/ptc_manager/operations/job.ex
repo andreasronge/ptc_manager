@@ -15,6 +15,7 @@ defmodule PtcManager.Operations.Job do
     field :started_at, :utc_datetime_usec
     field :ended_at, :utc_datetime_usec
     field :branch_name, :string
+    field :branch_prefix, :string, default: "ptc-manager/"
     field :publication_source, :string
     field :required_review_count, :integer
     field :review_resume_expires_at, :utc_datetime_usec
@@ -85,6 +86,7 @@ defmodule PtcManager.Operations.Job do
       :started_at,
       :ended_at,
       :branch_name,
+      :branch_prefix,
       :publication_source,
       :required_review_count,
       :review_resume_expires_at,
@@ -133,7 +135,8 @@ defmodule PtcManager.Operations.Job do
       :kind,
       :state,
       :fencing_token,
-      :base_branch
+      :base_branch,
+      :branch_prefix
     ])
     |> validate_inclusion(:kind, ["implementation"])
     |> validate_inclusion(:state, @states)
@@ -145,6 +148,11 @@ defmodule PtcManager.Operations.Job do
     )
     |> validate_length(:lease_owner, max: 120)
     |> validate_length(:branch_name, max: 240)
+    |> validate_change(:branch_prefix, fn :branch_prefix, prefix ->
+      if PtcManager.Repository.BranchPrefixes.valid_prefix?(prefix),
+        do: [],
+        else: [branch_prefix: "is not a safe branch prefix"]
+    end)
     |> validate_length(:last_error, max: 500)
     |> validate_length(:result_attempt_token, max: 64)
     |> validate_length(:pre_publication_bootstrap_command, max: 2_000)

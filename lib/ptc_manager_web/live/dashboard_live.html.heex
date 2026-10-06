@@ -397,6 +397,7 @@
                         </select>
                       </label>
                       <.approval_route item={item} route={issue_route(item)} />
+                      <.branch_prefix_field item={item} />
                       <button
                         id={"approve-issue-#{item.issue.id}"}
                         type="submit"

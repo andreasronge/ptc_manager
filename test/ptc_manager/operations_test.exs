@@ -880,6 +880,7 @@ defmodule PtcManager.OperationsTest do
 
     test "trying again approves the issue afresh and cannot run twice" do
       assert {:ok, stopped} = stop_job()
+      stopped = stopped |> Job.changeset(%{branch_prefix: "hotfix/"}) |> Repo.update!()
 
       # The agent commented on the issue while stopped, as it does when it asks
       # a question; the console synced that comment.
@@ -902,6 +903,7 @@ defmodule PtcManager.OperationsTest do
       assert approval.source_digest == Repo.get!(Issue, stopped.issue_id).content_digest
       assert retry.required_review_count == stopped.required_review_count
       assert retry.prompt_instructions == stopped.prompt_instructions
+      assert retry.branch_prefix == "hotfix/"
       assert retry.fencing_token == 0
 
       # The stopped card is answered, so pressing again cannot queue a second.
@@ -1682,12 +1684,20 @@ defmodule PtcManager.OperationsTest do
       |> Ecto.Changeset.change(agent_name: "impl_j#{job.id}_f1", state: "failed")
       |> Repo.update!()
 
+      branch = "bugfix/issue-#{job.issue_id}-job-#{job.id}"
+
       job
-      |> Job.changeset(%{ended_at: DateTime.utc_now(), last_error: "verification failed"})
+      |> Job.changeset(%{
+        ended_at: DateTime.utc_now(),
+        last_error: "verification failed",
+        branch_prefix: "bugfix/",
+        branch_name: branch
+      })
       |> Repo.update!()
 
       assert Operations.resumable_from_worktree?(Repo.get!(Job, job.id))
       assert {:ok, resumed} = Operations.resume_from_worktree(job.id, "andreas")
+      assert {resumed.branch_prefix, resumed.branch_name} == {"bugfix/", branch}
 
       assert resumed.state == "blocked"
       assert resumed.review_state == "resume_pending"
