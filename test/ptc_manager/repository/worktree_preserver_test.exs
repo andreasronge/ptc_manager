@@ -17,7 +17,9 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
           "bug..fix/issue-1-job-2",
           "bugfix./issue-1-job-2",
           "bugfix.lock/issue-1-job-2",
-          "-bugfix/issue-1-job-2"
+          "-bugfix/issue-1-job-2",
+          # 65 bytes: one over the prefix limit BranchPrefixes enforces.
+          String.duplicate("a", 64) <> "/issue-1-job-2"
         ] do
       {_output, status} =
         System.cmd(
@@ -37,6 +39,28 @@ defmodule PtcManager.Repository.WorktreePreserverTest do
 
       assert status == 2, branch
     end
+
+    # 64 bytes is the limit itself: past validation, the missing root fails it.
+    prefix = String.duplicate("a", 63) <> "/"
+    assert PtcManager.Repository.BranchPrefixes.valid_prefix?(prefix)
+
+    {_output, status} =
+      System.cmd(
+        "/usr/bin/python3",
+        [
+          "-I",
+          script,
+          "/nonexistent",
+          "/nonexistent/job",
+          "/nonexistent-artifacts",
+          "7",
+          token,
+          prefix <> "issue-1-job-2"
+        ],
+        stderr_to_stdout: true
+      )
+
+    refute status in [0, 2]
   end
 
   test "creates a recoverable bundle and binary patch without changing the worktree" do

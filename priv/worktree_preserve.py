@@ -16,13 +16,16 @@ TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 # three segments, none a git ref namespace, then the fixed job suffix.
 BRANCH = re.compile(
     r"^(?!(?i:refs|origin|head|remotes)/)"
-    r"(?:[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/){1,3}"
+    r"((?:[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/){1,3})"
     r"issue-[0-9]+-job-[0-9]+$"
 )
+MAX_PREFIX_BYTES = 64
 
 
 def valid_branch(branch):
-    return len(branch) <= 240 and ".lock/" not in branch and BRANCH.fullmatch(branch)
+    match = BRANCH.fullmatch(branch)
+    return (match is not None and len(branch) <= 240 and ".lock/" not in branch
+            and len(match.group(1).encode()) <= MAX_PREFIX_BYTES)
 MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_ARTIFACT_FILE_BYTES = MAX_ARTIFACT_BYTES // 2
 
