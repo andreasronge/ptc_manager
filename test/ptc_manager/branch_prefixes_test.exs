@@ -295,6 +295,49 @@ defmodule PtcManager.BranchPrefixesTest do
     end
   end
 
+  test "rows written without the new columns read back with the legacy prefix" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    {:ok, approved} = Operations.approve_issue_directly(issue.id, "andreas")
+    now = DateTime.utc_now()
+
+    {1, _} =
+      Repo.insert_all("repositories", [
+        %{
+          github_owner: "legacy",
+          github_name: "repo",
+          default_branch: "main",
+          inserted_at: now,
+          updated_at: now
+        }
+      ])
+
+    {1, _} =
+      Repo.insert_all("jobs", [
+        %{
+          repository_id: repository.id,
+          issue_id: issue.id,
+          approval_id: approved.approval_id,
+          kind: "implementation",
+          state: "done",
+          fencing_token: 0,
+          base_branch: "main",
+          inserted_at: now,
+          updated_at: now
+        }
+      ])
+
+    legacy = Repo.get_by!(Repository, github_owner: "legacy")
+    assert BranchPrefixes.default(legacy) == "ptc-manager/"
+    assert BranchPrefixes.list(legacy) == []
+
+    assert Repo.one!(
+             from j in Job,
+               where: j.id != ^approved.id and j.issue_id == ^issue.id,
+               select: j.branch_prefix
+           ) == "ptc-manager/"
+  end
+
   test "a job built without a prefix keeps the legacy one" do
     assert %Job{}.branch_prefix == "ptc-manager/"
     refute Job.changeset(%Job{}, %{branch_prefix: "nope"}).valid?

@@ -627,6 +627,25 @@ defmodule PtcManager.DispatchTest do
     assert leased.branch_name == "bugfix/issue-#{issue.number}-job-#{job.id}"
   end
 
+  test "a label's prefix survives unmapping, a new default, and relabelling before lease" do
+    repository = repository_fixture(%{local_path: "/tmp/repository"})
+    {:ok, _} = Operations.set_default_branch_prefix(repository.id, "feature/", "andreas")
+    {:ok, _} = Operations.add_branch_prefix_mapping(repository.id, "bug", "bugfix/", "andreas")
+    remote = Map.put(remote_issue(System.unique_integer([:positive])), "labels", ["bug"])
+    issue = issue_fixture(repository, IssueSnapshot.normalize!(remote, repository.id))
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    assert job.branch_prefix == "bugfix/"
+
+    {:ok, _} = Operations.remove_branch_prefix_mapping(repository.id, "bug", "andreas")
+    {:ok, _} = Operations.set_default_branch_prefix(repository.id, "other/", "andreas")
+    relabelled = Map.put(remote, "labels", ["docs"])
+    canonical = IssueSnapshot.normalize!(relabelled, repository.id)
+
+    assert {:ok, leased} = Operations.lease_job(job.id, "herdr:default", canonical, 60_000)
+    assert leased.branch_name == "bugfix/issue-#{issue.number}-job-#{job.id}"
+  end
+
   test "lease rejects a job whose stored prefix is unsafe before naming a branch" do
     {_repository, _issue, _proposal, job, remote} = approved_job_fixture()
     canonical = IssueSnapshot.normalize!(remote, job.repository_id)

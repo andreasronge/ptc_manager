@@ -316,6 +316,31 @@ defmodule PtcManager.CollectionsTest do
                Collections.start(umbrella.id, %{base: :default}, "andreas")
     end
 
+    test "a member whose own labels map to different prefixes is admitted on the default" do
+      repository =
+        repository_fixture(%{
+          branch_prefixes: %{
+            "default" => "feature/",
+            "mappings" => [
+              %{"label" => "bug", "prefix" => "bugfix/"},
+              %{"label" => "urgent", "prefix" => "hotfix/"}
+            ]
+          }
+        })
+
+      {umbrella, [member]} = collection_fixture(repository, [1])
+
+      member
+      |> Issue.changeset(%{github_labels: %{"names" => ["bug", "urgent"]}})
+      |> Repo.update!()
+
+      run = start!(umbrella)
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Job{branch_prefix: "feature/"} = job_for(member)
+      assert [%Step{kind: "admit", scope: "1"}] = steps(run)
+    end
+
     test "admits only ready, unblocked members, once each, under the run's own approval" do
       repository = repository_fixture()
       {umbrella, [first, second]} = collection_fixture(repository, [1, 2], chain: true)
