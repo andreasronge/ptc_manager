@@ -124,18 +124,19 @@ defmodule PtcManager.CollectionsTest do
     run
   end
 
-  defp steps(run), do: Repo.all(from s in Step, where: s.run_id == ^run.id, order_by: s.id)
+  defp steps(run), do: Repo.all(from(s in Step, where: s.run_id == ^run.id, order_by: s.id))
 
   defp collection_actions(repository) do
     Repo.all(
-      from a in AgentAction,
+      from(a in AgentAction,
         where: a.repository_id == ^repository.id and a.actor == "system:collection",
         order_by: a.id
+      )
     )
   end
 
   defp job_for(issue) do
-    Repo.one(from j in Job, where: j.issue_id == ^issue.id, order_by: [desc: j.id], limit: 1)
+    Repo.one(from(j in Job, where: j.issue_id == ^issue.id, order_by: [desc: j.id], limit: 1))
   end
 
   defp finish_action(action, outcome, created \\ []) do
@@ -222,8 +223,9 @@ defmodule PtcManager.CollectionsTest do
 
     for dependency <-
           Repo.all(
-            from d in PtcManager.Operations.IssueDependency,
+            from(d in PtcManager.Operations.IssueDependency,
               where: d.blocking_issue_id == ^issue.id
+            )
           ) do
       dependency
       |> PtcManager.Operations.IssueDependency.changeset(%{
@@ -246,7 +248,8 @@ defmodule PtcManager.CollectionsTest do
       refute run.auto_merge
       assert run.auto_recover
 
-      assert Repo.all(from m in Member, where: m.run_id == ^run.id) |> Enum.map(& &1.issue_number) ==
+      assert Repo.all(from(m in Member, where: m.run_id == ^run.id))
+             |> Enum.map(& &1.issue_number) ==
                [1, 2]
 
       assert {:error, :run_already_live} = Collections.start(umbrella.id, %{}, "andreas")
@@ -573,6 +576,37 @@ defmodule PtcManager.CollectionsTest do
       assert %Run{state: "paused"} = Repo.get!(Run, run.id)
     end
 
+    test "an overridden exhausted handoff no longer holds back the close-out" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      run = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+      merged!(first, job_for(first), umbrella, repository, [1], %{1 => "closed"})
+
+      for _attempt <- 1..2 do
+        :ok = Collections.reconcile(repository.id)
+
+        repository
+        |> collection_actions()
+        |> Enum.find(&(&1.state == "queued"))
+        |> AgentAction.changeset(%{state: "failed", last_error: "boom"})
+        |> Repo.update!()
+      end
+
+      :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_kind: "action_failed"} = Repo.get!(Run, run.id)
+      {:ok, _resumed} = Collections.resume(run.id, "andreas")
+
+      :ok = Collections.reconcile(repository.id)
+
+      assert %Run{state: "active"} = Repo.get!(Run, run.id)
+
+      assert Enum.any?(
+               collection_actions(repository),
+               &(&1.action_key == "collection_closeout" and &1.state == "queued")
+             )
+    end
+
     test "a green reviewed publication is merged once at its exact head after a fresh status read" do
       repository = repository_fixture()
       {umbrella, [first]} = collection_fixture(repository, [1])
@@ -624,7 +658,7 @@ defmodule PtcManager.CollectionsTest do
       assert length(collection_actions(repository)) == 1
       Run |> where([r], r.id == ^run.id) |> Repo.update_all(set: [auto_merge: false])
       merge |> AgentAction.changeset(%{state: "cancelled"}) |> Repo.update!()
-      Repo.delete_all(from s in Step, where: s.run_id == ^run.id and s.kind == "merge")
+      Repo.delete_all(from(s in Step, where: s.run_id == ^run.id and s.kind == "merge"))
       assert :ok = Collections.reconcile(repository.id)
       assert length(collection_actions(repository)) == 1
     end
@@ -889,7 +923,8 @@ defmodule PtcManager.CollectionsTest do
 
       assert {:ok, %Run{state: "active"}} = Collections.accept_changes(run.id, "andreas")
 
-      assert Repo.all(from m in Member, where: m.run_id == ^run.id) |> Enum.map(& &1.issue_number) ==
+      assert Repo.all(from(m in Member, where: m.run_id == ^run.id))
+             |> Enum.map(& &1.issue_number) ==
                [1, 2, 3]
 
       assert :ok = Collections.reconcile(repository.id)
