@@ -225,7 +225,7 @@ defmodule PtcManager.Collections do
       umbrella = Repo.get!(Issue, run.issue_id)
       current = Structure.members(umbrella)
       current_numbers = MapSet.new(current, & &1.number)
-      existing = Repo.all(from member in Member, where: member.run_id == ^run.id)
+      existing = Repo.all(from(member in Member, where: member.run_id == ^run.id))
 
       # A member with work in flight cannot be dropped, whatever GitHub says.
       for member <- existing, not MapSet.member?(current_numbers, member.issue_number) do
@@ -275,8 +275,9 @@ defmodule PtcManager.Collections do
         {:error, :not_a_member}
 
       repo.exists?(
-        from job in Job,
+        from(job in Job,
           where: job.issue_id == ^issue.id and job.state not in ^@retired_job_states
+        )
       ) ->
         {:error, :already_attempted}
 
@@ -1024,14 +1025,19 @@ defmodule PtcManager.Collections do
 
   ## Effects that need a quiet collection
 
+  # A maintainer override of the failed handoff's pause consumes it; otherwise
+  # it would hold every later quiet-pass effect, close-out included, forever.
   defp exhausted_handoff(run, statuses) do
     statuses
     |> Enum.filter(&(&1.publication != nil and &1.publication.pr_state == "merged"))
     |> Enum.sort_by(& &1.publication.id)
     |> Enum.find_value(fn status ->
       case action_attempt(run, "handoff", "#{status.publication.id}:attempt:") do
-        {:exhausted, action} -> {status, action}
-        _other -> nil
+        {:exhausted, action} ->
+          if overridden?(run, "action:#{action.id}"), do: nil, else: {status, action}
+
+        _other ->
+          nil
       end
     end)
   end
@@ -1340,11 +1346,12 @@ defmodule PtcManager.Collections do
 
       action ->
         Repo.exists?(
-          from newer in AgentAction,
+          from(newer in AgentAction,
             where:
               newer.action_key == ^action.action_key and newer.target_type == ^action.target_type and
                 newer.target_id == ^action.target_id and newer.id > ^action.id and
                 newer.state == "done"
+          )
         )
     end
   end
@@ -1451,16 +1458,17 @@ defmodule PtcManager.Collections do
   end
 
   defp member?(repo, run, number),
-    do: repo.exists?(from m in Member, where: m.run_id == ^run.id and m.issue_number == ^number)
+    do: repo.exists?(from(m in Member, where: m.run_id == ^run.id and m.issue_number == ^number))
 
   defp member_in_flight?(issue_id) do
     Repo.exists?(
-      from job in Job,
+      from(job in Job,
         left_join: publication in assoc(job, :pr_publication),
         where:
           job.issue_id == ^issue_id and
             (job.state in ^@live_job_states or
                (publication.state == "published" and publication.pr_state == "open"))
+      )
     )
   end
 
@@ -1468,13 +1476,14 @@ defmodule PtcManager.Collections do
 
   defp parent_run(repo, %Issue{} = issue) do
     repo.one(
-      from run in Run,
+      from(run in Run,
         join: umbrella in Issue,
         on: umbrella.id == run.issue_id,
         where:
           umbrella.repository_id == ^issue.repository_id and
             umbrella.number == ^issue.parent_issue_number and run.state in ^Run.live_states(),
         limit: 1
+      )
     )
   end
 
@@ -1507,7 +1516,7 @@ defmodule PtcManager.Collections do
     numbers =
       for %{issue: %Issue{id: issue_id}, number: number} <- members,
           Repo.exists?(
-            from job in Job,
+            from(job in Job,
               left_join: publication in PrPublication,
               on: publication.job_id == job.id,
               left_join: allocation in assoc(job, :worktree_allocation),
@@ -1517,6 +1526,7 @@ defmodule PtcManager.Collections do
                      (job.state in ["failed", "lost"] and
                         ((not is_nil(job.stop_reported_at) and is_nil(job.stop_acknowledged_at)) or
                            (not is_nil(allocation.id) and allocation.state != "removed"))))
+            )
           ),
           do: number
 
@@ -1537,13 +1547,15 @@ defmodule PtcManager.Collections do
       pattern = scope_or_prefix <> "%"
 
       Repo.exists?(
-        from step in Step,
+        from(step in Step,
           where: step.run_id == ^run.id and step.kind == ^kind and like(step.scope, ^pattern)
+        )
       )
     else
       Repo.exists?(
-        from step in Step,
+        from(step in Step,
           where: step.run_id == ^run.id and step.kind == ^kind and step.scope == ^scope_or_prefix
+        )
       )
     end
   end
@@ -1564,9 +1576,10 @@ defmodule PtcManager.Collections do
 
     steps =
       Repo.all(
-        from step in Step,
+        from(step in Step,
           where: step.run_id == ^run.id and step.kind == ^kind and like(step.scope, ^pattern),
           order_by: [asc: step.id]
+        )
       )
 
     case List.last(steps) do
@@ -1598,30 +1611,33 @@ defmodule PtcManager.Collections do
 
   defp outstanding_actions(run) do
     Repo.all(
-      from action in AgentAction,
+      from(action in AgentAction,
         where:
           action.repository_id == ^run.repository_id and action.actor == ^@actor and
             action.state in ^@outstanding_states
+      )
     )
   end
 
   defp outstanding_umbrella_actions(run, umbrella) do
     Repo.all(
-      from action in AgentAction,
+      from(action in AgentAction,
         where:
           action.repository_id == ^run.repository_id and action.target_type == "issue" and
             action.target_id == ^umbrella.id and action.state in ^@outstanding_states
+      )
     )
   end
 
   defp cancel_queued_actions(run, actor) do
     steps =
       Repo.all(
-        from step in Step,
+        from(step in Step,
           join: action in AgentAction,
           on: action.id == step.agent_action_id,
           where: step.run_id == ^run.id and action.state == "queued",
           select: {step, action}
+        )
       )
 
     for {step, action} <- steps do
@@ -1636,12 +1652,13 @@ defmodule PtcManager.Collections do
 
   defp latest_merge_action(publication) do
     Repo.one(
-      from action in AgentAction,
+      from(action in AgentAction,
         where:
           action.action_key == "merge_reviewed_pr" and action.target_type == "pull_request" and
             action.target_id == ^publication.id,
         order_by: [desc: action.id],
         limit: 1
+      )
     )
   end
 
