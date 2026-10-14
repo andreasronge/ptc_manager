@@ -1,5 +1,12 @@
 defmodule PtcManager.Deployments.LocalRevisionSource do
-  @moduledoc "Revision source backed by the default branch of a verified local checkout."
+  @moduledoc """
+  Revision source backed by a verified local checkout.
+
+  The latest revision is the remote default branch, fetched into the checkout
+  through the configured source updater, so a merge on GitHub is visible
+  without anyone pulling the checkout by hand. The checkout's own branches and
+  working tree are left untouched.
+  """
 
   @behaviour PtcManager.Deployments.RevisionSource
 
@@ -8,8 +15,9 @@ defmodule PtcManager.Deployments.LocalRevisionSource do
 
   @impl true
   def latest(%Repository{} = repository) do
-    with {:ok, path} <- Checkout.available_path(repository),
-         {:ok, sha} <- GitProbe.branch_sha(path, repository.default_branch) do
+    updater = Application.fetch_env!(:ptc_manager, :source_updater)
+
+    with {:ok, %{sha: sha}} <- updater.refresh(repository) do
       {:ok, sha}
     end
   end
