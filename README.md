@@ -311,8 +311,9 @@ The app launcher must write its process ID to `run/manager.pid` before `exec`.
 Keep `app` as a symlink into `releases/`, with an immutable `RELEASE_SHA` in each
 release. Register `ptc_manager` in Configuration to make its deployment visible.
 
-Deploy uses the **committed default branch in the registered local checkout**.
-Fetch/merge upstream changes first; uncommitted edits are excluded. The launchd
+Deploy uses the **GitHub default branch, fetched into the registered local
+checkout**. Each update check fetches `origin/<default branch>`; the checkout's
+own branches, unpushed commits, and uncommitted edits are never deployed. The launchd
 worker archives the requested SHA, runs its `scripts/ptc/deploy` command outside
 the web process, builds a production release, backs up SQLite, atomically swaps
 the release symlink, and stops the old app so launchd starts the replacement.
