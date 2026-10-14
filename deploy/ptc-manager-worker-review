@@ -17,6 +17,9 @@ import shutil
 import fcntl
 
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
+if sys.platform == "darwin":
+    BINARIES = {kind: shutil.which(name) or path for (kind, path), name in
+                zip(BINARIES.items(), ("codex", "claude", "cursor-agent"))}
 
 
 class CodexSessionEvents:

@@ -285,6 +285,56 @@ mix setup
 mix phx.server
 ```
 
+### macOS background services and deployment
+
+A macOS host can run the release, Herdr, and the deployment worker as launchd
+system services with `UserName` set to the maintainer account. Source checkouts
+and managed worktrees can live under `~/developer`; release files, configuration,
+logs, and SQLite data live in a separate service root. These services survive
+logout. FileVault still requires a disk unlock after a cold boot.
+
+Set `PTC_MACOS_SERVICE_ROOT` to the absolute service root. Install
+`deploy/macos-deploy-host`, `deploy/ptc-manager-worker-review`,
+`deploy/ptc-manager-worker-agent-login`, and `deploy/ptc-operation` in its `bin`
+directory. Update these copies from the revision being deployed before each
+deployment; the deployment worker does not install host helpers. Restart the
+worker after replacing its script, while no deployment is active. Run the host
+helper as a separate launchd job:
+
+```sh
+macos-deploy-host worker /absolute/service/root
+```
+
+The worker needs `PTC_MACOS_SOURCE` pointing to the registered `ptc_manager`
+checkout and the same `DATABASE_PATH`, `HOME`, `PATH`, and `PORT` as the app.
+The app launcher must write its process ID to `run/manager.pid` before `exec`.
+Keep `app` as a symlink into `releases/`, with an immutable `RELEASE_SHA` in each
+release. Register `ptc_manager` in Configuration to make its deployment visible.
+
+Deploy uses the **committed default branch in the registered local checkout**.
+Fetch/merge upstream changes first; uncommitted edits are excluded. The launchd
+worker archives the requested SHA, runs its `scripts/ptc/deploy` command outside
+the web process, builds a production release, backs up SQLite, atomically swaps
+the release symlink, and stops the old app so launchd starts the replacement.
+A failed health check restores the previous executable. Database migrations
+are not automatically reversed; the pre-deployment backup remains available.
+The worker only deploys `andreasronge/ptc_manager` from `PTC_MACOS_SOURCE`.
+
+With no `PTC_HERDR_RUN_AS_USER`, model discovery and independent reviews execute
+as the local service account with a scrubbed child environment. The macOS
+review helper resolves `codex`, `claude`, and `cursor-agent` on that account's
+`PATH`. Execution profiles → Refresh models queries the actual installed CLIs:
+Codex and Cursor return account catalogs; Claude returns its SDK initialization
+catalog without starting a model turn. Claude aliases do not prove account
+access. Sign in as the service account, then refresh; unavailable catalogs do
+not replace saved profile settings. Agent launch checks authentication when
+`PTC_MACOS_SERVICE_ROOT` is configured, so signed-out agents fail before creating
+an unattended login prompt. Enable the desired kinds in `PTC_AGENT_PROFILES_JSON`.
+
+Private Tailscale HTTPS can proxy the loopback app listener; SSH over the same
+network reaches Herdr. Installing agents does not enable job dispatch or
+GitHub synchronization. Those features still require explicit configuration.
+
 ### Managed expensive commands remain optional
 
 Repositories keep their ordinary build, test, lint, and run commands. On a Mac,

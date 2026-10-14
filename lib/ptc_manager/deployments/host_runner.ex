@@ -1,4 +1,4 @@
-defmodule PtcManager.Deployments.SystemdRunner do
+defmodule PtcManager.Deployments.HostRunner do
   @moduledoc false
 
   @behaviour PtcManager.Deployments.Runner
@@ -30,12 +30,12 @@ defmodule PtcManager.Deployments.SystemdRunner do
 
   @impl true
   def status(%Deployment{}) do
-    case Application.get_env(:ptc_manager, :deployment_systemctl_status_command) do
+    case Application.get_env(:ptc_manager, :deployment_status_command) do
       command when is_binary(command) and command != "" ->
         args =
           Application.get_env(
             :ptc_manager,
-            :deployment_systemctl_status_args,
+            :deployment_status_args,
             ["is-active", "--quiet", @unit]
           )
 
@@ -100,12 +100,12 @@ defmodule PtcManager.Deployments.SystemdRunner do
   end
 
   defp trigger do
-    case Application.get_env(:ptc_manager, :deployment_systemctl_command) do
+    case Application.get_env(:ptc_manager, :deployment_trigger_command) do
       command when is_binary(command) and command != "" ->
         args =
           Application.get_env(
             :ptc_manager,
-            :deployment_systemctl_args,
+            :deployment_trigger_args,
             ["-n", "/bin/systemctl", "start", "--no-block", @unit]
           )
 

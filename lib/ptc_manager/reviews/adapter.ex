@@ -61,8 +61,8 @@ defmodule PtcManager.Reviews.Adapter do
     try do
       with :ok <- File.write(request, Jason.encode!(body), [:exclusive]),
            :ok <- File.chmod(request, 0o640),
-           {_output, 0} <- WorkerHelper.run(@helper, ["review", request, result]),
-           {data, 0} <- WorkerHelper.run(@helper, ["read-result", result]),
+           {_output, 0} <- WorkerHelper.run(helper(), ["review", request, result]),
+           {data, 0} <- WorkerHelper.run(helper(), ["read-result", result]),
            {:ok, %{"result" => decoded, "session_id" => session_id} = envelope} <-
              Jason.decode(data),
            true <- PtcManager.Reviews.valid_result?(decoded),
@@ -102,7 +102,7 @@ defmodule PtcManager.Reviews.Adapter do
   end
 
   def models(kind) when kind in ~w(codex claude cursor) do
-    case WorkerHelper.run(@helper, ["models", kind]) do
+    case WorkerHelper.run(helper(), ["models", kind]) do
       {data, 0} ->
         with {:ok, %{"models" => models} = catalog} <- Jason.decode(data),
              true <- is_list(models) and length(models) <= 500,
@@ -124,4 +124,6 @@ defmodule PtcManager.Reviews.Adapter do
     do: is_binary(id) and is_binary(name) and byte_size(id) <= 120 and byte_size(name) <= 300
 
   defp valid_model?(_), do: false
+
+  defp helper, do: Application.get_env(:ptc_manager, :review_helper, @helper)
 end

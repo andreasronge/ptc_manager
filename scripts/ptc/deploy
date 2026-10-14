@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+if [ "${PTC_DEPLOY_PLATFORM:-}" = macos ]; then
+  exec ./deploy/macos-build
+fi
+
 requested_sha=${PTC_DEPLOY_SHA:-}
 source_archive=${PTC_DEPLOY_SOURCE_ARCHIVE:-}
 deployment_id=${PTC_DEPLOYMENT_ID:-}

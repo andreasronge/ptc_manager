@@ -430,8 +430,8 @@ if config_env() == :test do
 end
 
 if config_env() == :prod do
-  config :ptc_manager, :deployment_systemctl_command, "/usr/bin/sudo"
-  config :ptc_manager, :deployment_systemctl_status_command, "/bin/systemctl"
+  config :ptc_manager, :deployment_trigger_command, "/usr/bin/sudo"
+  config :ptc_manager, :deployment_status_command, "/bin/systemctl"
 
   raw_admin_password = System.get_env("PTC_MANAGER_PASSWORD")
 
@@ -512,4 +512,22 @@ if config_env() == :prod do
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.
+end
+
+if config_env() == :prod and :os.type() == {:unix, :darwin} do
+  if root = System.get_env("PTC_MACOS_SERVICE_ROOT") do
+    host = Path.join(root, "bin/macos-deploy-host")
+
+    config :ptc_manager,
+      deployment_revision_source: PtcManager.Deployments.LocalRevisionSource,
+      deployment_trigger_command: host,
+      deployment_trigger_args: ["trigger", root],
+      deployment_status_command: host,
+      deployment_status_args: ["status", root],
+      deployment_spool_path: Path.join(root, "data/deployments"),
+      deployed_sha_path: Path.join(root, "app/RELEASE_SHA"),
+      review_helper: Path.join(root, "bin/ptc-manager-worker-review"),
+      worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
+      verify_agent_login: true
+  end
 end
