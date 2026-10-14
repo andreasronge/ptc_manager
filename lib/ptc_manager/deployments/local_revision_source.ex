@@ -1,5 +1,5 @@
 defmodule PtcManager.Deployments.LocalRevisionSource do
-  @moduledoc "Demo-only revision source backed by the verified local checkout."
+  @moduledoc "Revision source backed by the default branch of a verified local checkout."
 
   @behaviour PtcManager.Deployments.RevisionSource
 

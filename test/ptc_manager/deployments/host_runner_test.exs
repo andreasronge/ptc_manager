@@ -1,7 +1,7 @@
-defmodule PtcManager.Deployments.SystemdRunnerTest do
+defmodule PtcManager.Deployments.HostRunnerTest do
   use ExUnit.Case, async: false
 
-  alias PtcManager.Deployments.{Deployment, SystemdRunner}
+  alias PtcManager.Deployments.{Deployment, HostRunner}
   alias PtcManager.Operations.Repository
   alias PtcManager.Repository.Contract
 
@@ -10,19 +10,19 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
       Path.join(System.tmp_dir!(), "ptc-systemd-runner-#{System.unique_integer([:positive])}")
 
     previous_spool = Application.get_env(:ptc_manager, :deployment_spool_path)
-    previous_command = Application.get_env(:ptc_manager, :deployment_systemctl_command)
-    previous_args = Application.get_env(:ptc_manager, :deployment_systemctl_args)
+    previous_command = Application.get_env(:ptc_manager, :deployment_trigger_command)
+    previous_args = Application.get_env(:ptc_manager, :deployment_trigger_args)
 
     on_exit(fn ->
       restore(:deployment_spool_path, previous_spool)
-      restore(:deployment_systemctl_command, previous_command)
-      restore(:deployment_systemctl_args, previous_args)
+      restore(:deployment_trigger_command, previous_command)
+      restore(:deployment_trigger_args, previous_args)
       File.rm_rf!(spool)
     end)
 
     Application.put_env(:ptc_manager, :deployment_spool_path, spool)
-    Application.put_env(:ptc_manager, :deployment_systemctl_command, "/usr/bin/true")
-    Application.put_env(:ptc_manager, :deployment_systemctl_args, [])
+    Application.put_env(:ptc_manager, :deployment_trigger_command, "/usr/bin/true")
+    Application.put_env(:ptc_manager, :deployment_trigger_args, [])
 
     repository = %Repository{
       id: 7,
@@ -44,7 +44,7 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
       deployment_timeout_minutes: 20
     }
 
-    assert :ok = SystemdRunner.start(deployment, contract)
+    assert :ok = HostRunner.start(deployment, contract)
     request = spool |> Path.join("deployment-42.request.json") |> File.read!() |> Jason.decode!()
     assert request["deployment_id"] == 42
     assert request["requested_sha"] == String.duplicate("a", 40)
@@ -58,19 +58,19 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
       Path.join(System.tmp_dir!(), "ptc-systemd-failure-#{System.unique_integer([:positive])}")
 
     previous_spool = Application.get_env(:ptc_manager, :deployment_spool_path)
-    previous_command = Application.get_env(:ptc_manager, :deployment_systemctl_command)
-    previous_args = Application.get_env(:ptc_manager, :deployment_systemctl_args)
+    previous_command = Application.get_env(:ptc_manager, :deployment_trigger_command)
+    previous_args = Application.get_env(:ptc_manager, :deployment_trigger_args)
 
     on_exit(fn ->
       restore(:deployment_spool_path, previous_spool)
-      restore(:deployment_systemctl_command, previous_command)
-      restore(:deployment_systemctl_args, previous_args)
+      restore(:deployment_trigger_command, previous_command)
+      restore(:deployment_trigger_args, previous_args)
       File.rm_rf!(spool)
     end)
 
     Application.put_env(:ptc_manager, :deployment_spool_path, spool)
-    Application.put_env(:ptc_manager, :deployment_systemctl_command, "/usr/bin/false")
-    Application.put_env(:ptc_manager, :deployment_systemctl_args, [])
+    Application.put_env(:ptc_manager, :deployment_trigger_command, "/usr/bin/false")
+    Application.put_env(:ptc_manager, :deployment_trigger_args, [])
 
     repository = %Repository{
       id: 7,
@@ -92,7 +92,7 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
     }
 
     assert {:error, {:deployment_trigger_failed, 1, _output}} =
-             SystemdRunner.start(deployment, contract)
+             HostRunner.start(deployment, contract)
 
     refute File.exists?(Path.join(spool, "deployment-9.request.json"))
   end
@@ -102,24 +102,24 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
       Path.join(System.tmp_dir!(), "ptc-systemd-stale-#{System.unique_integer([:positive])}")
 
     previous_spool = Application.get_env(:ptc_manager, :deployment_spool_path)
-    previous_command = Application.get_env(:ptc_manager, :deployment_systemctl_command)
-    previous_args = Application.get_env(:ptc_manager, :deployment_systemctl_args)
-    previous_status = Application.get_env(:ptc_manager, :deployment_systemctl_status_command)
+    previous_command = Application.get_env(:ptc_manager, :deployment_trigger_command)
+    previous_args = Application.get_env(:ptc_manager, :deployment_trigger_args)
+    previous_status = Application.get_env(:ptc_manager, :deployment_status_command)
 
     on_exit(fn ->
       restore(:deployment_spool_path, previous_spool)
-      restore(:deployment_systemctl_command, previous_command)
-      restore(:deployment_systemctl_args, previous_args)
-      restore(:deployment_systemctl_status_command, previous_status)
+      restore(:deployment_trigger_command, previous_command)
+      restore(:deployment_trigger_args, previous_args)
+      restore(:deployment_status_command, previous_status)
       File.rm_rf!(spool)
     end)
 
     File.mkdir_p!(spool)
     File.write!(Path.join(spool, "deployment-1.request.json"), "stale")
     Application.put_env(:ptc_manager, :deployment_spool_path, spool)
-    Application.put_env(:ptc_manager, :deployment_systemctl_command, "/usr/bin/true")
-    Application.put_env(:ptc_manager, :deployment_systemctl_args, [])
-    Application.delete_env(:ptc_manager, :deployment_systemctl_status_command)
+    Application.put_env(:ptc_manager, :deployment_trigger_command, "/usr/bin/true")
+    Application.put_env(:ptc_manager, :deployment_trigger_args, [])
+    Application.delete_env(:ptc_manager, :deployment_status_command)
 
     repository = %Repository{
       id: 7,
@@ -140,7 +140,7 @@ defmodule PtcManager.Deployments.SystemdRunnerTest do
       deployment_timeout_minutes: 20
     }
 
-    assert :ok = SystemdRunner.start(deployment, contract)
+    assert :ok = HostRunner.start(deployment, contract)
     refute File.exists?(Path.join(spool, "deployment-1.request.json"))
     assert File.exists?(Path.join(spool, "deployment-2.request.json"))
   end

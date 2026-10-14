@@ -19,6 +19,15 @@ context = review.__globals__
 
 
 class ReviewerContract(unittest.TestCase):
+    def test_macos_catalog_uses_installed_agent_paths(self):
+        paths = {'codex': '/opt/homebrew/bin/codex',
+                 'claude': '/opt/homebrew/bin/claude',
+                 'cursor-agent': '/Users/worker/.local/bin/cursor-agent'}
+        with patch('sys.platform', 'darwin'), patch('shutil.which', side_effect=paths.get):
+            local = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
+        self.assertEqual(local['BINARIES'], {'codex': paths['codex'],
+                         'claude': paths['claude'], 'cursor': paths['cursor-agent']})
+
     def test_capture_initialization_failure_does_not_change_command_result(self):
         with tempfile.TemporaryDirectory() as root:
             with patch.dict(context, ensure_shared_directory=lambda *a: (_ for _ in ()).throw(RuntimeError("unsafe artifact root"))):

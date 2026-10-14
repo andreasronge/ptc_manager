@@ -468,6 +468,7 @@ defmodule PtcManager.PublisherTest do
       Repo.start_link(
         name: nil,
         database: database,
+        busy_timeout: 200,
         pool_size: 3,
         pool: DBConnection.ConnectionPool
       )

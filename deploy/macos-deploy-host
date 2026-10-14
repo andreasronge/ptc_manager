@@ -1,0 +1,221 @@
+#!/usr/bin/python3 -I
+"""Launchd-supervised exact-revision deployment worker (no root privileges)."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+
+
+def atomic_json(path, value):
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    temporary.write_text(json.dumps(value) + '\n')
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def validate(request, root):
+    if type(request.get('deployment_id')) is not int or request['deployment_id'] <= 0:
+        raise ValueError('invalid_deployment_id')
+    sha = request.get('requested_sha', '')
+    if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}(?:[0-9a-f]{24})?', sha):
+        raise ValueError('invalid_requested_sha')
+    source = Path(request.get('source_path', '')).resolve()
+    configured = Path(os.environ['PTC_MACOS_SOURCE']).resolve()
+    if source != configured or request.get('repository') != 'andreasronge/ptc_manager':
+        raise ValueError('deployment_repository_not_allowed')
+    if request.get('command') != 'scripts/ptc/deploy':
+        raise ValueError('unexpected_deployment_command')
+    timeout = request.get('timeout_seconds')
+    if type(timeout) is not int or not 1 <= timeout <= 7200:
+        raise ValueError('invalid_timeout')
+    status = root / 'data/deployments' / f"deployment-{request['deployment_id']}.status.json"
+    if request.get('status_path') != str(status):
+        raise ValueError('invalid_status_path')
+    return source, sha, timeout, status
+
+
+def execute(args, cwd, log, deadline, env):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('deployment_timeout')
+    process = subprocess.Popen(args, cwd=cwd, env=env, stdout=log, stderr=log,
+                               stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        code = process.wait(timeout=remaining)
+        if code:
+            raise RuntimeError(f'command_failed: {args[0]} (exit {code})')
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def extract_archive(archive, directory):
+    with tarfile.open(archive) as bundle:
+        for member in bundle.getmembers():
+            path = directory / member.name
+            if not path.resolve().is_relative_to(directory.resolve()):
+                raise ValueError('archive_path_escape')
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise ValueError('archive_special_file')
+            if member.issym() or member.islnk():
+                target = path.parent / member.linkname if member.issym() else directory / member.linkname
+                if not target.resolve().is_relative_to(directory.resolve()):
+                    raise ValueError('archive_link_escape')
+        bundle.extractall(directory)
+
+
+def activate(root, release):
+    temporary = root / 'app.next'
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(release, target_is_directory=True)
+    temporary.replace(root / 'app')
+
+
+def wait_health(root, deadline, previous_pid=None):
+    url = 'http://127.0.0.1:' + os.environ.get('PORT', '4000') + '/health'
+    while time.monotonic() < deadline:
+        try:
+            pid = int((root / 'run/manager.pid').read_text())
+            if previous_pid is not None and pid == previous_pid:
+                time.sleep(1)
+                continue
+            os.kill(pid, 0)
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if response.status == 200:
+                    return
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(1)
+    raise RuntimeError('new_release_health_check_failed')
+
+
+def deploy(request, root):
+    source, sha, timeout, status = validate(request, root)
+    release_id = f"{sha[:12]}-d{request['deployment_id']}-{time.time_ns()}"
+    directory = root / 'builds' / release_id
+    directory.mkdir(parents=True)
+    candidate = root / 'releases' / release_id
+    deadline = time.monotonic() + timeout
+    environment = {k: v for k, v in os.environ.items() if k in ('HOME', 'PATH', 'LANG', 'TMPDIR', 'SSL_CERT_FILE')}
+    environment['PTC_DEPLOY_PLATFORM'] = 'macos'
+    old = (root / 'app').resolve()
+    old_pid = int((root / 'run/manager.pid').read_text())
+    installed = False
+    try:
+        with (root / 'logs' / f'{release_id}.log').open('wb') as log:
+            actual = subprocess.check_output(['git', '-C', str(source), 'rev-parse', sha + '^{commit}'],
+                                             env=environment, timeout=15, text=True).strip()
+            if actual != sha:
+                raise ValueError('requested_revision_mismatch')
+            archive = directory / 'source.tar'
+            execute(['git', '-C', str(source), 'archive', '--format=tar', '-o', str(archive), sha],
+                    source, log, deadline, environment)
+            checkout = directory / 'source'
+            checkout.mkdir()
+            extract_archive(archive, checkout)
+            execute(['./scripts/ptc/deploy'], checkout, log, deadline, environment)
+            shutil.copytree(checkout / '_build/prod/rel/ptc_manager', candidate)
+            (candidate / 'RELEASE_SHA').write_text(sha + '\n')
+            # Preserve a recoverable database before the new release runs migrations.
+            backup = root / 'data/backups' / (release_id + '.db')
+            with sqlite3.connect(os.environ['DATABASE_PATH']) as database, sqlite3.connect(backup) as destination:
+                database.backup(destination)
+            activate(root, candidate)
+            installed = True
+            execute([str(old / 'bin/ptc_manager'), 'stop'], root, log, deadline, os.environ.copy())
+            wait_health(root, min(deadline, time.monotonic() + 60), old_pid)
+        outcome = {'state': 'completed', 'release_id': release_id,
+                   'status_text': 'Installed the exact Git revision; local health check passed.'}
+    except Exception as error:
+        detail = str(error)[:1500]
+        if installed:
+            failed_pid = int((root / 'run/manager.pid').read_text())
+            activate(root, old)
+            try:
+                subprocess.run([str(candidate / 'bin/ptc_manager'), 'stop'], env=os.environ.copy(),
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+                wait_health(root, time.monotonic() + 60, failed_pid)
+                detail += '; previous executable restored (database backup retained)'
+            except Exception as rollback_error:
+                detail += '; executable rollback health check failed: ' + str(rollback_error)[:300]
+        outcome = {'state': 'failed', 'release_id': release_id, 'error': detail,
+                   'status_text': 'Deployment failed; see the host build log.'}
+    finally:
+        shutil.rmtree(directory)
+    atomic_json(status, dict(outcome, deployment_id=request['deployment_id'], requested_sha=sha))
+
+
+def running(spool):
+    try:
+        pid = int((spool / 'worker.pid').read_text())
+        os.kill(pid, 0)
+        with (spool / 'worker.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return False
+            except BlockingIOError:
+                return True
+    except (OSError, ValueError):
+        return False
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in ('worker', 'trigger', 'status'):
+        raise ValueError('expected worker|trigger|status SERVICE_ROOT')
+    root = Path(sys.argv[2]).resolve()
+    spool = root / 'data/deployments'
+    spool.mkdir(parents=True, exist_ok=True)
+    command = sys.argv[1]
+    if command == 'trigger':
+        if not running(spool):
+            raise RuntimeError('launchd_deployment_worker_not_running')
+        return
+    if command == 'status':
+        if (spool / 'active.json').exists() and running(spool):
+            return
+        sys.exit(3)
+    with (spool / 'worker.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (spool / 'worker.pid').write_text(str(os.getpid()))
+        # A restarted worker cannot safely resume an interrupted release swap.
+        active = spool / 'active.json'
+        if active.exists():
+            request = json.loads(active.read_text())
+            _, sha, _, status = validate(request, root)
+            atomic_json(status, {'deployment_id': request['deployment_id'], 'requested_sha': sha,
+                                 'state': 'failed', 'error': 'host_worker_restarted',
+                                 'status_text': 'Deployment worker restarted; inspect the installed release.'})
+            (spool / f"deployment-{request['deployment_id']}.request.json").unlink(missing_ok=True)
+            active.unlink()
+        while True:
+            for path in sorted(spool.glob('deployment-*.request.json')):
+                try:
+                    request = json.loads(path.read_text())
+                    validate(request, root)
+                except (ValueError, TypeError, KeyError) as error:
+                    print(f'Rejected {path.name}: {error}', flush=True)
+                    path.replace(path.with_suffix('.invalid'))
+                    continue
+                atomic_json(active, request)
+                try:
+                    deploy(request, root)
+                finally:
+                    path.unlink(missing_ok=True)
+                    active.unlink(missing_ok=True)
+            time.sleep(1)
+
+
+if __name__ == '__main__':
+    main()

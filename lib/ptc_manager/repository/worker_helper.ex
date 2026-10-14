@@ -1,9 +1,9 @@
 defmodule PtcManager.Repository.WorkerHelper do
   @moduledoc """
-  Runs one root-owned helper as the dedicated Herdr worker account.
+  Runs a helper as the configured Herdr worker, or as the local service account.
 
   An agent's persistent configuration lives in the worker's own home directory,
-  which only the worker may write. PtcManager reaches each of those files
+  which only the worker may write. On a separate-account host, PtcManager reaches those files
   through a narrowly scoped sudo rule, so every helper shares this invocation
   and the same worker boundary check.
   """
@@ -16,9 +16,10 @@ defmodule PtcManager.Repository.WorkerHelper do
 
   @doc "Runs the helper as the worker and returns its combined output and status."
   def run(helper, args) when is_binary(helper) and is_list(args) do
-    user = Application.fetch_env!(:ptc_manager, :herdr_run_as_user)
+    user = Application.get_env(:ptc_manager, :herdr_run_as_user)
+    {binary, arguments} = CommandEnvironment.command(helper, args, user)
 
-    System.cmd("/usr/bin/sudo", ["-n", "-H", "-u", user, "--", helper | args],
+    System.cmd(binary, arguments,
       env: CommandEnvironment.scrub(),
       stderr_to_stdout: true
     )
