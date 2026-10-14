@@ -749,7 +749,7 @@ defmodule PtcManager.MaintainerActionsTest do
     previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
 
     on_exit(fn ->
-      Enum.each(previous, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+      Enum.each(previous, fn {key, value} -> restore_test_env(key, value) end)
     end)
 
     Application.put_env(:ptc_manager, :execution_artifact_root, System.tmp_dir!())
