@@ -292,13 +292,20 @@ defmodule PtcManager.Collections do
   @doc "The live run a member issue belongs to, whose base branch it inherits."
   def member_run(repo, %Issue{} = issue), do: parent_run(repo, issue)
 
+  # A paused run holds its queued jobs rather than cancelling them: a retry is
+  # queued before the reconciler lifts the pause it answers.
   @doc false
   def dispatch_allowed(%Job{} = job, remote) do
+    run = parent_run(Repo, job.issue)
+
     cond do
       not job.repository.enabled ->
         {:error, :repository_disabled}
 
-      not match?(%Run{state: "active"}, parent_run(Repo, job.issue)) ->
+      match?(%Run{state: "paused"}, run) ->
+        {:error, :collection_run_paused}
+
+      not match?(%Run{state: "active"}, run) ->
         {:error, :no_active_collection_run}
 
       remote.workflow_label != "ptc:ready" or remote.workflow_label_conflict ->
@@ -319,6 +326,22 @@ defmodule PtcManager.Collections do
       true ->
         :ok
     end
+  end
+
+  @doc "Queued jobs a paused run admitted, which dispatch passes over until it resumes."
+  def held_job_ids do
+    from(job in Job,
+      join: approval in assoc(job, :approval),
+      join: member in assoc(job, :issue),
+      join: umbrella in Issue,
+      on:
+        umbrella.repository_id == member.repository_id and
+          umbrella.number == member.parent_issue_number,
+      join: run in Run,
+      on: run.issue_id == umbrella.id and run.state == "paused",
+      where: job.state == "queued" and approval.decision == "start_implementation_collection",
+      select: job.id
+    )
   end
 
   ## Reconciliation

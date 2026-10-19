@@ -997,7 +997,9 @@ moved pull request, a member back on `ptc:ready`, an answered decision.
 same job, head, or action. A changed sub-issue list on GitHub pauses the run
 until **Accept changes**, which refuses to drop a member with work in flight.
 **Pause** and **Cancel run** cancel queued collection actions, let running
-agents finish, and change nothing on GitHub. Every automatic effect is one
+agents finish, and change nothing on GitHub. A member job queued while the
+run is paused, such as a **Retry** of the stop that paused it, waits until
+the run resumes; if the run ends instead, dispatch cancels it. Every automatic effect is one
 row in the run's step log, written with the effect, so a bound is a row and
 a concurrent reconcile is a no-op.
 
