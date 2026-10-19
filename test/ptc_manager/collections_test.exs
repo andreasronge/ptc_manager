@@ -383,7 +383,7 @@ defmodule PtcManager.CollectionsTest do
 
       job = job |> Repo.preload([:approval, :repository, :issue])
 
-      assert {:error, :no_active_collection_run} =
+      assert {:error, :collection_run_paused} =
                PtcManager.AutoImplementation.dispatch_allowed(job, remote)
 
       {:ok, _resumed} = Collections.resume(run.id, "andreas")
@@ -784,9 +784,33 @@ defmodule PtcManager.CollectionsTest do
       refute Repo.get!(Run, run.id).escalation_pending
 
       # The maintainer retries by hand: a newer job clears the pause.
-      {:ok, _manual} = Operations.retry_stopped_job(second_retry.id, "andreas")
+      {:ok, manual} = Operations.retry_stopped_job(second_retry.id, "andreas")
+
+      # Dispatch can run before the reconciler lifts the pause. The retry waits
+      # for it instead of being cancelled, and does not hold up other work.
+      assert is_nil(Operations.next_queued_job())
+
+      remote = %{
+        state: "open",
+        content_digest: first.content_digest,
+        github_updated_at: first.github_updated_at,
+        blocking_issues: [],
+        dependency_overflow: false,
+        workflow_label: "ptc:ready",
+        workflow_label_conflict: false,
+        structure_projected: true,
+        sub_issues: %{"nodes" => [], "total" => 0},
+        github_assignees: %{"logins" => []}
+      }
+
+      assert {:error, :collection_run_paused} =
+               Operations.lease_job(manual.id, "herdr:default", remote, 60_000)
+
+      assert %Job{state: "queued"} = Repo.reload!(manual)
+
       assert :ok = Collections.reconcile(repository.id)
       assert %Run{state: "active", pause_kind: nil} = Repo.get!(Run, run.id)
+      assert Operations.next_queued_job().id == manual.id
     end
 
     test "a failed escalation is attempted once more, then the console is the notification" do

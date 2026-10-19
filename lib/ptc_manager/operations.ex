@@ -2234,6 +2234,7 @@ defmodule PtcManager.Operations do
     else
       Job
       |> where([job], job.state == "queued")
+      |> where([job], job.id not in subquery(PtcManager.Collections.held_job_ids()))
       |> order_by([job], asc: job.inserted_at, asc: job.id)
       |> limit(1)
       |> preload([:approval, :issue, :repository])
@@ -2410,6 +2411,9 @@ defmodule PtcManager.Operations do
 
           {:error, :delivery_priority} ->
             Repo.rollback(:delivery_priority)
+
+          {:error, :collection_run_paused} ->
+            Repo.rollback(:collection_run_paused)
 
           {:error, reason} ->
             if WorktreeSecurity.infrastructure_error?(reason) do
