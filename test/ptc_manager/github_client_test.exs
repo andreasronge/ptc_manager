@@ -94,6 +94,19 @@ defmodule PtcManager.GitHubClientTest do
     assert Client.review_blob_expressions(sha <> "/docs/rules.md") == [sha <> ":docs/rules.md"]
   end
 
+  # tyraorg/api#157 linked a 102,844-byte design document; job 329's review
+  # failed before it started.
+  test "a linked document too large or binary to inline is omitted, not unavailable" do
+    assert Client.review_blob_fit(%{"oid" => "abc", "isBinary" => false, "byteSize" => 100_000}) ==
+             {:fetch, "abc"}
+
+    assert Client.review_blob_fit(%{"oid" => "abc", "isBinary" => false, "byteSize" => 102_844}) ==
+             {:error, {:review_document_omitted, "102844 bytes, blob abc"}}
+
+    assert Client.review_blob_fit(%{"oid" => "abc", "isBinary" => true, "byteSize" => 10}) ==
+             {:error, {:review_document_omitted, "binary, blob abc"}}
+  end
+
   test "prefers Retry-After response timing" do
     assert Client.retry_delay_ms([{~c"retry-after", ~c"7"}], 1_000) == 7_000
   end

@@ -66,8 +66,8 @@ defmodule PtcManager.GitHub.Client do
   end
 
   def review_context(repository, {:blob, path}) do
-    with {:ok, %{"oid" => oid, "isBinary" => false, "byteSize" => size}} when size <= 100_000 <-
-           review_blob_metadata(repository, path) do
+    with {:ok, metadata} <- review_blob_metadata(repository, path),
+         {:fetch, oid} <- review_blob_fit(metadata) do
       query =
         "query($owner: String!, $name: String!, $expression: String!) { repository(owner: $owner, name: $name) { item: object(expression: $expression) { ... on Blob { text byteSize } } } }"
 
@@ -80,9 +80,23 @@ defmodule PtcManager.GitHub.Client do
          )}
       end
     else
+      {:error, {:review_document_omitted, _why}} = omitted -> omitted
       _ -> {:error, :review_requirements_unavailable}
     end
   end
+
+  @doc false
+  # A document GitHub has but that cannot be inlined is settled evidence; the
+  # reviewer reads it in its checkout instead.
+  # The blob id stays in the note, so a changed document changes the evidence.
+  def review_blob_fit(%{"oid" => oid, "isBinary" => true}),
+    do: {:error, {:review_document_omitted, "binary, blob #{oid}"}}
+
+  def review_blob_fit(%{"oid" => oid, "byteSize" => size}) when size <= 100_000,
+    do: {:fetch, oid}
+
+  def review_blob_fit(%{"oid" => oid, "byteSize" => size}),
+    do: {:error, {:review_document_omitted, "#{size} bytes, blob #{oid}"}}
 
   @doc false
   def review_blob_expressions(path) do

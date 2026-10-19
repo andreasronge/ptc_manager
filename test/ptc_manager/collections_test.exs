@@ -813,6 +813,130 @@ defmodule PtcManager.CollectionsTest do
       assert Operations.next_queued_job().id == manual.id
     end
 
+    # tyraorg/api run 6 paused 12 seconds after it started, on the job run 5
+    # had cancelled.
+    test "a new run starts a member afresh whose last attempt ended before it" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      earlier = start!(umbrella)
+      :ok = Collections.reconcile(repository.id)
+      cancelled = job_for(first)
+
+      cancelled
+      |> Job.changeset(%{state: "cancelled", ended_at: DateTime.utc_now(), last_error: "gone"})
+      |> Repo.update!()
+
+      {:ok, _ended} = Collections.cancel(earlier.id, "andreas")
+      run = start!(Repo.reload!(umbrella))
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "active"} = Repo.get!(Run, run.id)
+      assert %Job{state: "queued"} = again = job_for(first)
+      assert again.id != cancelled.id
+      assert [%Step{kind: "admit", scope: scope}] = steps(run)
+      assert scope == "1:after:#{cancelled.id}"
+    end
+
+    # A closed pull request keeps its own pause; admission would refuse the
+    # member anyway, and the run would wait without saying why.
+    test "a new run does not start afresh an attempt whose pull request was closed" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      earlier = start!(umbrella, %{auto_recover: false})
+      :ok = Collections.reconcile(repository.id)
+      published = job_for(first)
+      open_publication!(first, published, pr_state: "closed")
+
+      published
+      |> Repo.reload!()
+      |> Job.changeset(%{state: "cancelled", ended_at: DateTime.utc_now(), last_error: "closed"})
+      |> Repo.update!()
+
+      {:ok, _ended} = Collections.cancel(earlier.id, "andreas")
+      run = start!(Repo.reload!(umbrella), %{auto_recover: false})
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_scope: scope} = Repo.get!(Run, run.id)
+      assert scope == "member:1:job:#{published.id}:pr_closed"
+    end
+
+    # Retry answers an unanswered stop report and acknowledges it.
+    test "a new run does not start afresh an attempt with an unanswered stop report" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      earlier = start!(umbrella, %{auto_recover: false})
+      :ok = Collections.reconcile(repository.id)
+      stopped = job_for(first)
+      now = DateTime.utc_now()
+
+      stopped
+      |> Job.changeset(%{
+        state: "failed",
+        stop_report: %{
+          "reason_code" => "environment_broken",
+          "summary" => "No compiler.",
+          "detail" => "d",
+          "progress" => "none"
+        },
+        stop_reported_at: now,
+        ended_at: now
+      })
+      |> Repo.update!()
+
+      {:ok, _ended} = Collections.cancel(earlier.id, "andreas")
+      run = start!(Repo.reload!(umbrella), %{auto_recover: false})
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_scope: scope} = Repo.get!(Run, run.id)
+      assert scope == "member:1:job:#{stopped.id}:stop"
+      assert job_for(first).id == stopped.id
+    end
+
+    test "an attempt started before the run but ended after it still pauses the run" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      {:ok, existing} = Operations.approve_issue_directly(first.id, "andreas")
+      run = start!(Repo.reload!(umbrella), %{auto_recover: false})
+
+      existing
+      |> Job.changeset(%{state: "cancelled", ended_at: DateTime.utc_now(), last_error: "gone"})
+      |> Repo.update!()
+
+      assert :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_kind: "child_attempt_failed"} = Repo.get!(Run, run.id)
+      assert job_for(first).id == existing.id
+    end
+
+    test "resuming over a cancelled attempt starts the member again, once" do
+      repository = repository_fixture()
+      {umbrella, [first]} = collection_fixture(repository, [1])
+      run = start!(umbrella, %{auto_recover: false})
+      :ok = Collections.reconcile(repository.id)
+      cancelled = job_for(first)
+
+      cancelled
+      |> Job.changeset(%{state: "cancelled", ended_at: DateTime.utc_now(), last_error: "gone"})
+      |> Repo.update!()
+
+      :ok = Collections.reconcile(repository.id)
+      assert %Run{state: "paused", pause_kind: "child_attempt_failed"} = Repo.get!(Run, run.id)
+
+      {:ok, _resumed} = Collections.resume(run.id, "andreas")
+      assert :ok = Collections.reconcile(repository.id)
+
+      assert %Job{state: "queued"} = again = job_for(first)
+      assert again.id != cancelled.id
+
+      assert Enum.any?(
+               steps(run),
+               &(&1.kind == "admit" and &1.scope == "1:after:#{cancelled.id}")
+             )
+
+      :ok = Collections.reconcile(repository.id)
+      assert job_for(first).id == again.id
+      assert %Run{state: "active"} = Repo.get!(Run, run.id)
+    end
+
     test "a failed escalation is attempted once more, then the console is the notification" do
       repository = repository_fixture()
       {umbrella, [first]} = collection_fixture(repository, [1])

@@ -994,7 +994,11 @@ and *Recover a stuck member once*, and from then on deterministic code:
 A pause clears by itself when its condition does: a newer attempt, a merged or
 moved pull request, a member back on `ptc:ready`, an answered decision.
 **Resume** is a scoped override that lifts one pause without repeating for the
-same job, head, or action. A changed sub-issue list on GitHub pauses the run
+same job, head, or action. Over an attempt that was cancelled, lost, or failed
+without a stop report, which has no **Retry**, it starts the member again. A
+new run likewise starts afresh a member whose last attempt ended before the
+run started, unless that attempt has a pull request or an unanswered stop
+report, which keep their own recovery. A changed sub-issue list on GitHub pauses the run
 until **Accept changes**, which refuses to drop a member with work in flight.
 **Pause** and **Cancel run** cancel queued collection actions, let running
 agents finish, and change nothing on GitHub. A member job queued while the
