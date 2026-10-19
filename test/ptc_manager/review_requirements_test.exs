@@ -47,6 +47,16 @@ defmodule PtcManager.ReviewRequirementsTest do
       do: {:error, :review_context_missing}
   end
 
+  defmodule OversizedDocument do
+    def review_context(_repository, {:issue, 1}),
+      do:
+        {:ok,
+         %{"body" => "Design: https://github.com/team/private/blob/feature/ska/docs/design.md"}}
+
+    def review_context(_repository, {:blob, "feature/ska/docs/design.md"}),
+      do: {:error, {:review_document_omitted, "102844 bytes, blob b90f485"}}
+  end
+
   defmodule MissingRootIssue do
     def review_context(_repository, _target), do: {:error, :review_context_missing}
   end
@@ -97,6 +107,15 @@ defmodule PtcManager.ReviewRequirementsTest do
     assert text =~ "{:issue, 1890}"
     assert text =~ "{:issue, 1891}"
     assert text =~ "Jobs 106"
+  end
+
+  test "a linked document too large to inline is noted for the reviewer to read" do
+    assert {:ok, text} = Requirements.capture(put_in(job().issue.body, ""), OversizedDocument)
+
+    assert text =~ "Design:"
+    assert text =~ "feature/ska/docs/design.md"
+    assert text =~ "102844 bytes, blob b90f485"
+    assert text =~ "read it in the checked-out repository"
   end
 
   test "the job's own issue going missing still fails preparation" do

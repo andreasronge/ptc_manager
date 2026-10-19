@@ -605,9 +605,45 @@ defmodule PtcManager.Collections do
     publication = job && job.pr_publication
 
     case delivered_without_job(issue, job, run) do
-      %PrPublication{} = delivered -> merged_status(member, issue, job, delivered)
-      nil when is_nil(job) -> classify_unstarted(member, issue)
-      nil -> classify_job(member, issue, job, publication, run)
+      %PrPublication{} = delivered ->
+        merged_status(member, issue, job, delivered)
+
+      nil when is_nil(job) ->
+        classify_unstarted(member, issue)
+
+      nil ->
+        if ended_before?(job, run) and restartable?(job, publication),
+          do: afresh(member, issue, job),
+          else: classify_job(member, issue, job, publication, run)
+    end
+  end
+
+  # Starting a run is the maintainer's answer to every attempt that ended
+  # before it, such as one an earlier run cancelled.
+  defp ended_before?(
+         %Job{ended_at: %DateTime{} = ended_at} = job,
+         %Run{started_at: %DateTime{} = started_at}
+       ),
+       do: job.state in @retired_job_states and DateTime.compare(ended_at, started_at) == :lt
+
+  defp ended_before?(_job, _run), do: false
+
+  # A pull request or an unanswered stop report has its own recovery: admission
+  # refuses the first, and Retry answers the second.
+  defp restartable?(job, publication),
+    do: is_nil(publication) and (is_nil(job.stop_report) or not is_nil(job.stop_acknowledged_at))
+
+  # Judged as if unstarted, but admitted as the attempt after `job`.
+  defp afresh(member, issue, job), do: %{classify_unstarted(member, issue) | job: job}
+
+  # Resuming over an attempt nobody can retry, because it left no stop report,
+  # asks for a new one.
+  defp ended_attempt(member, issue, job, publication, run, reason, scope) do
+    if restartable?(job, publication) and step_exists?(run, "override", scope) do
+      afresh(member, issue, job)
+    else
+      base(member, :attention, job, publication)
+      |> attention("child_attempt_failed", reason, job.id, scope)
     end
   end
 
@@ -735,11 +771,13 @@ defmodule PtcManager.Collections do
         classify_failed(member, issue, job, publication, run)
 
       job.state in ["lost", "cancelled"] ->
-        base(member, :attention, job, publication)
-        |> attention(
-          "child_attempt_failed",
+        ended_attempt(
+          member,
+          issue,
+          job,
+          publication,
+          run,
           "The implementation of ##{issue.number} ended #{job.state}: #{job.last_error || "no detail"}.",
-          job.id,
           "member:#{issue.number}:job:#{job.id}:#{job.state}"
         )
 
@@ -803,11 +841,13 @@ defmodule PtcManager.Collections do
         classify_asked(member, issue, job, publication, run)
 
       true ->
-        base(member, :attention, job, publication)
-        |> attention(
-          "child_attempt_failed",
+        ended_attempt(
+          member,
+          issue,
+          job,
+          publication,
+          run,
           "The implementation of ##{issue.number} failed: #{job.last_error || "no detail"}.",
-          job.id,
           "member:#{issue.number}:job:#{job.id}:failed"
         )
     end

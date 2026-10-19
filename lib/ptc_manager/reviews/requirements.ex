@@ -72,6 +72,23 @@ defmodule PtcManager.Reviews.Requirements do
               scope
             )
 
+          # Too large or binary to inline; the reviewer reads it in its checkout.
+          {:error, {:review_document_omitted, why}} ->
+            {:blob, path} = target
+
+            note =
+              "Linked document #{owner}/#{name}/blob/#{path} was not included (#{why}); read it in the checked-out repository if the review needs it."
+
+            collect(
+              rest,
+              MapSet.put(seen, reference),
+              [note | texts],
+              "",
+              client,
+              left - 1,
+              scope
+            )
+
           {:error, _} ->
             {:error, {:review_requirements_unavailable, owner <> "/" <> name, inspect(target)}}
         end
