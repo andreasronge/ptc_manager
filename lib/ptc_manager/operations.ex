@@ -133,7 +133,7 @@ defmodule PtcManager.Operations do
       case PtcManager.Cluster.Claims.acquire(
              repository_id,
              actor,
-             fn _repository -> :ok end,
+             fn _repository, _checks -> :ok end,
              opts
            ) do
         {:ok, repository, _checks} -> notify_and_return({:ok, repository})

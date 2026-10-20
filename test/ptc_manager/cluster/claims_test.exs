@@ -123,7 +123,7 @@ defmodule PtcManager.Cluster.ClaimsTest do
     repository = repository_fixture(%{enabled: false})
 
     assert {:error, :import_failed, [_beta, _gamma]} =
-             Claims.acquire(repository.id, "maintainer", fn _repository ->
+             Claims.acquire(repository.id, "maintainer", fn _repository, _checks ->
                {:error, :import_failed}
              end)
 

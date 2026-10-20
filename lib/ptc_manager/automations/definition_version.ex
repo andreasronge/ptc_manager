@@ -29,6 +29,24 @@ defmodule PtcManager.Automations.DefinitionVersion do
     timestamps(updated_at: false, type: :utc_datetime_usec)
   end
 
+  @content_fields [
+    :target_type,
+    :execution_profile,
+    :agent_selector,
+    :github_access,
+    :queue_lane,
+    :resource_class,
+    :lock_policy,
+    :timeout_seconds,
+    :result_type,
+    :result_protocol_version,
+    :prompt,
+    :configuration_snapshot
+  ]
+
+  @doc "The fields that make up what a version does, as copied between definitions."
+  def content_fields, do: @content_fields
+
   def changeset(version, attrs) do
     version
     |> cast(attrs, [

@@ -122,6 +122,49 @@ defmodule PtcManager.Machine.ToolInventory do
     do: Application.get_env(:ptc_manager, :tool_inventory_max_age_ms, 1_800_000)
 
   @doc """
+  Turns a summary (this console's or a peer's) back into parsed contexts, so
+  requirements can be evaluated against another member's inventory. Anything
+  malformed counts as not probed.
+  """
+  def from_summary(summary) when is_map(summary) do
+    Map.new(@contexts, fn context ->
+      with %{"captured_at" => at, "tools" => tools} when is_binary(at) and is_map(tools) <-
+             summary[context],
+           {:ok, captured_at, _offset} <- DateTime.from_iso8601(at) do
+        {context,
+         %{
+           context: context,
+           captured_at: captured_at,
+           os: nil,
+           arch: nil,
+           cpu_count: nil,
+           memory_bytes: nil,
+           disk_free_bytes: nil,
+           tools: summary_tools(tools)
+         }}
+      else
+        _missing -> {context, nil}
+      end
+    end)
+  end
+
+  def from_summary(_summary), do: Map.new(@contexts, &{&1, nil})
+
+  defp summary_tools(tools) do
+    for {name, %{"status" => status} = tool} when is_binary(status) <- tools, into: %{} do
+      {name,
+       %{
+         status: status,
+         version: string_or_nil(tool["version"]),
+         detail: string_or_nil(tool["detail"])
+       }}
+    end
+  end
+
+  defp string_or_nil(value) when is_binary(value), do: value
+  defp string_or_nil(_value), do: nil
+
+  @doc """
   A JSON-shaped summary of parsed contexts, the form both this console and a
   peer's status document render: `%{context => nil | %{"captured_at", "stale",
   "os", "arch", "cpu_count", "memory_bytes", "disk_free_bytes", "tools"}}`.

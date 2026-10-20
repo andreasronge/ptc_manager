@@ -45,33 +45,38 @@ defmodule PtcManager.Operations.Repository do
   def max_workspace_setup_command_bytes, do: 2_000
   def max_workspace_setup_timeout_minutes, do: 24 * 60
 
+  @cast_fields [
+    :github_owner,
+    :github_name,
+    :default_branch,
+    :github_default_branch,
+    :workspace_setup_command,
+    :workspace_setup_timeout_minutes,
+    :integration_branches,
+    :github_branch_names,
+    :github_branches_checked_at,
+    :branch_prefixes,
+    :enabled,
+    :auto_fix_issues,
+    :auto_fix_daily_limit,
+    :local_path,
+    :sync_status,
+    :last_synced_at,
+    :last_sync_error,
+    :github_viewer_login,
+    :maintainer_labels,
+    :github_label_names,
+    :github_labels_checked_at,
+    :required_pre_pr_reviews,
+    :machine_requirements
+  ]
+
+  @doc "Every field the changeset accepts; a move decides for each whether it travels."
+  def cast_fields, do: @cast_fields
+
   def changeset(repository, attrs) do
     repository
-    |> cast(attrs, [
-      :github_owner,
-      :github_name,
-      :default_branch,
-      :github_default_branch,
-      :workspace_setup_command,
-      :workspace_setup_timeout_minutes,
-      :integration_branches,
-      :github_branch_names,
-      :github_branches_checked_at,
-      :branch_prefixes,
-      :enabled,
-      :auto_fix_issues,
-      :auto_fix_daily_limit,
-      :local_path,
-      :sync_status,
-      :last_synced_at,
-      :last_sync_error,
-      :github_viewer_login,
-      :maintainer_labels,
-      :github_label_names,
-      :github_labels_checked_at,
-      :required_pre_pr_reviews,
-      :machine_requirements
-    ])
+    |> cast(attrs, @cast_fields)
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
     |> validate_change(:default_branch, fn :default_branch, branch ->

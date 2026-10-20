@@ -44,6 +44,7 @@ defmodule PtcManagerWeb.Router do
     pipe_through :peer_api
 
     get "/status", PeerController, :status
+    get "/repositories/:owner/:name/settings", PeerController, :settings
   end
 
   scope "/api/operator", PtcManagerWeb do
@@ -70,6 +71,7 @@ defmodule PtcManagerWeb.Router do
       live "/automations/:id", AutomationsLive, :show
       live "/deployments", DeploymentsLive, :index
       live "/cluster", ClusterLive, :index
+      live "/cluster/claim/:owner/:name", ClusterClaimLive, :show
       live "/configuration", ConfigurationLive, :index
       live "/configuration/repositories/:id", RepositoryConfigurationLive, :show
       live "/execution-profiles", ExecutionProfilesLive, :index

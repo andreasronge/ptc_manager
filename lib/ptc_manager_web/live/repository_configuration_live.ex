@@ -471,6 +471,45 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  # Moving the repository's home: what still holds the claim here, and the
+  # members it could move to, with whether each satisfies its requirements.
+  defp move(repository) do
+    if PtcManager.Cluster.enabled?() do
+      claim = PtcManager.Cluster.Claims.local(repository)
+      cluster = PtcManager.Cluster.PeerPoller.current()
+
+      targets =
+        cluster.members
+        |> Map.values()
+        |> Enum.sort_by(& &1.id)
+        |> Enum.map(fn member ->
+          inventory = member.status && member.status["inventory"]
+
+          evaluation =
+            Requirements.evaluate(
+              repository.machine_requirements,
+              %{contexts: PtcManager.Machine.ToolInventory.from_summary(inventory)}
+            )
+
+          %{
+            id: member.id,
+            name: (member.status && member.status["machine_name"]) || member.id,
+            health: member.health,
+            capable?: evaluation.satisfied?,
+            reason: Requirements.explain(evaluation),
+            claim_url:
+              PtcManager.Cluster.console_url(
+                member.id,
+                "/cluster/claim/#{repository.github_owner}/#{repository.github_name}?from=" <>
+                  URI.encode_www_form(PtcManager.Machine.id())
+              )
+          }
+        end)
+
+      %{claim: claim, targets: targets}
+    end
+  end
+
   defp load_repository(%{assigns: %{repository_id: nil}}), do: :error
 
   defp load_repository(socket) do
@@ -489,6 +528,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
            branch_prefix_mappings: BranchPrefixes.list(repository),
            agent_environment_variables: AgentEnvironmentVariables.list_metadata(repository.id),
            machine_evaluation: PtcManager.Machine.Gate.evaluate(repository),
+           move: move(repository),
            probe_names: PtcManager.Machine.ToolProbes.names()
          )}
 

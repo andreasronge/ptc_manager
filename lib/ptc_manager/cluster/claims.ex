@@ -142,12 +142,12 @@ defmodule PtcManager.Cluster.Claims do
   @doc """
   Claims a disabled repository for this member and enables it.
 
-  `apply` runs inside the final transaction with the repository before it is
-  enabled; a move uses it to import settings, and its `{:error, reason}` rolls
-  the claim back. Returns `{:ok, repository, checks}` or
+  `apply` runs inside the final transaction with the repository (before it is
+  enabled) and the peer checks; a move uses it to import settings, and its
+  `{:error, reason}` rolls the claim back. Returns `{:ok, repository, checks}` or
   `{:error, reason, checks}`, where `checks` records each peer's answer.
   """
-  def acquire(repository_id, actor, apply \\ fn _repository -> :ok end, opts \\ [])
+  def acquire(repository_id, actor, apply \\ fn _repository, _checks -> :ok end, opts \\ [])
       when is_integer(repository_id) and is_binary(actor) do
     token = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
 
@@ -219,7 +219,7 @@ defmodule PtcManager.Cluster.Claims do
       repository = Repo.get!(Repository, repository_id)
       if repository.enabled, do: Repo.rollback(:already_enabled)
 
-      case apply.(repository) do
+      case apply.(repository, checks) do
         :ok -> :ok
         {:error, reason} -> Repo.rollback(reason)
       end

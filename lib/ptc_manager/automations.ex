@@ -573,23 +573,7 @@ defmodule PtcManager.Automations do
       enabled: false
     }
 
-    attrs =
-      version
-      |> Map.from_struct()
-      |> Map.take([
-        :target_type,
-        :execution_profile,
-        :agent_selector,
-        :github_access,
-        :queue_lane,
-        :resource_class,
-        :lock_policy,
-        :timeout_seconds,
-        :result_type,
-        :result_protocol_version,
-        :prompt,
-        :configuration_snapshot
-      ])
+    attrs = version |> Map.from_struct() |> Map.take(DefinitionVersion.content_fields())
 
     create_definition(target, identity, attrs, actor)
   end
