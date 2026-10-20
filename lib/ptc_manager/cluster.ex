@@ -19,7 +19,14 @@ defmodule PtcManager.Cluster do
   @protocol_version 1
   @min_secret_bytes 32
 
-  def protocol_version, do: @protocol_version
+  # Only a test build lets the multi-member integration tests run a member at
+  # another protocol version; a release always speaks this one.
+  if Application.compile_env(:ptc_manager, :cluster_test_overrides, false) do
+    def protocol_version,
+      do: Application.get_env(:ptc_manager, :cluster_protocol_version, @protocol_version)
+  else
+    def protocol_version, do: @protocol_version
+  end
 
   @doc "Whether this console is a cluster member."
   def enabled?, do: Machine.clustered?()

@@ -121,7 +121,9 @@ never carries untrusted operator-state text, prompts, issue text, agent
 output, or secrets. Claim predicates are read in one deferred read
 transaction, a single WAL snapshot that never takes the write lock.
 `Cluster.Peer.fetch_status/2` validates a document before anyone uses it
-(canonical, unique repository keys and known claim states) and fails closed.
+(canonical, unique repository keys and known claim states) and fails closed,
+then `Cluster.StatusShape` normalizes its display fields once, so a member's
+malformed data can neither clear a claim nor break a page.
 
 `Cluster.PeerPoller` polls every 15 seconds with a 5-second timeout, keeps
 results in ETS, marks members `healthy`, `incompatible`, `refused`, or
@@ -168,6 +170,23 @@ fetched again outside the transaction and a changed digest asks for another
 look. The import runs inside the claim's final transaction, never raises on a
 malformed document, and leaves every automation and trigger paused.
 
+## Tests
+
+Unit tests fake peers through `PtcManager.TestPeerClient`, swapped in with
+`PtcManager.Gateway`, and configure the test run as a member with
+`PtcManager.ClusterCase`. `test/ptc_manager/cluster/multi_member_test.exs`
+(tagged `:nightly`, so `scripts/ci/test-suite` skips it and `mix test` runs it)
+starts real members as `:peer` nodes, each running the whole application with
+its own SQLite file, HTTP port, machine id, and member map, and drives them
+through seven scenarios: mutual health, claim refusal and a move with its
+settings, simultaneous claims, a partition, restart from a stale database, a
+member at another protocol version, and a machine removed from the others'
+maps. Plain HTTP on loopback is allowed only by a test-only flag; signing stays
+on. The poller's unreachable bound (`cluster_unreachable_after_ms`) and the
+protocol version (`cluster_protocol_version`) can be overridden only in a test
+build (`cluster_test_overrides`, read with `Application.compile_env`); a
+release compiles the constants in.
+
 ## Decisions made while implementing the plan
 
 | Decision | Alternatives | Reason |
@@ -187,6 +206,9 @@ malformed document, and leaves every automation and trigger paused.
 | Plan commits 3 and 4 are one commit, and the Cluster page skeleton lands with the switcher | as planned | the status document's claim section and the claim protocol are one contract |
 | Drift lists differing deployed SHAs without "more than one release apart" or "behind the default branch" | ordering releases | a member cannot order SHAs without the repository's history |
 | `mix ptc.cluster check` signs as `--as`, `PTC_MACHINE_ID`, or the first member | a reserved non-member caller | holders of the secret can sign as any member anyway |
+| The integration harness uses `:peer` nodes over standard IO | OS processes running `mix phx.server` | separate VMs give each member its own application singletons, with no distribution or epmd, and the test can call into each member |
+| Peer documents are normalized once at fetch (`StatusShape`) | defensive code in every consumer | one place decides what another machine's data may look like |
+| The README and this document replace the plan | keeping the plan | the plan described intent; this describes what shipped |
 
 ## Deferred: remote placement
 

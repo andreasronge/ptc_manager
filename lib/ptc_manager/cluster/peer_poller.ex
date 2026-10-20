@@ -31,7 +31,6 @@ defmodule PtcManager.Cluster.PeerPoller do
 
   @table __MODULE__
   @topic "cluster"
-  @unreachable_after_ms 60_000
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -216,12 +215,21 @@ defmodule PtcManager.Cluster.PeerPoller do
     health =
       cond do
         member.health == "refused" -> "refused"
-        since >= @unreachable_after_ms -> "unreachable"
+        since >= unreachable_after_ms() -> "unreachable"
         member.health in ["healthy", "incompatible"] -> member.health
         true -> "unknown"
       end
 
     %{member | health: health, error: inspect(reason), last_attempt_at: now}
+  end
+
+  # A test build may shorten the bound for the integration tests; a release
+  # always waits a minute.
+  if Application.compile_env(:ptc_manager, :cluster_test_overrides, false) do
+    defp unreachable_after_ms,
+      do: Application.get_env(:ptc_manager, :cluster_unreachable_after_ms, 60_000)
+  else
+    defp unreachable_after_ms, do: 60_000
   end
 
   # A repository this member claims that a reachable peer also claims.
