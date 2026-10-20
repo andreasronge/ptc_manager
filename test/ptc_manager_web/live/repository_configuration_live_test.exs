@@ -515,6 +515,47 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     assert Repo.get!(Repository, repository.id).workspace_setup_timeout_minutes == 15
   end
 
+  test "edits machine requirements and shows whether this machine satisfies them", %{conn: conn} do
+    repository = repository_fixture()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+
+    assert has_element?(view, "#machine-requirements", "No requirements")
+    assert has_element?(view, "#machine-requirements-result", "This machine satisfies them")
+
+    html =
+      view
+      |> form("#add-machine-requirement", %{
+        "requirement" => %{"name" => "docker-compose", "version" => ">= 2.24.0"}
+      })
+      |> render_submit()
+
+    assert html =~ "Requirement added."
+    assert has_element?(view, "#machine-requirement-docker-compose", ">= 2.24.0")
+    assert has_element?(view, "#machine-requirement-docker-compose", "not probed in Agent panes")
+    assert has_element?(view, "#machine-requirements-result", "Waiting for a capable machine")
+
+    assert Repo.get!(Repository, repository.id).machine_requirements == %{
+             "tools" => [%{"name" => "docker-compose", "version" => ">= 2.24.0"}]
+           }
+
+    assert Repo.get_by(PtcManager.Operations.AuditEvent,
+             action: "repository.machine_requirements_changed",
+             target_id: repository.id
+           )
+
+    html =
+      view
+      |> form("#add-machine-requirement", %{
+        "requirement" => %{"name" => "git", "version" => "newest"}
+      })
+      |> render_submit()
+
+    assert html =~ "invalid version requirement for git"
+
+    view |> element("#machine-requirement-docker-compose button", "Remove") |> render_click()
+    assert Repo.get!(Repository, repository.id).machine_requirements == %{"tools" => []}
+  end
+
   test "maps a label to an integration branch from a suggestion, switches it off, and removes it",
        %{conn: conn} do
     Application.put_env(:ptc_manager, :test_github_branches, ["main", "feature/ska"])

@@ -226,6 +226,134 @@ defmodule PtcManager.DispatchTest do
     refute_receive {:dispatch_context, _context}
   end
 
+  describe "machine requirements" do
+    setup do
+      on_exit(fn -> PtcManager.Machine.Inventory.clear() end)
+      :ok
+    end
+
+    defp require_docker!(repository) do
+      {:ok, repository} =
+        Operations.update_machine_requirements(
+          repository.id,
+          %{"tools" => [%{"name" => "docker-daemon"}]},
+          "andreas"
+        )
+
+      repository
+    end
+
+    defp probe_docker!(exit_status) do
+      for context <- ["pane", "setup"] do
+        {:ok, parsed} =
+          PtcManager.Machine.ToolInventory.parse(
+            %{
+              "captured_at" => DateTime.to_iso8601(DateTime.utc_now()),
+              "probes" => [
+                %{"name" => "docker-daemon", "exit_status" => exit_status, "stdout" => "27.5.1\n"}
+              ]
+            },
+            context
+          )
+
+        PtcManager.Machine.Inventory.put_context(context, parsed)
+      end
+    end
+
+    test "a repository this machine cannot run keeps its job queued while others start" do
+      {gated_repository, _issue, _proposal, gated, _remote} = approved_job_fixture()
+      require_docker!(gated_repository)
+
+      {_repository, _issue, _proposal, job, remote} =
+        approved_job_fixture(repository_fixture(%{local_path: "/tmp/other-repository"}))
+
+      Process.put(:dispatch_github_result, {:ok, remote})
+
+      assert {:ok, %{job: working}} =
+               Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter, lease_ms: 60_000)
+
+      assert working.id == job.id
+      assert Repo.get!(Job, gated.id).state == "queued"
+
+      # No placement evidence for a repository without requirements on one machine.
+      refute Repo.exists?(from event in AuditEvent, where: event.action == "placement.admitted")
+    end
+
+    test "a queued repair this machine cannot run does not hold other repositories' work" do
+      {gated_repository, _issue, _proposal, _gated, _remote} = approved_job_fixture()
+      require_docker!(gated_repository)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: gated_repository.id,
+        action_key: "repair_and_merge_pr",
+        target_type: "pull_request",
+        target_id: 9_004,
+        target_label: "example/repo#9004",
+        prompt_version: 1,
+        prompt: "Fix and merge the exact pull request",
+        baseline_issue_numbers: %{"numbers" => []},
+        target_snapshot: %{},
+        actor: "andreas",
+        state: "queued",
+        attempt_count: 0,
+        requested_at: now
+      })
+      |> Repo.insert!()
+
+      {_repository, _issue, _proposal, job, remote} =
+        approved_job_fixture(repository_fixture(%{local_path: "/tmp/third-repository"}))
+
+      Process.put(:dispatch_github_result, {:ok, remote})
+
+      assert {:ok, %{job: %{id: id}}} =
+               Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter, lease_ms: 60_000)
+
+      assert id == job.id
+    end
+
+    test "a lease that finds the machine incapable leaves the job queued, not cancelled" do
+      {repository, _issue, _proposal, job, remote} = approved_job_fixture()
+      require_docker!(repository)
+      probe_docker!(1)
+
+      assert {:error, :machine_incapable} =
+               Operations.lease_job(job.id, "herdr:default", remote, 60_000)
+
+      assert Repo.get!(Job, job.id).state == "queued"
+
+      assert is_nil(
+               Operations.next_queued_job(PtcManager.Machine.Gate.unsatisfied_repository_ids())
+             )
+    end
+
+    test "work starts once the tool appears, with placement evidence" do
+      {repository, _issue, _proposal, job, remote} = approved_job_fixture()
+      require_docker!(repository)
+      probe_docker!(1)
+      Process.put(:dispatch_github_result, {:ok, remote})
+
+      assert {:ok, :empty} = Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter)
+      assert Repo.get!(Job, job.id).state == "queued"
+
+      probe_docker!(0)
+
+      assert {:ok, %{job: %{state: "working"}}} =
+               Dispatch.run_once(github: FakeGitHub, adapter: FakeAdapter, lease_ms: 60_000)
+
+      placement = Repo.one!(from event in AuditEvent, where: event.action == "placement.admitted")
+      assert placement.target_type == "job" and placement.target_id == job.id
+      assert placement.details["machine_id"] == "local"
+      assert placement.details["requirements"] == [%{"name" => "docker-daemon"}]
+
+      assert [%{"context" => "pane", "status" => "ok"}, %{"context" => "setup", "status" => "ok"}] =
+               Enum.sort_by(placement.details["tools"], & &1["context"])
+
+      assert Enum.all?(placement.details["tools"], &is_binary(&1["captured_at"]))
+    end
+  end
+
   test "fresh approved work is leased once and attached to a fenced Herdr attempt" do
     {repository, issue, _proposal, job, remote} = approved_job_fixture()
     Process.put(:dispatch_github_result, {:ok, remote})

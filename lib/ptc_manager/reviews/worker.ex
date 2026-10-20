@@ -34,6 +34,9 @@ defmodule PtcManager.Reviews.Worker do
         {:error, :database_busy} ->
           {:snooze, 10}
 
+        {:error, :machine_incapable} ->
+          {:snooze, 60}
+
         {:error, _} ->
           :ok
       end

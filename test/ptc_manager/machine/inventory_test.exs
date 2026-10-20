@@ -25,7 +25,12 @@ defmodule PtcManager.Machine.InventoryTest do
       "captured_at" => DateTime.to_iso8601(captured_at),
       "os" => "linux",
       "probes" => [
-        %{"name" => "docker", "exit_status" => 0, "stdout" => "Docker version 27.5.1, build 9f9e405\n", "stderr" => ""},
+        %{
+          "name" => "docker",
+          "exit_status" => 0,
+          "stdout" => "Docker version 27.5.1, build 9f9e405\n",
+          "stderr" => ""
+        },
         %{
           "name" => "docker-daemon",
           "exit_status" => daemon_status,

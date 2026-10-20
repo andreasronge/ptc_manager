@@ -329,6 +329,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   defp resume_refusal(:issue_claimed), do: "the issue is assigned on GitHub."
   defp resume_refusal(:issue_claim_unknown), do: "the issue's assignment needs sync."
   defp resume_refusal(:recovery_busy), do: "a recovery is already running."
+
+  defp resume_refusal(:machine_incapable),
+    do: "this machine lacks a tool the repository requires."
+
   defp resume_refusal(reason), do: inspect(reason)
 
   @doc "Whether a failed job's card offers Resume: its worktree and agent session are still there."

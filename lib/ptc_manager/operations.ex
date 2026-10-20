@@ -319,6 +319,46 @@ defmodule PtcManager.Operations do
   end
 
   @doc """
+  Replaces the tools a repository's work needs on the machine that runs it
+  (`PtcManager.Machine.Requirements`). Queued work re-evaluates on its next
+  admission check; nothing already running is touched.
+  """
+  def update_machine_requirements(repository_id, requirements, actor)
+      when is_integer(repository_id) and is_map(requirements) and is_binary(actor) and
+             actor != "" do
+    result =
+      RepoTransaction.immediate(fn ->
+        repository = Repo.get(Repository, repository_id) || Repo.rollback(:repository_not_found)
+        previous = repository.machine_requirements
+
+        case Repo.update(Repository.changeset(repository, %{machine_requirements: requirements})) do
+          {:ok, updated} ->
+            insert_audit!(%{
+              actor: actor,
+              action: "repository.machine_requirements_changed",
+              target_type: "repository",
+              target_id: repository.id,
+              details: %{
+                "repository" => "#{repository.github_owner}/#{repository.github_name}",
+                "old" => previous,
+                "new" => updated.machine_requirements
+              }
+            })
+
+            updated
+
+          {:error, changeset} ->
+            Repo.rollback({:invalid_machine_requirements, changeset})
+        end
+      end)
+
+    case result do
+      {:ok, repository} -> notify_and_return({:ok, repository})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Changes the branch a repository's work starts from and merges into.
 
   Refused while a job, maintainer action, automation run, or deployment is
@@ -894,13 +934,15 @@ defmodule PtcManager.Operations do
         resource_class \\ :any
       )
       when lane in [:any, :planning, :writing] and resource_class in [:any, "light", "heavy"] do
+    # A repository this machine cannot run keeps its actions queued without
+    # holding up other repositories' actions.
     blocked_repository_ids =
-      AgentAction
-      |> where([action], action.state == "sync_pending")
-      |> agent_action_lane(lane)
-      |> select([action], action.repository_id)
-      |> distinct(true)
-      |> Repo.all()
+      (AgentAction
+       |> where([action], action.state == "sync_pending")
+       |> agent_action_lane(lane)
+       |> select([action], action.repository_id)
+       |> distinct(true)
+       |> Repo.all()) ++ PtcManager.Machine.Gate.unsatisfied_repository_ids(now)
 
     base =
       AgentAction
@@ -1478,6 +1520,11 @@ defmodule PtcManager.Operations do
 
         unless job.state in @resumable_job_states and is_map(job.execution_settings),
           do: Repo.rollback(:job_not_resumable)
+
+        case PtcManager.Machine.Gate.check(job.repository_id) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
 
         unless retained_worktree?(job), do: Repo.rollback(:worktree_not_retained)
         unless continuable_run?(job), do: Repo.rollback(:no_session_to_continue)
@@ -2228,12 +2275,18 @@ defmodule PtcManager.Operations do
     end
   end
 
-  def next_queued_job do
+  @doc """
+  The oldest queued job dispatch may start. `excluded_repository_ids` are
+  repositories this machine cannot run (`PtcManager.Machine.Gate`); their jobs
+  stay queued without holding up the others.
+  """
+  def next_queued_job(excluded_repository_ids \\ []) do
     if heavy_delivery_action_active?() do
       nil
     else
       Job
       |> where([job], job.state == "queued")
+      |> where([job], job.repository_id not in ^excluded_repository_ids)
       |> where([job], job.id not in subquery(PtcManager.Collections.held_job_ids()))
       |> order_by([job], asc: job.inserted_at, asc: job.id)
       |> limit(1)
@@ -2318,6 +2371,7 @@ defmodule PtcManager.Operations do
           |> Repo.get!(job_id)
 
         with :ok <- job_is_queued(job),
+             :ok <- PtcManager.Machine.Gate.check(job.repository),
              :ok <- PtcManager.AutoImplementation.dispatch_allowed(job, remote_issue),
              {:ok, %{kind: agent_kind}} <- implementation_profile(job),
              :ok <- heavy_delivery_priority_unlocked(),
@@ -2374,6 +2428,8 @@ defmodule PtcManager.Operations do
               |> preload([:approval, :issue, :repository, :worktree_allocation])
               |> Repo.get!(job.id)
 
+            record_placement!(job.repository, "job", job.id)
+
             insert_audit!(%{
               actor: "worker:#{worker_key}",
               action: "job.leased",
@@ -2414,6 +2470,10 @@ defmodule PtcManager.Operations do
 
           {:error, :collection_run_paused} ->
             Repo.rollback(:collection_run_paused)
+
+          # The job waits for a capable machine; rejecting it would cancel it.
+          {:error, :machine_incapable} ->
+            Repo.rollback(:machine_incapable)
 
           {:error, reason} ->
             if WorktreeSecurity.infrastructure_error?(reason) do
@@ -3829,7 +3889,8 @@ defmodule PtcManager.Operations do
       worker = job.worktree_allocation.worker
       now = utc_now()
 
-      with :ok <- repository_dispatch_unlocked(job.repository_id),
+      with :ok <- PtcManager.Machine.Gate.check(job.repository),
+           :ok <- repository_dispatch_unlocked(job.repository_id),
            :ok <- heavy_delivery_priority_unlocked(),
            {:ok, capacity} <- worker_execution_capacity(worker),
            :ok <- dispatch_capacity_available(Repo, worker, capacity, now) do
@@ -3839,6 +3900,7 @@ defmodule PtcManager.Operations do
           last_error: nil
         })
         |> Repo.update!()
+        |> tap(fn _job -> record_placement!(job.repository, "job", job.id) end)
       else
         {:error, reason} -> Repo.rollback(reason)
       end
@@ -3892,6 +3954,7 @@ defmodule PtcManager.Operations do
           |> Repo.one()
 
         with %Job{state: "pr_open"} <- job,
+             :ok <- PtcManager.Machine.Gate.check(job.repository_id),
              %WorktreeAllocation{state: state, worker: worker} = allocation <- allocation,
              true <- state in ~w(warm waiting reclaimable attention),
              {:ok, capacity} <- worker_execution_capacity(worker),
@@ -3921,6 +3984,27 @@ defmodule PtcManager.Operations do
       end)
 
     broadcast_change(outcome)
+  end
+
+  @doc """
+  Returns a repair reservation whose action could not be claimed after all
+  (the machine became incapable in between) to `waiting`, so the next attempt
+  can reserve it again.
+  """
+  def return_repair_worktree(job_id, actor \\ "coordinator") when is_integer(job_id) do
+    case Repo.get_by(WorktreeAllocation, job_id: job_id) do
+      %WorktreeAllocation{state: "active", head_sha: head_sha} when is_binary(head_sha) ->
+        release_repair_worktree(job_id, head_sha, actor)
+
+      %WorktreeAllocation{state: "active"} = allocation ->
+        allocation
+        |> WorktreeAllocation.changeset(%{state: "waiting"})
+        |> Repo.update()
+        |> broadcast_change()
+
+      _other ->
+        {:ok, nil}
+    end
   end
 
   def release_repair_worktree(job_id, head_sha, actor \\ "coordinator")
@@ -5144,6 +5228,13 @@ defmodule PtcManager.Operations do
 
     outcome =
       Repo.transaction(fn ->
+        repository = Repo.get!(Repository, candidate.repository_id)
+
+        case PtcManager.Machine.Gate.check(repository) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
         worker = agent_action_worker!(candidate, now)
 
         {updated, _rows} =
@@ -5205,6 +5296,8 @@ defmodule PtcManager.Operations do
           coordinator_incarnation_id: worker.coordinator_incarnation_id
         })
         |> Repo.insert!()
+
+        record_placement!(repository, "agent_action", candidate.id)
 
         insert_audit!(%{
           actor: "coordinator",
@@ -5670,12 +5763,17 @@ defmodule PtcManager.Operations do
     if heavy_delivery_action_active?(), do: {:error, :delivery_priority}, else: :ok
   end
 
+  # A queued repair this machine cannot run waits for a capable machine, so it
+  # does not claim priority over other repositories' work; one that runs does.
   defp heavy_delivery_action_active? do
+    incapable = PtcManager.Machine.Gate.unsatisfied_repository_ids()
+
     AgentAction
     |> where(
       [action],
       action.action_key in ^@repair_action_keys and
-        action.state in ["queued", "running", "sync_pending"]
+        (action.state in ["running", "sync_pending"] or
+           (action.state == "queued" and action.repository_id not in ^incapable))
     )
     |> Repo.exists?()
   end
@@ -6073,6 +6171,26 @@ defmodule PtcManager.Operations do
   end
 
   defp insert_audit!(attrs), do: %AuditEvent{} |> AuditEvent.changeset(attrs) |> Repo.insert!()
+
+  @doc false
+  # Placement evidence for an admission, written in the admitting transaction.
+  # A repository without requirements on an unclustered console records none,
+  # so a single machine behaves as it always has.
+  def record_placement!(%Repository{} = repository, target_type, target_id) do
+    if PtcManager.Machine.Requirements.any?(repository.machine_requirements) or
+         PtcManager.Machine.clustered?() do
+      insert_audit!(%{
+        actor: "coordinator",
+        action: "placement.admitted",
+        target_type: target_type,
+        target_id: target_id,
+        details: PtcManager.Machine.Gate.placement_details(repository)
+      })
+    end
+
+    :ok
+  end
+
   defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
   defp rejection_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp rejection_error(reason), do: bounded_error(reason)
@@ -6090,6 +6208,10 @@ defmodule PtcManager.Operations do
 
   def rejection_words(:issue_claimed),
     do: "The issue is assigned on GitHub."
+
+  def rejection_words(:machine_incapable),
+    do:
+      "This machine does not have the tools the repository requires; see its requirements on the configuration page."
 
   def rejection_words(:issue_has_pull_request),
     do: "A pull request already references the issue."

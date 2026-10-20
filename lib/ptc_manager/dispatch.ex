@@ -23,7 +23,7 @@ defmodule PtcManager.Dispatch do
       Clock.utc_now(PtcManager.Clock.System)
     )
 
-    case Operations.next_queued_job() do
+    case Operations.next_queued_job(PtcManager.Machine.Gate.unsatisfied_repository_ids()) do
       nil ->
         {:ok, :empty}
 

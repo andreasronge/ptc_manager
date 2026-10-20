@@ -68,7 +68,8 @@ defmodule PtcManagerWeb.OperationsLive do
        resource_statistics: nil,
        workspace_setups: [],
        timeline: [],
-       timeline_groups: []
+       timeline_groups: [],
+       machine_waits: %{}
      )}
   end
 
@@ -103,7 +104,11 @@ defmodule PtcManagerWeb.OperationsLive do
     do: {:noreply, socket |> assign(:now, DateTime.utc_now()) |> load_usage()}
 
   def handle_info({:machine_inventory, inventory}, socket),
-    do: {:noreply, assign_inventory(socket, inventory)}
+    do:
+      {:noreply,
+       socket
+       |> assign_inventory(inventory)
+       |> assign(:machine_waits, machine_waits(DateTime.utc_now()))}
 
   def handle_info(:agent_output_tick, %{assigns: %{selected_run: nil}} = socket),
     do: {:noreply, assign(socket, :agent_output_timer, nil)}
@@ -214,6 +219,15 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   defp current_params(_assigns), do: []
+
+  # Repository id => why this machine cannot run its work, derived from the
+  # in-memory inventory; nothing about the wait is stored.
+  defp machine_waits(now) do
+    for {id, evaluation} <- PtcManager.Machine.Gate.evaluations(now),
+        not evaluation.satisfied?,
+        into: %{},
+        do: {id, PtcManager.Machine.Requirements.explain(evaluation)}
+  end
 
   defp assign_inventory(socket, inventory) do
     socket
@@ -649,7 +663,8 @@ defmodule PtcManagerWeb.OperationsLive do
       available_light_slots: available_light_slots,
       available_heavy_slots: available_heavy_slots,
       available_slots: available_light_slots + available_heavy_slots,
-      herdr_online?: usage.herdr_online?
+      herdr_online?: usage.herdr_online?,
+      machine_waits: machine_waits(now)
     )
     |> load_tab(socket.assigns.live_action)
     |> refresh_selected_run()

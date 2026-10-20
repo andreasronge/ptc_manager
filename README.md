@@ -103,6 +103,24 @@ validated at boot (at most 24 probes in all). Snapshots are written to
 now. Only a change in what the probes report is recorded, as the audit event
 `machine.inventory_changed`.
 
+A repository's configuration page lists the **machine requirements** of its
+work: tools from the catalog, each optionally with a version requirement such
+as `>= 2.24.0` (at most 20). They are PtcManager configuration, never content
+of the repository. A requirement holds only when both contexts satisfy it with
+a fresh inventory. Where they do not, nothing for that repository is admitted:
+implementation dispatch skips its queued jobs, reviews and review
+continuations wait unclaimed, maintainer actions stay queued, and Resume is
+refused. Its work stays queued, so a collection run spends no retry, and
+other repositories' work starts as usual. The Operations work queue shows why
+("Waiting for a capable machine: docker-daemon not reachable (pane)"), and a
+wait longer than 30 minutes becomes a `machine_incapable` stall. When the tool
+appears and the inventory refreshes, the work starts. A review round's
+deadline starts when a reviewer claims it, so a queued round never expires;
+a round queued for more than 30 minutes for any other reason is reported as
+`review_queued`. Each admission for a repository with requirements records a
+`placement.admitted` audit event with the machine and the evaluated tool
+lines.
+
 ## Execution profiles and review limits
 
 Configuration → **Execution profiles and models** sets the implementation and

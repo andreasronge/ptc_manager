@@ -66,6 +66,8 @@ defmodule PtcManager.Stalls do
       &result_reconciliation_stuck/1,
       &action_repeating_failure/1,
       &review_snoozing/1,
+      &review_queued/1,
+      &machine_incapable/1,
       &review_repeated_finding/1,
       &operation_slot_orphaned/1,
       &dispatch_rejected/1,
@@ -86,6 +88,8 @@ defmodule PtcManager.Stalls do
   def label(:stop_unacknowledged), do: "Agent stop waiting for an answer"
   def label(:action_repeating_failure), do: "Action failing the same way twice"
   def label(:review_snoozing), do: "Review waiting on the console's mode"
+  def label(:review_queued), do: "Review waiting in the queue"
+  def label(:machine_incapable), do: "Waiting for a capable machine"
   def label(:review_repeated_finding), do: "Review repeating a finding"
   def label(:operation_slot_orphaned), do: "Expensive-operation slot held by a lost operation"
   def label(:dispatch_rejected), do: "Dispatch rejected and nothing retried"
@@ -359,6 +363,124 @@ defmodule PtcManager.Stalls do
       end
 
     rounds ++ continuations
+  end
+
+  @doc "How long queued work may wait before it is reported (`queue_wait_ms`, 30 minutes)."
+  def queue_wait_ms, do: Application.get_env(:ptc_manager, :stall_queue_wait_ms, 1_800_000)
+
+  @doc """
+  Work for a repository whose requirements this machine does not satisfy, queued
+  for longer than `queue_wait_ms/0`. It waits by design (a missing tool must not
+  spend a retry), so it needs a person: install the tool or move the repository.
+  """
+  def machine_incapable(now) do
+    waiting_before = DateTime.add(now, -queue_wait_ms(), :millisecond)
+
+    unsatisfied =
+      now
+      |> PtcManager.Machine.Gate.evaluations()
+      |> Enum.reject(fn {_id, evaluation} -> evaluation.satisfied? end)
+      |> Map.new()
+
+    if unsatisfied == %{} do
+      []
+    else
+      ids = Map.keys(unsatisfied)
+      reason = &PtcManager.Machine.Requirements.explain(Map.fetch!(unsatisfied, &1))
+
+      jobs =
+        Repo.all(
+          from job in Job,
+            left_join: round in Round,
+            on: round.job_id == job.id and round.state == "queued",
+            where:
+              job.repository_id in ^ids and job.updated_at <= ^waiting_before and
+                (job.state == "queued" or
+                   (job.state in ^Reviews.active_states() and
+                      (job.review_state == "resume_pending" or not is_nil(round.id)))),
+            distinct: true,
+            preload: [:issue]
+        )
+
+      actions =
+        Repo.all(
+          from action in AgentAction,
+            where:
+              action.repository_id in ^ids and action.state == "queued" and
+                action.updated_at <= ^waiting_before
+        )
+
+      Enum.map(jobs, fn job ->
+        %{
+          kind: :machine_incapable,
+          severity: :attention,
+          target_type: "job",
+          target_id: job.id,
+          repository_id: job.repository_id,
+          issue_id: job.issue_id,
+          since: job.updated_at,
+          detail:
+            "Work for ##{job.issue.number} has waited #{humanize(elapsed_ms(job.updated_at, now))} " <>
+              "for a capable machine: #{reason.(job.repository_id)}. Install the tool, refresh the " <>
+              "inventory, or move the repository to a machine that has it."
+        }
+      end) ++
+        Enum.map(actions, fn action ->
+          %{
+            kind: :machine_incapable,
+            severity: :attention,
+            target_type: "agent_action",
+            target_id: action.id,
+            repository_id: action.repository_id,
+            issue_id: nil,
+            since: action.updated_at,
+            detail:
+              "The #{String.replace(action.action_key, "_", " ")} action has waited " <>
+                "#{humanize(elapsed_ms(action.updated_at, now))} for a capable machine: " <>
+                "#{reason.(action.repository_id)}."
+          }
+        end)
+    end
+  end
+
+  @doc """
+  A review round queued for longer than `queue_wait_ms/0` that no reviewer has
+  claimed, for a cause the mode and machine stalls do not already name. A queued
+  round does not expire; its deadline starts at its claim.
+  """
+  def review_queued(now) do
+    waiting_before = DateTime.add(now, -queue_wait_ms(), :millisecond)
+
+    if OperationalMode.reconciliation_allowed?() do
+      unsatisfied = PtcManager.Machine.Gate.unsatisfied_repository_ids(now)
+
+      for round <-
+            Repo.all(
+              from round in Round,
+                join: job in assoc(round, :job),
+                where:
+                  round.state == "queued" and round.updated_at <= ^waiting_before and
+                    job.state in ^Reviews.active_states() and
+                    job.repository_id not in ^unsatisfied,
+                preload: [job: [:issue]]
+            ) do
+        %{
+          kind: :review_queued,
+          severity: :alarm,
+          target_type: "job",
+          target_id: round.job_id,
+          repository_id: round.job.repository_id,
+          issue_id: round.job.issue_id,
+          since: round.updated_at,
+          detail:
+            "Review round #{round.number} for ##{round.job.issue.number} has been queued for " <>
+              "#{humanize(elapsed_ms(round.updated_at, now))} and no reviewer has claimed it. " <>
+              "Check the review queue on the Operations page."
+        }
+      end
+    else
+      []
+    end
   end
 
   @doc """

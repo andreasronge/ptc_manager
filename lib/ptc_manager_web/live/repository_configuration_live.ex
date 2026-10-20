@@ -11,10 +11,14 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
   alias PtcManager.Repository.Health
   alias PtcManager.Repository.IntegrationBranches
   alias PtcManager.Repository.MaintainerLabels
+  alias PtcManager.Machine.Requirements
 
   @impl true
   def mount(%{"id" => id}, session, socket) do
-    if connected?(socket), do: Operations.subscribe()
+    if connected?(socket) do
+      Operations.subscribe()
+      PtcManager.MachineUsage.subscribe()
+    end
 
     socket =
       socket
@@ -46,6 +50,10 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
       do: reload(socket)
 
   def handle_info({:operations_changed, _source}, socket), do: {:noreply, socket}
+
+  def handle_info({:machine_inventory, _inventory}, socket), do: reload(socket)
+
+  def handle_info(_message, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("set-repository-enabled", %{"enabled" => enabled}, socket) do
@@ -102,6 +110,23 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "The branch could not be changed.")}
     end
+  end
+
+  def handle_event("add-machine-requirement", %{"requirement" => params}, socket) do
+    lines =
+      Requirements.lines(socket.assigns.repository.machine_requirements) ++
+        [%{"name" => params["name"], "version" => params["version"]}]
+
+    save_machine_requirements(socket, lines, "Requirement added.")
+  end
+
+  def handle_event("remove-machine-requirement", %{"name" => name}, socket) do
+    lines =
+      socket.assigns.repository.machine_requirements
+      |> Requirements.lines()
+      |> Enum.reject(&(&1["name"] == name))
+
+    save_machine_requirements(socket, lines, "Requirement removed.")
   end
 
   def handle_event("save-workspace-setup", %{"setup" => params}, socket) do
@@ -420,6 +445,28 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  defp save_machine_requirements(socket, lines, message) do
+    case Operations.update_machine_requirements(
+           socket.assigns.repository.id,
+           Requirements.normalize(lines),
+           socket.assigns.actor
+         ) do
+      {:ok, _repository} ->
+        socket |> put_flash(:info, message) |> reload()
+
+      {:error, {:invalid_machine_requirements, changeset}} ->
+        error =
+          changeset.errors
+          |> Keyword.get_values(:machine_requirements)
+          |> Enum.map_join("; ", fn {text, _opts} -> text end)
+
+        {:noreply, put_flash(socket, :error, "The requirements " <> error <> ".")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The requirements could not be saved.")}
+    end
+  end
+
   defp load_repository(%{assigns: %{repository_id: nil}}), do: :error
 
   defp load_repository(socket) do
@@ -436,7 +483,9 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
            integration_suggestions: IntegrationBranches.suggestions(repository),
            branch_prefix_default: BranchPrefixes.default(repository),
            branch_prefix_mappings: BranchPrefixes.list(repository),
-           agent_environment_variables: AgentEnvironmentVariables.list_metadata(repository.id)
+           agent_environment_variables: AgentEnvironmentVariables.list_metadata(repository.id),
+           machine_evaluation: PtcManager.Machine.Gate.evaluate(repository),
+           probe_names: PtcManager.Machine.ToolProbes.names()
          )}
 
       nil ->
@@ -493,4 +542,16 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
       "Use 1 to 50 characters from letters, digits, spaces, and . _ / : - for a GitHub label name."
 
   def variable_set_at(%DateTime{} = value), do: Calendar.strftime(value, "%d %b %Y · %H:%M")
+
+  def requirement_reasons(line) do
+    Enum.map_join(line["failures"], ", ", fn failure ->
+      "#{failure_words(failure["reason"])} in #{PtcManagerWeb.MachineComponents.context_label(failure["context"])}"
+    end)
+  end
+
+  defp failure_words("no_inventory"), do: "not probed"
+  defp failure_words("stale"), do: "stale inventory"
+  defp failure_words("missing"), do: "missing"
+  defp failure_words("unreachable"), do: "not reachable"
+  defp failure_words("version"), do: "wrong version"
 end

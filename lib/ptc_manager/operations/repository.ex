@@ -27,6 +27,7 @@ defmodule PtcManager.Operations.Repository do
     field :github_label_names, :map, default: %{"names" => []}
     field :github_labels_checked_at, :utc_datetime_usec
     field :required_pre_pr_reviews, :integer, default: 2
+    field :machine_requirements, :map, default: %{"tools" => []}
 
     has_many :issues, PtcManager.Operations.Issue
     has_many :jobs, PtcManager.Operations.Job
@@ -68,7 +69,8 @@ defmodule PtcManager.Operations.Repository do
       :maintainer_labels,
       :github_label_names,
       :github_labels_checked_at,
-      :required_pre_pr_reviews
+      :required_pre_pr_reviews,
+      :machine_requirements
     ])
     |> validate_required([:github_owner, :github_name, :default_branch, :enabled])
     |> validate_inclusion(:sync_status, ["never", "syncing", "ok", "error"])
@@ -85,6 +87,7 @@ defmodule PtcManager.Operations.Repository do
       less_than_or_equal_to: 3
     )
     |> validate_workspace_setup()
+    |> PtcManager.Machine.Requirements.validate()
     |> validate_number(:auto_fix_daily_limit,
       greater_than_or_equal_to: 1,
       less_than_or_equal_to: 50

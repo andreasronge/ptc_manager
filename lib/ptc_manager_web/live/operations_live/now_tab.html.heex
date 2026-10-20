@@ -253,6 +253,13 @@
             Waiting {queue_age(@now, action.requested_at)} · {action.repository.github_name}
           </p>
           <p
+            :if={@machine_waits[action.repository_id]}
+            id={"queued-action-#{action.id}-machine-wait"}
+            class="mt-2 text-xs leading-5 text-amber-300"
+          >
+            Waiting for a capable machine: {@machine_waits[action.repository_id]}
+          </p>
+          <p
             :if={action.action_key == "daily_digest" && action.last_error}
             class="mt-2 text-xs leading-5 text-amber-300"
           >
@@ -287,6 +294,13 @@
           </div>
           <p class="mt-3 text-xs text-slate-500">
             Waiting {queue_age(@now, job.inserted_at)} · {job_review_label(job)}
+          </p>
+          <p
+            :if={@machine_waits[job.repository_id]}
+            id={"queued-job-#{job.id}-machine-wait"}
+            class="mt-2 text-xs leading-5 text-amber-300"
+          >
+            Waiting for a capable machine: {@machine_waits[job.repository_id]}
           </p>
           <button
             type="button"

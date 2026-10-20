@@ -27,6 +27,9 @@ defmodule PtcManager.Machine do
     end
   end
 
+  @doc "Whether this console is a member of a cluster (`PTC_CLUSTER_MEMBERS`)."
+  def clustered?, do: Application.get_env(:ptc_manager, :cluster_members) not in [nil, %{}]
+
   def valid_id?(id) when is_binary(id), do: Regex.match?(@id_pattern, id)
   def valid_id?(_id), do: false
 

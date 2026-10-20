@@ -386,6 +386,88 @@
       </.form>
     </section>
 
+    <section
+      id="machine-requirements"
+      class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"
+    >
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Machine requirements</h2>
+          <p class="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
+            Tools this repository's work needs on the machine that runs it, checked in agent panes and in workspace setup. On a machine that lacks one, its work stays queued, spending no retry, and other repositories' work goes on. The pre-publication gate's separate identity is not probed.
+          </p>
+        </div>
+        <span
+          id="machine-requirements-result"
+          class={[
+            "rounded-full px-2.5 py-1 text-xs font-semibold ring-1",
+            @machine_evaluation.satisfied? && "bg-teal-400/15 text-teal-300 ring-teal-400/20",
+            !@machine_evaluation.satisfied? && "bg-amber-400/15 text-amber-300 ring-amber-400/20"
+          ]}
+        >
+          {if @machine_evaluation.satisfied?,
+            do: "This machine satisfies them",
+            else: "Waiting for a capable machine"}
+        </span>
+      </div>
+      <ul :if={@machine_evaluation.lines != []} class="mt-4 divide-y divide-white/5">
+        <li
+          :for={line <- @machine_evaluation.lines}
+          id={"machine-requirement-#{line["name"]}"}
+          class="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
+        >
+          <span>
+            <span class="font-mono text-slate-200">{line["name"]}</span>
+            <span class="ml-2 font-mono text-xs text-slate-400">
+              {line["version"] || "present"}
+            </span>
+            <span :if={line["satisfied"]} class="ml-2 text-xs text-teal-300">satisfied</span>
+            <span :if={!line["satisfied"]} class="ml-2 text-xs text-amber-300">
+              {requirement_reasons(line)}
+            </span>
+          </span>
+          <button
+            type="button"
+            phx-click="remove-machine-requirement"
+            phx-value-name={line["name"]}
+            class="text-xs font-semibold text-rose-300 hover:text-rose-200"
+          >
+            Remove
+          </button>
+        </li>
+      </ul>
+      <p :if={@machine_evaluation.lines == []} class="mt-4 text-sm text-slate-400">
+        No requirements: any machine may run this repository's work.
+      </p>
+      <.form
+        for={%{}}
+        as={:requirement}
+        id="add-machine-requirement"
+        phx-submit="add-machine-requirement"
+        class="mt-4 flex flex-wrap items-end gap-2"
+      >
+        <label class="text-xs text-slate-400">
+          Tool<select
+            name="requirement[name]"
+            class="mt-1 block w-44 rounded-lg border border-white/10 bg-slate-950 p-2 text-sm"
+          >
+            <option :for={name <- @probe_names} value={name}>{name}</option>
+          </select>
+        </label>
+        <label class="text-xs text-slate-400">
+          Version (optional)<input
+            name="requirement[version]"
+            maxlength="64"
+            placeholder=">= 2.24.0"
+            class="mt-1 block w-40 rounded-lg border border-white/10 bg-slate-950 p-2 font-mono text-sm"
+          />
+        </label>
+        <button class="rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15">
+          Add requirement
+        </button>
+      </.form>
+    </section>
+
     <div class="grid gap-5 xl:grid-cols-2">
       <section id="auto-fix" class="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
         <h2 class="text-lg font-semibold text-white">Automatically implement ready issues</h2>
