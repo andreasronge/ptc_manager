@@ -44,6 +44,92 @@ defmodule PtcManagerWeb.ClusterLiveTest do
            )
   end
 
+  test "shows each member's tools, drift, and a move link at the repository's home", %{conn: conn} do
+    join_cluster!(%{
+      "beta" => fn _p, _h ->
+        {200,
+         TestPeerClient.status("beta", %{
+           "protocol_version" => 1,
+           "deployed_sha" => String.duplicate("c", 40),
+           "inventory" => %{
+             "pane" => %{
+               "captured_at" => DateTime.to_iso8601(DateTime.utc_now()),
+               "stale" => false,
+               "tools" => %{
+                 "docker" => %{"status" => "ok", "version" => "27.5.1", "detail" => nil}
+               }
+             },
+             "setup" => nil
+           },
+           "repositories" => [
+             %{"repository" => "acme/api", "claim" => "enabled", "requirements" => []}
+           ]
+         })}
+      end,
+      "gamma" => fn _p, _h -> :down end
+    })
+
+    PeerPoller.poll_now()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/cluster")
+
+    assert has_element?(view, "#machine-beta-tools-docker-pane", "27.5.1")
+    assert has_element?(view, "#cluster-drift", "beta: deployed revision cccccccccccc")
+
+    assert has_element?(
+             view,
+             ~s(#cluster-repository-acme\\/api a[href="https://beta.example.ts.net/repositories/acme/api"])
+           )
+  end
+
+  test "one member's malformed display data cannot break the page, and old inventories read stale",
+       %{conn: conn} do
+    long_ago = DateTime.utc_now() |> DateTime.add(-7_200, :second) |> DateTime.to_iso8601()
+
+    join_cluster!(%{
+      "beta" => fn _p, _h ->
+        {200,
+         TestPeerClient.status("beta", %{
+           "machine_name" => %{"not" => "a name"},
+           "capacity" => %{"cpu_percent" => "unknown"},
+           "agent_logins" => %{"codex" => %{}},
+           "jobs" => [%{"repository" => "acme/api", "url" => 7}, "junk"],
+           "inventory" => %{
+             "pane" => %{
+               "captured_at" => long_ago,
+               "stale" => false,
+               "tools" => %{
+                 "docker" => %{"status" => "ok", "version" => "27.5.1"},
+                 "git" => "odd"
+               }
+             },
+             "setup" => "odd"
+           },
+           "repositories" => [
+             %{
+               "repository" => "acme/api",
+               "claim" => "enabled",
+               "requirements" => [nil, %{"name" => "docker", "version" => "newest"}],
+               "claim_blockers" => [1]
+             }
+           ]
+         })}
+      end,
+      "gamma" => fn _p, _h -> :down end
+    })
+
+    PeerPoller.poll_now()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/cluster")
+
+    assert has_element?(view, "#machine-beta", "beta")
+    assert has_element?(view, "#machine-beta-tools", "stale")
+
+    assert has_element?(
+             view,
+             "#cluster-repository-acme\\/api",
+             "docker inventory is stale"
+           )
+  end
+
   test "the switcher keeps a repository page by owner and name", %{conn: conn} do
     repository = repository_fixture(%{github_owner: "Acme", github_name: "Api"})
     join_cluster!(%{})

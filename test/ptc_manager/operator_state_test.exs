@@ -129,6 +129,7 @@ defmodule PtcManager.OperatorStateTest do
 
     assert snapshot.captured_at == @now
     assert snapshot.machine_id == "local"
+    assert snapshot.cluster == %{enabled: false}
     assert snapshot.operational_mode == "active"
     assert [projected] = snapshot.repositories
     assert projected.id == repository.id

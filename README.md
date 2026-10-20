@@ -1917,6 +1917,112 @@ post-effect restart preserves the canary's durable result instead of restoring
 older state. This complements the deployment script checks with executable
 database and domain behavior.
 
+## Several machines
+
+One PtcManager instance runs per machine, with its own database, queues,
+Herdr server, and GitHub polling. Several instances form a cluster in which
+every repository is **homed** on exactly one machine: that machine polls
+GitHub for it, runs its collection runs, and executes all of its work
+locally. Members exchange a signed, read-only status document over
+Tailscale HTTPS so that a repository cannot be claimed twice, every console
+shows the whole cluster, and a repository's settings can move with it. They
+never share a database, never use Distributed Erlang, and never send each
+other commands. Running work on another machine than the repository's home
+is not supported. The design is explained in
+[`docs/maintainers/multi-machine.md`](docs/maintainers/multi-machine.md).
+
+### Prerequisites
+
+- Every instance that has GitHub credentials for a managed repository either
+  joins the cluster or has that repository disabled. An instance outside the
+  member map is outside the protocol and nothing stops it.
+- Each member is reachable from the others over Tailscale HTTPS: `tailscale
+  serve` in front of the loopback listener, as above.
+- A macOS member uses the launchd path (see "macOS background services and
+  deployment"): jobs run as the service account, operation cgroups are off,
+  and the health snapshot and release RPC tooling are Linux-only.
+- Clocks agree within a minute; requests outside that window are refused.
+
+### Configuration
+
+Set these in each member's environment file:
+
+- `PTC_MACHINE_ID` (required when clustered): 2 to 63 lowercase letters,
+  digits, or hyphens. `PTC_MACHINE_NAME` is the label on the badge.
+- `PTC_CLUSTER_MEMBERS`: a JSON object of every member's id and base URL,
+  **this machine included**, identical on every member, for example
+  `{"herdr-build-01":"https://herdr-build-01.tailnet.ts.net","mac-mini":"https://mac-mini.tailnet.ts.net"}`.
+  A base URL is an `https://*.ts.net` name or a Tailscale address.
+- `PTC_CLUSTER_SECRET`: at least 32 bytes, identical on every member. It signs
+  every request and response (HMAC-SHA256 over method, path, timestamp,
+  caller, nonce, and body hash).
+
+A member refuses to boot when its id is missing from the map. Its membership
+revision (the SHA-256 of the canonical map) is shown on the Cluster page; a
+change is audited at boot as `cluster.membership_changed`.
+
+Check a cluster from any member, or from a maintainer machine with the same
+two variables:
+
+```sh
+mix ptc.cluster check            # signs as PTC_MACHINE_ID, else the first member
+mix ptc.cluster check --as mac-mini
+```
+
+It prints each member's membership revision, protocol version, deployed SHA,
+clock skew, and any signature or transport failure, and exits non-zero when a
+member does not answer or disagrees.
+
+### Ownership
+
+A member claims a repository while the row is enabled, any of its work is not
+finished (a job, a pending agent action, a live collection run, an unreleased
+worktree), or a claim is in progress. On a member, repositories are added
+disabled and **Enable** is a claim: it announces an intent, asks every other
+member, and enables only when none claims the repository, is claiming it,
+reports another membership revision or protocol version, or cannot be
+reached. A refused claim names each member's answer. No claim is ever taken
+over automatically.
+
+After a restart a member admits no new work until it has heard from every
+other member at the same revision with no conflicting claim; there is no
+timeout. Running work keeps reconciling and publishing, and a member that did
+not restart keeps serving its repositories through a partition. If a peer
+also claims one of this member's repositories, no new work starts for it here
+until a person disables it on one side; a banner says so. A member that a
+peer refuses as a non-member admits nothing.
+
+### Moving a repository
+
+1. On the source, disable the repository. Its page lists what still holds the
+   claim (queued work, live runs, retained worktrees) with links to cancel or
+   finish it. When nothing remains it shows "ready to claim" and a link to
+   each healthy member that satisfies the repository's requirements.
+2. On the target, onboard the repository the ordinary way (it is added
+   disabled) and prepare its checkout, service access, and commit identity.
+3. Follow the link to the target's claim page. It checks the checkout and the
+   commit identity, shows which settings change, and lists the agent
+   environment variable **names** to re-enter (secret values never leave a
+   machine). Confirming claims the repository and imports its settings in
+   one transaction. Automations are matched by key, updated as new versions,
+   and arrive paused with their triggers until you review them.
+
+History stays on the source; the Cluster page links each job to its console.
+
+### Membership changes
+
+- **Add a machine:** start it with the new member map, then restart the
+  others with the same map. Claims fail on the revision check until all
+  agree; existing claims keep working.
+- **Remove a machine:** only when its status shows no claims and no intents.
+  Stop it, then update the map and restart the others. If it is dead, first
+  make sure it can never return with its database; that is the one thing the
+  design asks a person to assert.
+
+Deploys stay per machine; the Cluster page shows each member's SHA, and the
+protocol tolerates skew between releases. Daily digests and notifications
+stay per machine, covering disjoint repositories.
+
 ## Hetzner systemd and Tailscale
 
 Build the release, copy `_build/prod/rel/ptc_manager` to `/opt/ptc_manager`, and

@@ -112,6 +112,20 @@ defmodule PtcManager.Machine.RequirementsTest do
              Requirements.evaluate(requirements, inventory(pane, setup), @now).lines
   end
 
+  test "an unparsable version from another machine fails the line instead of raising" do
+    requirements = %{"tools" => [%{"name" => "node", "version" => ">= 1.0.0"}]}
+
+    summary = %{
+      "captured_at" => DateTime.to_iso8601(@now),
+      "tools" => %{"node" => %{"status" => "ok", "version" => "unknown"}}
+    }
+
+    contexts = ToolInventory.from_summary(%{"pane" => summary, "setup" => summary})
+
+    assert [%{"failures" => [%{"reason" => "version", "detail" => "unknown"} | _]}] =
+             Requirements.evaluate(requirements, %{contexts: contexts}, @now).lines
+  end
+
   test "validation accepts known tools with valid requirements and refuses the rest" do
     assert changeset(%{
              "tools" => [

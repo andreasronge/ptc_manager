@@ -54,12 +54,18 @@ defmodule PtcManager.Cluster.Status do
     settings = PtcManager.CapacitySettings.current()
     usage = PtcManager.Operations.agent_slot_usage(now)
 
+    sample = PtcManager.MachineUsage.latest_sample()
+
     %{
       "light_agent_capacity" => settings.light_agent_capacity,
       "heavy_agent_capacity" => settings.heavy_agent_capacity,
       "operation_capacity" => settings.operation_capacity,
       "light_agents_in_use" => usage.light,
-      "heavy_agents_in_use" => usage.heavy
+      "heavy_agents_in_use" => usage.heavy,
+      "cpu_percent" => sample && sample.cpu_percent,
+      "memory_percent" => sample && sample.memory_percent,
+      "disk_percent" => sample && sample.disk_percent,
+      "load_one" => sample && sample.load_one
     }
   end
 

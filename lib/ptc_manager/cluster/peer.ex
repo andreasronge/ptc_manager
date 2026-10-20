@@ -29,7 +29,9 @@ defmodule PtcManager.Cluster.Peer do
   """
   def fetch_status(member_id, opts \\ []) do
     with {:ok, status} <- fetch(member_id, status_path(), opts) do
-      if valid_status?(status, member_id), do: {:ok, status}, else: {:error, :invalid_status}
+      if valid_status?(status, member_id),
+        do: {:ok, PtcManager.Cluster.StatusShape.normalize(status)},
+        else: {:error, :invalid_status}
     end
   end
 

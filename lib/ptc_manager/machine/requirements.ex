@@ -158,9 +158,15 @@ defmodule PtcManager.Machine.Requirements do
 
   defp tool_failure(%{"version" => requirement}, %{status: "ok", version: version})
        when is_binary(requirement) do
-    if is_binary(version) and Version.match?(version, requirement),
-      do: nil,
-      else: %{"reason" => "version", "detail" => version}
+    # Both sides may come from another machine, so neither is trusted to parse.
+    with true <- is_binary(version),
+         {:ok, parsed_version} <- Version.parse(version),
+         {:ok, parsed} <- Version.parse_requirement(requirement),
+         true <- Version.match?(parsed_version, parsed) do
+      nil
+    else
+      _mismatch -> %{"reason" => "version", "detail" => version}
+    end
   end
 
   defp tool_failure(_line, %{status: "ok"}), do: nil

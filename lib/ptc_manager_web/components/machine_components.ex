@@ -37,7 +37,7 @@ defmodule PtcManagerWeb.MachineComponents do
               <.tool_cell
                 id={"#{@id}-#{tool}-#{context}"}
                 tool={summary && get_in(summary, ["tools", tool])}
-                stale={summary && summary["stale"]}
+                stale={stale?(summary, @now)}
               />
             </td>
           </tr>
@@ -85,7 +85,22 @@ defmodule PtcManagerWeb.MachineComponents do
         _invalid -> "unknown"
       end
 
-    if summary["stale"], do: "stale · #{age}", else: age
+    if stale?(summary, now), do: "stale · #{age}", else: age
+  end
+
+  # A summary may have been cached, by this console or a peer, past the age
+  # limit since it was built, so staleness is judged now, from its capture time.
+  defp stale?(nil, _now), do: false
+
+  defp stale?(%{"captured_at" => captured_at} = summary, now) do
+    case DateTime.from_iso8601(to_string(captured_at)) do
+      {:ok, at, _offset} ->
+        summary["stale"] == true or
+          DateTime.diff(now, at, :millisecond) > PtcManager.Machine.ToolInventory.max_age_ms()
+
+      _invalid ->
+        true
+    end
   end
 
   defp cell_text(nil), do: "—"

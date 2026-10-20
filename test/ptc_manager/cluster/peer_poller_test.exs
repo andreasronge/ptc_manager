@@ -147,6 +147,30 @@ defmodule PtcManager.Cluster.PeerPollerTest do
     Application.put_env(:ptc_manager, :cluster_http_client, TestPeerClient.new(responders))
   end
 
+  test "the operator state carries the cluster as the poller last saw it" do
+    join_cluster!(%{
+      "beta" =>
+        healthy("beta", %{"repositories" => [%{"repository" => "acme/api", "claim" => "enabled"}]}),
+      "gamma" => healthy("gamma")
+    })
+
+    PeerPoller.poll_now()
+    cluster = PtcManager.OperatorState.snapshot().cluster
+
+    assert cluster.enabled
+    assert cluster.startup_complete
+
+    assert [
+             %{
+               id: "beta",
+               health: "healthy",
+               claims: [%{repository: "acme/api", claim: "enabled"}]
+             },
+             %{id: "gamma"}
+           ] =
+             cluster.members
+  end
+
   test "a disabled repository is not admitted on a member" do
     repository = repository_fixture(%{github_owner: "acme", github_name: "off"})
     join_cluster!(%{"beta" => healthy("beta"), "gamma" => healthy("gamma")})
