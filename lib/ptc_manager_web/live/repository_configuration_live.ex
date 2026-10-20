@@ -75,6 +75,10 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
       {:error, :repository_not_found} ->
         {:noreply, put_flash(socket, :error, "That repository is no longer configured.")}
 
+      {:error, {:claim_refused, reason, checks}} ->
+        {:noreply,
+         put_flash(socket, :error, PtcManagerWeb.ClusterDisplay.claim_refusal(reason, checks))}
+
       _invalid ->
         {:noreply, put_flash(socket, :error, "The repository could not be updated.")}
     end

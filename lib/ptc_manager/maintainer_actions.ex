@@ -343,7 +343,7 @@ defmodule PtcManager.MaintainerActions do
         case prepare_and_claim(candidate, adapter, sync) do
           {:ok, {action, token}} -> execute_claimed(adapter, sync, action, token)
           {:skip, :no_longer_queued} -> {:ok, :empty}
-          {:skip, :machine_incapable} -> {:ok, :empty}
+          {:skip, reason} when reason in [:machine_incapable, :cluster_fenced] -> {:ok, :empty}
           {:deferred, action} -> {:ok, action}
           {:terminal, action} -> {:ok, action}
           {:error, reason} -> {:error, reason}
@@ -361,8 +361,8 @@ defmodule PtcManager.MaintainerActions do
       {:error, :dispatch_capacity} ->
         defer_preflight(action.id, :dispatch_capacity, action.sync_attempt_count)
 
-      {:error, :machine_incapable} ->
-        {:skip, :machine_incapable}
+      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+        {:skip, reason}
 
       {:error, reason} ->
         if WorktreeSecurity.infrastructure_error?(reason),
@@ -404,13 +404,13 @@ defmodule PtcManager.MaintainerActions do
   # preparation, a reservation made for a retained repair is handed back.
   defp claim_prepared(prepared) do
     case Operations.claim_agent_action(prepared.id) do
-      {:error, :machine_incapable} ->
+      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
         if prepared.target_snapshot["repair_mode"] == "retained" do
           publication = Repo.get!(PrPublication, prepared.target_id)
           Operations.return_repair_worktree(publication.job_id, "repair-agent")
         end
 
-        {:skip, :machine_incapable}
+        {:skip, reason}
 
       result ->
         result

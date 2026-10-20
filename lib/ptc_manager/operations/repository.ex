@@ -99,6 +99,9 @@ defmodule PtcManager.Operations.Repository do
     end)
     |> update_change(:local_path, &normalize_local_path/1)
     |> unique_constraint([:github_owner, :github_name])
+    |> unique_constraint([:github_owner, :github_name],
+      name: :repositories_github_identity_ci_index
+    )
     |> unique_constraint(:local_path)
   end
 

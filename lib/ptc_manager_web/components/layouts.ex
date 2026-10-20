@@ -32,6 +32,11 @@ defmodule PtcManagerWeb.Layouts do
     doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
 
   attr :current_path, :string, default: "/"
+
+  attr :switch_to, :any,
+    default: nil,
+    doc: "where the machine switcher lands on another member; a repository struct or a path"
+
   attr :repositories, :list, default: []
   attr :selected_repository, :string, default: nil
 
@@ -53,6 +58,11 @@ defmodule PtcManagerWeb.Layouts do
               </span>
             </a>
             <.machine_badge machine={PtcManager.Machine.describe()} />
+            <.machine_switcher
+              :if={PtcManager.Cluster.enabled?()}
+              current_path={@current_path}
+              switch_to={@switch_to}
+            />
           </div>
           <nav
             aria-label="Primary"
@@ -97,6 +107,14 @@ defmodule PtcManagerWeb.Layouts do
               Deploy
             </.nav_link>
             <.nav_link
+              :if={PtcManager.Cluster.enabled?()}
+              href={~p"/cluster"}
+              active={@current_path == "/cluster"}
+              icon="hero-server-stack-mini"
+            >
+              Cluster
+            </.nav_link>
+            <.nav_link
               href={~p"/configuration"}
               active={@current_path == "/configuration"}
               icon="hero-cog-6-tooth-mini"
@@ -134,6 +152,18 @@ defmodule PtcManagerWeb.Layouts do
               {repository.github_owner}/{repository.github_name}
             </option>
           </select>
+        </div>
+      </div>
+
+      <div
+        :if={PtcManager.Cluster.Fence.console_banner()}
+        id="cluster-banner"
+        role="status"
+        class="border-b border-rose-400/20 bg-rose-400/[0.08] px-4 py-3 text-rose-100 sm:px-6"
+      >
+        <div class="mx-auto flex max-w-7xl items-start gap-3 text-sm">
+          <.icon name="hero-server-stack-mini" class="mt-0.5 size-4 shrink-0" />
+          <p>{PtcManager.Cluster.Fence.console_banner()}</p>
         </div>
       </div>
 
@@ -201,6 +231,65 @@ defmodule PtcManagerWeb.Layouts do
       <span class="text-slate-100">{@machine.name}</span>
       <span class="font-normal text-slate-400">{@machine.os}</span>
     </span>
+    """
+  end
+
+  @doc """
+  The other members, each with a health dot. Following one opens the same
+  place on that member's console where record ids allow it.
+  """
+  attr :current_path, :string, required: true
+  attr :switch_to, :any, default: nil
+
+  def machine_switcher(assigns) do
+    cluster = PtcManager.Cluster.PeerPoller.current()
+
+    {path, repository} =
+      case assigns.switch_to do
+        %{github_owner: _owner} = repository -> {assigns.current_path, repository}
+        path when is_binary(path) -> {path, nil}
+        nil -> {assigns.current_path, nil}
+      end
+
+    assigns =
+      assign(assigns,
+        members:
+          cluster.members
+          |> Map.values()
+          |> Enum.sort_by(& &1.id)
+          |> Enum.map(fn member ->
+            Map.put(
+              member,
+              :url,
+              PtcManagerWeb.ClusterDisplay.switch_url(member.id, path, repository)
+            )
+          end)
+      )
+
+    ~H"""
+    <details id="machine-switcher" class="relative">
+      <summary class="cursor-pointer list-none rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/5 hover:text-white">
+        Switch machine
+      </summary>
+      <div class="absolute left-0 z-40 mt-2 min-w-56 rounded-xl border border-white/10 bg-slate-900 p-2 shadow-xl">
+        <a
+          :for={member <- @members}
+          id={"switch-to-#{member.id}"}
+          href={member.url}
+          class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm text-slate-200 hover:bg-white/5"
+        >
+          <span class="flex items-center gap-2">
+            <span class={[
+              "size-2 rounded-full",
+              PtcManagerWeb.ClusterDisplay.health_class(member.health)
+            ]}>
+            </span>
+            {(member.status && member.status["machine_name"]) || member.id}
+          </span>
+          <span class="text-xs text-slate-500">{member.health}</span>
+        </a>
+      </div>
+    </details>
     """
   end
 

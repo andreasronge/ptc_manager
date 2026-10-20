@@ -58,7 +58,12 @@ defmodule PtcManager.Machine.Inventory do
   end
 
   defp empty do
-    %{contexts: Map.new(ToolInventory.contexts(), &{&1, nil}), errors: %{}, probing?: false}
+    %{
+      contexts: Map.new(ToolInventory.contexts(), &{&1, nil}),
+      errors: %{},
+      probing?: false,
+      agent_logins: %{}
+    }
   end
 
   @doc "Starts a fresh probe of every context; results arrive on the `machine_usage` topic."
@@ -185,12 +190,17 @@ defmodule PtcManager.Machine.Inventory do
     state = finish_probe(state)
 
     case result do
-      {:ok, documents} ->
+      {:ok, documents, logins} ->
         Enum.each(documents, fn {context, document} ->
           write_snapshot(state, context, document)
         end)
 
-        {:noreply, state |> clear_error() |> reload(Map.new(documents)) |> observe_transition()}
+        {:noreply,
+         state
+         |> clear_error()
+         |> put_logins(logins)
+         |> reload(Map.new(documents))
+         |> observe_transition()}
 
       {:error, reason} ->
         Logger.warning("tool probe failed: #{inspect(reason)}")
@@ -238,14 +248,38 @@ defmodule PtcManager.Machine.Inventory do
     case config(:herdr_run_as_user, nil) do
       user when is_binary(user) and user != "" ->
         with {:ok, document} <- run_probe_script("setup", catalog_path, user) do
-          {:ok, [{"setup", document}]}
+          {:ok, [{"setup", document}], agent_logins()}
         end
 
       _service_account ->
         with {:ok, document} <- run_probe_script("pane", catalog_path, nil) do
-          {:ok, [{"pane", document}, {"setup", Map.put(document, "context", "setup")}]}
+          {:ok, [{"pane", document}, {"setup", Map.put(document, "context", "setup")}],
+           agent_logins()}
         end
     end
+  end
+
+  # Whether each enabled agent CLI is signed in as the job identity. Only a
+  # machine with a worker boundary (or one configured to verify) can tell.
+  defp agent_logins do
+    checked? =
+      PtcManager.Repository.WorkerHelper.worker_boundary?() or
+        config(:verify_agent_login, false)
+
+    Map.new(PtcManager.AgentProfiles.enabled_kinds(), fn kind ->
+      status =
+        if checked? do
+          case PtcManager.Repository.WorkerAgentLogin.verify(kind) do
+            :ok -> "signed_in"
+            {:error, {:agent_signed_out, _kind}} -> "signed_out"
+            {:error, _reason} -> "unknown"
+          end
+        else
+          "not_checked"
+        end
+
+      {kind, status}
+    end)
   end
 
   defp run_probe_script(context, catalog_path, user) do
@@ -402,6 +436,12 @@ defmodule PtcManager.Machine.Inventory do
   defp record_error(state, reason) do
     inventory = current(state.table)
     store(state, %{inventory | errors: Map.put(inventory.errors, "probe", reason)})
+    state
+  end
+
+  defp put_logins(state, logins) do
+    inventory = current(state.table)
+    if inventory.agent_logins != logins, do: store(state, %{inventory | agent_logins: logins})
     state
   end
 

@@ -8,6 +8,7 @@ defmodule PtcManager.Application do
   @impl true
   def start(_type, _args) do
     PtcManager.RuntimeIncarnation.initialize()
+    PtcManager.Cluster.validate!()
 
     children = [
       PtcManagerWeb.Telemetry,
@@ -21,6 +22,11 @@ defmodule PtcManager.Application do
         start: {Task, :start_link, [&PtcManager.OperationalMode.record_boot/0]},
         restart: :temporary
       },
+      %{
+        id: PtcManager.Cluster.MembershipRecord,
+        start: {Task, :start_link, [&PtcManager.Cluster.record_membership/0]},
+        restart: :temporary
+      },
       PtcManager.Automations.Bootstrap,
       {Oban, Application.fetch_env!(:ptc_manager, Oban)},
       PtcManager.Repository.StartupPreflight,
@@ -29,6 +35,7 @@ defmodule PtcManager.Application do
       {Task.Supervisor, name: PtcManager.TaskSupervisor},
       PtcManager.MachineUsage.Sampler,
       PtcManager.Machine.Inventory,
+      PtcManager.Cluster.PeerPoller,
       PtcManager.DeploymentCoordinator,
       PtcManager.ResourceOperationBroker,
       maintainer_action_supervisor(),

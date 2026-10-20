@@ -40,6 +40,34 @@ config :ptc_manager,
   tool_inventory_max_age_ms:
     env_default.("PTC_TOOL_INVENTORY_MAX_AGE_MS", "1800000") |> String.to_integer()
 
+# Several machines: every member's id and base URL, and the shared secret that
+# signs peer requests. PtcManager.Cluster.validate!/0 checks them at boot.
+cluster_members =
+  case System.get_env("PTC_CLUSTER_MEMBERS") do
+    value when value in [nil, ""] ->
+      nil
+
+    value ->
+      case Jason.decode(value) do
+        {:ok, members} when is_map(members) and map_size(members) > 0 ->
+          Map.new(members, fn
+            {id, url} when is_binary(url) -> {id, String.trim_trailing(url, "/")}
+            {id, url} -> {id, url}
+          end)
+
+        _invalid ->
+          raise "PTC_CLUSTER_MEMBERS must be a JSON object of machine id to base URL"
+      end
+  end
+
+config :ptc_manager,
+  machine_id_configured: System.get_env("PTC_MACHINE_ID", "") != "",
+  cluster_members: cluster_members,
+  cluster_secret: System.get_env("PTC_CLUSTER_SECRET"),
+  # Plain HTTP on loopback, for the multi-member integration tests only.
+  cluster_allow_insecure_loopback:
+    config_env() != :prod and System.get_env("PTC_CLUSTER_ALLOW_INSECURE_LOOPBACK") == "true"
+
 if tool_inventory_dir = System.get_env("PTC_TOOL_INVENTORY_DIR") do
   config :ptc_manager, :tool_inventory_dir, tool_inventory_dir
 end

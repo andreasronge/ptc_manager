@@ -34,6 +34,18 @@ defmodule PtcManagerWeb.Router do
     get "/health", HealthController, :show
   end
 
+  # Cluster members read each other's status. Authentication runs first, so an
+  # unclustered console answers 404 to everything here.
+  pipeline :peer_api do
+    plug PtcManagerWeb.PeerAuth
+  end
+
+  scope "/api/peer/v1", PtcManagerWeb do
+    pipe_through :peer_api
+
+    get "/status", PeerController, :status
+  end
+
   scope "/api/operator", PtcManagerWeb do
     pipe_through :operator_api
 
@@ -57,6 +69,7 @@ defmodule PtcManagerWeb.Router do
       live "/automations/new", AutomationsLive, :new
       live "/automations/:id", AutomationsLive, :show
       live "/deployments", DeploymentsLive, :index
+      live "/cluster", ClusterLive, :index
       live "/configuration", ConfigurationLive, :index
       live "/configuration/repositories/:id", RepositoryConfigurationLive, :show
       live "/execution-profiles", ExecutionProfilesLive, :index
@@ -64,6 +77,7 @@ defmodule PtcManagerWeb.Router do
       live "/jobs/:id/report", DeliveryReportLive, :show
     end
 
+    get "/repositories/:owner/:name", RepositoryLinkController, :show
     delete "/logout", AuthController, :delete
   end
 

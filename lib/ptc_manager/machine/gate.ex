@@ -17,14 +17,24 @@ defmodule PtcManager.Machine.Gate do
   alias PtcManager.Operations.Repository
   alias PtcManager.Repo
 
-  @doc "Ids of repositories whose requirements this machine does not satisfy now."
+  @doc """
+  Ids of repositories this console may not admit work for now: their
+  requirements are unmet here, or the cluster fences them
+  (`PtcManager.Cluster.Fence`).
+  """
   def unsatisfied_repository_ids(now \\ DateTime.utc_now()) do
     inventory = Inventory.current()
 
-    for {id, requirements} <- requirement_rows(),
-        not Requirements.evaluate(requirements, inventory, now).satisfied?,
-        do: id
+    incapable =
+      for {id, requirements} <- requirement_rows(),
+          not Requirements.evaluate(requirements, inventory, now).satisfied?,
+          do: id
+
+    Enum.uniq(incapable ++ PtcManager.Cluster.Fence.fenced_repository_ids())
   end
+
+  @doc "Whether an admission error means the work waits rather than fails."
+  def waiting?(reason), do: reason in [:machine_incapable, :cluster_fenced]
 
   @doc "Repository id => evaluation for every repository that declares requirements."
   def evaluations(now \\ DateTime.utc_now()) do
@@ -55,10 +65,17 @@ defmodule PtcManager.Machine.Gate do
   """
   def check(repository_or_id, now \\ DateTime.utc_now())
 
-  def check(%Repository{machine_requirements: requirements}, now) do
-    if Requirements.evaluate(requirements, Inventory.current(), now).satisfied?,
-      do: :ok,
-      else: {:error, :machine_incapable}
+  def check(%Repository{machine_requirements: requirements} = repository, now) do
+    cond do
+      not Requirements.evaluate(requirements, Inventory.current(), now).satisfied? ->
+        {:error, :machine_incapable}
+
+      PtcManager.Cluster.Fence.admission(repository) != :ok ->
+        {:error, :cluster_fenced}
+
+      true ->
+        :ok
+    end
   end
 
   def check(repository_id, now) when is_integer(repository_id) do

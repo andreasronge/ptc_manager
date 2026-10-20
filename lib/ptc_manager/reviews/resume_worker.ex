@@ -26,7 +26,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
   defp resume(id, generation) do
     case PtcManager.Machine.Gate.check(Repo.get!(Job, id).repository_id) do
       :ok -> recover(id, generation)
-      {:error, :machine_incapable} -> {:snooze, 60}
+      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] -> {:snooze, 60}
     end
   end
 
@@ -43,7 +43,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
           {:error, :stale_continuation} ->
             :ok
 
-          {:error, :machine_incapable} ->
+          {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
             {:snooze, 60}
 
           {:error, _} ->
@@ -88,7 +88,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
            ] ->
         {:snooze, 10}
 
-      {:error, :machine_incapable} ->
+      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
         {:snooze, 60}
 
       {:error, reason} when reason in [:stale_continuation, :continuation_already_claimed] ->

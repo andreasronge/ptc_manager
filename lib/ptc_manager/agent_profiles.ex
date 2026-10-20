@@ -146,5 +146,13 @@ defmodule PtcManager.AgentProfiles do
     end)
   end
 
+  @doc "Every enabled kind, sorted."
+  def enabled_kinds do
+    configured()
+    |> Enum.filter(fn {_kind, profile} -> is_map(profile) and profile["enabled"] == true end)
+    |> Enum.map(fn {kind, _profile} -> kind end)
+    |> Enum.sort()
+  end
+
   defp configured, do: Application.get_env(:ptc_manager, :agent_profiles, %{})
 end

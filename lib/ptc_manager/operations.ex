@@ -74,6 +74,23 @@ defmodule PtcManager.Operations do
   def list_repositories,
     do: Repository |> order_by([repository], asc: repository.id) |> Repo.all()
 
+  @doc "Enabled repositories, the ones this console synchronizes and serves."
+  def enabled_repositories,
+    do:
+      Repository
+      |> where([repository], repository.enabled)
+      |> order_by([repository], asc: repository.id)
+      |> Repo.all()
+
+  # On a cluster member a disabled repository is one this member is giving up
+  # or has not claimed, so nothing new is created for it. A single console
+  # keeps its old behaviour.
+  defp member_owns(%Repository{enabled: true}), do: :ok
+
+  defp member_owns(%Repository{}) do
+    if PtcManager.Cluster.enabled?(), do: {:error, :repository_disabled}, else: :ok
+  end
+
   def list_workers,
     do: Worker |> order_by([worker], asc: worker.id) |> Repo.all()
 
@@ -108,8 +125,30 @@ defmodule PtcManager.Operations do
   Enabling is that decision, and disabling is how it is withdrawn: neither
   touches GitHub, the checkout, or work already in flight.
   """
-  def set_repository_enabled(repository_id, enabled, actor)
-      when is_integer(repository_id) and is_boolean(enabled) and is_binary(actor) and actor != "" do
+  def set_repository_enabled(repository_id, enabled, actor, opts \\ [])
+
+  def set_repository_enabled(repository_id, true, actor, opts)
+      when is_integer(repository_id) and is_binary(actor) and actor != "" do
+    if PtcManager.Cluster.enabled?() do
+      case PtcManager.Cluster.Claims.acquire(
+             repository_id,
+             actor,
+             fn _repository -> :ok end,
+             opts
+           ) do
+        {:ok, repository, _checks} -> notify_and_return({:ok, repository})
+        {:error, reason, checks} -> {:error, {:claim_refused, reason, checks}}
+      end
+    else
+      toggle_repository(repository_id, true, actor)
+    end
+  end
+
+  def set_repository_enabled(repository_id, false, actor, _opts)
+      when is_integer(repository_id) and is_binary(actor) and actor != "",
+      do: toggle_repository(repository_id, false, actor)
+
+  defp toggle_repository(repository_id, enabled, actor) do
     case Repo.get(Repository, repository_id) do
       nil ->
         {:error, :repository_not_found}
@@ -170,7 +209,21 @@ defmodule PtcManager.Operations do
     end
   end
 
+  # A member inserts every repository disabled: enabling is a claim
+  # (`PtcManager.Cluster.Claims.acquire/4`), never a side effect of creation.
   defp insert_repository(attrs) do
+    attrs =
+      cond do
+        not PtcManager.Cluster.enabled?() ->
+          attrs
+
+        Enum.any?(Map.keys(Map.new(attrs)), &is_binary/1) ->
+          Map.put(Map.new(attrs), "enabled", false)
+
+        true ->
+          Map.put(Map.new(attrs), :enabled, false)
+      end
+
     Multi.new()
     |> Multi.insert(:repository, Repository.changeset(%Repository{}, attrs))
     |> Multi.run(:automations, fn _repo, %{repository: repository} ->
@@ -880,6 +933,15 @@ defmodule PtcManager.Operations do
     |> Multi.run(:branch, fn _repo, _changes ->
       unchanged_branch(attrs[:repository_id], built_for_branch)
     end)
+    |> Multi.run(:owner, fn repo, _changes ->
+      case attrs[:repository_id] && repo.get(Repository, attrs[:repository_id]) do
+        %Repository{} = repository ->
+          with :ok <- member_owns(repository), do: {:ok, :owned}
+
+        _missing ->
+          {:ok, :owned}
+      end
+    end)
     |> Multi.insert(:agent_action, AgentAction.changeset(%AgentAction{}, attrs))
     |> Multi.insert(:audit_event, fn %{agent_action: action} ->
       AuditEvent.changeset(%AuditEvent{}, %{
@@ -1361,6 +1423,11 @@ defmodule PtcManager.Operations do
 
         issue = Repo.get!(Issue, stopped.issue_id)
         unless issue.state == "open", do: Repo.rollback(:issue_not_open)
+
+        case member_owns(Repo.get!(Repository, stopped.repository_id)) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
 
         # The same gates a fresh approval passes; a retry is one. The retry
         # runs on the stopped job's frozen title and body, so a changed issue
@@ -2472,8 +2539,8 @@ defmodule PtcManager.Operations do
             Repo.rollback(:collection_run_paused)
 
           # The job waits for a capable machine; rejecting it would cancel it.
-          {:error, :machine_incapable} ->
-            Repo.rollback(:machine_incapable)
+          {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+            Repo.rollback(reason)
 
           {:error, reason} ->
             if WorktreeSecurity.infrastructure_error?(reason) do
@@ -4629,6 +4696,7 @@ defmodule PtcManager.Operations do
   defp current_approvable_snapshot(repo, issue_id, mode) do
     with %Issue{} = issue <- repo.get(Issue, issue_id),
          repository = repo.get!(Repository, issue.repository_id),
+         :ok <- member_owns(repository),
          :ok <- automatic_approval_allowed(repo, issue, mode),
          :ok <- issue_is_open(issue),
          :ok <- issue_unclaimed(issue, repository),
@@ -6208,6 +6276,10 @@ defmodule PtcManager.Operations do
 
   def rejection_words(:issue_claimed),
     do: "The issue is assigned on GitHub."
+
+  def rejection_words(:cluster_fenced),
+    do:
+      "The cluster does not let this machine start new work for the repository now; see the Cluster page."
 
   def rejection_words(:machine_incapable),
     do:

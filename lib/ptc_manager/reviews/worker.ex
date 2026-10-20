@@ -34,7 +34,7 @@ defmodule PtcManager.Reviews.Worker do
         {:error, :database_busy} ->
           {:snooze, 10}
 
-        {:error, :machine_incapable} ->
+        {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
           {:snooze, 60}
 
         {:error, _} ->

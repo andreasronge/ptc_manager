@@ -130,7 +130,7 @@ defmodule PtcManagerWeb.JobReviewsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path="/board">
+    <Layouts.app flash={@flash} current_path="/board" switch_to="/cluster">
       <div class="mx-auto max-w-4xl space-y-5 p-6 text-slate-200">
         <h1 class="text-2xl font-semibold text-white">Reviews for issue #{@job.issue.number}</h1>
         <p>{@job.issue.title}</p>

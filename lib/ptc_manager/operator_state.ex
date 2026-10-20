@@ -46,7 +46,7 @@ defmodule PtcManager.OperatorState do
         (Operations.list_active_agent_runs() ++ Operations.list_waiting_agent_runs())
         |> Enum.map(&agent_run(&1, now)),
       audit_events: Enum.map(recent_audit_events(), &audit_event/1),
-      repositories: Enum.map(enabled_repositories(), &repository(&1, now))
+      repositories: Enum.map(Operations.enabled_repositories(), &repository(&1, now))
     })
   end
 
@@ -169,8 +169,6 @@ defmodule PtcManager.OperatorState do
   end
 
   ## Per repository
-
-  defp enabled_repositories, do: Enum.filter(Operations.list_repositories(), & &1.enabled)
 
   defp repository(%Repository{} = repository, now) do
     %{

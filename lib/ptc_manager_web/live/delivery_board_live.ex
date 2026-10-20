@@ -333,6 +333,9 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
   defp resume_refusal(:machine_incapable),
     do: "this machine lacks a tool the repository requires."
 
+  defp resume_refusal(:cluster_fenced),
+    do: "the cluster does not let this machine start new work for the repository now."
+
   defp resume_refusal(reason), do: inspect(reason)
 
   @doc "Whether a failed job's card offers Resume: its worktree and agent session are still there."
