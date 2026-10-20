@@ -2,6 +2,7 @@ ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/herdr
 agent ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-herdr-worker-bridge
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-git
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-bootstrap
+ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-tool-probe
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-claude-trust
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-codex-arm
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-agent-login
@@ -13,6 +14,7 @@ ptc-manager ALL=(ptc-manager-verifier) NOPASSWD: /usr/bin/env
 ptc-manager ALL=(ptc-manager-gate) NOPASSWD: /usr/bin/env
 ptc-manager ALL=(root) NOPASSWD: /bin/systemctl start --no-block ptc-manager-self-deploy.service
 ptc-manager ALL=(root) NOPASSWD: /bin/systemctl start --no-block ptc-manager-provision-repository.service
+ptc-manager ALL=(root) NOPASSWD: /bin/systemctl start --no-block ptc_manager-tool-probe.service
 ptc-manager ALL=(root) NOPASSWD: /usr/local/bin/ptc-manager-operation-recover *
 
 ptc-manager ALL=(ptc-manager-worker) NOPASSWD: /usr/local/bin/ptc-manager-worker-worktree-cleanup

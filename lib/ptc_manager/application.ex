@@ -28,6 +28,7 @@ defmodule PtcManager.Application do
       {Phoenix.PubSub, name: PtcManager.PubSub},
       {Task.Supervisor, name: PtcManager.TaskSupervisor},
       PtcManager.MachineUsage.Sampler,
+      PtcManager.Machine.Inventory,
       PtcManager.DeploymentCoordinator,
       PtcManager.ResourceOperationBroker,
       maintainer_action_supervisor(),

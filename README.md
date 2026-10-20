@@ -72,6 +72,37 @@ last day, 1 hour for the last week) and leaves a visible gap wherever no sample
 exists, for example across a deploy restart. The chart is server-rendered SVG:
 no JavaScript chart library is bundled.
 
+### Machine identity and tool inventory
+
+Every page shows a badge with this machine's name and operating system, in a
+colour derived from `PTC_MACHINE_ID` (default `local`; `PTC_MACHINE_NAME` is
+the label, defaulting to the id). The Operations page lists the tools this
+machine can run in each place repository commands run:
+
+- **Agent panes**: agents and `$PTC_OPERATION_WRAPPER` commands in Herdr. On
+  Linux the oneshot `ptc_manager-tool-probe.service` probes them with exactly
+  the Herdr service's user, groups, environment file, and sandbox (a test keeps
+  the two unit files in step), every 10 minutes from its timer. Its `PATH` is
+  the one in `/etc/ptc_manager/herdr.env`; keep it explicit there.
+- **Workspace setup**: the setup command, which runs through sudo from the
+  console's own sandbox with sudo's `secure_path`. The console probes this
+  context itself through the same sudo path.
+
+On macOS both contexts are the service account, so one probe run records both.
+The pre-publication gate's separate identity is not probed. Each probe is an
+argv list run without a shell, with a 5-second timeout and capped output; the
+built-in catalog (`PtcManager.Machine.ToolProbes`) covers `docker`,
+`docker-daemon` (the server version, so it fails when the job user cannot
+reach the daemon), `docker-compose`, `deno`, `elixir`, `node`, `git`, `gh`,
+`psql`, `redis-server`, and `cerbos`. Add tools without a code change through
+`PTC_TOOL_PROBES_JSON`, a JSON array of `{"name", "argv", "version_regex"}`
+validated at boot (at most 24 probes in all). Snapshots are written to
+`tool-inventory-<context>.json` in `PTC_TOOL_INVENTORY_DIR`
+(`/var/lib/ptc_manager-output` on a Linux service) and count as stale after
+`PTC_TOOL_INVENTORY_MAX_AGE_MS` (30 minutes). **Refresh** probes every context
+now. Only a change in what the probes report is recorded, as the audit event
+`machine.inventory_changed`.
+
 ## Execution profiles and review limits
 
 Configuration → **Execution profiles and models** sets the implementation and

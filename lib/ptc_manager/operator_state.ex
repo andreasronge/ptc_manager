@@ -56,7 +56,11 @@ defmodule PtcManager.OperatorState do
   end
 
   defp envelope(now) do
-    %{captured_at: now, deployed_sha: Application.get_env(:ptc_manager, :deployed_sha)}
+    %{
+      captured_at: now,
+      machine_id: PtcManager.Machine.id(),
+      deployed_sha: Application.get_env(:ptc_manager, :deployed_sha)
+    }
   end
 
   ## Console-wide sections

@@ -160,6 +160,9 @@ health_snapshot_candidate="/tmp/ptc-manager-health-snapshot-${release_id}"
 health_snapshot_service_candidate="/tmp/ptc-manager-health-snapshot-service-${release_id}"
 health_snapshot_timer_candidate="/tmp/ptc-manager-health-snapshot-timer-${release_id}"
 health_snapshot_env_candidate="/tmp/ptc-manager-health-snapshot-env-${release_id}"
+tool_probe_candidate="/tmp/ptc-manager-tool-probe-${release_id}"
+tool_probe_service_candidate="/tmp/ptc-manager-tool-probe-service-${release_id}"
+tool_probe_timer_candidate="/tmp/ptc-manager-tool-probe-timer-${release_id}"
 toolchain_manifest="/tmp/ptc-manager-toolchain-versions-${release_id}"
 toolchain_reader="/tmp/ptc-manager-toolchain-version-${release_id}"
 coordinator_environment_files=
@@ -191,6 +194,7 @@ cleanup_remote() {
     "$self_deploy_access_candidate" "$health_snapshot_candidate" \
     "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate" \
     "$health_snapshot_env_candidate" \
+    "$tool_probe_candidate" "$tool_probe_service_candidate" "$tool_probe_timer_candidate" \
     "$toolchain_manifest" "$toolchain_reader"
   sudo rm -f -- "$maintenance_override_backup"
 
@@ -1524,6 +1528,9 @@ tar -xOf "$source_archive" deploy/ptc_manager-self-deploy-access.conf >"$self_de
 tar -xOf "$source_archive" deploy/ptc-manager-health-snapshot >"$health_snapshot_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-health-snapshot.service >"$health_snapshot_service_candidate"
 tar -xOf "$source_archive" deploy/ptc_manager-health-snapshot.timer >"$health_snapshot_timer_candidate"
+tar -xOf "$source_archive" priv/tool_probe.py >"$tool_probe_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-tool-probe.service >"$tool_probe_service_candidate"
+tar -xOf "$source_archive" deploy/ptc_manager-tool-probe.timer >"$tool_probe_timer_candidate"
 tar -xOf "$source_archive" deploy/toolchain-versions >"$toolchain_manifest"
 tar -xOf "$source_archive" deploy/ptc-manager-toolchain-version >"$toolchain_reader"
 chmod 0755 "$worker_git_candidate"
@@ -1548,6 +1555,8 @@ chmod 0755 "$self_deploy_runner_candidate"
 chmod 0644 "$self_deploy_service_candidate" "$self_deploy_access_candidate"
 chmod 0755 "$health_snapshot_candidate"
 chmod 0644 "$health_snapshot_service_candidate" "$health_snapshot_timer_candidate"
+chmod 0755 "$tool_probe_candidate"
+chmod 0644 "$tool_probe_service_candidate" "$tool_probe_timer_candidate"
 chmod 0755 "$toolchain_reader"
 sudo visudo -cf "$sudoers_candidate" >/dev/null
 
@@ -1949,6 +1958,15 @@ sudo install -o root -g root -m 0644 "$health_snapshot_timer_candidate" \
   /etc/systemd/system/ptc_manager-health-snapshot.timer
 sudo install -o root -g root -m 0600 "$health_snapshot_env_candidate" \
   /etc/ptc_manager/health-snapshot.env
+# The agent-pane tool inventory: the probe runs with the Herdr service's
+# identity and sandbox, reads the catalog the console writes, and is started by
+# its timer or by the console's Refresh through one sudoers rule.
+sudo install -o root -g root -m 0755 "$tool_probe_candidate" \
+  /usr/local/bin/ptc-manager-tool-probe
+sudo install -o root -g root -m 0644 "$tool_probe_service_candidate" \
+  /etc/systemd/system/ptc_manager-tool-probe.service
+sudo install -o root -g root -m 0644 "$tool_probe_timer_candidate" \
+  /etc/systemd/system/ptc_manager-tool-probe.timer
 
 # The same script the Prepare checkouts button starts: it clones missing
 # checkouts as the worker and installs the access drop-ins. A clone that fails
@@ -2022,6 +2040,7 @@ sudo systemctl is-active --quiet ptc_manager.service
 sudo systemctl start ptc_manager-health-snapshot.service
 verify_health_snapshot "$previous_health_snapshot_id"
 sudo systemctl enable --now ptc_manager-health-snapshot.timer
+sudo systemctl enable --now ptc_manager-tool-probe.timer
 
 migration_version=$(sudo sqlite3 -readonly "$database_path" \
   "select coalesce(max(version), 0) from schema_migrations;")

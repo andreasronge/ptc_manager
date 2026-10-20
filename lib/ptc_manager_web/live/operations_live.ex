@@ -2,11 +2,13 @@ defmodule PtcManagerWeb.OperationsLive do
   use PtcManagerWeb, :live_view
 
   import PtcManagerWeb.UsageChart
+  import PtcManagerWeb.MachineComponents
 
   alias PtcManager.CapacitySettings
   alias PtcManager.ResourceOperations
   alias PtcManager.HostMetrics
   alias PtcManager.Herdr.Transcript
+  alias PtcManager.Machine.{Inventory, ToolInventory}
   alias PtcManager.MachineUsage
   alias PtcManager.Operations
   alias PtcManager.Operations.AgentHealth
@@ -50,6 +52,7 @@ defmodule PtcManagerWeb.OperationsLive do
      |> assign(:agent_output_timer, nil)
      |> assign(:range, MachineUsage.range(nil))
      |> assign(:usage, nil)
+     |> assign_inventory(Inventory.current())
      |> assign(:timeline_filter, "all")
      |> assign(:include_maintenance?, false)
      |> assign(:cancel_agent_run_id, nil)
@@ -99,6 +102,9 @@ defmodule PtcManagerWeb.OperationsLive do
   def handle_info({:machine_usage_sampled, _sample}, socket),
     do: {:noreply, socket |> assign(:now, DateTime.utc_now()) |> load_usage()}
 
+  def handle_info({:machine_inventory, inventory}, socket),
+    do: {:noreply, assign_inventory(socket, inventory)}
+
   def handle_info(:agent_output_tick, %{assigns: %{selected_run: nil}} = socket),
     do: {:noreply, assign(socket, :agent_output_timer, nil)}
 
@@ -111,6 +117,16 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   @impl true
+  def handle_event("refresh_inventory", _params, socket) do
+    case Inventory.refresh() do
+      :ok ->
+        {:noreply, put_flash(socket, :info, "Probing tools in every execution context.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Tool probe could not start: #{inspect(reason)}")}
+    end
+  end
+
   def handle_event("close_agent", _params, socket),
     do: {:noreply, push_patch(socket, to: close_path(socket.assigns))}
 
@@ -198,6 +214,13 @@ defmodule PtcManagerWeb.OperationsLive do
   end
 
   defp current_params(_assigns), do: []
+
+  defp assign_inventory(socket, inventory) do
+    socket
+    |> assign(:tool_inventory, ToolInventory.summary(inventory.contexts, DateTime.utc_now()))
+    |> assign(:tool_inventory_probing?, inventory.probing?)
+    |> assign(:tool_inventory_errors, inventory.errors)
+  end
 
   defp range_param(key), do: if(key == MachineUsage.default_range_key(), do: nil, else: key)
 

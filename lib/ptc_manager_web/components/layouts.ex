@@ -42,15 +42,18 @@ defmodule PtcManagerWeb.Layouts do
     <div class="min-h-screen bg-slate-950 text-slate-100">
       <header class="sticky top-0 z-30 border-b border-white/10 bg-slate-950/90 px-4 backdrop-blur sm:px-6">
         <div class="mx-auto flex min-h-16 max-w-7xl flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3 sm:flex-nowrap sm:py-0">
-          <a href={~p"/"} class="flex items-center gap-3">
-            <span class="grid size-9 place-items-center rounded-xl bg-teal-400 font-black text-slate-950">
-              P
-            </span>
-            <span>
-              <span class="block text-sm font-semibold leading-4">PtcManager</span>
-              <span class="block text-xs text-slate-500">Maintainer console</span>
-            </span>
-          </a>
+          <div class="flex items-center gap-3">
+            <a href={~p"/"} class="flex items-center gap-3">
+              <span class="grid size-9 place-items-center rounded-xl bg-teal-400 font-black text-slate-950">
+                P
+              </span>
+              <span>
+                <span class="block text-sm font-semibold leading-4">PtcManager</span>
+                <span class="block text-xs text-slate-500">Maintainer console</span>
+              </span>
+            </a>
+            <.machine_badge machine={PtcManager.Machine.describe()} />
+          </div>
           <nav
             aria-label="Primary"
             class="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto"
@@ -178,6 +181,28 @@ defmodule PtcManagerWeb.Layouts do
   defp restricted_mode_message(_mode),
     do:
       "Read-only inspection is available; agents, queues, synchronization, and configuration changes are paused."
+
+  @doc """
+  The machine this console runs on. Its colour comes from the machine id, so
+  consoles of different machines are hard to mistake for each other.
+  """
+  attr :machine, :map, required: true
+
+  def machine_badge(assigns) do
+    ~H"""
+    <span
+      id="machine-badge"
+      title={"Machine #{@machine.id} (#{@machine.os})"}
+      class="inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold"
+      style={"border-color: hsl(#{@machine.hue} 70% 55% / 0.5); background-color: hsl(#{@machine.hue} 70% 55% / 0.12)"}
+    >
+      <span class="size-2 rounded-full" style={"background-color: hsl(#{@machine.hue} 70% 55%)"}>
+      </span>
+      <span class="text-slate-100">{@machine.name}</span>
+      <span class="font-normal text-slate-400">{@machine.os}</span>
+    </span>
+    """
+  end
 
   attr :href, :string, required: true
   attr :active, :boolean, default: false

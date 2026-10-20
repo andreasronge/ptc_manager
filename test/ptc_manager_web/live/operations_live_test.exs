@@ -33,6 +33,31 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert timing.detail =~ "waits for CI"
   end
 
+  test "the Now tab shows this machine's tools per execution context", %{conn: conn} do
+    {:ok, parsed} =
+      PtcManager.Machine.ToolInventory.parse(
+        %{
+          "captured_at" => DateTime.to_iso8601(DateTime.utc_now()),
+          "probes" => [
+            %{"name" => "docker", "exit_status" => 0, "stdout" => "Docker version 27.5.1, build 9f9e405\n"},
+            %{"name" => "docker-daemon", "exit_status" => 1, "stderr" => "permission denied"}
+          ]
+        },
+        "pane"
+      )
+
+    PtcManager.Machine.Inventory.put_context("pane", parsed)
+    on_exit(fn -> PtcManager.Machine.Inventory.clear() end)
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+
+    assert has_element?(view, "#machine-badge", PtcManager.Machine.name())
+    assert has_element?(view, "#tool-inventory-docker-pane", "27.5.1")
+    assert has_element?(view, "#tool-inventory-docker-daemon-pane", "fails")
+    assert has_element?(view, "#tool-inventory", "not probed yet")
+    assert has_element?(view, "#refresh-tool-inventory", "Refresh")
+  end
+
   test "tab paths drop blank parameters and keep the rest" do
     assert OperationsLive.tab_path(:index) == "/operations"
     assert OperationsLive.tab_path(:index, range: nil, agent: 7) == "/operations?agent=7"
