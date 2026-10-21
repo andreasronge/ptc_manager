@@ -686,6 +686,43 @@ defmodule PtcManager.ReviewsTest do
     assert {:error, :stale_review} = Reviews.complete(round.id, clean())
   end
 
+  test "a queued round waits without expiring; its deadline starts at the claim" do
+    job = job!(2)
+    {:ok, round} = request(job, "waiting")
+    assert round.state == "queued"
+
+    round
+    |> Ecto.Changeset.change(expires_at: DateTime.add(DateTime.utc_now(), -1))
+    |> Repo.update!()
+
+    assert :ok = Reviews.sweep()
+    assert {:ok, %{state: "queued"}} = Reviews.status(job.id, round.id)
+    assert Repo.get!(Job, job.id).review_state == "running"
+
+    assert {:ok, running} = Reviews.claim(round.id)
+    assert running.state == "running"
+    assert DateTime.diff(running.expires_at, DateTime.utc_now()) >= 900
+  end
+
+  test "a machine without the repository's tools leaves the round queued" do
+    job = job!(2)
+    on_exit(fn -> PtcManager.Machine.Inventory.clear() end)
+
+    {:ok, _repository} =
+      Operations.update_machine_requirements(
+        job.repository_id,
+        %{"tools" => [%{"name" => "docker-daemon"}]},
+        "maintainer"
+      )
+
+    {:ok, round} = request(job, "gated")
+    assert {:error, :machine_incapable} = Reviews.claim(round.id)
+    assert Repo.get!(Reviews.Round, round.id).state == "queued"
+
+    assert {:snooze, 60} =
+             PtcManager.Reviews.Worker.perform(%Oban.Job{args: %{"round_id" => round.id}})
+  end
+
   test "an interrupted continuation expires independently of job heartbeat updates" do
     job = job!(1)
 

@@ -72,6 +72,55 @@ last day, 1 hour for the last week) and leaves a visible gap wherever no sample
 exists, for example across a deploy restart. The chart is server-rendered SVG:
 no JavaScript chart library is bundled.
 
+### Machine identity and tool inventory
+
+Every page shows a badge with this machine's name and operating system, in a
+colour derived from `PTC_MACHINE_ID` (default `local`; `PTC_MACHINE_NAME` is
+the label, defaulting to the id). The Operations page lists the tools this
+machine can run in each place repository commands run:
+
+- **Agent panes**: agents and `$PTC_OPERATION_WRAPPER` commands in Herdr. On
+  Linux the oneshot `ptc_manager-tool-probe.service` probes them with exactly
+  the Herdr service's user, groups, environment file, and sandbox (a test keeps
+  the two unit files in step), every 10 minutes from its timer. Its `PATH` is
+  the one in `/etc/ptc_manager/herdr.env`; keep it explicit there.
+- **Workspace setup**: the setup command, which runs through sudo from the
+  console's own sandbox with sudo's `secure_path`. The console probes this
+  context itself through the same sudo path.
+
+On macOS both contexts are the service account, so one probe run records both.
+The pre-publication gate's separate identity is not probed. Each probe is an
+argv list run without a shell, with a 5-second timeout and capped output; the
+built-in catalog (`PtcManager.Machine.ToolProbes`) covers `docker`,
+`docker-daemon` (the server version, so it fails when the job user cannot
+reach the daemon), `docker-compose`, `deno`, `elixir`, `node`, `git`, `gh`,
+`psql`, `redis-server`, and `cerbos`. Add tools without a code change through
+`PTC_TOOL_PROBES_JSON`, a JSON array of `{"name", "argv", "version_regex"}`
+validated at boot (at most 24 probes in all). Snapshots are written to
+`tool-inventory-<context>.json` in `PTC_TOOL_INVENTORY_DIR`
+(`/var/lib/ptc_manager-output` on a Linux service) and count as stale after
+`PTC_TOOL_INVENTORY_MAX_AGE_MS` (30 minutes). **Refresh** probes every context
+now. Only a change in what the probes report is recorded, as the audit event
+`machine.inventory_changed`.
+
+A repository's configuration page lists the **machine requirements** of its
+work: tools from the catalog, each optionally with a version requirement such
+as `>= 2.24.0` (at most 20). They are PtcManager configuration, never content
+of the repository. A requirement holds only when both contexts satisfy it with
+a fresh inventory. Where they do not, nothing for that repository is admitted:
+implementation dispatch skips its queued jobs, reviews and review
+continuations wait unclaimed, maintainer actions stay queued, and Resume is
+refused. Its work stays queued, so a collection run spends no retry, and
+other repositories' work starts as usual. The Operations work queue shows why
+("Waiting for a capable machine: docker-daemon not reachable (pane)"), and a
+wait longer than 30 minutes becomes a `machine_incapable` stall. When the tool
+appears and the inventory refreshes, the work starts. A review round's
+deadline starts when a reviewer claims it, so a queued round never expires;
+a round queued for more than 30 minutes for any other reason is reported as
+`review_queued`. Each admission for a repository with requirements records a
+`placement.admitted` audit event with the machine and the evaluated tool
+lines.
+
 ## Execution profiles and review limits
 
 Configuration → **Execution profiles and models** sets the implementation and
@@ -1867,6 +1916,112 @@ work remains paused until the allowlisted canary activates it, and that a
 post-effect restart preserves the canary's durable result instead of restoring
 older state. This complements the deployment script checks with executable
 database and domain behavior.
+
+## Several machines
+
+One PtcManager instance runs per machine, with its own database, queues,
+Herdr server, and GitHub polling. Several instances form a cluster in which
+every repository is **homed** on exactly one machine: that machine polls
+GitHub for it, runs its collection runs, and executes all of its work
+locally. Members exchange a signed, read-only status document over
+Tailscale HTTPS so that a repository cannot be claimed twice, every console
+shows the whole cluster, and a repository's settings can move with it. They
+never share a database, never use Distributed Erlang, and never send each
+other commands. Running work on another machine than the repository's home
+is not supported. The design is explained in
+[`docs/maintainers/multi-machine.md`](docs/maintainers/multi-machine.md).
+
+### Prerequisites
+
+- Every instance that has GitHub credentials for a managed repository either
+  joins the cluster or has that repository disabled. An instance outside the
+  member map is outside the protocol and nothing stops it.
+- Each member is reachable from the others over Tailscale HTTPS: `tailscale
+  serve` in front of the loopback listener, as above.
+- A macOS member uses the launchd path (see "macOS background services and
+  deployment"): jobs run as the service account, operation cgroups are off,
+  and the health snapshot and release RPC tooling are Linux-only.
+- Clocks agree within a minute; requests outside that window are refused.
+
+### Configuration
+
+Set these in each member's environment file:
+
+- `PTC_MACHINE_ID` (required when clustered): 2 to 63 lowercase letters,
+  digits, or hyphens. `PTC_MACHINE_NAME` is the label on the badge.
+- `PTC_CLUSTER_MEMBERS`: a JSON object of every member's id and base URL,
+  **this machine included**, identical on every member, for example
+  `{"herdr-build-01":"https://herdr-build-01.tailnet.ts.net","mac-mini":"https://mac-mini.tailnet.ts.net"}`.
+  A base URL is an `https://*.ts.net` name or a Tailscale address.
+- `PTC_CLUSTER_SECRET`: at least 32 bytes, identical on every member. It signs
+  every request and response (HMAC-SHA256 over method, path, timestamp,
+  caller, nonce, and body hash).
+
+A member refuses to boot when its id is missing from the map. Its membership
+revision (the SHA-256 of the canonical map) is shown on the Cluster page; a
+change is audited at boot as `cluster.membership_changed`.
+
+Check a cluster from any member, or from a maintainer machine with the same
+two variables:
+
+```sh
+mix ptc.cluster check            # signs as PTC_MACHINE_ID, else the first member
+mix ptc.cluster check --as mac-mini
+```
+
+It prints each member's membership revision, protocol version, deployed SHA,
+clock skew, and any signature or transport failure, and exits non-zero when a
+member does not answer or disagrees.
+
+### Ownership
+
+A member claims a repository while the row is enabled, any of its work is not
+finished (a job, a pending agent action, a live collection run, an unreleased
+worktree), or a claim is in progress. On a member, repositories are added
+disabled and **Enable** is a claim: it announces an intent, asks every other
+member, and enables only when none claims the repository, is claiming it,
+reports another membership revision or protocol version, or cannot be
+reached. A refused claim names each member's answer. No claim is ever taken
+over automatically.
+
+After a restart a member admits no new work until it has heard from every
+other member at the same revision with no conflicting claim; there is no
+timeout. Running work keeps reconciling and publishing, and a member that did
+not restart keeps serving its repositories through a partition. If a peer
+also claims one of this member's repositories, no new work starts for it here
+until a person disables it on one side; a banner says so. A member that a
+peer refuses as a non-member admits nothing.
+
+### Moving a repository
+
+1. On the source, disable the repository. Its page lists what still holds the
+   claim (queued work, live runs, retained worktrees) with links to cancel or
+   finish it. When nothing remains it shows "ready to claim" and a link to
+   each healthy member that satisfies the repository's requirements.
+2. On the target, onboard the repository the ordinary way (it is added
+   disabled) and prepare its checkout, service access, and commit identity.
+3. Follow the link to the target's claim page. It checks the checkout and the
+   commit identity, shows which settings change, and lists the agent
+   environment variable **names** to re-enter (secret values never leave a
+   machine). Confirming claims the repository and imports its settings in
+   one transaction. Automations are matched by key, updated as new versions,
+   and arrive paused with their triggers until you review them.
+
+History stays on the source; the Cluster page links each job to its console.
+
+### Membership changes
+
+- **Add a machine:** start it with the new member map, then restart the
+  others with the same map. Claims fail on the revision check until all
+  agree; existing claims keep working.
+- **Remove a machine:** only when its status shows no claims and no intents.
+  Stop it, then update the map and restart the others. If it is dead, first
+  make sure it can never return with its database; that is the one thing the
+  design asks a person to assert.
+
+Deploys stay per machine; the Cluster page shows each member's SHA, and the
+protocol tolerates skew between releases. Daily digests and notifications
+stay per machine, covering disjoint repositories.
 
 ## Hetzner systemd and Tailscale
 

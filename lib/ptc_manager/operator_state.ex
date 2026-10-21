@@ -46,7 +46,8 @@ defmodule PtcManager.OperatorState do
         (Operations.list_active_agent_runs() ++ Operations.list_waiting_agent_runs())
         |> Enum.map(&agent_run(&1, now)),
       audit_events: Enum.map(recent_audit_events(), &audit_event/1),
-      repositories: Enum.map(enabled_repositories(), &repository(&1, now))
+      cluster: cluster(),
+      repositories: Enum.map(Operations.enabled_repositories(), &repository(&1, now))
     })
   end
 
@@ -56,7 +57,11 @@ defmodule PtcManager.OperatorState do
   end
 
   defp envelope(now) do
-    %{captured_at: now, deployed_sha: Application.get_env(:ptc_manager, :deployed_sha)}
+    %{
+      captured_at: now,
+      machine_id: PtcManager.Machine.id(),
+      deployed_sha: Application.get_env(:ptc_manager, :deployed_sha)
+    }
   end
 
   ## Console-wide sections
@@ -75,6 +80,47 @@ defmodule PtcManager.OperatorState do
       started_at: deployment.started_at,
       untrusted: %{status_text: deployment.status_text, last_error: deployment.last_error}
     }
+  end
+
+  # The cluster as the peer poller last saw it; nothing is fetched here.
+  defp cluster do
+    if PtcManager.Cluster.enabled?() do
+      cluster = PtcManager.Cluster.PeerPoller.current()
+
+      %{
+        enabled: true,
+        membership_revision: PtcManager.Cluster.membership_revision(),
+        startup_complete: cluster.startup_complete?,
+        conflicts: cluster.conflicts,
+        refused_by: cluster.refused_by,
+        polled_at: cluster.polled_at,
+        members:
+          cluster.members
+          |> Map.values()
+          |> Enum.sort_by(& &1.id)
+          |> Enum.map(fn member ->
+            status = member.status || %{}
+
+            %{
+              id: member.id,
+              health: member.health,
+              last_success_at: member.last_success_at,
+              deployed_sha: status["deployed_sha"],
+              protocol_version: status["protocol_version"],
+              membership_revision: status["membership_revision"],
+              claims: member_claims(status)
+            }
+          end)
+      }
+    else
+      %{enabled: false}
+    end
+  end
+
+  defp member_claims(status) do
+    for repository <- List.wrap(status["repositories"]), repository["claim"] != "none" do
+      %{repository: repository["repository"], claim: repository["claim"]}
+    end
   end
 
   defp capacity(now) do
@@ -165,8 +211,6 @@ defmodule PtcManager.OperatorState do
   end
 
   ## Per repository
-
-  defp enabled_repositories, do: Enum.filter(Operations.list_repositories(), & &1.enabled)
 
   defp repository(%Repository{} = repository, now) do
     %{

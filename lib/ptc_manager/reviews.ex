@@ -198,7 +198,7 @@ defmodule PtcManager.Reviews do
               "schema" => review_schema(),
               "handoff" => handoff
             },
-            expires_at: DateTime.add(DateTime.utc_now(), timeout_ms(job) + 900_000, :millisecond)
+            expires_at: deadline(job)
           })
           |> Repo.insert!()
 
@@ -353,20 +353,36 @@ defmodule PtcManager.Reviews do
     |> notify()
   end
 
+  @doc """
+  Starts a queued round. Its execution deadline starts here, not at the
+  request: a round may wait in the queue (for a capable machine, a mode, or a
+  reviewer slot) without expiring, and `PtcManager.Stalls` reports long waits.
+  """
   def claim(id) do
     RepoTransaction.immediate(fn ->
       round = Repo.get!(Round, id)
-      job = Repo.get!(Job, round.job_id)
+      job = Repo.get!(Job, round.job_id) |> Repo.preload(:repository)
 
       unless round.state == "queued" and job.state in @active and job.review_state == "running" and
                job.fencing_token == round.fencing_token and
-               job.review_generation == round.generation and
-               DateTime.compare(round.expires_at, DateTime.utc_now()) == :gt,
+               job.review_generation == round.generation,
              do: Repo.rollback(:stale_review)
 
-      round |> Round.changeset(%{state: "running"}) |> Repo.update!()
+      case PtcManager.Machine.Gate.check(job.repository) do
+        :ok -> :ok
+        {:error, reason} -> Repo.rollback(reason)
+      end
+
+      PtcManager.Operations.record_placement!(job.repository, "job", job.id)
+
+      round
+      |> Round.changeset(%{state: "running", expires_at: deadline(job)})
+      |> Repo.update!()
     end)
   end
+
+  defp deadline(job),
+    do: DateTime.add(DateTime.utc_now(), timeout_ms(job) + 900_000, :millisecond)
 
   def pause(id, reason, expected) do
     RepoTransaction.immediate(fn ->
@@ -395,9 +411,10 @@ defmodule PtcManager.Reviews do
   def sweep do
     now = DateTime.utc_now()
 
+    # A queued round has not started; its deadline starts at its claim.
     Repo.all(
       from r in Round,
-        where: r.state in ["preparing", "queued", "running"] and r.expires_at < ^now
+        where: r.state in ["preparing", "running"] and r.expires_at < ^now
     )
     |> Enum.each(&fail(&1.id, :review_expired))
 
@@ -575,7 +592,7 @@ defmodule PtcManager.Reviews do
         {:error, :review_missing}
 
       round ->
-        if round.state in ~w(preparing queued running) and
+        if round.state in ~w(preparing running) and
              DateTime.compare(round.expires_at, DateTime.utc_now()) != :gt do
           fail(id, :review_expired)
           {:ok, Repo.get!(Round, id)}
@@ -641,6 +658,11 @@ defmodule PtcManager.Reviews do
                       current.review_resume_mode == "assessment" and
                       is_nil(current.review_recovery_expires_at),
                     do: Repo.rollback(:stale_continuation)
+
+             case PtcManager.Machine.Gate.check(current.repository_id) do
+               :ok -> :ok
+               {:error, reason} -> Repo.rollback(reason)
+             end
 
              update_job(current, %{review_state: "pending", last_error: nil})
              handoff = List.last(rounds(current.id)).input["handoff"] || ""

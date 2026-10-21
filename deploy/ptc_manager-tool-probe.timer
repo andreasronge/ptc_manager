@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the PtcManager agent-pane tool inventory
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=ptc_manager-tool-probe.service
+
+[Install]
+WantedBy=timers.target

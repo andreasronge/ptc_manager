@@ -91,8 +91,7 @@ defmodule PtcManager.Deployments do
   end
 
   def configured_repositories do
-    Operations.list_repositories()
-    |> Enum.filter(& &1.enabled)
+    Operations.enabled_repositories()
     |> Enum.map(fn repository -> {repository, contract(repository)} end)
     |> Enum.filter(fn {_repository, result} ->
       match?({:ok, %Contract{} = contract} when contract.deployment_command != nil, result)

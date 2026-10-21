@@ -66,10 +66,10 @@ defmodule PtcManagerWeb.DashboardLive do
        |> put_flash(:info, "Resuming on the retained worktree with a fresh approval.")
        |> load_dashboard()}
     else
-      {:error, :issue_claimed} ->
+      {:error, reason} when reason in [:issue_claimed, :machine_incapable, :cluster_fenced] ->
         {:noreply,
          socket
-         |> put_flash(:error, Operations.rejection_words(:issue_claimed))
+         |> put_flash(:error, Operations.rejection_words(reason))
          |> load_dashboard()}
 
       {:error, reason} ->

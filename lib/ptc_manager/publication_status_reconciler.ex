@@ -49,8 +49,7 @@ defmodule PtcManager.PublicationStatusReconciler do
 
   defp reconcile_external(client) do
     if supports?(client, :list_open, 1) do
-      PtcManager.Operations.list_repositories()
-      |> Enum.filter(& &1.enabled)
+      PtcManager.Operations.enabled_repositories()
       # A rate limit pauses every repository; any other failure is one
       # repository's, so the rest are still reconciled and the first error is
       # reported once the pass ends.

@@ -10,8 +10,7 @@ defmodule PtcManager.GitHub.Sync do
   alias PtcManager.Repo
 
   def sync_enabled_repositories do
-    Operations.list_repositories()
-    |> Enum.filter(& &1.enabled)
+    Operations.enabled_repositories()
     |> Enum.map(&sync_repository/1)
   end
 

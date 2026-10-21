@@ -21,7 +21,16 @@ defmodule PtcManager.Reviews.ResumeWorker do
        else: {:snooze, 30}
   end
 
+  # Recovery writes and stops agents, so the machine is checked first; a job
+  # whose repository this machine cannot run waits here, with nothing touched.
   defp resume(id, generation) do
+    case PtcManager.Machine.Gate.check(Repo.get!(Job, id).repository_id) do
+      :ok -> recover(id, generation)
+      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] -> {:snooze, 60}
+    end
+  end
+
+  defp recover(id, generation) do
     adapter =
       Application.get_env(:ptc_manager, :review_resume_adapter, PtcManager.Dispatch.HerdrAdapter)
 
@@ -33,6 +42,9 @@ defmodule PtcManager.Reviews.ResumeWorker do
 
           {:error, :stale_continuation} ->
             :ok
+
+          {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+            {:snooze, 60}
 
           {:error, _} ->
             finish(id, generation, {:error, :review_admission_failed}, false)
@@ -75,6 +87,9 @@ defmodule PtcManager.Reviews.ResumeWorker do
              :delivery_priority
            ] ->
         {:snooze, 10}
+
+      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+        {:snooze, 60}
 
       {:error, reason} when reason in [:stale_continuation, :continuation_already_claimed] ->
         :ok

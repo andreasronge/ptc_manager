@@ -359,6 +359,10 @@ defmodule PtcManager.Automations do
       automation_definition: {definition, [:repository, :current_version]}
     )
     |> Repo.all()
+    # A cluster member runs no schedule for a repository it has not claimed.
+    |> Enum.filter(
+      &(not PtcManager.Cluster.enabled?() or &1.automation_definition.repository.enabled)
+    )
   end
 
   def run_trigger(%Trigger{} = trigger, actor, opts \\ []) when is_binary(actor) do
@@ -569,23 +573,7 @@ defmodule PtcManager.Automations do
       enabled: false
     }
 
-    attrs =
-      version
-      |> Map.from_struct()
-      |> Map.take([
-        :target_type,
-        :execution_profile,
-        :agent_selector,
-        :github_access,
-        :queue_lane,
-        :resource_class,
-        :lock_policy,
-        :timeout_seconds,
-        :result_type,
-        :result_protocol_version,
-        :prompt,
-        :configuration_snapshot
-      ])
+    attrs = version |> Map.from_struct() |> Map.take(DefinitionVersion.content_fields())
 
     create_definition(target, identity, attrs, actor)
   end

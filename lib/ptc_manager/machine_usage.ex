@@ -62,6 +62,10 @@ defmodule PtcManager.MachineUsage do
 
   def count_samples, do: Repo.aggregate(Sample, :count)
 
+  @doc "The newest sample, or nil."
+  def latest_sample,
+    do: Repo.one(from(sample in Sample, order_by: [desc: sample.id], limit: 1))
+
   @doc """
   Returns the usage timeline for a range as evenly spaced buckets ending at the
   current bucket. Each point carries bucket averages, or `nil` values and

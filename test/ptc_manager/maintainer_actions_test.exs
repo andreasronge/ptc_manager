@@ -1894,6 +1894,37 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "attention"
   end
 
+  test "a retained repair is not reserved on an incapable machine, and a returned reservation can be taken again" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    allocation = retain_repair_worktree(publication)
+    on_exit(fn -> PtcManager.Machine.Inventory.clear() end)
+
+    {:ok, _repository} =
+      Operations.update_machine_requirements(
+        repository.id,
+        %{"tools" => [%{"name" => "docker-daemon"}]},
+        "andreas"
+      )
+
+    assert {:error, :machine_incapable} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    assert Repo.get!(WorktreeAllocation, allocation.id).state == allocation.state
+
+    {:ok, _repository} =
+      Operations.update_machine_requirements(repository.id, %{"tools" => []}, "andreas")
+
+    assert {:ok, %{state: "active"}} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    assert {:ok, %{state: "waiting"}} = Operations.return_repair_worktree(publication.job_id)
+
+    assert {:ok, %{state: "active"}} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+  end
+
   test "a deferred repair reconciliation reuses the stored agent result" do
     previous_base = Application.get_env(:ptc_manager, :agent_action_sync_retry_base_ms)
     previous_max = Application.get_env(:ptc_manager, :agent_action_sync_retry_max_ms)

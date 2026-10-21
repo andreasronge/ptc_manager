@@ -15,6 +15,63 @@ config :ptc_manager,
   health_snapshot_path:
     env_default.("PTC_HEALTH_OUT", "/var/lib/ptc_manager-output/ptc-health.json")
 
+machine_id = env_default.("PTC_MACHINE_ID", "local")
+
+unless Regex.match?(~r/\A[a-z0-9][a-z0-9-]{1,62}\z/, machine_id) do
+  raise "PTC_MACHINE_ID must be 2 to 63 lowercase letters, digits, or hyphens, starting with a letter or digit"
+end
+
+tool_probes_extra =
+  case System.get_env("PTC_TOOL_PROBES_JSON") do
+    value when value in [nil, ""] ->
+      []
+
+    value ->
+      case Jason.decode(value) do
+        {:ok, probes} when is_list(probes) -> probes
+        _invalid -> raise "PTC_TOOL_PROBES_JSON must be a JSON array of probes"
+      end
+  end
+
+config :ptc_manager,
+  machine_id: machine_id,
+  machine_name: env_default.("PTC_MACHINE_NAME", machine_id),
+  tool_probes_extra: tool_probes_extra,
+  tool_inventory_max_age_ms:
+    env_default.("PTC_TOOL_INVENTORY_MAX_AGE_MS", "1800000") |> String.to_integer()
+
+# Several machines: every member's id and base URL, and the shared secret that
+# signs peer requests. PtcManager.Cluster.validate!/0 checks them at boot.
+cluster_members =
+  case System.get_env("PTC_CLUSTER_MEMBERS") do
+    value when value in [nil, ""] ->
+      nil
+
+    value ->
+      case Jason.decode(value) do
+        {:ok, members} when is_map(members) and map_size(members) > 0 ->
+          Map.new(members, fn
+            {id, url} when is_binary(url) -> {id, String.trim_trailing(url, "/")}
+            {id, url} -> {id, url}
+          end)
+
+        _invalid ->
+          raise "PTC_CLUSTER_MEMBERS must be a JSON object of machine id to base URL"
+      end
+  end
+
+config :ptc_manager,
+  machine_id_configured: System.get_env("PTC_MACHINE_ID", "") != "",
+  cluster_members: cluster_members,
+  cluster_secret: System.get_env("PTC_CLUSTER_SECRET"),
+  # Plain HTTP on loopback, for the multi-member integration tests only.
+  cluster_allow_insecure_loopback:
+    config_env() != :prod and System.get_env("PTC_CLUSTER_ALLOW_INSECURE_LOOPBACK") == "true"
+
+if tool_inventory_dir = System.get_env("PTC_TOOL_INVENTORY_DIR") do
+  config :ptc_manager, :tool_inventory_dir, tool_inventory_dir
+end
+
 if config_env() == :prod do
   database_busy_timeout_ms =
     env_default.("PTC_DATABASE_BUSY_TIMEOUT_MS", "15000") |> String.to_integer()
@@ -433,6 +490,16 @@ if config_env() == :prod do
   config :ptc_manager, :deployment_trigger_command, "/usr/bin/sudo"
   config :ptc_manager, :deployment_status_command, "/bin/systemctl"
 
+  # The pane context is probed by its own systemd unit with the Herdr service's
+  # sandbox; the console may only start it.
+  if :os.type() == {:unix, :linux} and herdr_run_as_user not in [nil, ""] do
+    config :ptc_manager, :tool_probe_systemctl_command, "/usr/bin/sudo"
+
+    unless System.get_env("PTC_TOOL_INVENTORY_DIR") do
+      config :ptc_manager, :tool_inventory_dir, "/var/lib/ptc_manager-output"
+    end
+  end
+
   raw_admin_password = System.get_env("PTC_MANAGER_PASSWORD")
 
   admin_password =
@@ -526,6 +593,8 @@ if config_env() == :prod and :os.type() == {:unix, :darwin} do
       deployment_status_args: ["status", root],
       deployment_spool_path: Path.join(root, "data/deployments"),
       deployed_sha_path: Path.join(root, "app/RELEASE_SHA"),
+      tool_inventory_dir:
+        System.get_env("PTC_TOOL_INVENTORY_DIR") || Path.join(root, "data/tool-inventory"),
       review_helper: Path.join(root, "bin/ptc-manager-worker-review"),
       worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
       verify_agent_login: true

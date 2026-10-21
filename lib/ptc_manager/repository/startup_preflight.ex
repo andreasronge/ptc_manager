@@ -64,8 +64,7 @@ defmodule PtcManager.Repository.StartupPreflight do
   end
 
   defp validate_enabled_repositories do
-    Operations.list_repositories()
-    |> Enum.filter(& &1.enabled)
+    Operations.enabled_repositories()
     |> Enum.reduce_while(:ok, fn repository, :ok ->
       case Checkout.available_path(repository) do
         {:ok, _path} -> {:cont, :ok}

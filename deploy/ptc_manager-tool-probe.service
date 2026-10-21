@@ -1,0 +1,20 @@
+[Unit]
+Description=Probe the tools PtcManager's Herdr panes can run
+After=ptc_manager.service
+
+# The identity, groups, environment, and sandbox below must match
+# ptc_manager-herdr.service, or the inventory describes a place agents do not
+# run; the suite compares the two files. The catalog is written by the console.
+[Service]
+Type=oneshot
+User=ptc-manager-worker
+Group=ptc-manager-worker
+SupplementaryGroups=ptc-manager-output
+WorkingDirectory=/srv/ptc_runner
+EnvironmentFile=/etc/ptc_manager/herdr.env
+ExecStart=/usr/local/bin/ptc-manager-tool-probe pane /var/lib/ptc_manager-output/tool-probe-catalog.json /var/lib/ptc_manager-output/tool-inventory-pane.json
+TimeoutStartSec=180
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ptc_manager-worker /var/lib/ptc_manager-output /srv/ptc_runner /srv/ptc_manager /srv/ptc_manager-worktrees
