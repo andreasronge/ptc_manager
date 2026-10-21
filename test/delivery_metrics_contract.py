@@ -87,4 +87,30 @@ class ResourceMetrics(unittest.TestCase):
         with patch.dict(metrics.__globals__,read_text=lambda _:None), patch('os.sched_getaffinity',side_effect=OSError(),create=True):
             self.assertIsNone(metrics('/sys/fs/cgroup/agent/operation'))
 
+class UnreapedWait(unittest.TestCase):
+    def assert_waits_without_reaping(self):
+        import subprocess, sys, time
+        for program, settle in (('import time; time.sleep(0.2)', 0), ('pass', 0.3)):
+            child = subprocess.Popen([sys.executable, '-c', program])
+            time.sleep(settle)
+            wrapper['wait_unreaped'](child.pid)
+            # Still our zombie: the PID cannot be reused until we reap it here.
+            pid, _status = os.waitpid(child.pid, os.WNOHANG)
+            self.assertEqual(pid, child.pid)
+
+    def test_waits_for_exit_without_reaping(self):
+        self.assert_waits_without_reaping()
+
+    @unittest.skipUnless(hasattr(__import__('select'), 'kqueue'), 'kqueue is BSD and macOS only')
+    def test_waits_without_waitid_on_macos(self):
+        # macOS Python has no os.waitid.
+        with patch.dict(wrapper['wait_unreaped'].__globals__, {'os': _without_waitid()}):
+            self.assert_waits_without_reaping()
+
+def _without_waitid():
+    import types
+    module = types.ModuleType('os_without_waitid')
+    module.__dict__.update({name: getattr(os, name) for name in dir(os) if name != 'waitid'})
+    return module
+
 if __name__=='__main__': unittest.main()
