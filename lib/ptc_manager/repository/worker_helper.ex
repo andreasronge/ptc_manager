@@ -8,16 +8,11 @@ defmodule PtcManager.Repository.WorkerHelper do
   and the same worker boundary check.
   """
 
-  alias PtcManager.CommandEnvironment
-
-  @doc "Returns true when Herdr runs under a separate worker account."
-  def worker_boundary?,
-    do: Application.get_env(:ptc_manager, :herdr_run_as_user) not in [nil, ""]
+  alias PtcManager.{CommandEnvironment, Host}
 
   @doc "Runs the helper as the worker and returns its combined output and status."
   def run(helper, args) when is_binary(helper) and is_list(args) do
-    user = Application.get_env(:ptc_manager, :herdr_run_as_user)
-    {binary, arguments} = CommandEnvironment.command(helper, args, user)
+    {binary, arguments} = Host.agent_command(helper, args)
 
     System.cmd(binary, arguments,
       env: CommandEnvironment.scrub(),

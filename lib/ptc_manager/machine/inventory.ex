@@ -245,17 +245,15 @@ defmodule PtcManager.Machine.Inventory do
   defp probe(nil), do: {:error, :tool_inventory_directory_not_configured}
 
   defp probe(catalog_path) do
-    case config(:herdr_run_as_user, nil) do
-      user when is_binary(user) and user != "" ->
-        with {:ok, document} <- run_probe_script("setup", catalog_path, user) do
-          {:ok, [{"setup", document}], agent_logins()}
-        end
-
-      _service_account ->
-        with {:ok, document} <- run_probe_script("pane", catalog_path, nil) do
-          {:ok, [{"pane", document}, {"setup", Map.put(document, "context", "setup")}],
-           agent_logins()}
-        end
+    if PtcManager.Host.separate_agent_account?() do
+      with {:ok, document} <- run_probe_script("setup", catalog_path) do
+        {:ok, [{"setup", document}], agent_logins()}
+      end
+    else
+      with {:ok, document} <- run_probe_script("pane", catalog_path) do
+        {:ok, [{"pane", document}, {"setup", Map.put(document, "context", "setup")}],
+         agent_logins()}
+      end
     end
   end
 
@@ -263,7 +261,7 @@ defmodule PtcManager.Machine.Inventory do
   # machine with a worker boundary (or one configured to verify) can tell.
   defp agent_logins do
     checked? =
-      PtcManager.Repository.WorkerHelper.worker_boundary?() or
+      PtcManager.Host.separate_agent_account?() or
         config(:verify_agent_login, false)
 
     Map.new(PtcManager.AgentProfiles.enabled_kinds(), fn kind ->
@@ -282,20 +280,8 @@ defmodule PtcManager.Machine.Inventory do
     end)
   end
 
-  defp run_probe_script(context, catalog_path, user) do
-    {executable, args} =
-      case user do
-        nil ->
-          {"/usr/bin/python3",
-           ["-I", Application.app_dir(:ptc_manager, "priv/tool_probe.py"), context, catalog_path]}
-
-        user ->
-          CommandEnvironment.command(
-            config(:tool_probe_script, "/usr/local/bin/ptc-manager-tool-probe"),
-            [context, catalog_path],
-            user
-          )
-      end
+  defp run_probe_script(context, catalog_path) do
+    {executable, args} = PtcManager.Host.helper_command(:tool_probe, [context, catalog_path])
 
     case System.cmd(executable, args, env: CommandEnvironment.scrub(), stderr_to_stdout: false) do
       {output, 0} ->

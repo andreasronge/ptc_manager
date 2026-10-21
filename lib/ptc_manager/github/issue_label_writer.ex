@@ -50,7 +50,7 @@ defmodule PtcManager.GitHub.WorkerIssueLabelWriter do
   def write(repository, number, operation, label)
       when is_binary(repository) and is_integer(number) and number > 0 and
              operation in [:add, :remove] and is_binary(label) do
-    if WorkerHelper.worker_boundary?() do
+    if PtcManager.Host.separate_agent_account?() do
       run([repository, Integer.to_string(number), Atom.to_string(operation), label])
     else
       {:error, :label_writes_disabled}

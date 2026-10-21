@@ -342,7 +342,14 @@ and managed worktrees can live under `~/developer`; release files, configuration
 logs, and SQLite data live in a separate service root. These services survive
 logout. FileVault still requires a disk unlock after a cold boot.
 
-Set `PTC_MACOS_SERVICE_ROOT` to the absolute service root. Install
+Set `PTC_MACOS_SERVICE_ROOT` to the absolute service root. A Darwin release
+selects the macOS host profile and refuses to boot without it, with
+`PTC_HERDR_RUN_AS_USER` set (agents run as the service account), or with
+`PTC_OPERATION_CGROUPS=true`. The profile places the operation wrapper
+(`bin/ptc-operation`), its socket (`run/operations.sock`), operation contexts,
+execution artifacts, planning snapshots, daily-digest bundles, the tool
+inventory and the health snapshot (`data/health.json`) under the service root;
+each path's own environment variable still wins. Install
 `deploy/macos-deploy-host`, `deploy/ptc-manager-worker-review`,
 `deploy/ptc-manager-worker-agent-login`, and `deploy/ptc-operation` in its `bin`
 directory. Update these copies from the revision being deployed before each

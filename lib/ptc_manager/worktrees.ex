@@ -437,20 +437,8 @@ defmodule PtcManager.Worktrees do
   # The root is worker-owned in production. Use its OS identity for removal,
   # keeping the coordinator's claim and path checks above as the authority.
   defp remove_directory(path) do
-    user = Application.get_env(:ptc_manager, :herdr_run_as_user)
     root = Application.fetch_env!(:ptc_manager, :worktree_root) |> Path.expand()
-
-    {binary, args} =
-      if user in [nil, ""] do
-        {"/usr/bin/python3",
-         ["-I", Application.app_dir(:ptc_manager, "priv/worktree_cleanup.py"), root, path]}
-      else
-        PtcManager.CommandEnvironment.command(
-          "/usr/local/bin/ptc-manager-worker-worktree-cleanup",
-          [root, path],
-          user
-        )
-      end
+    {binary, args} = PtcManager.Host.helper_command(:worktree_cleanup, [root, path])
 
     case System.cmd(binary, args,
            stderr_to_stdout: true,

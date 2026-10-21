@@ -11,7 +11,38 @@ env_default = fn name, default ->
   end
 end
 
+# One host profile decides every platform question; PtcManager.Host reads it.
+# A Linux release keeps every default below; a macOS release must name its
+# service root, and the settings it cannot honour stop it at boot.
+host_profile =
+  cond do
+    config_env() == :prod and :os.type() == {:unix, :linux} -> :linux
+    config_env() == :prod and :os.type() == {:unix, :darwin} -> :macos
+    config_env() == :prod -> raise "PtcManager releases run on Linux or macOS only"
+    true -> :development
+  end
+
+macos_service_root =
+  if host_profile == :macos do
+    root = System.get_env("PTC_MACOS_SERVICE_ROOT")
+
+    cond do
+      root in [nil, ""] or Path.type(root) != :absolute ->
+        raise "a macOS release needs PTC_MACOS_SERVICE_ROOT set to an absolute service root"
+
+      System.get_env("PTC_HERDR_RUN_AS_USER") not in [nil, ""] ->
+        raise "PTC_HERDR_RUN_AS_USER is not supported on macOS: agents run as the service account"
+
+      System.get_env("PTC_OPERATION_CGROUPS") == "true" ->
+        raise "PTC_OPERATION_CGROUPS=true is not supported on macOS, which has no cgroups"
+
+      true ->
+        root
+    end
+  end
+
 config :ptc_manager,
+  host_profile: host_profile,
   health_snapshot_path:
     env_default.("PTC_HEALTH_OUT", "/var/lib/ptc_manager-output/ptc-health.json")
 
@@ -201,8 +232,7 @@ pr_reconcile_enabled =
 
 external_pr_reconcile_enabled = pr_reconcile_enabled
 
-operation_cgroups_default =
-  if config_env() == :prod and :os.type() == {:unix, :linux}, do: "true", else: "false"
+operation_cgroups_default = if host_profile == :linux, do: "true", else: "false"
 
 implementation_agent_kind = System.get_env("PTC_IMPLEMENTATION_AGENT_KIND", "codex")
 
@@ -280,9 +310,6 @@ config :ptc_manager,
     ),
   resource_operation_cgroups:
     env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default) == "true",
-  # Linux releases keep finishing as they always have; development and macOS
-  # hosts (below) fence an operation whose command leaves processes behind.
-  resource_operation_check_remaining_processes: config_env() != :prod,
   resource_operation_agent_context:
     env_default.(
       "PTC_OPERATION_AGENT_CONTEXT",
@@ -495,7 +522,7 @@ if config_env() == :prod do
 
   # The pane context is probed by its own systemd unit with the Herdr service's
   # sandbox; the console may only start it.
-  if :os.type() == {:unix, :linux} and herdr_run_as_user not in [nil, ""] do
+  if host_profile == :linux and herdr_run_as_user not in [nil, ""] do
     config :ptc_manager, :tool_probe_systemctl_command, "/usr/bin/sudo"
 
     unless System.get_env("PTC_TOOL_INVENTORY_DIR") do
@@ -584,27 +611,34 @@ if config_env() == :prod do
   # Check `Plug.SSL` for all available options in `force_ssl`.
 end
 
-if config_env() == :prod and :os.type() == {:unix, :darwin} do
-  if root = System.get_env("PTC_MACOS_SERVICE_ROOT") do
-    host = Path.join(root, "bin/macos-deploy-host")
+if host_profile == :macos do
+  root = macos_service_root
+  host = Path.join(root, "bin/macos-deploy-host")
+  service_path = fn name, relative -> env_default.(name, Path.join(root, relative)) end
 
-    config :ptc_manager,
-      deployment_revision_source: PtcManager.Deployments.LocalRevisionSource,
-      deployment_trigger_command: host,
-      deployment_trigger_args: ["trigger", root],
-      deployment_status_command: host,
-      deployment_status_args: ["status", root],
-      deployment_spool_path: Path.join(root, "data/deployments"),
-      deployed_sha_path: Path.join(root, "app/RELEASE_SHA"),
-      tool_inventory_dir:
-        System.get_env("PTC_TOOL_INVENTORY_DIR") || Path.join(root, "data/tool-inventory"),
-      review_helper: Path.join(root, "bin/ptc-manager-worker-review"),
-      execution_artifact_root:
-        System.get_env("PTC_EXECUTION_ARTIFACT_ROOT") ||
-          Path.join(root, "data/execution-artifacts"),
-      worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
-      verify_agent_login: true,
-      # Without cgroups a wrapper reports processes that outlive its command.
-      resource_operation_check_remaining_processes: true
-  end
+  config :ptc_manager,
+    deployment_revision_source: PtcManager.Deployments.LocalRevisionSource,
+    deployment_trigger_command: host,
+    deployment_trigger_args: ["trigger", root],
+    deployment_status_command: host,
+    deployment_status_args: ["status", root],
+    deployment_spool_path: Path.join(root, "data/deployments"),
+    deployed_sha_path: Path.join(root, "app/RELEASE_SHA"),
+    review_helper: Path.join(root, "bin/ptc-manager-worker-review"),
+    worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
+    verify_agent_login: true,
+    # Every host path lives under the service root; see PtcManager.Host.path_specs/0.
+    resource_operation_wrapper: service_path.("PTC_OPERATION_WRAPPER", "bin/ptc-operation"),
+    resource_operation_socket_path:
+      service_path.("PTC_OPERATION_SOCKET_PATH", "run/operations.sock"),
+    resource_operation_context_dir:
+      service_path.("PTC_OPERATION_CONTEXT_DIR", "data/operation-contexts"),
+    execution_artifact_root:
+      service_path.("PTC_EXECUTION_ARTIFACT_ROOT", "data/execution-artifacts"),
+    planning_snapshot_root:
+      service_path.("PTC_PLANNING_SNAPSHOT_ROOT", "data/planning-snapshots"),
+    daily_digest_bundle_root:
+      service_path.("PTC_DAILY_DIGEST_BUNDLE_ROOT", "data/daily-digest-bundles"),
+    tool_inventory_dir: service_path.("PTC_TOOL_INVENTORY_DIR", "data/tool-inventory"),
+    health_snapshot_path: service_path.("PTC_HEALTH_OUT", "data/health.json")
 end

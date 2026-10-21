@@ -1,7 +1,7 @@
 defmodule PtcManager.Herdr.Command do
   @moduledoc "Executes the Herdr CLI with a scrubbed environment and optional worker identity."
 
-  alias PtcManager.CommandEnvironment
+  alias PtcManager.{CommandEnvironment, Host}
 
   def run(args, timeout \\ nil) when is_list(args) do
     binary = Application.get_env(:ptc_manager, :herdr_binary, "herdr")
@@ -28,26 +28,17 @@ defmodule PtcManager.Herdr.Command do
   @doc false
   def command(binary, args) do
     session = Application.get_env(:ptc_manager, :herdr_session, "default")
-    args = ["--session", session | args]
 
-    case Application.get_env(:ptc_manager, :herdr_run_as_user) do
-      user when is_binary(user) and user != "" ->
-        {"/usr/bin/sudo", ["-n", "-H", "-u", user, "--", binary | args]}
-
-      _user ->
-        {binary, args}
-    end
+    Host.agent_command(binary, ["--session", session | args])
   end
 
   @doc false
   def environment do
     environment = CommandEnvironment.scrub()
 
-    if Application.get_env(:ptc_manager, :herdr_run_as_user) in [nil, ""] do
-      maybe_add_socket(environment, Application.get_env(:ptc_manager, :herdr_socket_path))
-    else
-      environment
-    end
+    if Host.separate_agent_account?(),
+      do: environment,
+      else: maybe_add_socket(environment, Application.get_env(:ptc_manager, :herdr_socket_path))
   end
 
   defp maybe_add_socket(environment, path) when is_binary(path) and path != "",

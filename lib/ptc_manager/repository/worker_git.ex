@@ -45,11 +45,7 @@ defmodule PtcManager.Repository.WorkerGit do
         Application.get_env(:ptc_manager, :git_binary, "git")
       )
 
-    CommandEnvironment.command(
-      binary,
-      args,
-      Application.get_env(:ptc_manager, :herdr_run_as_user)
-    )
+    PtcManager.Host.agent_command(binary, args)
   end
 
   defp receive_result(port, output, deadline) do

@@ -55,7 +55,7 @@ defmodule PtcManager.Repository.WorkerClaudeTrust do
     end)
   end
 
-  defp worker_boundary?, do: WorkerHelper.worker_boundary?()
+  defp worker_boundary?, do: PtcManager.Host.separate_agent_account?()
 
   defp run(args) do
     command = Application.get_env(:ptc_manager, :worker_claude_trust_command, __MODULE__.Runner)

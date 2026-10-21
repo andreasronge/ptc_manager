@@ -251,7 +251,12 @@ defmodule PtcManager.Repository.WorkspaceSetup do
 
     def run(path, command, timeout_ms, variables \\ [], artifact_directory \\ nil) do
       started = System.monotonic_time(:millisecond)
-      user = Application.get_env(:ptc_manager, :herdr_run_as_user)
+
+      user =
+        case PtcManager.Host.agent_identity() do
+          {:separate, user} -> user
+          :service_account -> nil
+        end
 
       wrapper =
         Application.get_env(
