@@ -7,8 +7,8 @@ defmodule PtcManager.WorktreeSecurity do
 
   def validate_configured_root(path) do
     if Application.get_env(:ptc_manager, :worktree_permission_check, true) do
-      with {:ok, owner_uid} <- configured_owner_uid() do
-        validate_root(path, owner_uid: owner_uid, trusted_ancestor_uids: [0])
+      with {:ok, owner_uid, trusted_ancestor_uids} <- configured_owner() do
+        validate_root(path, owner_uid: owner_uid, trusted_ancestor_uids: trusted_ancestor_uids)
       end
     else
       :ok
@@ -96,23 +96,33 @@ defmodule PtcManager.WorktreeSecurity do
     if uid in trusted_uids, do: :ok, else: {:error, {:unsafe_worktree_owner, path}}
   end
 
-  defp configured_owner_uid do
+  # Without a separate agent account (the macOS launchd setup), agents run as
+  # the service account, which may already write anything it owns, so its own
+  # directories are as trusted as root's.
+  defp configured_owner do
     case Application.get_env(:ptc_manager, :worktree_owner_uid) do
-      uid when is_integer(uid) and uid >= 0 -> {:ok, uid}
-      _unset -> lookup_owner_uid(Application.get_env(:ptc_manager, :herdr_run_as_user))
+      uid when is_integer(uid) and uid >= 0 ->
+        {:ok, uid, [0]}
+
+      _unset ->
+        case Application.get_env(:ptc_manager, :herdr_run_as_user) do
+          user when is_binary(user) and user != "" ->
+            with {:ok, uid} <- lookup_owner_uid(["-u", user]), do: {:ok, uid, [0]}
+
+          _same_account ->
+            with {:ok, uid} <- lookup_owner_uid(["-u"]), do: {:ok, uid, [0, uid]}
+        end
     end
   end
 
-  defp lookup_owner_uid(user) when is_binary(user) and user != "" do
-    case System.cmd("/usr/bin/id", ["-u", user], stderr_to_stdout: true) do
+  defp lookup_owner_uid(args) do
+    case System.cmd("/usr/bin/id", args, stderr_to_stdout: true) do
       {output, 0} -> parse_uid(output)
       {_output, _status} -> {:error, :worktree_owner_unavailable}
     end
   rescue
     _error -> {:error, :worktree_owner_unavailable}
   end
-
-  defp lookup_owner_uid(_user), do: {:error, :worktree_owner_unavailable}
 
   defp parse_uid(output) do
     case Integer.parse(String.trim(output)) do

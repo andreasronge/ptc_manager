@@ -2342,7 +2342,9 @@ read/execute access without filesystem write access. The worker-owned
 worktrees. It and every ancestor must be
 non-writable by group and other identities; the deployment enforces mode
 `2750` on the worker-owned root and PtcManager refuses new work when that
-invariant is broken. This keeps private build artifacts safe while still
+invariant is broken. Every ancestor must also be owned by root; without
+`PTC_HERDR_RUN_AS_USER` (agents on the service account, as on macOS), the
+service account's own directories count as well. This keeps private build artifacts safe while still
 allowing the coordinator read-only traversal. For retained implementation and
 pull-request worktrees, PtcManager removes a worktree through Herdr only after a
 credential-free Git check proves a non-terminal checkout is clean and its exact
