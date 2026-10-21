@@ -1,0 +1,5 @@
+#!/bin/sh
+# Example launcher for dev.ptc.herdr: install as <service root>/bin/run-herdr.
+set -eu
+. /Users/Shared/ptc-services/config/manager.env
+exec "$PTC_HERDR_BINARY" --session "$PTC_HERDR_SESSION" server

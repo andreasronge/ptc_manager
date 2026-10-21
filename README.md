@@ -334,6 +334,22 @@ mix setup
 mix phx.server
 ```
 
+### Supported hosts
+
+| | Linux | macOS |
+|---|---|---|
+| Services | systemd units | launchd jobs (`deploy/launchd/`) |
+| Agent account | a separate worker account (`PTC_HERDR_RUN_AS_USER`) or the service account | the maintainer's own account |
+| Expensive-operation containment | cgroup v2 per operation | none |
+| An operation nothing proves stopped | recovered through its cgroup, otherwise maintenance | fenced until a maintainer releases it |
+| Host readiness | reported in the banner | blocks admission while a check fails |
+
+Both are production hosts. A macOS host trades containment for visibility: it
+never guesses that an abandoned command stopped, keeps its slot fenced, and
+leaves the decision to a maintainer. [`docs/maintainers/host-profiles.md`](docs/maintainers/host-profiles.md)
+explains the host profile and walks through setting up a macOS host;
+`deploy/ptc_manager-macos.env.example` is a complete environment.
+
 ### macOS background services and deployment
 
 A macOS host can run the release, Herdr, and the deployment worker as launchd
