@@ -16,6 +16,9 @@ class ResourceMetrics(unittest.TestCase):
     def test_cleanup_uses_no_follow_directory_descriptors(self):
         remove = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'priv/execution_artifact_cleanup.py'))['remove']
         with tempfile.TemporaryDirectory() as directory:
+            # The helper refuses a symlinked root component; macOS's temporary
+            # directory lives under the /var -> /private/var symlink.
+            directory = os.path.realpath(directory)
             root, outside = Path(directory, 'root'), Path(directory, 'outside')
             good = root / 'repository-1/job-1/agent-run-1'
             victim = outside / 'agent-run-1'

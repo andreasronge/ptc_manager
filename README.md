@@ -1643,8 +1643,11 @@ test phase has a hard wall-clock budget of less than 60 seconds; a failed,
 hung, or slower run fails the gate. Real filesystem, Git-worktree, cache,
 process-timeout, and disposable-migration lifecycle tests carry the `nightly`
 tag. They remain part of a normal unfiltered `mix test` and run every night in
-GitHub Actions through `.github/workflows/nightly.yml`; the workflow can also
-be started manually. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
+GitHub Actions through `.github/workflows/nightly.yml`, together with the
+`resource_e2e` operation-wrapper tests; the workflow can also be started
+manually. A `macos-host` CI job runs the wrapper's Python contracts with the
+stock `/usr/bin/python3` and its end-to-end tests on macOS on every pull
+request, because macOS agent hosts run the wrapper without cgroups. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
 only for local diagnosis—the checked-in defaults are the publication and
 deployment contract. CI runs five partitions on separate runners using
 `PTC_TEST_PARTITION_ONLY` with `PTC_TEST_PARTITIONS`; every matrix job is

@@ -38,3 +38,24 @@ jobs:
           PTC_TEST_PARTITIONS: 5
           ERL_FLAGS: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
       - run: git diff --exit-code
+
+  # macOS agent hosts run the operation wrapper with the stock /usr/bin/python3
+  # and without cgroups, so its contracts and end-to-end tests run there too.
+  macos-host:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install elixir coreutils
+      - run: echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-brew-elixir-${{ hashFiles('mix.lock') }}
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mix deps.get
+      - run: /usr/bin/python3 test/review_worker_contract.py
+      - run: /usr/bin/python3 test/delivery_metrics_contract.py
+      - run: mix test --include resource_e2e test/ptc_manager/resource_operation_broker_test.exs test/ptc_manager/resource_operation_wrapper_e2e_test.exs test/ptc_manager/resource_operations_test.exs test/ptc_manager/macos_runtime_test.exs
