@@ -170,6 +170,7 @@ defmodule PtcManager.Deployments do
     AgentRun
     |> join(:left, [run], action in assoc(run, :agent_action))
     |> join(:left, [run], job in assoc(run, :job))
+    |> where([run], run.role != "observed")
     |> where(
       [run, action, job],
       run.state in ^@driving_run_states or
@@ -183,7 +184,7 @@ defmodule PtcManager.Deployments do
   @doc "The status a waiting deployment shows, naming the runs that hold the drain."
   def drain_status_text(blockers) when is_list(blockers) do
     count = length(blockers)
-    noun = if count == 1, do: "managed agent", else: "managed agents"
+    noun = if count == 1, do: "PtcManager-owned agent", else: "PtcManager-owned agents"
 
     bounded(
       "Waiting for #{count} #{noun} to finish; new work is paused. Holding the drain: " <>

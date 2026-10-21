@@ -117,7 +117,7 @@ defmodule PtcManager.DeploymentsTest do
     assert Deployments.advance() == :ok
     refute_receive {:deployment_started, _, _}, 100
     waiting = Repo.get!(Deployment, deployment.id)
-    assert waiting.status_text =~ "Waiting for 2 managed agents"
+    assert waiting.status_text =~ "Waiting for 2 PtcManager-owned agents"
     assert waiting.status_text =~ "impl_j7_f1 (working, started"
     assert waiting.status_text =~ "repair_pr9_a#{guarded_action.id}_f1 (blocked, started"
     refute waiting.status_text =~ "impl_j25_f1"
@@ -162,6 +162,19 @@ defmodule PtcManager.DeploymentsTest do
 
     assert host_active_run_count() == length(Deployments.drain_blockers())
     assert host_active_run_count() == 1
+  end
+
+  test "an observed Herdr pane never holds the drain" do
+    worker = worker_fixture()
+    agent_run!(worker, %{state: "working", role: "observed", agent_name: "claude"})
+    agent_run!(worker, %{state: "unknown", role: "observed", agent_name: "codex"})
+
+    assert host_active_run_count() == 0
+    assert Deployments.drain_blockers() == []
+
+    agent_run!(worker, %{state: "working", agent_name: "impl_j7_f1"})
+    assert host_active_run_count() == 1
+    assert [%AgentRun{agent_name: "impl_j7_f1"}] = Deployments.drain_blockers()
   end
 
   test "a waiting deployment fails as soon as the default branch moves on" do

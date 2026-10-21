@@ -3693,9 +3693,14 @@ defmodule PtcManager.Operations do
     |> Repo.all()
   end
 
+  @doc """
+  PtcManager-owned runs in an active state. Observed Herdr panes are listed by
+  `list_observed_agent_runs/0` and carry no weight: no slot, stall or drain.
+  """
   def list_active_agent_runs do
     AgentRun
     |> without_orphaned_action_duplicates()
+    |> where([run], run.role != "observed")
     |> where([run], run.state in ~w(queued starting working idle blocked unknown))
     |> order_by([run], asc: run.started_at, asc: run.id)
     |> preload([
@@ -3756,9 +3761,20 @@ defmodule PtcManager.Operations do
     if action_key in @legacy_heavy_action_keys, do: "heavy", else: "light"
   end
 
+  @doc "Observed Herdr panes, PtcManager did not start, that Herdr still reports."
+  def list_observed_agent_runs do
+    AgentRun
+    |> where([run], run.role == "observed")
+    |> where([run], run.state not in ~w(done failed lost))
+    |> order_by([run], asc: run.started_at, asc: run.id)
+    |> preload(:worker)
+    |> Repo.all()
+  end
+
   def list_waiting_agent_runs do
     AgentRun
     |> without_orphaned_action_duplicates()
+    |> where([run], run.role != "observed")
     |> where([run], run.state == "waiting")
     |> order_by([run], asc: run.last_heartbeat_at, asc: run.id)
     |> preload([

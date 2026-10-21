@@ -65,6 +65,7 @@ defmodule PtcManagerWeb.OperationsLive do
        queued_jobs: [],
        queued_actions: [],
        resource_operations: [],
+       observed_runs: [],
        recent_resource_operations: [],
        resource_statistics: nil,
        workspace_setups: [],
@@ -752,6 +753,7 @@ defmodule PtcManagerWeb.OperationsLive do
     assign(socket,
       queued_jobs: Operations.list_queued_jobs(),
       queued_actions: Operations.list_queued_agent_actions(),
+      observed_runs: Operations.list_observed_agent_runs(),
       resource_operations: ResourceOperations.list_current(),
       active_operation_slots: ResourceOperations.count_active()
     )

@@ -142,6 +142,28 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert Repo.get!(PtcManager.Operations.ResourceOperation, operation.id).state == "lost"
   end
 
+  test "an observed Herdr pane is listed apart and cannot be cancelled", %{conn: conn} do
+    worker = worker_fixture(%{name: "Mac mini"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        role: "observed",
+        state: "working",
+        agent_name: "claude",
+        started_at: now,
+        last_heartbeat_at: now
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+
+    assert has_element?(view, "#observed-panes", "Other Herdr panes")
+    assert has_element?(view, "#observed-run-#{run.id}", "claude")
+    refute has_element?(view, "#active-run-#{run.id}")
+    refute has_element?(view, "#cancel-agent-run-#{run.id}")
+  end
+
   test "queued work for a repository this machine cannot run says why it waits", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)

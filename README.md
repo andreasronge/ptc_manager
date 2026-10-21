@@ -2569,6 +2569,12 @@ managed PR is open, its named Herdr session and worktree move to a
 passive `waiting` state: they remain available for CI repairs or review feedback
 without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
+Only agent runs PtcManager started, bound to a job or an agent action, carry
+operational weight. Herdr.Sync records any other pane in the session, such as
+a maintainer's own interactive Claude Code or Codex pane, as `observed`: the
+Operations page lists it under **Other Herdr panes**, and it never holds a
+deployment drain, uses an agent slot, raises an agent stall, or offers a
+cancel. A pane first seen unbound takes its role and owner when it later binds.
 Deployments may proceed while agents are only `waiting`. A deployment waits for
 every run the coordinator is driving, and for a blocked or unknown run only
 while its agent action or its job is still in flight: a retained agent sitting

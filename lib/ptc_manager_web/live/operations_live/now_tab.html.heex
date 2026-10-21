@@ -487,6 +487,32 @@
           </.link>
         </div>
       </section>
+
+      <section :if={@observed_runs != []} id="observed-panes" class="pt-3">
+        <div class="mb-1 flex items-center justify-between">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Other Herdr panes
+          </h3>
+          <span class="text-xs text-slate-600">{length(@observed_runs)}</span>
+        </div>
+        <p class="mb-3 text-xs text-slate-600">
+          Panes PtcManager did not start. They use no slot, hold no deployment, and cannot be cancelled here.
+        </p>
+        <div class="space-y-2">
+          <div
+            :for={run <- @observed_runs}
+            id={"observed-run-#{run.id}"}
+            class="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3"
+          >
+            <p class="truncate text-sm font-medium text-slate-300">
+              {run.agent_name || "Herdr agent"}
+            </p>
+            <p class="mt-1 text-xs text-slate-500">
+              {run.state} · {(run.worker && run.worker.name) || "unknown worker"}
+            </p>
+          </div>
+        </div>
+      </section>
     </div>
   </aside>
 </section>

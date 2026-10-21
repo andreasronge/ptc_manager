@@ -410,8 +410,12 @@ defmodule PtcManager.Herdr.Sync do
 
   defp steady_observation_entry(worker, runs, attrs) do
     case Map.get(runs, attrs.external_key) do
-      {%AgentRun{}, _job} = entry ->
-        {entry, attrs}
+      {%AgentRun{} = run, _job} = entry ->
+        # A pane first seen unbound that now names a managed attempt takes the
+        # full path, which binds it.
+        if owned?(run) or not owned?(attach_owner(attrs, worker)),
+          do: {entry, attrs},
+          else: {:rebind, attrs}
 
       nil ->
         attrs =
@@ -907,7 +911,8 @@ defmodule PtcManager.Herdr.Sync do
         Enum.map(normalized, fn attrs ->
           case Map.get(existing_runs, attrs.external_key) do
             %AgentRun{} = existing_run ->
-              preserve_existing_attachment(attrs, existing_run, existing_job_states)
+              attrs = preserve_existing_attachment(attrs, existing_run, existing_job_states)
+              if owned?(existing_run), do: attrs, else: attach_owner(attrs, worker)
 
             nil ->
               attrs
@@ -1417,7 +1422,29 @@ defmodule PtcManager.Herdr.Sync do
   # write transaction on every tick; an unchanged run now produces an empty
   # changeset, and one statement refreshes every observed heartbeat.
   defp update_run!(run, attrs) do
-    run |> AgentRun.changeset(Map.delete(attrs, :last_heartbeat_at)) |> Repo.update!()
+    run
+    |> AgentRun.changeset(attrs |> Map.delete(:last_heartbeat_at) |> ownership_role(run))
+    |> Repo.update!()
+  end
+
+  # Only a pane bound to a job or an agent action is PtcManager's; any other
+  # pane is observed, and a later bind gives it its role and owner together.
+  defp ownership_role(attrs, run) do
+    if owned?(attrs) or owned?(run), do: attrs, else: Map.put(attrs, :role, "observed")
+  end
+
+  defp owned?(%AgentRun{job_id: job_id, agent_action_id: action_id}),
+    do: is_integer(job_id) or is_integer(action_id)
+
+  defp owned?(%{} = attrs),
+    do: is_integer(attrs[:job_id]) or is_integer(attrs[:agent_action_id])
+
+  defp owned?(nil), do: false
+
+  defp attach_owner(attrs, worker) do
+    attrs
+    |> maybe_attach_managed_attempt(worker.worker_key)
+    |> maybe_attach_agent_action_attempt(worker)
   end
 
   defp refresh_heartbeats(run_ids, now) do
@@ -1434,7 +1461,7 @@ defmodule PtcManager.Herdr.Sync do
 
   defp insert_agent_run(worker, attrs) do
     %AgentRun{}
-    |> AgentRun.changeset(Map.put(attrs, :worker_id, worker.id))
+    |> AgentRun.changeset(attrs |> Map.put(:worker_id, worker.id) |> ownership_role(nil))
     |> Repo.insert!()
   end
 
