@@ -25,5 +25,7 @@ defmodule PtcManager.MacOSRuntimeTest do
     assert config[:deployment_trigger_command] == host
     assert config[:deployment_status_command] == host
     assert config[:deployment_trigger_args] == ["trigger", "/tmp/ptc-macos-runtime"]
+    # Session archives and operation logs stay under the service root, not /var/lib.
+    assert config[:execution_artifact_root] == "/tmp/ptc-macos-runtime/data/execution-artifacts"
   end
 end

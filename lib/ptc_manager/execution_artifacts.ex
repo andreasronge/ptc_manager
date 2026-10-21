@@ -211,7 +211,7 @@ defmodule PtcManager.ExecutionArtifacts do
       if File.regular?(Path.join(destination, "manifest.json")) do
         :ok
       else
-        case command.run("/usr/local/bin/ptc-manager-worker-review", [
+        case command.run(PtcManager.Reviews.Adapter.helper(), [
                "archive-session",
                kind,
                session_id,

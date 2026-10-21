@@ -596,6 +596,9 @@ if config_env() == :prod and :os.type() == {:unix, :darwin} do
       tool_inventory_dir:
         System.get_env("PTC_TOOL_INVENTORY_DIR") || Path.join(root, "data/tool-inventory"),
       review_helper: Path.join(root, "bin/ptc-manager-worker-review"),
+      execution_artifact_root:
+        System.get_env("PTC_EXECUTION_ARTIFACT_ROOT") ||
+          Path.join(root, "data/execution-artifacts"),
       worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
       verify_agent_login: true
   end
