@@ -23,24 +23,35 @@ defmodule PtcManager.Dispatch do
       Clock.utc_now(PtcManager.Clock.System)
     )
 
-    case Operations.next_queued_job(PtcManager.Machine.Gate.unsatisfied_repository_ids()) do
+    # Queued jobs of a gate-blocked repository are never picked; they carry
+    # the gate's reason instead, so the queue says why they wait.
+    blocked = PtcManager.Machine.Gate.blocked_reasons()
+    _ = Operations.record_dispatch_blocked(blocked)
+
+    case Operations.next_queued_job(Map.keys(blocked)) do
       nil ->
         {:ok, :empty}
 
       job ->
-        with {:ok, capacity} <- dispatch_capacity(worker_key, opts),
-             :ok <- Worktrees.ensure_slot(worker_key, capacity, adapter) do
-          dispatch_job(
-            job,
-            github,
-            source_updater,
-            adapter,
-            worker_key,
-            lease_ms,
-            capacity,
-            clock
-          )
-        end
+        result =
+          with {:ok, capacity} <- dispatch_capacity(worker_key, opts),
+               :ok <- Worktrees.ensure_slot(worker_key, capacity, adapter) do
+            dispatch_job(
+              job,
+              github,
+              source_updater,
+              adapter,
+              worker_key,
+              lease_ms,
+              capacity,
+              clock
+            )
+          end
+
+        # Written only while the job is still queued: an error after its
+        # lease is the job's own last_error.
+        with {:error, reason} <- result, do: Operations.record_dispatch_error(job.id, reason)
+        result
     end
   end
 

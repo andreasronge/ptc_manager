@@ -105,13 +105,14 @@ defmodule PtcManager.WorktreeSecurity do
         {:ok, uid, [0]}
 
       _unset ->
-        case Application.get_env(:ptc_manager, :herdr_run_as_user) do
-          user when is_binary(user) and user != "" ->
-            with {:ok, uid} <- lookup_owner_uid(["-u", user]), do: {:ok, uid, [0]}
+        args =
+          case PtcManager.Host.agent_identity() do
+            {:separate, user} -> ["-u", user]
+            :service_account -> ["-u"]
+          end
 
-          _same_account ->
-            with {:ok, uid} <- lookup_owner_uid(["-u"]), do: {:ok, uid, [0, uid]}
-        end
+        with {:ok, uid} <- lookup_owner_uid(args),
+             do: {:ok, uid, PtcManager.Host.trusted_ancestor_owners(uid)}
     end
   end
 

@@ -109,7 +109,12 @@ defmodule PtcManagerWeb.ClusterClaimLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path="/cluster" switch_to="/cluster">
+    <Layouts.app
+      readiness={@host_readiness}
+      flash={@flash}
+      current_path="/cluster"
+      switch_to="/cluster"
+    >
       <section>
         <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Move a repository</p>
         <h1 class="mt-2 text-2xl font-semibold">

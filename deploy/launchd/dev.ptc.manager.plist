@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example launchd system service for a macOS PtcManager host. Install it in
+  /Library/LaunchDaemons as root, replace MAINTAINER and the service root, and
+  load it with: sudo launchctl bootstrap system /Library/LaunchDaemons/dev.ptc.manager.plist
+  See docs/maintainers/host-profiles.md.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.ptc.manager</string>
+	<key>UserName</key>
+	<string>MAINTAINER</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/MAINTAINER</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/Shared/ptc-services/bin/run-manager</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/Shared/ptc-services</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>SessionCreate</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/Shared/ptc-services/logs/manager.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/Shared/ptc-services/logs/manager.log</string>
+</dict>
+</plist>

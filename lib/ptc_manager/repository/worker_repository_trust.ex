@@ -44,8 +44,7 @@ defmodule PtcManager.Repository.WorkerRepositoryTrust do
     end
   end
 
-  defp worker_boundary?,
-    do: Application.get_env(:ptc_manager, :herdr_run_as_user) not in [nil, ""]
+  defp worker_boundary?, do: PtcManager.Host.separate_agent_account?()
 
   defp git(args) do
     command =

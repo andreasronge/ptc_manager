@@ -42,8 +42,8 @@ defmodule PtcManager.Repository.SourceUpdater do
 
     with :ok <- valid_ref(git, branch_ref, timeout_ms),
          :ok <-
-           run(
-             git,
+           git
+           |> run(
              [
                "-C",
                path,
@@ -58,13 +58,29 @@ defmodule PtcManager.Repository.SourceUpdater do
                "+#{branch_ref}:#{remote_ref}"
              ],
              timeout_ms
-           ),
+           )
+           |> missing_on_github(git, remote, branch, timeout_ms),
          {:ok, sha} <- revision(git, path, remote_ref, timeout_ms),
          true <- Regex.match?(@sha, sha) do
       {:ok, %{path: Path.expand(path), sha: sha, ref: remote_ref}}
     else
       false -> {:error, :repository_source_invalid_sha}
       {:error, _reason} = error -> error
+    end
+  end
+
+  # A failed fetch is a network, authentication or GitHub problem, unless
+  # GitHub answers that the branch does not exist; only that is reported as
+  # a missing branch.
+  defp missing_on_github(:ok, _git, _remote, _branch, _timeout_ms), do: :ok
+
+  defp missing_on_github(error, git, remote, branch, timeout_ms) do
+    case git.run(
+           ["ls-remote", "--exit-code", "--heads", "--", remote, "refs/heads/#{branch}"],
+           timeout_ms
+         ) do
+      {_output, 2} -> {:error, {:branch_not_on_github, branch}}
+      _other -> error
     end
   end
 

@@ -7,7 +7,7 @@ defmodule PtcManager.Deployments do
   alias PtcManager.Deployments.{Deployment, ReleaseRevision}
   alias PtcManager.Operations.{AgentRun, AuditEvent, Repository}
   alias PtcManager.Repository.{Checkout, Contract, GitProbe}
-  alias PtcManager.{Gateway, OperationalMode, Operations, Repo, RepoTransaction}
+  alias PtcManager.{Gateway, Host, OperationalMode, Operations, Repo, RepoTransaction}
 
   @driving_run_states ~w(queued starting working)
   @attention_run_states ~w(blocked unknown)
@@ -23,7 +23,7 @@ defmodule PtcManager.Deployments do
   def request(%Repository{} = repository, actor) when is_binary(actor) and actor != "" do
     source = Application.fetch_env!(:ptc_manager, :deployment_revision_source)
 
-    with true <- repository.enabled,
+    with true <- deployable_here?(repository),
          {:ok, requested_sha} <- Gateway.call(source, :latest, [repository]),
          true <- valid_sha?(requested_sha),
          {:ok, contract} <- contract_at(source, repository, requested_sha),
@@ -41,6 +41,23 @@ defmodule PtcManager.Deployments do
   end
 
   def request(_repository, _actor), do: {:error, :invalid_deployment_request}
+
+  @doc """
+  Whether this console may deploy the repository: an enabled one, or this
+  member's own release checkout even while it is disabled here. Deploying it
+  only fetches GitHub into the checkout and swaps the local release, so it
+  needs no cluster claim.
+  """
+  def deployable_here?(%Repository{enabled: true}), do: true
+
+  def deployable_here?(%Repository{local_path: path}) when is_binary(path) and path != "" do
+    case Host.self_source_path() do
+      nil -> false
+      source -> Path.expand(path) == source
+    end
+  end
+
+  def deployable_here?(%Repository{}), do: false
 
   def list_recent(limit \\ 20) do
     Deployment
@@ -91,7 +108,8 @@ defmodule PtcManager.Deployments do
   end
 
   def configured_repositories do
-    Operations.enabled_repositories()
+    Operations.list_repositories()
+    |> Enum.filter(&deployable_here?/1)
     |> Enum.map(fn repository -> {repository, contract(repository)} end)
     |> Enum.filter(fn {_repository, result} ->
       match?({:ok, %Contract{} = contract} when contract.deployment_command != nil, result)
@@ -170,6 +188,7 @@ defmodule PtcManager.Deployments do
     AgentRun
     |> join(:left, [run], action in assoc(run, :agent_action))
     |> join(:left, [run], job in assoc(run, :job))
+    |> where([run], run.role != "observed")
     |> where(
       [run, action, job],
       run.state in ^@driving_run_states or
@@ -183,7 +202,7 @@ defmodule PtcManager.Deployments do
   @doc "The status a waiting deployment shows, naming the runs that hold the drain."
   def drain_status_text(blockers) when is_list(blockers) do
     count = length(blockers)
-    noun = if count == 1, do: "managed agent", else: "managed agents"
+    noun = if count == 1, do: "PtcManager-owned agent", else: "PtcManager-owned agents"
 
     bounded(
       "Waiting for #{count} #{noun} to finish; new work is paused. Holding the drain: " <>

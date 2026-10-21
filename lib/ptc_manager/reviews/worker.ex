@@ -1,5 +1,6 @@
 defmodule PtcManager.Reviews.Worker do
   use Oban.Worker, queue: :reviews, max_attempts: 1
+  import PtcManager.Machine.Gate, only: [waiting_reason?: 1]
   alias PtcManager.{Reviews, OperationalMode}
   @impl true
   def perform(%Oban.Job{args: %{"round_id" => id}}) do
@@ -34,7 +35,7 @@ defmodule PtcManager.Reviews.Worker do
         {:error, :database_busy} ->
           {:snooze, 10}
 
-        {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+        {:error, reason} when waiting_reason?(reason) ->
           {:snooze, 60}
 
         {:error, _} ->

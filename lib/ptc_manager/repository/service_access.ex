@@ -20,10 +20,19 @@ defmodule PtcManager.Repository.ServiceAccess do
 
   @doc "Summarizes both services' access to this repository's checkout."
   def summarize(%Repository{local_path: path}) when is_binary(path) and path != "" do
-    coordinator = grant(coordinator_unit(), Path.join(path, ".git"))
-    worker = grant(worker_unit(), path)
+    if PtcManager.Host.service_manager() == :launchd do
+      %{
+        status: :ready,
+        label: "No service sandbox",
+        detail:
+          "launchd services have no path grants; the checkout follows the account's permissions."
+      }
+    else
+      coordinator = grant(coordinator_unit(), Path.join(path, ".git"))
+      worker = grant(worker_unit(), path)
 
-    describe(coordinator, worker)
+      describe(coordinator, worker)
+    end
   end
 
   def summarize(%Repository{}),

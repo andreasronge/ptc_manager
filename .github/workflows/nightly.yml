@@ -29,7 +29,7 @@ jobs:
             _build
           key: ${{ runner.os }}-otp-29-elixir-1.20-${{ hashFiles('mix.lock') }}
       - run: ./scripts/ptc/bootstrap
-      - name: Run the complete suite, including nightly system tests
-        run: mix test
+      - name: Run the complete suite, including nightly and wrapper end-to-end tests
+        run: mix test --include resource_e2e
       - run: ./scripts/duplication_gate.sh check
       - run: git diff --exit-code

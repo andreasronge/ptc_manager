@@ -255,7 +255,9 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
           "args" => [
             "--dangerously-bypass-approvals-and-sandbox",
             "-c",
-            ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}})
+            ~s(projects={{{workspace_path_toml}}={trust_level="trusted"}}),
+            "-c",
+            "check_for_update_on_startup=true"
           ]
         },
         "cursor" => %{"enabled" => true, "args" => ["--force", "--trust", "{{workspace_path}}"]}
@@ -273,8 +275,14 @@ defmodule PtcManager.Dispatch.HerdrAdapterTest do
                  "gpt-5.6-sol",
                  "-c",
                  ~s(projects={"#{workspace.repository}"={trust_level="trusted"},) <>
-                   ~s("#{worktree_path}"={trust_level="trusted"}})
+                   ~s("#{worktree_path}"={trust_level="trusted"}}),
+                 # An unattended start never waits on an update prompt.
+                 "-c",
+                 "check_for_update_on_startup=false"
                ]
+
+      assert HerdrAdapter.agent_arguments("codex", worktree_path, []) |> Enum.take(-2) ==
+               PtcManager.CodexTrust.unattended_args()
 
       assert HerdrAdapter.agent_arguments("cursor", worktree_path, trusted) ==
                ["--force", "--trust", worktree_path, "--model", "cursor-grok-4.6-high"]

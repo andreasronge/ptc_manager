@@ -283,7 +283,9 @@ defmodule PtcManager.DatabaseDiagnosticsTest do
     required = %{
       "DATABASE_PATH" => "/tmp/ptc-manager-runtime-config-test.db",
       "PTC_MANAGER_PASSWORD" => "runtime-config-password",
-      "SECRET_KEY_BASE" => String.duplicate("s", 64)
+      "SECRET_KEY_BASE" => String.duplicate("s", 64),
+      # Read only on macOS, where a release refuses to boot without it.
+      "PTC_MACOS_SERVICE_ROOT" => "/tmp/ptc-manager-runtime-config-test"
     }
 
     environment = Map.merge(required, overrides)

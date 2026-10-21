@@ -70,6 +70,7 @@ defmodule PtcManager.Stalls do
       &machine_incapable/1,
       &review_repeated_finding/1,
       &operation_slot_orphaned/1,
+      &operation_fenced/1,
       &dispatch_rejected/1,
       &publication_stuck_green/1,
       &agent_out_of_contact/1,
@@ -92,6 +93,7 @@ defmodule PtcManager.Stalls do
   def label(:machine_incapable), do: "Waiting for a capable machine"
   def label(:review_repeated_finding), do: "Review repeating a finding"
   def label(:operation_slot_orphaned), do: "Expensive-operation slot held by a lost operation"
+  def label(:operation_fenced), do: "Expensive operation fenced until a maintainer releases it"
   def label(:dispatch_rejected), do: "Dispatch rejected and nothing retried"
   def label(:publication_stuck_green), do: "Green member pull request not merged"
   def label(:agent_out_of_contact), do: "Agent out of contact"
@@ -382,35 +384,23 @@ defmodule PtcManager.Stalls do
       |> Enum.reject(fn {_id, evaluation} -> evaluation.satisfied? end)
       |> Map.new()
 
-    if unsatisfied == %{} do
-      []
-    else
-      ids = Map.keys(unsatisfied)
-      reason = &PtcManager.Machine.Requirements.explain(Map.fetch!(unsatisfied, &1))
+    incapable =
+      if unsatisfied == %{},
+        do: [],
+        else: incapable_stalls(unsatisfied, waiting_before, now)
 
-      jobs =
-        Repo.all(
-          from job in Job,
-            left_join: round in Round,
-            on: round.job_id == job.id and round.state == "queued",
-            where:
-              job.repository_id in ^ids and job.updated_at <= ^waiting_before and
-                (job.state == "queued" or
-                   (job.state in ^Reviews.active_states() and
-                      (job.review_state == "resume_pending" or not is_nil(round.id)))),
-            distinct: true,
-            preload: [:issue]
-        )
+    stalled_ids = MapSet.new(incapable, &{&1.target_type, &1.target_id})
 
-      actions =
-        Repo.all(
-          from action in AgentAction,
-            where:
-              action.repository_id in ^ids and action.state == "queued" and
-                action.updated_at <= ^waiting_before
-        )
-
-      Enum.map(jobs, fn job ->
+    incapable ++
+      for job <-
+            Repo.all(
+              from job in Job,
+                where:
+                  job.state == "queued" and not is_nil(job.dispatch_blocked_reason) and
+                    job.dispatch_blocked_at <= ^waiting_before,
+                preload: [:issue]
+            ),
+          not MapSet.member?(stalled_ids, {"job", job.id}) do
         %{
           kind: :machine_incapable,
           severity: :attention,
@@ -418,29 +408,71 @@ defmodule PtcManager.Stalls do
           target_id: job.id,
           repository_id: job.repository_id,
           issue_id: job.issue_id,
-          since: job.updated_at,
+          since: job.dispatch_blocked_at,
           detail:
-            "Work for ##{job.issue.number} has waited #{humanize(elapsed_ms(job.updated_at, now))} " <>
-              "for a capable machine: #{reason.(job.repository_id)}. Install the tool, refresh the " <>
-              "inventory, or move the repository to a machine that has it."
+            "Work for ##{job.issue.number} has waited " <>
+              "#{humanize(elapsed_ms(job.dispatch_blocked_at, now))} before leasing. " <>
+              Operations.dispatch_blocked_words(job)
         }
-      end) ++
-        Enum.map(actions, fn action ->
-          %{
-            kind: :machine_incapable,
-            severity: :attention,
-            target_type: "agent_action",
-            target_id: action.id,
-            repository_id: action.repository_id,
-            issue_id: nil,
-            since: action.updated_at,
-            detail:
-              "The #{String.replace(action.action_key, "_", " ")} action has waited " <>
-                "#{humanize(elapsed_ms(action.updated_at, now))} for a capable machine: " <>
-                "#{reason.(action.repository_id)}."
-          }
-        end)
-    end
+      end
+  end
+
+  defp incapable_stalls(unsatisfied, waiting_before, now) do
+    ids = Map.keys(unsatisfied)
+    reason = &PtcManager.Machine.Requirements.explain(Map.fetch!(unsatisfied, &1))
+
+    jobs =
+      Repo.all(
+        from job in Job,
+          left_join: round in Round,
+          on: round.job_id == job.id and round.state == "queued",
+          where:
+            job.repository_id in ^ids and job.updated_at <= ^waiting_before and
+              (job.state == "queued" or
+                 (job.state in ^Reviews.active_states() and
+                    (job.review_state == "resume_pending" or not is_nil(round.id)))),
+          distinct: true,
+          preload: [:issue]
+      )
+
+    actions =
+      Repo.all(
+        from action in AgentAction,
+          where:
+            action.repository_id in ^ids and action.state == "queued" and
+              action.updated_at <= ^waiting_before
+      )
+
+    Enum.map(jobs, fn job ->
+      %{
+        kind: :machine_incapable,
+        severity: :attention,
+        target_type: "job",
+        target_id: job.id,
+        repository_id: job.repository_id,
+        issue_id: job.issue_id,
+        since: job.updated_at,
+        detail:
+          "Work for ##{job.issue.number} has waited #{humanize(elapsed_ms(job.updated_at, now))} " <>
+            "for a capable machine: #{reason.(job.repository_id)}. Install the tool, refresh the " <>
+            "inventory, or move the repository to a machine that has it."
+      }
+    end) ++
+      Enum.map(actions, fn action ->
+        %{
+          kind: :machine_incapable,
+          severity: :attention,
+          target_type: "agent_action",
+          target_id: action.id,
+          repository_id: action.repository_id,
+          issue_id: nil,
+          since: action.updated_at,
+          detail:
+            "The #{String.replace(action.action_key, "_", " ")} action has waited " <>
+              "#{humanize(elapsed_ms(action.updated_at, now))} for a capable machine: " <>
+              "#{reason.(action.repository_id)}."
+        }
+      end)
   end
 
   @doc """
@@ -531,7 +563,7 @@ defmodule PtcManager.Stalls do
           Repo.all(
             from operation in ResourceOperation,
               where:
-                not is_nil(operation.slot_number) and
+                not is_nil(operation.slot_number) and is_nil(operation.fence_evidence) and
                   operation.state in ["starting", "running", "cancelling", "recovery_pending"]
           ),
         since = operation_silent_since(operation),
@@ -551,6 +583,70 @@ defmodule PtcManager.Stalls do
             "#{humanize(elapsed_ms(since, now))}, and recovery has not released it."
       }
     end
+  end
+
+  @doc """
+  An operation that a host without containment keeps fenced: nothing proves
+  its command stopped, so it holds its slot until a maintainer releases it on
+  the Operations page. Only work waiting for that slot waits.
+  """
+  def operation_fenced(_now) do
+    for operation <-
+          Repo.all(
+            from operation in ResourceOperation,
+              where:
+                operation.state == "recovery_pending" and not is_nil(operation.fence_evidence),
+              preload: [:job, :agent_action]
+          ) do
+      %{
+        kind: :operation_fenced,
+        severity: :attention,
+        target_type: "resource_operation",
+        target_id: operation.id,
+        repository_id: operation.repository_id,
+        issue_id: operation.job && operation.job.issue_id,
+        since: operation.last_heartbeat_at,
+        detail:
+          "Operation #{operation.id} (#{operation.label}) of #{operation_owner(operation)} holds " <>
+            "slot #{operation.slot_number}. #{fence_summary(operation.fence_evidence)} " <>
+            "Release it on the Operations page once nothing it started is still running."
+      }
+    end
+  end
+
+  defp operation_owner(%ResourceOperation{job_id: id}) when is_integer(id), do: "job #{id}"
+
+  defp operation_owner(%ResourceOperation{agent_action_id: id}) when is_integer(id),
+    do: "action #{id}"
+
+  defp operation_owner(_operation), do: "unknown work"
+
+  defp fence_summary(evidence) do
+    processes =
+      case evidence["processes"] do
+        [_ | _] = listed ->
+          "Still running: " <>
+            Enum.map_join(
+              listed,
+              ", ",
+              &"pid #{&1["pid"]} (#{String.slice(&1["command"], 0, 60)})"
+            ) <>
+            "."
+
+        _none ->
+          if evidence["listing_error"] || evidence["inspection_error"],
+            do: "Its processes could not be listed.",
+            else: "No process carrying its marker is listed."
+      end
+
+    lock =
+      case evidence["lock"] do
+        "held" -> "Its wrapper (pid #{evidence["wrapper_pid"]}) still holds the slot lock."
+        "free" -> "Its slot lock is free."
+        _other -> "Its slot lock could not be checked."
+      end
+
+    processes <> " " <> lock
   end
 
   @doc """

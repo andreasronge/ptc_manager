@@ -19,13 +19,7 @@ defmodule PtcManager.Machine do
   end
 
   @doc "The operating system this release runs on, as the inventory reports it."
-  def os do
-    case :os.type() do
-      {:unix, :linux} -> "linux"
-      {:unix, :darwin} -> "darwin"
-      {family, name} -> "#{family}-#{name}"
-    end
-  end
+  defdelegate os, to: PtcManager.Host
 
   @doc "Whether this console is a member of a cluster (`PTC_CLUSTER_MEMBERS`)."
   def clustered?, do: Application.get_env(:ptc_manager, :cluster_members) not in [nil, %{}]

@@ -22,6 +22,8 @@ config :ptc_manager,
   dispatch_enabled: false,
   deployment_poll_interval_ms: 0,
   result_reconcile_interval_ms: 0,
+  # Readiness tests turn it on; everything else runs on a ready host.
+  host_readiness: false,
   publication_enabled: false,
   pr_reconcile_enabled: false,
   heavy_agent_capacity: 1,

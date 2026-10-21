@@ -38,7 +38,7 @@ defmodule PtcManager.Repository.WorkerCodexArming do
   Records the managed policy, and the model when the Codex profile names one.
   """
   def arm(model \\ nil) do
-    if WorkerHelper.worker_boundary?() do
+    if PtcManager.Host.separate_agent_account?() do
       case run(["arm" | List.wrap(model)]) do
         {_output, 0} -> :ok
         {output, status} -> {:error, {:worker_codex_arming_failed, status, bounded(output)}}

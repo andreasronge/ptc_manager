@@ -53,6 +53,13 @@ defmodule PtcManager.Repository.GitProbe do
 
   def branch_sha(_path, _branch), do: {:error, :invalid_repository_branch}
 
+  @doc "Resolves the last fetched commit of a GitHub branch, without fetching."
+  def fetched_branch_sha(path, branch)
+      when is_binary(path) and is_binary(branch) and branch != "" and byte_size(branch) <= 240,
+      do: revision(path, "refs/remotes/origin/#{branch}^{commit}")
+
+  def fetched_branch_sha(_path, _branch), do: {:error, :invalid_repository_branch}
+
   @doc "Returns the canonical checkout, shared Git directory, and GitHub origin identity."
   def checkout_identity(%Repository{}, path) when is_binary(path) do
     with true <- Path.type(path) == :absolute and File.dir?(path),

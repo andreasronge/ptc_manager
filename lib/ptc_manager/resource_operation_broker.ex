@@ -219,13 +219,18 @@ defmodule PtcManager.ResourceOperationBroker do
 
   defp handle_request(%{"operation" => "finish", "operation_id" => id} = request, payload) do
     with %ResourceOperation{} = operation <- owned_operation(id, payload),
+         {:ok, remaining} <- remaining_processes(request),
          {:ok, operation} <-
-           ResourceOperations.finish(operation.id, request["attempt_token"], %{
-             exit_status: request["exit_status"],
-             peak_memory_bytes: request["peak_memory_bytes"],
-             resource_metrics: request["resource_metrics"],
-             last_error: request["last_error"]
-           }) do
+           ResourceOperations.finish(
+             operation.id,
+             request["attempt_token"],
+             Map.merge(remaining, %{
+               exit_status: request["exit_status"],
+               peak_memory_bytes: request["peak_memory_bytes"],
+               resource_metrics: request["resource_metrics"],
+               last_error: request["last_error"]
+             })
+           ) do
       operation_response(operation)
     else
       nil -> error_response(:operation_not_found)
@@ -233,7 +238,46 @@ defmodule PtcManager.ResourceOperationBroker do
     end
   end
 
+  # Readiness proves the socket, the context directory and authentication
+  # with a context that owns nothing; it creates no operation.
+  defp handle_request(%{"operation" => "ping"}, %{"owner_type" => "readiness"}),
+    do: %{"status" => "ok"}
+
   defp handle_request(_request, _payload), do: error_response(:unsupported_operation)
+
+  @remaining_limit 20
+  @remaining_text 300
+
+  # The wrapper reports processes that outlived its command. The list is
+  # evidence for a maintainer, so it is shape-checked and bounded here.
+  defp remaining_processes(%{"processes_remaining" => true} = request) do
+    processes = Map.get(request, "remaining_processes", [])
+    detail = Map.get(request, "remaining_detail")
+
+    if is_list(processes) and length(processes) <= @remaining_limit and
+         Enum.all?(processes, &remaining_process?/1) and (is_nil(detail) or is_binary(detail)) do
+      {:ok,
+       %{
+         processes_remaining: true,
+         remaining_processes: Enum.map(processes, &Map.take(&1, ["pid", "stat", "command"])),
+         remaining_detail: detail && String.slice(detail, 0, @remaining_text)
+       }}
+    else
+      {:error, :invalid_remaining_processes}
+    end
+  end
+
+  defp remaining_processes(request) do
+    if Map.get(request, "processes_remaining") in [nil, false],
+      do: {:ok, %{}},
+      else: {:error, :invalid_remaining_processes}
+  end
+
+  defp remaining_process?(%{"pid" => pid, "stat" => stat, "command" => command})
+       when is_integer(pid) and pid > 0 and is_binary(stat) and is_binary(command),
+       do: String.length(stat) <= 16 and String.length(command) <= @remaining_text
+
+  defp remaining_process?(_process), do: false
 
   defp review_response(result) when result in [:paused, :skipped],
     do: %{"status" => "ok", "state" => to_string(result)}
@@ -442,6 +486,11 @@ defmodule PtcManager.ResourceOperationBroker do
               operation.attempt_token,
               "The abandoned operation process tree was terminated during recovery."
             )
+
+        # No containment: the operation keeps its slot and waits for a
+        # maintainer, while everything else keeps running.
+        {:fenced, evidence} ->
+          _ = ResourceOperations.record_fenced(operation, evidence)
 
         {:retry, reason} ->
           retry_after_ms =

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Example launcher for dev.ptc.deployment-worker: install as
+# <service root>/bin/run-deployment-worker.
+set -eu
+. /Users/Shared/ptc-services/config/manager.env
+exec "$PTC_MACOS_SERVICE_ROOT/bin/macos-deploy-host" worker "$PTC_MACOS_SERVICE_ROOT"

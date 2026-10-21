@@ -71,6 +71,7 @@ defmodule PtcManager.ManagedOperationContext do
         "artifact_max_bytes" =>
           Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000),
         "cgroups" => Application.get_env(:ptc_manager, :resource_operation_cgroups, false),
+        "check_remaining_processes" => PtcManager.Host.check_remaining_processes?(),
         "operation_memory_high_bytes" =>
           Application.get_env(:ptc_manager, :operation_memory_high_bytes, 2_147_483_648),
         "verify_operation_memory_high_bytes" =>
@@ -476,7 +477,8 @@ defmodule PtcManager.ManagedOperationContext do
         "/usr/local/bin/ptc-operation"
       )
 
-  defp lock_directory do
+  @doc "Where wrappers keep their `operation-slot-<n>.lock` files."
+  def lock_directory do
     case socket_path() do
       path when is_binary(path) and path != "" -> Path.dirname(path)
       _disabled -> System.tmp_dir!()

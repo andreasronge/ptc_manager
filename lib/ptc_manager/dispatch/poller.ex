@@ -2,14 +2,18 @@ defmodule PtcManager.Dispatch.Poller do
   @moduledoc false
   use GenServer
 
+  require Logger
+
   alias PtcManager.Dispatch
+
+  @max_backoff_ms 60_000
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   def wake, do: GenServer.cast(__MODULE__, :wake)
 
   @impl true
   def init(:ok) do
-    state = %{task_ref: nil}
+    state = %{task_ref: nil, last_error: nil, delay_ms: nil}
     if enabled?(), do: send(self(), :dispatch)
     {:ok, state}
   end
@@ -30,15 +34,13 @@ defmodule PtcManager.Dispatch.Poller do
     end
   end
 
-  def handle_info({reference, _result}, %{task_ref: reference} = state) do
+  def handle_info({reference, result}, %{task_ref: reference} = state) do
     Process.demonitor(reference, [:flush])
-    schedule()
-    {:noreply, %{state | task_ref: nil}}
+    {:noreply, %{observe(result, state) | task_ref: nil} |> schedule()}
   end
 
-  def handle_info({:DOWN, reference, :process, _pid, _reason}, %{task_ref: reference} = state) do
-    schedule()
-    {:noreply, %{state | task_ref: nil}}
+  def handle_info({:DOWN, reference, :process, _pid, reason}, %{task_ref: reference} = state) do
+    {:noreply, %{observe({:error, {:crashed, reason}}, state) | task_ref: nil} |> schedule()}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -51,8 +53,27 @@ defmodule PtcManager.Dispatch.Poller do
 
   def handle_cast(:wake, state), do: {:noreply, state}
 
-  defp schedule do
-    if enabled?(), do: Process.send_after(self(), :dispatch, interval())
+  # A failure is logged once when it changes and its recovery once; the same
+  # failure again backs off, doubling up to a minute.
+  @doc false
+  def observe({:error, reason}, %{last_error: reason, delay_ms: delay} = state),
+    do: %{state | delay_ms: min(delay * 2, @max_backoff_ms)}
+
+  def observe({:error, reason}, state) do
+    Logger.warning("Dispatch stopped before leasing a job: #{inspect(reason)}")
+    %{state | last_error: reason, delay_ms: interval()}
+  end
+
+  def observe(_result, %{last_error: nil} = state), do: %{state | delay_ms: interval()}
+
+  def observe(_result, state) do
+    Logger.info("Dispatch recovered after: #{inspect(state.last_error)}")
+    %{state | last_error: nil, delay_ms: interval()}
+  end
+
+  defp schedule(state) do
+    if enabled?(), do: Process.send_after(self(), :dispatch, state.delay_ms || interval())
+    state
   end
 
   defp enabled? do

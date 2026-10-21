@@ -213,7 +213,8 @@ defmodule PtcManager.HerdrSyncTest do
     worker = Repo.get_by!(Worker, worker_key: "herdr:test")
     run = Repo.one!(AgentRun)
     assert worker.status == "online"
-    assert run.role == "manager"
+    # A pane PtcManager did not start is observed, whatever its name says.
+    assert run.role == "observed"
     assert run.state == "working"
     assert run.agent_name == "Codex manager"
     assert run.external_key == "test:agent-123"
@@ -735,6 +736,111 @@ defmodule PtcManager.HerdrSyncTest do
     recovered_run = Repo.get!(AgentRun, lost_run.id)
     assert recovered_run.state == "done"
     assert recovered_run.ended_at == lost_run.ended_at
+  end
+
+  test "a pane PtcManager did not start is observed and carries no weight" do
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         %{
+           "agent" => "claude",
+           "agent_status" => "working",
+           "pane_id" => "w1:p9",
+           "agent_session" => %{"value" => "maintainer-session"}
+         }
+       ]}
+    )
+
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "observed")
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "observed")
+
+    run = Repo.one!(AgentRun)
+    assert run.role == "observed"
+    assert run.state == "working"
+    assert PtcManager.Deployments.drain_blockers() == []
+    assert Operations.list_active_agent_runs() == []
+    assert %{light: 0, heavy: 0} = Operations.agent_slot_usage()
+    assert [%AgentRun{id: id}] = Operations.list_observed_agent_runs()
+    assert id == run.id
+  end
+
+  test "recorded runs no job or action owns become observed, canaries aside" do
+    worker = worker_fixture()
+
+    insert = fn attrs ->
+      %AgentRun{}
+      |> AgentRun.changeset(
+        Map.merge(
+          %{worker_id: worker.id, state: "working", started_at: now(), last_heartbeat_at: now()},
+          attrs
+        )
+      )
+      |> Repo.insert!()
+    end
+
+    pane = insert.(%{role: "implementer", external_key: "default:claude-pane"})
+    named = insert.(%{role: "manager", external_key: "default:manager-pane"})
+    canary = insert.(%{role: "manager", external_key: "deployment-canary:abc"})
+
+    action =
+      %AgentAction{}
+      |> AgentAction.changeset(%{
+        repository_id: repository_fixture().id,
+        action_key: "repair_pr",
+        target_type: "pull_request",
+        target_id: 1706,
+        target_label: "example/repo#1706",
+        prompt: "Repair PR 1706",
+        actor: "maintainer",
+        state: "running",
+        attempt_count: 1,
+        requested_at: now()
+      })
+      |> Repo.insert!()
+
+    owned = insert.(%{role: "manager", agent_action_id: action.id})
+
+    assert AgentRun.reclassify_unowned(Repo) == 2
+    assert Repo.get!(AgentRun, pane.id).role == "observed"
+    assert Repo.get!(AgentRun, named.id).role == "observed"
+    assert Repo.get!(AgentRun, canary.id).role == "manager"
+    assert Repo.get!(AgentRun, owned.id).role == "manager"
+    assert AgentRun.reclassify_unowned(Repo) == 0
+  end
+
+  test "a pane first seen unbound takes its managed role and owner once it binds" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "andreas")
+    job = job |> Job.changeset(%{state: "working", fencing_token: 1}) |> Repo.update!()
+
+    Process.put(
+      :herdr_result,
+      {:ok,
+       [
+         remote_agent("working")
+         |> Map.put("name", "impl_j#{job.id}_f1")
+         |> Map.put("agent_session", %{"value" => "late-bind"})
+       ]}
+    )
+
+    # The job is not yet leased to this worker, so the pane cannot bind.
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "late")
+    observed = Repo.one!(AgentRun)
+    assert observed.role == "observed"
+    assert is_nil(observed.job_id)
+
+    job |> Job.changeset(%{lease_owner: "herdr:late"}) |> Repo.update!()
+    assert {:ok, _summary} = Sync.sync(client: FakeClient, session: "late")
+
+    bound = Repo.get!(AgentRun, observed.id)
+    assert bound.job_id == job.id
+    assert bound.fencing_token == 1
+    assert bound.role == "implementer"
+    assert [%AgentRun{id: id}] = PtcManager.Deployments.drain_blockers()
+    assert id == observed.id
   end
 
   test "adopts a positively observed deterministic managed agent" do

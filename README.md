@@ -334,6 +334,22 @@ mix setup
 mix phx.server
 ```
 
+### Supported hosts
+
+| | Linux | macOS |
+|---|---|---|
+| Services | systemd units | launchd jobs (`deploy/launchd/`) |
+| Agent account | a separate worker account (`PTC_HERDR_RUN_AS_USER`) or the service account | the maintainer's own account |
+| Expensive-operation containment | cgroup v2 per operation | none |
+| An operation nothing proves stopped | recovered through its cgroup, otherwise maintenance | fenced until a maintainer releases it |
+| Host readiness | reported in the banner | blocks admission while a check fails |
+
+Both are production hosts. A macOS host trades containment for visibility: it
+never guesses that an abandoned command stopped, keeps its slot fenced, and
+leaves the decision to a maintainer. [`docs/maintainers/host-profiles.md`](docs/maintainers/host-profiles.md)
+explains the host profile and walks through setting up a macOS host;
+`deploy/ptc_manager-macos.env.example` is a complete environment.
+
 ### macOS background services and deployment
 
 A macOS host can run the release, Herdr, and the deployment worker as launchd
@@ -342,7 +358,14 @@ and managed worktrees can live under `~/developer`; release files, configuration
 logs, and SQLite data live in a separate service root. These services survive
 logout. FileVault still requires a disk unlock after a cold boot.
 
-Set `PTC_MACOS_SERVICE_ROOT` to the absolute service root. Install
+Set `PTC_MACOS_SERVICE_ROOT` to the absolute service root. A Darwin release
+selects the macOS host profile and refuses to boot without it, with
+`PTC_HERDR_RUN_AS_USER` set (agents run as the service account), or with
+`PTC_OPERATION_CGROUPS=true`. The profile places the operation wrapper
+(`bin/ptc-operation`), its socket (`run/operations.sock`), operation contexts,
+execution artifacts, planning snapshots, daily-digest bundles, the tool
+inventory and the health snapshot (`data/health.json`) under the service root;
+each path's own environment variable still wins. Install
 `deploy/macos-deploy-host`, `deploy/ptc-manager-worker-review`,
 `deploy/ptc-manager-worker-agent-login`, and `deploy/ptc-operation` in its `bin`
 directory. Update these copies from the revision being deployed before each
@@ -382,6 +405,9 @@ access. Sign in as the service account, then refresh; unavailable catalogs do
 not replace saved profile settings. Agent launch checks authentication when
 `PTC_MACOS_SERVICE_ROOT` is configured, so signed-out agents fail before creating
 an unattended login prompt. Enable the desired kinds in `PTC_AGENT_PROFILES_JSON`.
+With `PTC_DISPATCH_ENABLED=true`, finished jobs are reconciled every 10 seconds
+unless `PTC_RESULT_RECONCILE_INTERVAL_MS` says otherwise (Linux keeps its
+explicit setting, which defaults to 0).
 
 Private Tailscale HTTPS can proxy the loopback app listener; SSH over the same
 network reaches Herdr. Installing agents does not enable job dispatch or
@@ -457,6 +483,71 @@ it then enters maintenance because wrapper disappearance cannot prove that its
 child process tree stopped. The production default requires the versioned Herdr
 unit, launcher, and sourceable agent-context helper installed by deployment. It
 is never enabled by default on the Mac.
+
+The wrapper starts a command only after the coordinator acknowledges that exact
+operation as running. Its signal handlers are installed first, so an interrupt
+that arrives before the command exists is delivered to it once it starts; a
+failed signal is logged and never taken as proof that the command stopped. If
+a later heartbeat is refused because the attempt is stale or no longer leased,
+the wrapper kills its command and exits 75 without reporting a result. Every
+command's environment carries `PTC_OPERATION_ATTEMPT=<operation>-<attempt>`.
+
+On a macOS host and in development, where there are no cgroups, the wrapper
+checks for leftovers after the command's group has been killed: processes of
+the same account whose environment still carries the attempt marker, and any
+process still holding the command's output. If it finds one, or cannot list
+processes, it reports them and the operation keeps its slot fenced instead of
+completing. Linux releases do not run this check. Detection is best effort: a
+descendant that escapes the process group, does not hold the command's output,
+and either clears its environment or hides it (macOS hides the environment of
+Apple platform binaries such as `/bin/sh` or `/bin/sleep`, Linux that of
+non-dumpable processes) is not detected, and its command finishes normally.
+
+Such a host has no containment that could prove an abandoned command stopped,
+so the broker never releases an uncertain operation by itself there and never
+enters maintenance for it. The operation stays fenced and holds its slot; an
+**Expensive operation fenced** stall names it, its job, what was seen and the
+slot. Everything else keeps running; only work waiting for that slot waits.
+The stall opens **Release operation…** on the Operations page (it works in
+maintenance mode too), which inspects the operation again and lists each
+process still carrying the marker with a `kill <pid>` line to copy after you
+have checked it. PtcManager signals no process itself. Release needs the slot
+lock to be free, which means the wrapper is gone; with processes still listed
+it asks you to accept that they may keep running. The release is one guarded
+update that loses to any heartbeat, finish or cancel that got there first, and
+it is audited as `resource_operation.released`. A wrapper that resumes after a
+release is refused and stops its command. `ptc-operation self-test` checks
+signal forwarding, the unreaped wait, the group kill and the marker listing on
+the host it runs on.
+
+### Host readiness
+
+Before it admits work, PtcManager checks that the host can run the whole job
+lifecycle. The checks run at boot, again with every tool-inventory refresh,
+and when **Recheck** is pressed in the banner that names each failing check:
+
+| Check | Fails when |
+|---|---|
+| `paths` | a release's host path is unusable; roots created on first use may be absent, and on Linux worker-owned roots are only checked to exist |
+| `helpers` | on macOS, `ptc-operation`, `ptc-manager-worker-review`, `ptc-manager-worker-agent-login` or `macos-deploy-host` under the service root is missing or differs from the copy this release was built with |
+| `operation_wrapper` | `ptc-operation self-test` fails |
+| `operation_broker` | the broker does not answer an authenticated `ping` on its socket |
+| `reconcile` | dispatch is enabled but `PTC_RESULT_RECONCILE_INTERVAL_MS` is 0 |
+| `publication` | dispatch is enabled and brokered publication lacks its GitHub App settings, or agents publish but `gh` is not signed in for the agent identity |
+| `agent_login` | an enabled agent kind is signed out |
+
+On macOS and in development a failing check keeps the machine gate from
+admitting anything (`host_not_ready`): queued work waits, and inspection,
+deployment, configuration and releasing a fenced operation stay available.
+On Linux the banner reports failures but admission is unchanged.
+
+A queued job also says why it has not started. The jobs of a repository the
+gate holds back carry the gate's reason, and an error that stopped dispatch
+before the lease is recorded on the job it had picked; the Operations work
+queue shows it, a lease or a cancel clears it, and after the queue-wait
+threshold it raises the **Waiting for a capable machine** stall. The dispatch
+poller logs a new reason once and its recovery once, and backs off from 5 to
+60 seconds while the same failure repeats.
 
 SQLite permits one writer. High-frequency Herdr and maintainer-action work is
 phase-shifted, and only one housekeeping poller runs shared action expiry and
@@ -651,6 +742,11 @@ worktrees only.
 
 A checked-in `.ptc-manager.yml` is optional. It holds what PtcManager freezes
 from an exact commit: broker publication verification and self-deployment.
+Repository health reads it at the default branch's commit on GitHub, fetched
+into the checkout, the same commit dispatch and deployment use. A repository's
+page shows the last fetched commit at once and fetches in the background; the
+configuration overview reads the last fetched commit without a network call.
+A branch GitHub does not have and a fetch that fails are reported as such.
 When the Herdr agent pushes its own branch and creates the PR, a repository
 needs no contract at all. Repository hooks may provide fast local feedback,
 while GitHub CI and branch protection remain the authoritative merge gate.
@@ -1643,8 +1739,11 @@ test phase has a hard wall-clock budget of less than 60 seconds; a failed,
 hung, or slower run fails the gate. Real filesystem, Git-worktree, cache,
 process-timeout, and disposable-migration lifecycle tests carry the `nightly`
 tag. They remain part of a normal unfiltered `mix test` and run every night in
-GitHub Actions through `.github/workflows/nightly.yml`; the workflow can also
-be started manually. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
+GitHub Actions through `.github/workflows/nightly.yml`, together with the
+`resource_e2e` operation-wrapper tests; the workflow can also be started
+manually. A `macos-host` CI job runs the wrapper's Python contracts with the
+stock `/usr/bin/python3` and its end-to-end tests on macOS on every pull
+request, because macOS agent hosts run the wrapper without cgroups. Set `PTC_TEST_BUDGET_SECONDS` or `PTC_TEST_PARTITIONS`
 only for local diagnosis—the checked-in defaults are the publication and
 deployment contract. CI runs five partitions on separate runners using
 `PTC_TEST_PARTITION_ONLY` with `PTC_TEST_PARTITIONS`; every matrix job is
@@ -1993,6 +2092,13 @@ not restart keeps serving its repositories through a partition. If a peer
 also claims one of this member's repositories, no new work starts for it here
 until a person disables it on one side; a banner says so. A member that a
 peer refuses as a non-member admits nothing.
+
+A member's own release is the one exception. Deploying it only fetches
+GitHub into the checkout and swaps the local release, so a macOS member lists
+and deploys the repository whose checkout is `PTC_MACOS_SOURCE` even while it
+is disabled there and claimed by another member, and needs no claim to do so.
+Everything else a disabled repository refuses stays refused. A Linux member
+deploys through its systemd path and is unchanged.
 
 ### Moving a repository
 
@@ -2471,7 +2577,9 @@ setting the only profile is `PTC_IMPLEMENTATION_AGENT_KIND` started with
 `PTC_IMPLEMENTATION_AGENT_ARGS`, which default to Codex and its current
 unattended CLI flag `--dangerously-bypass-approvals-and-sandbox`. Override the
 arguments only when the installed agent CLI requires a different supported
-mode.
+mode. Whatever the profile says, every Codex start also gets
+`-c check_for_update_on_startup=false`, because an update prompt would wait for
+a person nobody is watching; a profile no longer needs to carry it.
 
 A profile also names the model that kind runs, as `"model"` alongside its
 `"args"`. Left unset each kind takes its default from
@@ -2507,6 +2615,9 @@ repository; a branch already owned by a PtcManager job remains the managed
 record instead of being duplicated as an external PR. If no
 explicit `PTC_PR_RECONCILE_ENABLED` value is set, any positive
 `PTC_GITHUB_SYNC_INTERVAL_MS` also enables this PR import/reconciliation loop.
+`PTC_EXTERNAL_PR_RECONCILE_ENABLED=false` keeps that loop for PtcManager's own
+pull requests but stops it importing pull requests PtcManager did not open;
+unset, it follows `PTC_PR_RECONCILE_ENABLED`.
 The inexpensive list snapshot runs each cycle, while detailed CI and
 mergeability health rotates through one open PR per cycle to stay within GitHub
 API limits. If no
@@ -2515,6 +2626,12 @@ managed PR is open, its named Herdr session and worktree move to a
 passive `waiting` state: they remain available for CI repairs or review feedback
 without consuming a CPU-active implementation slot. The Operations and backlog
 screens show these retained agents separately from agents that are running now.
+Only agent runs PtcManager started, bound to a job or an agent action, carry
+operational weight. Herdr.Sync records any other pane in the session, such as
+a maintainer's own interactive Claude Code or Codex pane, as `observed`: the
+Operations page lists it under **Other Herdr panes**, and it never holds a
+deployment drain, uses an agent slot, raises an agent stall, or offers a
+cancel. A pane first seen unbound takes its role and owner when it later binds.
 Deployments may proceed while agents are only `waiting`. A deployment waits for
 every run the coordinator is driving, and for a blocked or unknown run only
 while its agent action or its job is still in flight: a retained agent sitting

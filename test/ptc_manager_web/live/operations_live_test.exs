@@ -62,6 +62,152 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#refresh-tool-inventory", "Refresh")
   end
 
+  test "a fenced operation shows fresh evidence and a maintainer releases it", %{conn: conn} do
+    directory = Path.join(System.tmp_dir!(), "ptc-release-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(directory)
+    File.write!(Path.join(directory, "operation-slot-1.lock"), "")
+
+    for {key, value} <- [
+          resource_operation_socket_path: Path.join(directory, "operations.sock"),
+          resource_operation_wrapper: Path.expand("deploy/ptc-operation")
+        ] do
+      previous = Application.get_env(:ptc_manager, key)
+      Application.put_env(:ptc_manager, key, value)
+      on_exit(fn -> Application.put_env(:ptc_manager, key, previous) end)
+    end
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
+    worker = worker_fixture(%{name: "Mac mini"})
+    stale = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "working",
+        started_at: stale,
+        last_heartbeat_at: stale
+      })
+
+    {:ok, _queued} =
+      ResourceOperations.request(
+        %{
+          worker_id: worker.id,
+          repository_id: repository.id,
+          job_id: job.id,
+          agent_run_id: run.id,
+          invocation_id: "fenced-in-view",
+          label: "verify",
+          priority: 20,
+          state: "queued"
+        },
+        stale
+      )
+
+    {:ok, operation} = ResourceOperations.claim_next(worker.id, stale)
+
+    {:ok, operation} =
+      ResourceOperations.mark_running(
+        operation.id,
+        operation.attempt_token,
+        %{wrapper_pid: 999_999},
+        stale
+      )
+
+    PtcManager.ResourceOperationBroker.sweep()
+    assert Repo.get!(PtcManager.Operations.ResourceOperation, operation.id).fence_evidence
+
+    # Releasing stays available while maintenance holds the console.
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous_mode) end)
+
+    {:ok, view, _html} =
+      conn |> authenticated_conn() |> live(~p"/operations?release=#{operation.id}")
+
+    panel = "#release-operation-#{operation.id}"
+    assert has_element?(view, "#resource-operation-#{operation.id}", "fenced")
+    assert has_element?(view, panel, "No process carrying this attempt's marker is listed")
+    assert has_element?(view, panel, "The slot lock is free")
+
+    view |> element("#release-#{operation.id}") |> render_click()
+
+    assert render(view) =~ "Operation #{operation.id} released"
+    assert Repo.get!(PtcManager.Operations.ResourceOperation, operation.id).state == "lost"
+  end
+
+  test "the readiness banner names failing checks and rechecks on request", %{conn: conn} do
+    report = PtcManager.Machine.Readiness.current()
+    keys = [:host_readiness | Enum.map(PtcManager.Host.path_specs(), &elem(&1, 1))]
+    previous = Map.new(keys, &{&1, Application.fetch_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      :persistent_term.put({PtcManager.Machine.Readiness, :report}, report)
+
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:ptc_manager, key, value)
+        {key, :error} -> Application.delete_env(:ptc_manager, key)
+      end)
+    end)
+
+    # No host paths and no broker: a recheck finds nothing to fail.
+    Enum.each(keys, &Application.put_env(:ptc_manager, &1, nil))
+    Application.put_env(:ptc_manager, :host_readiness, true)
+
+    PtcManager.Machine.Readiness.put_report(%{
+      checks: [%{key: :reconcile, status: :failed, blocking: true, sentence: "Never reconciled."}],
+      evaluated_at: DateTime.utc_now()
+    })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+    assert has_element?(view, "#readiness-banner", "admits no new work")
+    assert has_element?(view, "#readiness-reconcile", "Never reconciled.")
+
+    assert {:error, {:live_redirect, %{to: "/operations", flash: _}}} =
+             view |> element("#recheck-readiness") |> render_click()
+
+    assert PtcManager.Machine.Readiness.ready?()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+    refute has_element?(view, "#readiness-banner")
+
+    # An open page follows readiness as it changes.
+    PtcManager.Machine.Readiness.put_report(%{
+      checks: [%{key: :paths, status: :failed, blocking: false, sentence: "Missing root."}],
+      evaluated_at: DateTime.utc_now()
+    })
+
+    assert render(view) =~ "Missing root."
+    assert has_element?(view, "#readiness-banner", "needs attention")
+  end
+
+  test "an observed Herdr pane is listed apart and cannot be cancelled", %{conn: conn} do
+    worker = worker_fixture(%{name: "Mac mini"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        role: "observed",
+        state: "working",
+        agent_name: "claude",
+        started_at: now,
+        last_heartbeat_at: now
+      })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+
+    assert has_element?(view, "#observed-panes", "Other Herdr panes")
+    assert has_element?(view, "#observed-run-#{run.id}", "claude")
+    refute has_element?(view, "#active-run-#{run.id}")
+    refute has_element?(view, "#cancel-agent-run-#{run.id}")
+  end
+
   test "queued work for a repository this machine cannot run says why it waits", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)

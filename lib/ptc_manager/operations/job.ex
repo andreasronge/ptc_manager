@@ -29,6 +29,8 @@ defmodule PtcManager.Operations.Job do
     field :review_resume_mode, :string
     field :review_generation, :integer, default: 0
     field :last_error, :string
+    field :dispatch_blocked_reason, :string
+    field :dispatch_blocked_at, :utc_datetime_usec
     field :reconciling_at, :utc_datetime_usec
     field :absence_observed_at, :utc_datetime_usec
     field :result_base_sha, :string

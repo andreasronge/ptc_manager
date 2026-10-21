@@ -5,7 +5,7 @@ defmodule PtcManagerWeb.OperationsLive do
   import PtcManagerWeb.MachineComponents
 
   alias PtcManager.CapacitySettings
-  alias PtcManager.ResourceOperations
+  alias PtcManager.{ResourceOperationRecovery, ResourceOperations}
   alias PtcManager.HostMetrics
   alias PtcManager.Herdr.Transcript
   alias PtcManager.Machine.{Inventory, ToolInventory}
@@ -56,6 +56,7 @@ defmodule PtcManagerWeb.OperationsLive do
      |> assign(:timeline_filter, "all")
      |> assign(:include_maintenance?, false)
      |> assign(:cancel_agent_run_id, nil)
+     |> assign(:release, nil)
      |> assign(
        workers: [],
        active_runs: [],
@@ -64,6 +65,7 @@ defmodule PtcManagerWeb.OperationsLive do
        queued_jobs: [],
        queued_actions: [],
        resource_operations: [],
+       observed_runs: [],
        recent_resource_operations: [],
        resource_statistics: nil,
        workspace_setups: [],
@@ -83,7 +85,8 @@ defmodule PtcManagerWeb.OperationsLive do
      |> assign(:include_maintenance?, params["maintenance"] == "1")
      |> load_operations()
      |> load_usage()
-     |> select_agent(params["agent"])}
+     |> select_agent(params["agent"])
+     |> open_release(params["release"])}
   end
 
   @impl true
@@ -158,6 +161,81 @@ defmodule PtcManagerWeb.OperationsLive do
      |> put_flash(kind, message)
      |> load_operations()}
   end
+
+  # Releasing a fenced operation ---------------------------------------------
+  #
+  # PtcManager signals no process itself: macOS offers no identity-safe way to
+  # do it. The maintainer sees fresh evidence, stops what they have checked,
+  # and releases the slot once its wrapper is gone.
+
+  def handle_event("inspect-release", %{"id" => id}, socket),
+    do: {:noreply, open_release(socket, id)}
+
+  def handle_event("close-release", _params, socket),
+    do: {:noreply, assign(socket, :release, nil)}
+
+  def handle_event("release-operation", %{"id" => id} = params, socket) do
+    accept? = params["accept"] == "true"
+
+    {kind, message} =
+      with %{} = operation <- find_operation(id),
+           {:ok, released} <-
+             ResourceOperationRecovery.release(operation, socket.assigns.actor, accept?) do
+        {:info, "Operation #{released.id} released; its slot is free."}
+      else
+        nil -> {:error, "That operation is no longer listed."}
+        {:error, reason} -> {:error, release_error(reason)}
+      end
+
+    {:noreply,
+     socket
+     |> put_flash(kind, message)
+     |> load_operations()
+     |> then(&if(kind == :info, do: assign(&1, :release, nil), else: open_release(&1, id)))}
+  end
+
+  defp open_release(socket, nil), do: socket
+
+  defp open_release(socket, id) do
+    case find_operation(id) do
+      %{} = operation ->
+        if ResourceOperations.awaiting_maintainer?(operation),
+          do:
+            assign(socket, :release, %{
+              operation: operation,
+              evidence: ResourceOperationRecovery.inspect_operation(operation)
+            }),
+          else: assign(socket, :release, nil)
+
+      nil ->
+        assign(socket, :release, nil)
+    end
+  end
+
+  defp find_operation(id) do
+    with {id, ""} <- Integer.parse(to_string(id)),
+         do: Enum.find(ResourceOperations.list_current(), &(&1.id == id))
+  end
+
+  defp release_error(:operation_changed),
+    do: "The operation changed before the release; refresh and look again."
+
+  defp release_error(:operation_not_fenced), do: "The operation is not waiting for a maintainer."
+
+  defp release_error({:slot_lock_held, pid}),
+    do: "Its wrapper (pid #{pid}) still holds the slot lock; releasing now would block the slot."
+
+  defp release_error({:slot_lock_unknown, detail}),
+    do: "The slot lock could not be checked (#{detail}); nothing was released."
+
+  defp release_error(:processes_listed),
+    do: "Processes may still be running; confirm that you accept they may keep running."
+
+  defp release_error(reason), do: "Release failed: #{inspect(reason)}"
+
+  def awaiting_maintainer?(operation), do: ResourceOperations.awaiting_maintainer?(operation)
+
+  defdelegate processes_may_remain?(evidence), to: ResourceOperationRecovery
 
   def cancellable_run?(%{job: job} = run), do: AgentCancel.cancellable?(job, run)
   def cancellable_run?(_run), do: false
@@ -532,6 +610,7 @@ defmodule PtcManagerWeb.OperationsLive do
   def operation_state(%{state: "starting"}), do: "starting"
   def operation_state(%{state: "running", label: label}), do: label
   def operation_state(%{state: "cancelling"}), do: "stopping"
+  def operation_state(%{state: "recovery_pending", fence_evidence: %{}}), do: "fenced"
   def operation_state(%{state: "recovery_pending"}), do: "recovering"
   def operation_state(%{state: state}), do: state
 
@@ -674,6 +753,7 @@ defmodule PtcManagerWeb.OperationsLive do
     assign(socket,
       queued_jobs: Operations.list_queued_jobs(),
       queued_actions: Operations.list_queued_agent_actions(),
+      observed_runs: Operations.list_observed_agent_runs(),
       resource_operations: ResourceOperations.list_current(),
       active_operation_slots: ResourceOperations.count_active()
     )

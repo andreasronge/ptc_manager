@@ -1,6 +1,7 @@
 """Offline cgroup telemetry contract: no agents, network or privileged writes."""
 import runpy
 import json
+import sys
 import io
 import os
 import threading
@@ -16,6 +17,9 @@ class ResourceMetrics(unittest.TestCase):
     def test_cleanup_uses_no_follow_directory_descriptors(self):
         remove = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'priv/execution_artifact_cleanup.py'))['remove']
         with tempfile.TemporaryDirectory() as directory:
+            # The helper refuses a symlinked root component; macOS's temporary
+            # directory lives under the /var -> /private/var symlink.
+            directory = os.path.realpath(directory)
             root, outside = Path(directory, 'root'), Path(directory, 'outside')
             good = root / 'repository-1/job-1/agent-run-1'
             victim = outside / 'agent-run-1'
@@ -138,6 +142,96 @@ class GroupSignal(unittest.TestCase):
                 return
             time.sleep(0.05)
         self.fail('descendant survived the group kill')
+
+    def test_a_refused_signal_is_logged_and_never_proves_the_group_is_gone(self):
+        import signal
+        stderr = io.StringIO()
+        with patch.object(wrapper['os'], 'killpg', side_effect=PermissionError(1, 'Operation not permitted')), \
+                patch('sys.stderr', stderr):
+            # Forwarding must survive EPERM so the wrapper keeps waiting for its child.
+            wrapper['signal_group'](4242, signal.SIGTERM)
+        self.assertIn('signal 15 to process group 4242 failed', stderr.getvalue())
+
+class RemainingProcesses(unittest.TestCase):
+    def spawn(self, marker, **kwargs):
+        import subprocess, sys
+        environment = dict(os.environ, PTC_OPERATION_ATTEMPT=marker)
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                 env=environment, **kwargs)
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        return child
+
+    def test_a_live_marked_process_is_listed_with_its_arguments_only(self):
+        child = self.spawn('91-abcdefghijkl')
+        self.spawn('911-abcdefghijk')
+        found, error = wrapper['remaining_after_kill']('91-abcdefghijkl', timeout=1)
+        self.assertIsNone(error)
+        self.assertEqual([pid for pid, _stat, _command in found], [child.pid])
+        self.assertNotIn('PTC_OPERATION_ATTEMPT', found[0][2])
+        self.assertIn('time.sleep(30)', found[0][2])
+
+    def test_a_zombie_carrying_the_marker_is_not_a_survivor(self):
+        child = self.spawn('92-abcdefghijkl')
+        child.kill()
+        wrapper['wait_unreaped'](child.pid)
+        found, error = wrapper['remaining_after_kill']('92-abcdefghijkl', timeout=0.5)
+        self.assertEqual((found, error), ([], None))
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'the two-step listing is macOS only')
+    def test_a_match_that_cannot_be_described_stays_listed(self):
+        import subprocess
+        child = self.spawn('94-abcdefghijkl')
+        real_run = subprocess.run
+        def failing_description(command, **kwargs):
+            if '-p' in command:
+                return subprocess.CompletedProcess(command, 1, stdout='', stderr='ps: fork failed')
+            return real_run(command, **kwargs)
+        with patch.object(wrapper['subprocess'], 'run', side_effect=failing_description):
+            found = wrapper['marked_processes']('94-abcdefghijkl')
+        self.assertEqual(found, [(child.pid, '?', '(not described)')])
+
+    def test_a_linux_process_that_hides_its_environment_is_skipped(self):
+        files = {'/proc/7/environ': PermissionError(13, 'Permission denied'),
+                 '/proc/8/environ': b'PTC_OPERATION_ATTEMPT=95-abcdefghijkl\0HOME=/h\0',
+                 '/proc/8/stat': '8 (python3) S 1',
+                 '/proc/8/cmdline': b'python3\0-c\0pass\0'}
+        def fake_open(path, *args, **kwargs):
+            value = files[path]
+            if isinstance(value, Exception):
+                raise value
+            return io.BytesIO(value) if isinstance(value, bytes) else io.StringIO(value)
+        globals_ = wrapper['marked_processes'].__globals__
+        with patch.object(globals_['sys'], 'platform', 'linux'), \
+                patch.object(globals_['os'], 'listdir', return_value=['7', '8', 'self']), \
+                patch.object(globals_['os'], 'stat', return_value=os.stat_result((0,) * 4 + (os.getuid(),) + (0,) * 5)), \
+                patch('builtins.open', side_effect=fake_open):
+            found = wrapper['marked_processes']('95-abcdefghijkl')
+        self.assertEqual(found, [(8, 'S', 'python3 -c pass')])
+
+    def test_a_listing_failure_is_reported_not_treated_as_empty(self):
+        with patch.dict(wrapper['remaining_after_kill'].__globals__,
+                        marked_processes=lambda _marker: (_ for _ in ()).throw(OSError('ps unavailable'))):
+            found, error = wrapper['remaining_after_kill']('93-abcdefghijkl', timeout=0.2)
+        self.assertEqual(found, [])
+        self.assertIn('ps unavailable', error)
+
+class SelfTest(unittest.TestCase):
+    def test_self_test_passes_on_this_host(self):
+        stdout = io.StringIO()
+        with patch('sys.stdout', stdout):
+            status = wrapper['self_test']()
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(status, 0, result)
+        self.assertEqual(set(result['checks']),
+                         {'marker_listing', 'forwarding', 'unreaped_wait', 'group_kill'})
+
+    def test_self_test_fails_when_a_check_fails(self):
+        stdout = io.StringIO()
+        with patch('sys.stdout', stdout), \
+                patch.dict(wrapper['self_test'].__globals__, remaining_after_kill=lambda _m: ([(1, 'S', 'x')], None)):
+            status = wrapper['self_test']()
+        self.assertEqual(status, 1)
+        self.assertFalse(json.loads(stdout.getvalue())['checks']['group_kill'])
 
 def _without_waitid():
     import types

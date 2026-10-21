@@ -133,18 +133,27 @@ defmodule PtcManager.GitHub.AppBroker do
     with_trusted_repository(source_path, publication, function, fn -> :ok end)
   end
 
-  defp configured? do
-    required = [
-      Application.get_env(:ptc_manager, :github_app_id),
-      Application.get_env(:ptc_manager, :github_app_installation_id),
-      Application.get_env(:ptc_manager, :github_app_private_key_path),
-      Application.get_env(:ptc_manager, :github_push_timeout_binary),
-      Application.get_env(:ptc_manager, :github_publish_staging_root)
-    ]
+  @required_settings [
+    :github_app_id,
+    :github_app_installation_id,
+    :github_app_private_key_path,
+    :github_push_timeout_binary,
+    :github_publish_staging_root
+  ]
 
-    if Enum.all?(required, &(not is_nil(&1) and &1 != "")),
-      do: :ok,
-      else: {:blocked, :github_app_not_configured}
+  @doc "`:ok`, or `{:error, missing_keys}` naming the settings brokered publication lacks. Read-only."
+  def configuration_status do
+    case Enum.filter(@required_settings, &(Application.get_env(:ptc_manager, &1) in [nil, ""])) do
+      [] -> :ok
+      missing -> {:error, missing}
+    end
+  end
+
+  defp configured? do
+    case configuration_status() do
+      :ok -> :ok
+      {:error, _missing} -> {:blocked, :github_app_not_configured}
+    end
   end
 
   defp valid_context(repository, issue, publication) do

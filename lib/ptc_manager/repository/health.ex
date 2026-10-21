@@ -9,17 +9,26 @@ defmodule PtcManager.Repository.Health do
   # one turns into a failed agent step rather than a visible error.
   @required_labels ~w(ptc:ready ptc:blocked ptc:needs-decision ptc:follow-up)
 
+  @doc """
+  One repository's health. Its contract is read at the default branch's
+  commit on GitHub, fetched now, exactly as dispatch and deployment read it.
+  """
   def summarize(%Repository{} = repository) do
-    summarize(repository, Checkout.available_path(repository))
+    summarize(repository, Checkout.available_path(repository), fetch: true)
   end
 
-  def summarize(%Repository{} = repository, availability) do
+  @doc """
+  Health from a known checkout availability. Without `fetch: true` the
+  contract is read at the default branch's last fetched commit, so a page
+  summarising every repository makes no network call.
+  """
+  def summarize(%Repository{} = repository, availability, opts \\ []) do
     checkout = checkout_health(availability)
 
     %{
       repository: repository,
       checkout: checkout,
-      gate: gate_health(repository, checkout),
+      gate: gate_health(repository, checkout, Keyword.get(opts, :fetch, false)),
       workspace_setup: workspace_setup_health(repository),
       github: github_health(repository),
       labels: label_health(repository),
@@ -75,8 +84,8 @@ defmodule PtcManager.Repository.Health do
 
   # .ptc-manager.yml is optional; it only adds broker verification and
   # deployment, which are frozen from an exact commit.
-  defp gate_health(repository, %{status: :ready, path: path}) do
-    with {:ok, branch_sha} <- GitProbe.branch_sha(path, repository.default_branch),
+  defp gate_health(repository, %{status: :ready, path: path}, fetch?) do
+    with {:ok, branch_sha} <- default_branch_commit(repository, path, fetch?),
          {:ok, content} <- GitProbe.repository_contract(path, branch_sha),
          {:ok, contract} <- Contract.parse(content) do
       contract_health(contract)
@@ -89,16 +98,25 @@ defmodule PtcManager.Repository.Health do
             "Agent publishing uses GitHub CI; broker verification and deployment are not configured."
         }
 
+      {:error, :branch_not_fetched} ->
+        %{
+          status: :unchecked,
+          label: "Repository contract not checked",
+          detail:
+            "Branch #{repository.default_branch} has not been fetched from GitHub yet; " <>
+              "open the repository to fetch it."
+        }
+
       {:error, reason} ->
         %{
           status: :attention,
           label: "Repository contract needs attention",
-          detail: gate_error(reason)
+          detail: gate_error(reason, repository.default_branch)
         }
     end
   end
 
-  defp gate_health(_repository, _checkout) do
+  defp gate_health(_repository, _checkout, _fetch?) do
     %{
       status: :unchecked,
       label: "Repository contract not checked",
@@ -213,7 +231,27 @@ defmodule PtcManager.Repository.Health do
   defp checkout_error(:repository_origin_not_github), do: "The origin is not a GitHub repository."
   defp checkout_error(_reason), do: "The checkout identity could not be verified."
 
-  defp gate_error(:branch_missing), do: "Commit the repository before enabling agent work."
+  defp default_branch_commit(repository, _path, true) do
+    updater = Application.fetch_env!(:ptc_manager, :source_updater)
 
-  defp gate_error(_reason), do: ".ptc-manager.yml is invalid or unreadable."
+    with {:ok, %{sha: sha}} <- updater.refresh(repository), do: {:ok, sha}
+  end
+
+  defp default_branch_commit(repository, path, false) do
+    case GitProbe.fetched_branch_sha(path, repository.default_branch) do
+      {:error, :branch_missing} -> {:error, :branch_not_fetched}
+      result -> result
+    end
+  end
+
+  defp gate_error({:branch_not_on_github, branch}, _branch),
+    do: "Branch #{branch} is not on GitHub."
+
+  defp gate_error({:repository_source_fetch_failed, _status, output}, branch),
+    do: "Could not fetch #{branch}: #{String.slice(output, -300, 300)}"
+
+  defp gate_error(:repository_source_refresh_lock_failed, branch),
+    do: "Could not fetch #{branch}: another fetch of this checkout is still running."
+
+  defp gate_error(_reason, _branch), do: ".ptc-manager.yml is invalid or unreadable."
 end

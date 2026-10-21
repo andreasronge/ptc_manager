@@ -2,7 +2,30 @@ defmodule PtcManager.Operations.AgentRun do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @roles ~w(manager implementer reviewer)
+  # `observed` is a Herdr pane PtcManager did not start: shown, never waited
+  # on, counted or cancelled.
+  @roles ~w(manager implementer reviewer observed)
+
+  import Ecto.Query, only: [from: 2]
+
+  @doc """
+  Marks the recorded runs no job or agent action owns as observed, leaving
+  deployment canaries, which PtcManager starts itself, alone. Returns the count.
+  """
+  def reclassify_unowned(repo) do
+    {count, _rows} =
+      repo.update_all(
+        from(run in __MODULE__,
+          where:
+            is_nil(run.job_id) and is_nil(run.agent_action_id) and run.role != "observed" and
+              (is_nil(run.external_key) or not like(run.external_key, "deployment-canary:%"))
+        ),
+        set: [role: "observed"]
+      )
+
+    count
+  end
+
   @states ~w(queued starting working idle blocked waiting unknown done failed lost)
   @terminal_states ~w(done failed lost)
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/

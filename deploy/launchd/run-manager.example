@@ -1,0 +1,8 @@
+#!/bin/sh
+# Example launcher for dev.ptc.manager: install as <service root>/bin/run-manager.
+set -eu
+. /Users/Shared/ptc-services/config/manager.env
+# The release writes its process id before exec so the deployment worker can
+# stop it after swapping the release symlink.
+echo $$ > "$PTC_MACOS_SERVICE_ROOT/run/manager.pid"
+exec "$PTC_MACOS_SERVICE_ROOT/app/bin/ptc_manager" start

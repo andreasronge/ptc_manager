@@ -1,6 +1,8 @@
 defmodule PtcManager.ResourceOperationBrokerTest do
   use PtcManager.DataCase, async: false
 
+  import Ecto.Query
+
   alias PtcManager.ManagedOperationContext
   alias PtcManager.Operations
   alias PtcManager.Operations.ResourceOperation
@@ -178,6 +180,114 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     assert context.run.id == operation.agent_run_id
 
     File.rm_rf!(directory)
+  end
+
+  test "only a readiness context may ping, and a ping creates nothing" do
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-operation-ping-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    ping = fn owner_type ->
+      {:ok, issued} =
+        ManagedOperationContext.issue(
+          %{
+            owner_type: owner_type,
+            owner_id: 0,
+            repository_id: 0,
+            worker_id: 0,
+            pane_id: "ping",
+            fencing_token: 0
+          },
+          directory: directory
+        )
+
+      ResourceOperationBroker.dispatch(%{
+        "token" => issued.token,
+        "context_id" => issued.payload["context_id"],
+        "operation" => "ping"
+      })
+    end
+
+    assert ping.("readiness") == %{"status" => "ok"}
+    assert %{"status" => "error", "error" => ":unsupported_operation"} = ping.("job")
+    assert Repo.aggregate(ResourceOperation, :count) == 0
+  end
+
+  test "the broker validates and forwards processes that outlived the command" do
+    context = managed_run_fixture()
+
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-operation-remaining-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, issued} =
+      ManagedOperationContext.issue(
+        %{
+          owner_type: "job",
+          owner_id: context.job.id,
+          repository_id: context.repository.id,
+          worker_id: context.worker.id,
+          pane_id: "pane-operation-test",
+          fencing_token: 4
+        },
+        directory: directory
+      )
+
+    common = %{"token" => issued.token, "context_id" => issued.payload["context_id"]}
+    dispatch = &ResourceOperationBroker.dispatch(Map.merge(common, &1))
+
+    requested =
+      dispatch.(%{"operation" => "request", "invocation_id" => "remaining", "label" => "test"})
+
+    acquired = dispatch.(%{"operation" => "acquire", "operation_id" => requested["operation_id"]})
+
+    lease = %{
+      "operation_id" => requested["operation_id"],
+      "attempt_token" => acquired["attempt_token"]
+    }
+
+    assert %{"status" => "running"} =
+             dispatch.(Map.merge(lease, %{"operation" => "running", "wrapper_pid" => 4321}))
+
+    finish = Map.merge(lease, %{"operation" => "finish", "exit_status" => 0})
+
+    for invalid <- [
+          %{"processes_remaining" => "yes"},
+          %{"processes_remaining" => true, "remaining_processes" => [%{"pid" => -1}]},
+          %{"processes_remaining" => true, "remaining_processes" => List.duplicate(%{}, 21)},
+          %{"processes_remaining" => true, "remaining_detail" => 7}
+        ] do
+      assert %{"status" => "error", "error" => ":invalid_remaining_processes"} =
+               dispatch.(Map.merge(finish, invalid))
+    end
+
+    assert Repo.get!(ResourceOperation, requested["operation_id"]).state == "running"
+
+    assert %{"status" => "recovery_pending"} =
+             dispatch.(
+               Map.merge(finish, %{
+                 "processes_remaining" => true,
+                 "remaining_processes" => [
+                   %{"pid" => 9876, "stat" => "S", "command" => "node server.js", "env" => "x"},
+                   # Python bounds by characters; multibyte text must not be refused.
+                   %{"pid" => 9877, "stat" => "S", "command" => String.duplicate("é", 300)}
+                 ]
+               })
+             )
+
+    operation = Repo.get!(ResourceOperation, requested["operation_id"])
+    assert operation.slot_number == 1
+    assert operation.last_error =~ "pid 9876 (S) node server.js"
+
+    assert [%{"pid" => 9876} = reported, %{"pid" => 9877}] =
+             operation.remaining_processes["processes"]
+
+    refute Map.has_key?(reported, "env")
   end
 
   test "Linux containment is explicit in the pane command only when enabled" do
@@ -358,6 +468,76 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     failed = Repo.get!(ResourceOperation, operation.id)
     assert failed.state == "recovery_pending"
     assert failed.last_error =~ "could not evaluate"
+    assert PtcManager.OperationalMode.mode() == :maintenance
+  end
+
+  test "a fenced operation raises a stall and never enters maintenance" do
+    evidence = %{"processes" => [], "lock" => "held", "wrapper_pid" => 4321, "slot_number" => 1}
+    configure_recovery({:fenced, evidence})
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous_mode) end)
+
+    operation = stale_running_operation("broker-fenced")
+
+    for _sweep <- 1..3, do: ResourceOperationBroker.sweep()
+
+    fenced = Repo.get!(ResourceOperation, operation.id)
+    assert fenced.state == "recovery_pending"
+    assert fenced.slot_number == operation.slot_number
+    assert fenced.fence_evidence == evidence
+    assert fenced.last_error =~ "Fenced"
+    assert PtcManager.OperationalMode.mode() == :active
+
+    assert [stall] = PtcManager.Stalls.operation_fenced(DateTime.utc_now())
+    assert stall.target_id == operation.id
+    assert stall.detail =~ "job #{operation.job_id}"
+    assert stall.detail =~ "slot #{operation.slot_number}"
+    assert stall.detail =~ "pid 4321"
+
+    later = DateTime.add(DateTime.utc_now(), 3_600, :second)
+    assert PtcManager.Stalls.operation_slot_orphaned(later) == []
+  end
+
+  test "Linux without cgroups still escalates to maintenance" do
+    previous = %{
+      host_profile: Application.get_env(:ptc_manager, :host_profile),
+      recovery: Application.get_env(:ptc_manager, :resource_operation_recovery),
+      mode: Application.get_env(:ptc_manager, :operational_mode),
+      retry: Application.get_env(:ptc_manager, :resource_operation_recovery_retry_ms)
+    }
+
+    Application.put_env(:ptc_manager, :host_profile, :linux)
+
+    Application.put_env(
+      :ptc_manager,
+      :resource_operation_recovery,
+      PtcManager.ResourceOperationRecovery
+    )
+
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    Application.put_env(:ptc_manager, :resource_operation_recovery_retry_ms, 0)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :host_profile, previous.host_profile)
+      Application.put_env(:ptc_manager, :resource_operation_recovery, previous.recovery)
+      Application.put_env(:ptc_manager, :operational_mode, previous.mode)
+      Application.put_env(:ptc_manager, :resource_operation_recovery_retry_ms, previous.retry)
+    end)
+
+    operation = stale_running_operation("broker-linux-escalation")
+
+    {1, _} =
+      Repo.update_all(from(o in ResourceOperation, where: o.id == ^operation.id),
+        set: [wrapper_pid: 999_999]
+      )
+
+    ResourceOperationBroker.sweep()
+    ResourceOperationBroker.sweep()
+
+    escalated = Repo.get!(ResourceOperation, operation.id)
+    assert escalated.last_error =~ "exceeded its retry bound"
+    assert is_nil(escalated.fence_evidence)
     assert PtcManager.OperationalMode.mode() == :maintenance
   end
 

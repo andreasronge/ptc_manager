@@ -27,7 +27,7 @@ defmodule PtcManager.Repository.WorkerAgentLogin do
   """
   @spec verify(binary()) :: :ok | {:error, term()}
   def verify(kind) when kind in ~w(codex claude cursor) do
-    if WorkerHelper.worker_boundary?() or
+    if PtcManager.Host.separate_agent_account?() or
          Application.get_env(:ptc_manager, :verify_agent_login, false) do
       case run([kind]) do
         {_output, 0} ->

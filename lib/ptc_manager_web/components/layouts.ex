@@ -40,6 +40,10 @@ defmodule PtcManagerWeb.Layouts do
   attr :repositories, :list, default: []
   attr :selected_repository, :string, default: nil
 
+  attr :readiness, :list,
+    default: [],
+    doc: "failing host readiness checks (`PtcManager.Machine.Readiness`)"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -164,6 +168,37 @@ defmodule PtcManagerWeb.Layouts do
         <div class="mx-auto flex max-w-7xl items-start gap-3 text-sm">
           <.icon name="hero-server-stack-mini" class="mt-0.5 size-4 shrink-0" />
           <p>{PtcManager.Cluster.Fence.console_banner()}</p>
+        </div>
+      </div>
+
+      <div
+        :if={@readiness != []}
+        id="readiness-banner"
+        role="status"
+        class="border-b border-rose-400/20 bg-rose-400/[0.08] px-4 py-3 text-rose-100 sm:px-6"
+      >
+        <div class="mx-auto flex max-w-7xl items-start gap-3 text-sm">
+          <.icon name="hero-exclamation-triangle-mini" class="mt-0.5 size-4 shrink-0" />
+          <div class="min-w-0 flex-1">
+            <p class="font-semibold">
+              {if Enum.any?(@readiness, & &1.blocking),
+                do: "This host is not ready; it admits no new work.",
+                else: "Host readiness needs attention."}
+            </p>
+            <ul class="mt-1 space-y-0.5">
+              <li :for={check <- @readiness} id={"readiness-#{check.key}"}>
+                <span class="font-mono text-xs">{check.key}</span>: {check.sentence}
+              </li>
+            </ul>
+          </div>
+          <button
+            id="recheck-readiness"
+            type="button"
+            phx-click="recheck-readiness"
+            class="shrink-0 rounded-lg border border-rose-200/30 px-3 py-1 text-xs font-semibold hover:bg-rose-200/10"
+          >
+            Recheck
+          </button>
         </div>
       </div>
 

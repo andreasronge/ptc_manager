@@ -1,7 +1,7 @@
 defmodule PtcManager.Repository.WorktreePreserver do
   @moduledoc "Creates a recoverable Git bundle and binary patch before retained work is removed."
 
-  alias PtcManager.CommandEnvironment
+  alias PtcManager.{CommandEnvironment, Host}
 
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
@@ -44,23 +44,10 @@ defmodule PtcManager.Repository.WorktreePreserver do
 
   def preserve(_allocation, _token), do: {:error, :invalid_worktree_preservation_context}
 
-  defp command(args) do
-    case Application.get_env(:ptc_manager, :herdr_run_as_user) do
-      user when is_binary(user) and user != "" ->
-        CommandEnvironment.command(
-          "/usr/local/bin/ptc-manager-worker-worktree-preserve",
-          args,
-          user
-        )
-
-      _user ->
-        {"/usr/bin/python3",
-         ["-I", Application.app_dir(:ptc_manager, "priv/worktree_preserve.py") | args]}
-    end
-  end
+  defp command(args), do: Host.helper_command(:worktree_preserve, args)
 
   defp seal(root, path) do
-    {command, args} = seal_command([root, path])
+    {command, args} = Host.helper_command(:worktree_seal, [root, path])
 
     case System.cmd(command, args, env: CommandEnvironment.scrub(), stderr_to_stdout: true) do
       {_output, 0} ->
@@ -68,21 +55,6 @@ defmodule PtcManager.Repository.WorktreePreserver do
 
       {output, status} ->
         {:error, {:worktree_preservation_seal_failed, status, String.slice(output, 0, 500)}}
-    end
-  end
-
-  defp seal_command(args) do
-    case Application.get_env(:ptc_manager, :herdr_run_as_user) do
-      user when is_binary(user) and user != "" ->
-        CommandEnvironment.command(
-          "/usr/local/bin/ptc-manager-worker-worktree-seal",
-          args,
-          "root"
-        )
-
-      _user ->
-        {"/usr/bin/python3",
-         ["-I", Application.app_dir(:ptc_manager, "priv/worktree_seal.py") | args]}
     end
   end
 
@@ -111,8 +83,8 @@ defmodule PtcManager.Repository.WorktreePreserver do
   end
 
   defp default_artifact_root do
-    if Application.get_env(:ptc_manager, :herdr_run_as_user) in [nil, ""],
-      do: Path.join(System.tmp_dir!(), "ptc-manager-retained"),
-      else: "/var/lib/ptc_manager-worker/retained"
+    if Host.separate_agent_account?(),
+      do: "/var/lib/ptc_manager-worker/retained",
+      else: Path.join(System.tmp_dir!(), "ptc-manager-retained")
   end
 end

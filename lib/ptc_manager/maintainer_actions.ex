@@ -1,6 +1,7 @@
 defmodule PtcManager.MaintainerActions do
   @moduledoc "Queues and executes named maintainer prompts while GitHub remains canonical."
 
+  import PtcManager.Machine.Gate, only: [waiting_reason?: 1]
   import Ecto.Query, only: [from: 2, limit: 2, order_by: 3, preload: 2, where: 3]
   require Logger
 
@@ -343,7 +344,7 @@ defmodule PtcManager.MaintainerActions do
         case prepare_and_claim(candidate, adapter, sync) do
           {:ok, {action, token}} -> execute_claimed(adapter, sync, action, token)
           {:skip, :no_longer_queued} -> {:ok, :empty}
-          {:skip, reason} when reason in [:machine_incapable, :cluster_fenced] -> {:ok, :empty}
+          {:skip, reason} when waiting_reason?(reason) -> {:ok, :empty}
           {:deferred, action} -> {:ok, action}
           {:terminal, action} -> {:ok, action}
           {:error, reason} -> {:error, reason}
@@ -361,7 +362,7 @@ defmodule PtcManager.MaintainerActions do
       {:error, :dispatch_capacity} ->
         defer_preflight(action.id, :dispatch_capacity, action.sync_attempt_count)
 
-      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+      {:error, reason} when waiting_reason?(reason) ->
         {:skip, reason}
 
       {:error, reason} ->
@@ -404,7 +405,7 @@ defmodule PtcManager.MaintainerActions do
   # preparation, a reservation made for a retained repair is handed back.
   defp claim_prepared(prepared) do
     case Operations.claim_agent_action(prepared.id) do
-      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+      {:error, reason} when waiting_reason?(reason) ->
         if prepared.target_snapshot["repair_mode"] == "retained" do
           publication = Repo.get!(PrPublication, prepared.target_id)
           Operations.return_repair_worktree(publication.job_id, "repair-agent")

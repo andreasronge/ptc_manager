@@ -58,7 +58,10 @@ defmodule PtcManagerWeb.Router do
     pipe_through [:browser, :require_authenticated]
 
     live_session :maintainer,
-      on_mount: [{PtcManagerWeb.MaintenanceMode, :default}] do
+      on_mount: [
+        {PtcManagerWeb.MaintenanceMode, :default},
+        {PtcManagerWeb.HostReadiness, :default}
+      ] do
       live "/", DashboardLive, :index
       live "/board", DeliveryBoardLive, :index
       live "/updates", DailyDigestLive, :index

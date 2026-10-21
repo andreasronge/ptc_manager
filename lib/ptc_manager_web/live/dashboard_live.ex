@@ -1,6 +1,7 @@
 defmodule PtcManagerWeb.DashboardLive do
   use PtcManagerWeb, :live_view
 
+  import PtcManager.Machine.Gate, only: [waiting_reason?: 1]
   import PtcManagerWeb.PlanningComponents
   import PtcManagerWeb.RetrospectiveComponents, only: [retrospective: 1]
 
@@ -66,7 +67,7 @@ defmodule PtcManagerWeb.DashboardLive do
        |> put_flash(:info, "Resuming on the retained worktree with a fresh approval.")
        |> load_dashboard()}
     else
-      {:error, reason} when reason in [:issue_claimed, :machine_incapable, :cluster_fenced] ->
+      {:error, reason} when reason == :issue_claimed or waiting_reason?(reason) ->
         {:noreply,
          socket
          |> put_flash(:error, Operations.rejection_words(reason))
@@ -1255,6 +1256,9 @@ defmodule PtcManagerWeb.DashboardLive do
       do: ~p"/board"
 
   def stall_path(%{target_type: "operational_mode"}, _repositories), do: ~p"/deployments"
+
+  def stall_path(%{kind: :operation_fenced, target_id: id}, _repositories),
+    do: ~p"/operations?release=#{id}"
 
   def stall_path(_stall, _repositories), do: ~p"/operations"
 

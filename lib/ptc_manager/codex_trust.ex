@@ -20,6 +20,12 @@ defmodule PtcManager.CodexTrust do
     ["-c", "projects={#{entries}}"]
   end
 
+  @doc """
+  The settings that keep a Codex start unattended, whatever the profile says:
+  an update prompt at startup waits for a person nobody is watching.
+  """
+  def unattended_args, do: ["-c", "check_for_update_on_startup=false"]
+
   @doc "Quotes a value as a TOML basic string."
   def toml_basic_string(value) when is_binary(value) do
     escaped =
