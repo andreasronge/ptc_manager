@@ -54,4 +54,20 @@ defmodule PtcManager.ManagerTest do
     assert {"/usr/bin/sudo", ["-n", "-H", "-u", "codex-user", "--", "/bin/codex", "exec"]} =
              CommandEnvironment.command("/bin/codex", ["exec"], "codex-user")
   end
+
+  test "drops the release's own runtime from a child's PATH" do
+    root = "/srv/releases/abc123"
+
+    environment = %{
+      "PATH" =>
+        "#{root}/erts-17.1/bin:#{root}/bin:/srv/releases/abc1234/bin:/opt/homebrew/bin:/usr/bin",
+      "ROOTDIR" => root,
+      "RELEASE_ROOT" => root
+    }
+
+    child_environment = environment |> CommandEnvironment.scrub() |> Map.new()
+
+    assert child_environment["PATH"] == "/srv/releases/abc1234/bin:/opt/homebrew/bin:/usr/bin"
+    assert child_environment["ROOTDIR"] == nil
+  end
 end
