@@ -52,6 +52,28 @@ defmodule PtcManager.Repository.SourceUpdaterTest do
     assert File.read!(Path.join(checkout, "mix.lock")) == "%{version: 1}\n"
   end
 
+  test "a branch GitHub does not have is told apart from a failed fetch" do
+    root =
+      Path.join(System.tmp_dir!(), "ptc-source-missing-#{System.unique_integer([:positive])}")
+
+    remote = Path.join(root, "remote.git")
+    checkout = Path.join(root, "checkout")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+    git!(root, ["init", "--bare", remote])
+    git!(root, ["init", checkout])
+
+    repository = %Repository{
+      github_owner: "example",
+      github_name: "repository",
+      default_branch: "feature/ska",
+      local_path: checkout
+    }
+
+    assert {:error, {:branch_not_on_github, "feature/ska"}} =
+             SourceUpdater.refresh(repository, remote: remote)
+  end
+
   test "returns a bounded failure when the remote fetch times out" do
     repository = %Repository{
       github_owner: "example",

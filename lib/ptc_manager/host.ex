@@ -98,6 +98,17 @@ defmodule PtcManager.Host do
     end
   end
 
+  @doc """
+  The checkout this member deploys its own release from, or nil. Only a macOS
+  member builds its release from a local checkout (`PTC_MACOS_SOURCE`).
+  """
+  def self_source_path do
+    case {profile(), Application.get_env(:ptc_manager, :host_self_source)} do
+      {:macos, path} when is_binary(path) and path != "" -> Path.expand(path)
+      _other -> nil
+    end
+  end
+
   @paths [
     {:operation_wrapper, :resource_operation_wrapper, "PTC_OPERATION_WRAPPER", :executable},
     {:operation_socket, :resource_operation_socket_path, "PTC_OPERATION_SOCKET_PATH", :socket},

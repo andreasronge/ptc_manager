@@ -164,6 +164,30 @@ defmodule PtcManager.DeploymentsTest do
     assert host_active_run_count() == 1
   end
 
+  test "a macOS member deploys its own release while it is disabled here" do
+    repository = deployable_repository()
+
+    repository =
+      repository |> Ecto.Changeset.change(enabled: false) |> Repo.update!()
+
+    for key <- [:host_profile, :host_self_source] do
+      previous = Application.get_env(:ptc_manager, key)
+      on_exit(fn -> Application.put_env(:ptc_manager, key, previous) end)
+    end
+
+    Application.put_env(:ptc_manager, :host_self_source, repository.local_path)
+
+    Application.put_env(:ptc_manager, :host_profile, :linux)
+    assert Deployments.configured_repositories() == []
+    assert {:error, :deployment_not_available} = Deployments.request(repository, "andreas")
+
+    Application.put_env(:ptc_manager, :host_profile, :macos)
+    assert [{%{id: id}, {:ok, _contract}}] = Deployments.configured_repositories()
+    assert id == repository.id
+    assert {:ok, deployment} = Deployments.request(repository, "andreas")
+    assert deployment.repository_id == repository.id
+  end
+
   test "an observed Herdr pane never holds the drain" do
     worker = worker_fixture()
     agent_run!(worker, %{state: "working", role: "observed", agent_name: "claude"})

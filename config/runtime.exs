@@ -639,6 +639,7 @@ if host_profile == :macos do
     deployment_spool_path: Path.join(root, "data/deployments"),
     deployed_sha_path: Path.join(root, "app/RELEASE_SHA"),
     review_helper: Path.join(root, "bin/ptc-manager-worker-review"),
+    host_self_source: System.get_env("PTC_MACOS_SOURCE"),
     worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
     verify_agent_login: true,
     # Every host path lives under the service root; see PtcManager.Host.path_specs/0.

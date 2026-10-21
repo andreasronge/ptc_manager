@@ -291,6 +291,8 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
       })
 
     {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(ready))
+    # The contract check follows the page's own fetch from GitHub.
+    render_async(view, 5_000)
 
     assert has_element?(view, "#repository-health", "Checkout verified")
     assert has_element?(view, "#repository-health", "GitHub read access verified")
@@ -300,6 +302,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
     {:ok, setup_only_view, _html} =
       conn |> authenticated_conn() |> live(repository_path(setup_only))
 
+    render_async(setup_only_view, 5_000)
     assert has_element?(setup_only_view, "#repository-health", "Repository contract ready")
     assert has_element?(setup_only_view, "#repository-health", "Workspace setup configured")
 
@@ -353,6 +356,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
 
     repository = repository_fixture(%{github_name: "untracked-contract", local_path: root})
     {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+    render_async(view, 5_000)
 
     # Only a contract committed on the configured branch counts, and without
     # one the repository simply has no broker verification or deployment.
@@ -391,10 +395,19 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
 
     repository = repository_fixture(%{github_name: "feature-contract", local_path: root})
     {:ok, view, _html} = conn |> authenticated_conn() |> live(repository_path(repository))
+    render_async(view, 5_000)
 
     # Only a contract committed on the configured branch counts, and without
     # one the repository simply has no broker verification or deployment.
     assert has_element?(view, "#repository-health", "No repository contract")
+
+    # Choosing the branch that has one fetches and checks it again.
+    view
+    |> form("#default-branch-form", branch: %{name: "feature/contract"})
+    |> render_submit()
+
+    render_async(view, 5_000)
+    assert has_element?(view, "#repository-health", "Optional broker verification ready")
   end
 
   test "configures the maintainer's own triage labels per repository", %{conn: conn} do

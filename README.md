@@ -697,6 +697,11 @@ worktrees only.
 
 A checked-in `.ptc-manager.yml` is optional. It holds what PtcManager freezes
 from an exact commit: broker publication verification and self-deployment.
+Repository health reads it at the default branch's commit on GitHub, fetched
+into the checkout, the same commit dispatch and deployment use. A repository's
+page shows the last fetched commit at once and fetches in the background; the
+configuration overview reads the last fetched commit without a network call.
+A branch GitHub does not have and a fetch that fails are reported as such.
 When the Herdr agent pushes its own branch and creates the PR, a repository
 needs no contract at all. Repository hooks may provide fast local feedback,
 while GitHub CI and branch protection remain the authoritative merge gate.
@@ -2042,6 +2047,13 @@ not restart keeps serving its repositories through a partition. If a peer
 also claims one of this member's repositories, no new work starts for it here
 until a person disables it on one side; a banner says so. A member that a
 peer refuses as a non-member admits nothing.
+
+A member's own release is the one exception. Deploying it only fetches
+GitHub into the checkout and swaps the local release, so a macOS member lists
+and deploys the repository whose checkout is `PTC_MACOS_SOURCE` even while it
+is disabled there and claimed by another member, and needs no claim to do so.
+Everything else a disabled repository refuses stays refused. A Linux member
+deploys through its systemd path and is unchanged.
 
 ### Moving a repository
 

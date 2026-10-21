@@ -28,7 +28,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
 
     case load_repository(socket) do
       {:ok, socket} ->
-        {:ok, socket}
+        {:ok, fetch_health(socket)}
 
       :error ->
         {:ok,
@@ -54,6 +54,26 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
   def handle_info({:machine_inventory, _inventory}, socket), do: reload(socket)
 
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  # The page renders from the last fetched commit; one fetch from GitHub per
+  # visit then refreshes the contract check without holding the page.
+  defp fetch_health(socket) do
+    if connected?(socket) do
+      repository = socket.assigns.repository
+      start_async(socket, :fetched_health, fn -> Health.summarize(repository) end)
+    else
+      socket
+    end
+  end
+
+  @impl true
+  def handle_async(:fetched_health, {:ok, health}, socket) do
+    if same_branch?(health.repository, socket.assigns.repository),
+      do: {:noreply, assign(socket, :health, %{socket.assigns.health | gate: health.gate})},
+      else: {:noreply, socket}
+  end
+
+  def handle_async(:fetched_health, {:exit, _reason}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("set-repository-enabled", %{"enabled" => enabled}, socket) do
@@ -437,9 +457,14 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     do: {:noreply, put_flash(socket, :error, "Confirm the repository before removing it.")}
 
   defp reload(socket) do
+    branch = socket.assigns[:repository] && socket.assigns.repository.default_branch
+
     case load_repository(socket) do
       {:ok, socket} ->
-        {:noreply, socket}
+        # A new default branch has its own contract; fetch it.
+        if socket.assigns.repository.default_branch == branch,
+          do: {:noreply, socket},
+          else: {:noreply, fetch_health(socket)}
 
       :error ->
         {:noreply,
@@ -510,6 +535,24 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  # Reloads keep the contract check the last fetch produced and refresh the
+  # rest, which needs no network.
+  defp current_health(socket, repository) do
+    health =
+      Health.summarize(repository, PtcManager.Repository.Checkout.available_path(repository))
+
+    case socket.assigns[:health] do
+      %{repository: previous, gate: gate} ->
+        if same_branch?(previous, repository), do: %{health | gate: gate}, else: health
+
+      _first ->
+        health
+    end
+  end
+
+  defp same_branch?(left, right),
+    do: left.id == right.id and left.default_branch == right.default_branch
+
   defp load_repository(%{assigns: %{repository_id: nil}}), do: :error
 
   defp load_repository(socket) do
@@ -519,7 +562,7 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
          assign(socket,
            page_title: full_name(repository),
            repository: repository,
-           health: Health.summarize(repository),
+           health: current_health(socket, repository),
            commit_identity: PtcManager.CommitIdentities.resolve(repository),
            maintainer_labels: MaintainerLabels.list(repository),
            integration_branches: IntegrationBranches.list(repository),
