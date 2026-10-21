@@ -358,7 +358,9 @@ The worker needs `PTC_MACOS_SOURCE` pointing to the registered `ptc_manager`
 checkout and the same `DATABASE_PATH`, `HOME`, `PATH`, and `PORT` as the app.
 The app launcher must write its process ID to `run/manager.pid` before `exec`.
 Keep `app` as a symlink into `releases/`, with an immutable `RELEASE_SHA` in each
-release. Register `ptc_manager` in Configuration to make its deployment visible.
+release. Provider session archives and operation logs default to
+`data/execution-artifacts` under the service root (`PTC_EXECUTION_ARTIFACT_ROOT`
+overrides it), and archival runs that root's `bin/ptc-manager-worker-review`. Register `ptc_manager` in Configuration to make its deployment visible.
 
 Deploy uses the **GitHub default branch, fetched into the registered local
 checkout**. Each update check fetches `origin/<default branch>`; the checkout's

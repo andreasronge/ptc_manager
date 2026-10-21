@@ -125,5 +125,6 @@ defmodule PtcManager.Reviews.Adapter do
 
   defp valid_model?(_), do: false
 
-  defp helper, do: Application.get_env(:ptc_manager, :review_helper, @helper)
+  @doc "The worker review helper: the macOS service root's copy, else the Linux install."
+  def helper, do: Application.get_env(:ptc_manager, :review_helper, @helper)
 end

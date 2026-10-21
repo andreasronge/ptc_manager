@@ -22,43 +22,32 @@ defmodule PtcManager.ExecutionArtifactsTest do
     def run(["workspace", "close", "generic-workspace"]), do: {:ok, "closed"}
   end
 
+  defmodule RecordingCapture do
+    def run(helper, args) do
+      send(self(), {:capture_helper, helper, hd(args)})
+      {"", 0}
+    end
+
+    def run(["workspace", "close", "generic-workspace"]), do: {:ok, "closed"}
+  end
+
+  test "archival runs the configured review helper, as on a macOS service root" do
+    _run = terminal_generic_run()
+    restore_env_on_exit([:review_helper])
+
+    helper = "/srv/service-root/bin/ptc-manager-worker-review"
+    Application.put_env(:ptc_manager, :execution_artifact_root, "/tmp/generic-archive-helper")
+    Application.put_env(:ptc_manager, :execution_artifact_command, RecordingCapture)
+    Application.put_env(:ptc_manager, :generic_herdr_command, RecordingCapture)
+    Application.put_env(:ptc_manager, :review_helper, helper)
+
+    assert :ok = ExecutionArtifacts.cleanup_terminal_once()
+    assert_received {:capture_helper, ^helper, "archive-session"}
+  end
+
   test "terminal generic actions retry archival without a source snapshot" do
-    repository = repository_fixture()
-    worker = worker_fixture()
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
-    action =
-      Repo.insert!(%PtcManager.Operations.AgentAction{
-        repository_id: repository.id,
-        action_key: "post_cancellation_note",
-        target_type: "issue",
-        target_id: 1,
-        target_label: "issue",
-        prompt: "task",
-        actor: "maintainer",
-        state: "done",
-        requested_at: now
-      })
-
-    {:ok, run} =
-      Operations.create_agent_run(%{
-        worker_id: worker.id,
-        agent_action_id: action.id,
-        role: "implementer",
-        state: "working",
-        started_at: now,
-        last_heartbeat_at: now,
-        external_key: "default:generic-pane",
-        provider_kind: "codex",
-        herdr_workspace: "generic-workspace"
-      })
-
-    keys = [:execution_artifact_root, :execution_artifact_command, :generic_herdr_command]
-    previous = Map.new(keys, &{&1, Application.get_env(:ptc_manager, &1)})
-
-    on_exit(fn ->
-      Enum.each(previous, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
-    end)
+    run = terminal_generic_run()
+    restore_env_on_exit([])
 
     Application.put_env(:ptc_manager, :execution_artifact_root, "/tmp/generic-archive-retry")
     Application.put_env(:ptc_manager, :execution_artifact_command, RetryCapture)
@@ -221,5 +210,49 @@ defmodule PtcManager.ExecutionArtifactsTest do
     assert "agent_run:#{run.id}-#{ExecutionArtifacts.session_token("second")}" in next.manifest[
              "execution_artifacts"
            ]["missing_source_ids"]
+  end
+
+  # A finished generic action whose Codex agent run still needs its session archived.
+  defp terminal_generic_run do
+    repository = repository_fixture()
+    worker = worker_fixture()
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    action =
+      Repo.insert!(%PtcManager.Operations.AgentAction{
+        repository_id: repository.id,
+        action_key: "post_cancellation_note",
+        target_type: "issue",
+        target_id: 1,
+        target_label: "issue",
+        prompt: "task",
+        actor: "maintainer",
+        state: "done",
+        requested_at: now
+      })
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        agent_action_id: action.id,
+        role: "implementer",
+        state: "working",
+        started_at: now,
+        last_heartbeat_at: now,
+        external_key: "default:generic-pane",
+        provider_kind: "codex",
+        herdr_workspace: "generic-workspace"
+      })
+
+    run
+  end
+
+  defp restore_env_on_exit(extra_keys) do
+    keys = [:execution_artifact_root, :execution_artifact_command, :generic_herdr_command]
+    previous = Map.new(keys ++ extra_keys, &{&1, Application.get_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn {key, value} -> Application.put_env(:ptc_manager, key, value) end)
+    end)
   end
 end
