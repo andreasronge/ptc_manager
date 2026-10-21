@@ -131,9 +131,10 @@ class GroupSignal(unittest.TestCase):
         child.wait()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            try:
-                os.kill(descendant, 0)
-            except ProcessLookupError:
+            # Gone, or a zombie nobody reaps (a container without an init): either way, killed.
+            state = subprocess.run(['ps', '-o', 'stat=', '-p', str(descendant)],
+                                   capture_output=True, text=True).stdout.strip()
+            if not state or state.startswith('Z'):
                 return
             time.sleep(0.05)
         self.fail('descendant survived the group kill')
