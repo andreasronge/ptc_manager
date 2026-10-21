@@ -1256,6 +1256,9 @@ defmodule PtcManagerWeb.DashboardLive do
 
   def stall_path(%{target_type: "operational_mode"}, _repositories), do: ~p"/deployments"
 
+  def stall_path(%{kind: :operation_fenced, target_id: id}, _repositories),
+    do: ~p"/operations?release=#{id}"
+
   def stall_path(_stall, _repositories), do: ~p"/operations"
 
   # Only a job that ended without finishing can have a worktree to resume;

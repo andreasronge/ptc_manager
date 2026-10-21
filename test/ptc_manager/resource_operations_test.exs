@@ -248,8 +248,128 @@ defmodule PtcManager.ResourceOperationsTest do
   end
 
   test "recovery without cgroup containment keeps the slot fenced for a retry" do
+    with_env(host_profile: :linux)
+
     assert {:retry, :operation_recovery_requires_cgroup_containment} =
              ResourceOperationRecovery.recover(%ResourceOperation{wrapper_pid: 999_999})
+  end
+
+  test "a host without containment fences the operation with fresh evidence" do
+    lock_directory = temporary_lock_directory()
+    File.write!(Path.join(lock_directory, "operation-slot-1.lock"), "")
+
+    operation = %ResourceOperation{
+      id: 4_242,
+      attempt_token: "fence-test-token-0123",
+      wrapper_pid: 999_999,
+      slot_number: 1
+    }
+
+    assert {:fenced, evidence} = ResourceOperationRecovery.recover(operation)
+    assert evidence["processes"] == []
+    assert evidence["listing_error"] == nil
+    assert evidence["lock"] == "free"
+    assert evidence["wrapper_pid"] == 999_999
+    assert evidence["slot_number"] == 1
+    assert evidence["wrapper_alive"] == false
+
+    # A wrapper that vanished before creating its slot lock leaves no lock.
+    File.rm!(Path.join(lock_directory, "operation-slot-1.lock"))
+    assert {:fenced, %{"lock" => "free"}} = ResourceOperationRecovery.recover(operation)
+    assert {:ok, %{mode: mode}} = File.stat(Path.join(lock_directory, "operation-slot-1.lock"))
+    assert Bitwise.band(mode, 0o777) == 0o660
+
+    with_env(herdr_run_as_user: "ptc-worker")
+    assert {:fenced, %{"listing_error" => unseen}} = ResourceOperationRecovery.recover(operation)
+    assert unseen =~ "agent account ptc-worker cannot be listed"
+    Application.put_env(:ptc_manager, :herdr_run_as_user, nil)
+
+    Application.put_env(:ptc_manager, :resource_operation_wrapper, "/nonexistent/ptc-operation")
+
+    assert {:fenced, %{"inspection_error" => "the wrapper could not run" <> _}} =
+             ResourceOperationRecovery.recover(operation)
+  end
+
+  test "a maintainer release needs a free slot lock and accepted processes" do
+    set_operation_capacity(1)
+    lock_directory = temporary_lock_directory()
+    lock = Path.join(lock_directory, "operation-slot-1.lock")
+    File.write!(lock, "")
+    operation = fenced_operation("release-guarded")
+
+    holder = hold_lock(lock)
+
+    assert {:error, {:slot_lock_held, 999_999}} =
+             ResourceOperationRecovery.release(operation, "maintainer", true)
+
+    Port.close(holder)
+    wait_until_free(lock)
+
+    marker = "#{operation.id}-#{String.slice(operation.attempt_token, 0, 12)}"
+    survivor = spawn_marked(marker)
+
+    assert {:error, :processes_listed} =
+             ResourceOperationRecovery.release(operation, "maintainer", false)
+
+    refute ResourceOperationRecovery.processes_may_remain?(%{"processes" => []})
+
+    assert ResourceOperationRecovery.processes_may_remain?(%{
+             "processes" => [],
+             "listing_error" => "process listing failed: ps"
+           })
+
+    assert {:ok, released} = ResourceOperationRecovery.release(operation, "maintainer", true)
+    System.cmd("kill", ["-KILL", survivor], stderr_to_stdout: true)
+    assert released.state == "lost"
+    assert is_nil(released.slot_number)
+
+    assert %{actor: "maintainer", details: details} =
+             Repo.get_by!(PtcManager.Operations.AuditEvent,
+               action: "resource_operation.released",
+               target_id: operation.id
+             )
+
+    assert details["processes_listed"] == true
+    assert [%{"pid" => pid}] = details["evidence"]["processes"]
+    assert Integer.to_string(pid) == survivor
+  end
+
+  test "a release loses cleanly to a heartbeat, a late finish or a cancel" do
+    lock_directory = temporary_lock_directory()
+    File.write!(Path.join(lock_directory, "operation-slot-1.lock"), "")
+
+    for {invocation, change} <- [
+          {"race-heartbeat",
+           fn operation -> ResourceOperations.heartbeat(operation.id, operation.attempt_token) end},
+          {"race-finish",
+           fn operation ->
+             ResourceOperations.finish(operation.id, operation.attempt_token, %{exit_status: 0})
+           end},
+          {"race-cancel", fn operation -> ResourceOperations.cancel(operation.id, "stop") end},
+          {"race-remaining",
+           fn operation ->
+             ResourceOperations.finish(operation.id, operation.attempt_token, %{
+               exit_status: 0,
+               processes_remaining: true,
+               remaining_processes: [],
+               remaining_detail: "late"
+             })
+           end}
+        ] do
+      set_operation_capacity(1)
+      operation = fenced_operation(invocation, false)
+      {:ok, _changed} = change.(operation)
+
+      assert {:error, :operation_changed} =
+               ResourceOperations.release_fenced(operation, "maintainer", %{"processes" => []})
+
+      refute Repo.get_by(PtcManager.Operations.AuditEvent,
+               action: "resource_operation.released",
+               target_id: operation.id
+             )
+
+      Repo.delete_all(ResourceOperation)
+    end
   end
 
   test "statistics use deterministic nearest-rank percentiles" do
@@ -367,6 +487,115 @@ defmodule PtcManager.ResourceOperationsTest do
       },
       extra
     )
+  end
+
+  # A running operation whose wrapper went silent on a host that fences it.
+  defp fenced_operation(invocation_id, record? \\ true) do
+    context = managed_run_fixture()
+    base = DateTime.add(DateTime.utc_now(), -60, :second)
+    {:ok, _queued} = ResourceOperations.request(operation_attrs(context, invocation_id), base)
+    {:ok, operation} = ResourceOperations.claim_next(context.worker.id, base)
+
+    {:ok, operation} =
+      ResourceOperations.mark_running(
+        operation.id,
+        operation.attempt_token,
+        %{wrapper_pid: 999_999},
+        base
+      )
+
+    assert ResourceOperations.mark_stale_recovery_pending() == 1
+    operation = Repo.get!(ResourceOperation, operation.id)
+
+    if record? do
+      {:ok, operation} = ResourceOperations.record_fenced(operation, %{"processes" => []})
+      operation
+    else
+      operation
+    end
+  end
+
+  defp temporary_lock_directory do
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-fence-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    with_env(
+      resource_operation_socket_path: Path.join(directory, "operations.sock"),
+      resource_operation_wrapper: Path.expand("deploy/ptc-operation")
+    )
+
+    directory
+  end
+
+  defp with_env(settings) do
+    for {key, value} <- settings do
+      previous = Application.fetch_env(:ptc_manager, key)
+      Application.put_env(:ptc_manager, key, value)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:ptc_manager, key, value)
+          :error -> Application.delete_env(:ptc_manager, key)
+        end
+      end)
+    end
+  end
+
+  defp hold_lock(path) do
+    port =
+      Port.open({:spawn_executable, "/usr/bin/python3"}, [
+        :binary,
+        args: [
+          "-c",
+          "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); " <>
+            "print('locked', flush=True); sys.stdin.read()",
+          path
+        ]
+      ])
+
+    assert_receive {^port, {:data, "locked\n"}}, 5_000
+    port
+  end
+
+  defp wait_until_free(path, attempts \\ 50) do
+    {output, 0} =
+      System.cmd(
+        "/usr/bin/python3",
+        [
+          "-c",
+          "import fcntl, sys; f = open(sys.argv[1]); " <>
+            "print('free' if not fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB) else '')",
+          path
+        ],
+        stderr_to_stdout: true
+      )
+      |> then(fn {output, status} -> {String.trim(output), status} end)
+      |> case do
+        {"free", 0} = free -> free
+        _held when attempts > 0 -> Process.sleep(50) && wait_until_free(path, attempts - 1)
+      end
+
+    output
+  end
+
+  # Started from inside Python so it runs the interpreter itself: macOS hides
+  # the environment of its python3 shims.
+  defp spawn_marked(marker) do
+    {pid, 0} =
+      System.cmd("/usr/bin/python3", [
+        "-c",
+        "import os, subprocess, sys; print(subprocess.Popen([sys.executable, '-c', " <>
+          "'import time; time.sleep(30)'], env=dict(os.environ, PTC_OPERATION_ATTEMPT=sys.argv[1]), " <>
+          "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)",
+        marker
+      ])
+
+    pid = String.trim(pid)
+    on_exit(fn -> System.cmd("kill", ["-KILL", pid], stderr_to_stdout: true) end)
+    pid
   end
 
   defp set_operation_capacity(capacity) do

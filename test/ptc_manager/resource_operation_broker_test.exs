@@ -1,6 +1,8 @@
 defmodule PtcManager.ResourceOperationBrokerTest do
   use PtcManager.DataCase, async: false
 
+  import Ecto.Query
+
   alias PtcManager.ManagedOperationContext
   alias PtcManager.Operations
   alias PtcManager.Operations.ResourceOperation
@@ -434,6 +436,76 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     failed = Repo.get!(ResourceOperation, operation.id)
     assert failed.state == "recovery_pending"
     assert failed.last_error =~ "could not evaluate"
+    assert PtcManager.OperationalMode.mode() == :maintenance
+  end
+
+  test "a fenced operation raises a stall and never enters maintenance" do
+    evidence = %{"processes" => [], "lock" => "held", "wrapper_pid" => 4321, "slot_number" => 1}
+    configure_recovery({:fenced, evidence})
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous_mode) end)
+
+    operation = stale_running_operation("broker-fenced")
+
+    for _sweep <- 1..3, do: ResourceOperationBroker.sweep()
+
+    fenced = Repo.get!(ResourceOperation, operation.id)
+    assert fenced.state == "recovery_pending"
+    assert fenced.slot_number == operation.slot_number
+    assert fenced.fence_evidence == evidence
+    assert fenced.last_error =~ "Fenced"
+    assert PtcManager.OperationalMode.mode() == :active
+
+    assert [stall] = PtcManager.Stalls.operation_fenced(DateTime.utc_now())
+    assert stall.target_id == operation.id
+    assert stall.detail =~ "job #{operation.job_id}"
+    assert stall.detail =~ "slot #{operation.slot_number}"
+    assert stall.detail =~ "pid 4321"
+
+    later = DateTime.add(DateTime.utc_now(), 3_600, :second)
+    assert PtcManager.Stalls.operation_slot_orphaned(later) == []
+  end
+
+  test "Linux without cgroups still escalates to maintenance" do
+    previous = %{
+      host_profile: Application.get_env(:ptc_manager, :host_profile),
+      recovery: Application.get_env(:ptc_manager, :resource_operation_recovery),
+      mode: Application.get_env(:ptc_manager, :operational_mode),
+      retry: Application.get_env(:ptc_manager, :resource_operation_recovery_retry_ms)
+    }
+
+    Application.put_env(:ptc_manager, :host_profile, :linux)
+
+    Application.put_env(
+      :ptc_manager,
+      :resource_operation_recovery,
+      PtcManager.ResourceOperationRecovery
+    )
+
+    Application.put_env(:ptc_manager, :operational_mode, :active)
+    Application.put_env(:ptc_manager, :resource_operation_recovery_retry_ms, 0)
+
+    on_exit(fn ->
+      Application.put_env(:ptc_manager, :host_profile, previous.host_profile)
+      Application.put_env(:ptc_manager, :resource_operation_recovery, previous.recovery)
+      Application.put_env(:ptc_manager, :operational_mode, previous.mode)
+      Application.put_env(:ptc_manager, :resource_operation_recovery_retry_ms, previous.retry)
+    end)
+
+    operation = stale_running_operation("broker-linux-escalation")
+
+    {1, _} =
+      Repo.update_all(from(o in ResourceOperation, where: o.id == ^operation.id),
+        set: [wrapper_pid: 999_999]
+      )
+
+    ResourceOperationBroker.sweep()
+    ResourceOperationBroker.sweep()
+
+    escalated = Repo.get!(ResourceOperation, operation.id)
+    assert escalated.last_error =~ "exceeded its retry bound"
+    assert is_nil(escalated.fence_evidence)
     assert PtcManager.OperationalMode.mode() == :maintenance
   end
 

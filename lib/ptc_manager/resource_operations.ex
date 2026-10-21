@@ -9,7 +9,15 @@ defmodule PtcManager.ResourceOperations do
   import Ecto.Query
 
   alias PtcManager.Operations
-  alias PtcManager.Operations.{CapacityChange, CapacitySetting, ResourceOperation, Worker}
+
+  alias PtcManager.Operations.{
+    AuditEvent,
+    CapacityChange,
+    CapacitySetting,
+    ResourceOperation,
+    Worker
+  }
+
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
 
@@ -227,6 +235,116 @@ defmodule PtcManager.ResourceOperations do
           "Operation recovery could not evaluate the fenced slot and requires maintainer attention: #{bounded(inspect(reason))}"
       })
     end)
+  end
+
+  @fenced_prefix "Fenced: nothing proves this operation's processes stopped"
+
+  @doc """
+  Records that a host without containment keeps this operation fenced. The
+  evidence is written only when it changes, so a sweep that re-inspects an
+  unchanged operation writes nothing.
+  """
+  def record_fenced(%ResourceOperation{} = operation, evidence) when is_map(evidence) do
+    if operation.fence_evidence == evidence and fenced?(operation),
+      do: {:ok, operation},
+      else: write_fenced(operation, evidence)
+  end
+
+  defp fenced?(operation), do: String.starts_with?(operation.last_error || "", @fenced_prefix)
+
+  defp write_fenced(%ResourceOperation{id: id, attempt_token: attempt_token}, evidence) do
+    transition(id, attempt_token, ["recovery_pending"], fn operation ->
+      attrs =
+        if operation.fence_evidence == evidence,
+          do: %{},
+          else: %{fence_evidence: evidence}
+
+      attrs =
+        if fenced?(operation),
+          do: attrs,
+          else:
+            Map.put(
+              attrs,
+              :last_error,
+              bounded(
+                "#{@fenced_prefix}; it holds slot #{operation.slot_number} until a maintainer " <>
+                  "releases it. #{operation.last_error}"
+              )
+            )
+
+      ResourceOperation.changeset(operation, attrs)
+    end)
+  end
+
+  @doc "Whether the operation waits for a maintainer: fenced, or escalated by recovery."
+  def awaiting_maintainer?(%ResourceOperation{state: "recovery_pending"} = operation) do
+    not is_nil(operation.fence_evidence) or
+      String.starts_with?(operation.last_error || "", [
+        "Operation recovery exceeded",
+        "Operation recovery could not evaluate"
+      ])
+  end
+
+  def awaiting_maintainer?(%ResourceOperation{}), do: false
+
+  @doc """
+  A maintainer's release of a fenced operation: one guarded update from
+  `recovery_pending` with the same attempt token and the same revision the
+  maintainer inspected, to `lost`, audited with the evidence they saw.
+  Anything that changed the operation first wins.
+  """
+  def release_fenced(%ResourceOperation{} = expected, actor, evidence, at \\ now()) do
+    result =
+      RepoTransaction.immediate(fn ->
+        case Repo.get(ResourceOperation, expected.id) do
+          %ResourceOperation{state: "recovery_pending", attempt_token: token} = operation
+          when token == expected.attempt_token and is_binary(token) and
+                 operation.updated_at == expected.updated_at ->
+            released =
+              operation
+              |> ResourceOperation.changeset(%{
+                state: "lost",
+                exit_status: operation.exit_status || 75,
+                last_error: bounded("Released by #{actor}. #{operation.last_error}"),
+                fence_evidence: evidence,
+                wrapper_pid: nil,
+                cgroup_path: nil,
+                slot_number: nil,
+                finished_at: at,
+                last_heartbeat_at: at,
+                run_duration_ms: duration_ms(operation.started_at || at, at)
+              })
+              |> Repo.update!()
+
+            %AuditEvent{}
+            |> AuditEvent.changeset(%{
+              actor: actor,
+              action: "resource_operation.released",
+              target_type: "resource_operation",
+              target_id: operation.id,
+              details: %{
+                "slot_number" => operation.slot_number,
+                "evidence" => evidence,
+                "processes_listed" => evidence["processes"] not in [nil, []]
+              }
+            })
+            |> Repo.insert!()
+
+            released
+
+          _changed ->
+            Repo.rollback(:operation_changed)
+        end
+      end)
+
+    case result do
+      {:ok, operation} ->
+        notify()
+        {:ok, operation}
+
+      other ->
+        other
+    end
   end
 
   def release_recovered(id, attempt_token, reason, at \\ now()) do

@@ -27,8 +27,13 @@ def parse_args():
     run = commands.add_parser("run")
     run.add_argument("--label", required=True)
     run.add_argument("command", nargs=argparse.REMAINDER)
+    inspect = commands.add_parser("inspect", help="Describe a fenced operation as JSON")
+    inspect.add_argument("--marker", required=True)
+    inspect.add_argument("--lock", required=True)
+    inspect.add_argument("--wrapper-pid", type=int, default=0)
+    commands.add_parser("self-test", help="Check process handling on this host")
     args = parser.parse_args()
-    if args.subcommand == "review":
+    if args.subcommand in ("review", "inspect", "self-test"):
         return args
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
@@ -366,6 +371,111 @@ def wait_unreaped(pid):
             pass
     finally:
         queue.close()
+
+
+def slot_lock_state(path):
+    """`free`, `held`, or the error that prevented checking. The lock is taken
+    without blocking and released at once. A slot whose wrapper vanished before
+    creating its lock file gets the file the next wrapper would have created."""
+    try:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660)
+            # Wrappers of a separate agent account share it through the group,
+            # whatever this service's umask removed.
+            os.fchmod(descriptor, 0o660)
+    except OSError as error:
+        return f"error: {error.strerror or error}"
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return "held"
+    except OSError as error:
+        return f"error: {error.strerror or error}"
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return "free"
+    finally:
+        os.close(descriptor)
+
+
+def process_alive(pid):
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def inspect_operation(args):
+    """Evidence about a fenced operation for its maintainer; it changes nothing."""
+    try:
+        found, error = marked_processes(args.marker), None
+    except Exception as listing_error:
+        found, error = [], f"process listing failed: {listing_error}"
+    print(json.dumps({
+        "processes": [{"pid": pid, "stat": stat[:16], "command": command[:300]}
+                      for pid, stat, command in found[:REMAINING_LIMIT]],
+        "listing_error": error,
+        "wrapper_alive": process_alive(args.wrapper_pid),
+        "lock": slot_lock_state(args.lock),
+    }, sort_keys=True))
+    return 0
+
+
+def self_test():
+    """Exercises what an unattended command depends on: forwarding a signal to
+    the command group, waiting without reaping, killing the group, and finding
+    a marked descendant. Prints JSON and exits non-zero on any failure."""
+    marker = f"self-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    environment = dict(os.environ, **{MARKER_VARIABLE: marker})
+    program = ("import signal, subprocess, sys, time; "
+               "signal.signal(signal.SIGUSR1, lambda *_: sys.exit(42)); "
+               "grandchild = subprocess.Popen([sys.executable, '-c', "
+               "'import signal, time; signal.signal(signal.SIGUSR1, signal.SIG_IGN); time.sleep(60)']); "
+               "print(grandchild.pid, flush=True); time.sleep(60)")
+    checks = {}
+    child = subprocess.Popen([sys.executable, "-c", program], env=environment,
+                             start_new_session=True, stdout=subprocess.PIPE, text=True)
+    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError("self-test timed out")))
+    signal.alarm(20)
+    try:
+        grandchild = int(child.stdout.readline())
+        deadline = time.monotonic() + 5
+        while True:
+            listed = {pid for pid, _stat, _command in marked_processes(marker)}
+            if {child.pid, grandchild} <= listed or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        checks["marker_listing"] = {child.pid, grandchild} <= listed
+        signal_group(child.pid, signal.SIGUSR1)
+        wait_unreaped(child.pid)
+        # The exited leader must still be our zombie, holding its pid and group.
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)],
+                               capture_output=True, text=True, timeout=10).stdout.strip()
+        checks["unreaped_wait"] = state.startswith("Z")
+        signal_group(child.pid, signal.SIGKILL, quiet=(PermissionError,))
+        remaining, error = remaining_after_kill(marker)
+        checks["group_kill"] = not remaining and error is None
+        checks["forwarding"] = child.wait() == 42
+    except Exception as error:
+        checks["error"] = f"{type(error).__name__}: {error}"
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        child.wait()
+    finally:
+        signal.alarm(0)
+        child.stdout.close()
+    passed = "error" not in checks and all(checks.values())
+    print(json.dumps({"status": "passed" if passed else "failed", "checks": checks}, sort_keys=True))
+    return 0 if passed else 1
 
 
 def managed_run(args, context):
@@ -774,6 +884,10 @@ def ensure_shared_directory(root, directory):
 
 def main():
     args = parse_args()
+    if args.subcommand == "inspect":
+        return inspect_operation(args)
+    if args.subcommand == "self-test":
+        return self_test()
     if args.subcommand == "review":
         try:
             with open(os.environ["PTC_MANAGED_OPERATION_CONTEXT"], encoding="utf-8") as source:

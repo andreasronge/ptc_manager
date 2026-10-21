@@ -70,6 +70,7 @@ defmodule PtcManager.Stalls do
       &machine_incapable/1,
       &review_repeated_finding/1,
       &operation_slot_orphaned/1,
+      &operation_fenced/1,
       &dispatch_rejected/1,
       &publication_stuck_green/1,
       &agent_out_of_contact/1,
@@ -92,6 +93,7 @@ defmodule PtcManager.Stalls do
   def label(:machine_incapable), do: "Waiting for a capable machine"
   def label(:review_repeated_finding), do: "Review repeating a finding"
   def label(:operation_slot_orphaned), do: "Expensive-operation slot held by a lost operation"
+  def label(:operation_fenced), do: "Expensive operation fenced until a maintainer releases it"
   def label(:dispatch_rejected), do: "Dispatch rejected and nothing retried"
   def label(:publication_stuck_green), do: "Green member pull request not merged"
   def label(:agent_out_of_contact), do: "Agent out of contact"
@@ -531,7 +533,7 @@ defmodule PtcManager.Stalls do
           Repo.all(
             from operation in ResourceOperation,
               where:
-                not is_nil(operation.slot_number) and
+                not is_nil(operation.slot_number) and is_nil(operation.fence_evidence) and
                   operation.state in ["starting", "running", "cancelling", "recovery_pending"]
           ),
         since = operation_silent_since(operation),
@@ -551,6 +553,70 @@ defmodule PtcManager.Stalls do
             "#{humanize(elapsed_ms(since, now))}, and recovery has not released it."
       }
     end
+  end
+
+  @doc """
+  An operation that a host without containment keeps fenced: nothing proves
+  its command stopped, so it holds its slot until a maintainer releases it on
+  the Operations page. Only work waiting for that slot waits.
+  """
+  def operation_fenced(_now) do
+    for operation <-
+          Repo.all(
+            from operation in ResourceOperation,
+              where:
+                operation.state == "recovery_pending" and not is_nil(operation.fence_evidence),
+              preload: [:job, :agent_action]
+          ) do
+      %{
+        kind: :operation_fenced,
+        severity: :attention,
+        target_type: "resource_operation",
+        target_id: operation.id,
+        repository_id: operation.repository_id,
+        issue_id: operation.job && operation.job.issue_id,
+        since: operation.last_heartbeat_at,
+        detail:
+          "Operation #{operation.id} (#{operation.label}) of #{operation_owner(operation)} holds " <>
+            "slot #{operation.slot_number}. #{fence_summary(operation.fence_evidence)} " <>
+            "Release it on the Operations page once nothing it started is still running."
+      }
+    end
+  end
+
+  defp operation_owner(%ResourceOperation{job_id: id}) when is_integer(id), do: "job #{id}"
+
+  defp operation_owner(%ResourceOperation{agent_action_id: id}) when is_integer(id),
+    do: "action #{id}"
+
+  defp operation_owner(_operation), do: "unknown work"
+
+  defp fence_summary(evidence) do
+    processes =
+      case evidence["processes"] do
+        [_ | _] = listed ->
+          "Still running: " <>
+            Enum.map_join(
+              listed,
+              ", ",
+              &"pid #{&1["pid"]} (#{String.slice(&1["command"], 0, 60)})"
+            ) <>
+            "."
+
+        _none ->
+          if evidence["listing_error"] || evidence["inspection_error"],
+            do: "Its processes could not be listed.",
+            else: "No process carrying its marker is listed."
+      end
+
+    lock =
+      case evidence["lock"] do
+        "held" -> "Its wrapper (pid #{evidence["wrapper_pid"]}) still holds the slot lock."
+        "free" -> "Its slot lock is free."
+        _other -> "Its slot lock could not be checked."
+      end
+
+    processes <> " " <> lock
   end
 
   @doc """

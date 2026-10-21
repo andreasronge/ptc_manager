@@ -484,6 +484,23 @@ and either clears its environment or hides it (macOS hides the environment of
 Apple platform binaries such as `/bin/sh` or `/bin/sleep`, Linux that of
 non-dumpable processes) is not detected, and its command finishes normally.
 
+Such a host has no containment that could prove an abandoned command stopped,
+so the broker never releases an uncertain operation by itself there and never
+enters maintenance for it. The operation stays fenced and holds its slot; an
+**Expensive operation fenced** stall names it, its job, what was seen and the
+slot. Everything else keeps running; only work waiting for that slot waits.
+The stall opens **Release operation…** on the Operations page (it works in
+maintenance mode too), which inspects the operation again and lists each
+process still carrying the marker with a `kill <pid>` line to copy after you
+have checked it. PtcManager signals no process itself. Release needs the slot
+lock to be free, which means the wrapper is gone; with processes still listed
+it asks you to accept that they may keep running. The release is one guarded
+update that loses to any heartbeat, finish or cancel that got there first, and
+it is audited as `resource_operation.released`. A wrapper that resumes after a
+release is refused and stops its command. `ptc-operation self-test` checks
+signal forwarding, the unreaped wait, the group kill and the marker listing on
+the host it runs on.
+
 SQLite permits one writer. High-frequency Herdr and maintainer-action work is
 phase-shifted, and only one housekeeping poller runs shared action expiry and
 cleanup work. Queries that spend at least one second waiting, and transactions

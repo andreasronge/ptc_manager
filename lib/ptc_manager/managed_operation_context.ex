@@ -477,7 +477,8 @@ defmodule PtcManager.ManagedOperationContext do
         "/usr/local/bin/ptc-operation"
       )
 
-  defp lock_directory do
+  @doc "Where wrappers keep their `operation-slot-<n>.lock` files."
+  def lock_directory do
     case socket_path() do
       path when is_binary(path) and path != "" -> Path.dirname(path)
       _disabled -> System.tmp_dir!()

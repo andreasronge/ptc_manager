@@ -482,6 +482,11 @@ defmodule PtcManager.ResourceOperationBroker do
               "The abandoned operation process tree was terminated during recovery."
             )
 
+        # No containment: the operation keeps its slot and waits for a
+        # maintainer, while everything else keeps running.
+        {:fenced, evidence} ->
+          _ = ResourceOperations.record_fenced(operation, evidence)
+
         {:retry, reason} ->
           retry_after_ms =
             Application.get_env(:ptc_manager, :resource_operation_recovery_retry_ms, 60_000)

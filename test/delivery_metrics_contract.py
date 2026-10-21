@@ -215,6 +215,24 @@ class RemainingProcesses(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertIn('ps unavailable', error)
 
+class SelfTest(unittest.TestCase):
+    def test_self_test_passes_on_this_host(self):
+        stdout = io.StringIO()
+        with patch('sys.stdout', stdout):
+            status = wrapper['self_test']()
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(status, 0, result)
+        self.assertEqual(set(result['checks']),
+                         {'marker_listing', 'forwarding', 'unreaped_wait', 'group_kill'})
+
+    def test_self_test_fails_when_a_check_fails(self):
+        stdout = io.StringIO()
+        with patch('sys.stdout', stdout), \
+                patch.dict(wrapper['self_test'].__globals__, remaining_after_kill=lambda _m: ([(1, 'S', 'x')], None)):
+            status = wrapper['self_test']()
+        self.assertEqual(status, 1)
+        self.assertFalse(json.loads(stdout.getvalue())['checks']['group_kill'])
+
 def _without_waitid():
     import types
     module = types.ModuleType('os_without_waitid')

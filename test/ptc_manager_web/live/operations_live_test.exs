@@ -62,6 +62,86 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert has_element?(view, "#refresh-tool-inventory", "Refresh")
   end
 
+  test "a fenced operation shows fresh evidence and a maintainer releases it", %{conn: conn} do
+    directory = Path.join(System.tmp_dir!(), "ptc-release-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(directory)
+    File.write!(Path.join(directory, "operation-slot-1.lock"), "")
+
+    for {key, value} <- [
+          resource_operation_socket_path: Path.join(directory, "operations.sock"),
+          resource_operation_wrapper: Path.expand("deploy/ptc-operation")
+        ] do
+      previous = Application.get_env(:ptc_manager, key)
+      Application.put_env(:ptc_manager, key, value)
+      on_exit(fn -> Application.put_env(:ptc_manager, key, previous) end)
+    end
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    proposal_fixture(issue)
+    {:ok, job} = Operations.approve_issue(issue.id, "maintainer")
+    worker = worker_fixture(%{name: "Mac mini"})
+    stale = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: worker.id,
+        job_id: job.id,
+        role: "implementer",
+        state: "working",
+        started_at: stale,
+        last_heartbeat_at: stale
+      })
+
+    {:ok, _queued} =
+      ResourceOperations.request(
+        %{
+          worker_id: worker.id,
+          repository_id: repository.id,
+          job_id: job.id,
+          agent_run_id: run.id,
+          invocation_id: "fenced-in-view",
+          label: "verify",
+          priority: 20,
+          state: "queued"
+        },
+        stale
+      )
+
+    {:ok, operation} = ResourceOperations.claim_next(worker.id, stale)
+
+    {:ok, operation} =
+      ResourceOperations.mark_running(
+        operation.id,
+        operation.attempt_token,
+        %{wrapper_pid: 999_999},
+        stale
+      )
+
+    PtcManager.ResourceOperationBroker.sweep()
+    assert Repo.get!(PtcManager.Operations.ResourceOperation, operation.id).fence_evidence
+
+    # Releasing stays available while maintenance holds the console.
+    previous_mode = Application.get_env(:ptc_manager, :operational_mode)
+    Application.put_env(:ptc_manager, :operational_mode, :maintenance)
+    on_exit(fn -> Application.put_env(:ptc_manager, :operational_mode, previous_mode) end)
+
+    {:ok, view, _html} =
+      conn |> authenticated_conn() |> live(~p"/operations?release=#{operation.id}")
+
+    panel = "#release-operation-#{operation.id}"
+    assert has_element?(view, "#resource-operation-#{operation.id}", "fenced")
+    assert has_element?(view, panel, "No process carrying this attempt's marker is listed")
+    assert has_element?(view, panel, "The slot lock is free")
+
+    view |> element("#release-#{operation.id}") |> render_click()
+
+    assert render(view) =~ "Operation #{operation.id} released"
+    assert Repo.get!(PtcManager.Operations.ResourceOperation, operation.id).state == "lost"
+  end
+
   test "queued work for a repository this machine cannot run says why it waits", %{conn: conn} do
     repository = repository_fixture()
     issue = issue_fixture(repository)

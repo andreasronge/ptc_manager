@@ -58,4 +58,5 @@ jobs:
       - run: mix deps.get
       - run: /usr/bin/python3 test/review_worker_contract.py
       - run: /usr/bin/python3 test/delivery_metrics_contract.py
-      - run: mix test --include resource_e2e test/ptc_manager/resource_operation_broker_test.exs test/ptc_manager/resource_operation_wrapper_e2e_test.exs test/ptc_manager/resource_operations_test.exs test/ptc_manager/macos_runtime_test.exs test/ptc_manager/host_test.exs
+      - run: /usr/bin/python3 deploy/ptc-operation self-test
+      - run: mix test --include resource_e2e test/ptc_manager/resource_operation_broker_test.exs test/ptc_manager/resource_operation_wrapper_e2e_test.exs test/ptc_manager/resource_operation_lifecycle_test.exs test/ptc_manager/resource_operations_test.exs test/ptc_manager/macos_runtime_test.exs test/ptc_manager/host_test.exs
