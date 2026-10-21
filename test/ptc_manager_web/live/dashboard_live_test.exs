@@ -1888,6 +1888,28 @@ defmodule PtcManagerWeb.DashboardLiveTest do
     assert is_nil(Repo.get!(PtcManager.Operations.Approval, job.approval_id).proposal_id)
   end
 
+  test "names a paused implementation automation instead of an internal reason", %{conn: conn} do
+    repository = repository_fixture()
+    issue = issue_fixture(repository, %{title: "Rename one confusing button"})
+    :ok = PtcManager.Automations.ensure_defaults(repository)
+
+    {:ok, _paused} =
+      repository
+      |> PtcManager.Automations.get_definition("implement_issue")
+      |> PtcManager.Automations.update_identity(%{enabled: false})
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/")
+
+    view
+    |> form("#approve-form-issue-#{issue.id}", %{"issue-id" => Integer.to_string(issue.id)})
+    |> render_submit(%{"direct" => "true"})
+
+    html = render(view)
+    assert html =~ "The Implement issue automation is paused for this repository."
+    refute html =~ "automation_disabled"
+    assert Repo.aggregate(Job, :count) == 0
+  end
+
   test "the card shows a mapped integration branch and can send the work to the default branch",
        %{conn: conn} do
     repository =

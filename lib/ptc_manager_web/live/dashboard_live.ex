@@ -556,6 +556,14 @@ defmodule PtcManagerWeb.DashboardLive do
       {:error, :invalid_review_count} ->
         {:noreply, put_flash(socket, :error, "Choose between zero and five reviews.")}
 
+      {:error, :automation_disabled} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "The Implement issue automation is paused for this repository. Enable it under Automations."
+         )}
+
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Approval failed: #{inspect(reason)}")}
     end
