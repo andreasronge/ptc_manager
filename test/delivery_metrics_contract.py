@@ -107,6 +107,38 @@ class UnreapedWait(unittest.TestCase):
         with patch.dict(wrapper['wait_unreaped'].__globals__, {'os': _without_waitid()}):
             self.assert_waits_without_reaping()
 
+class GroupSignal(unittest.TestCase):
+    def test_a_group_of_only_its_exited_leader_is_already_gone(self):
+        import signal, subprocess, sys
+        # macOS refuses to signal such a group with EPERM rather than ESRCH.
+        child = subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+        wrapper['wait_unreaped'](child.pid)
+        wrapper['signal_group'](child.pid, signal.SIGKILL)
+        child.wait()
+        wrapper['signal_group'](child.pid, signal.SIGKILL)
+
+    def test_a_surviving_descendant_is_killed(self):
+        import signal, subprocess, sys, time
+        child = subprocess.Popen(
+            [sys.executable, '-c',
+             'import subprocess, sys; '
+             'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]); '
+             'print(p.pid, flush=True)'],
+            start_new_session=True, stdout=subprocess.PIPE, text=True)
+        descendant = int(child.stdout.readline())
+        wrapper['wait_unreaped'](child.pid)
+        wrapper['signal_group'](child.pid, signal.SIGKILL)
+        child.wait()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            # Gone, or a zombie nobody reaps (a container without an init): either way, killed.
+            state = subprocess.run(['ps', '-o', 'stat=', '-p', str(descendant)],
+                                   capture_output=True, text=True).stdout.strip()
+            if not state or state.startswith('Z'):
+                return
+            time.sleep(0.05)
+        self.fail('descendant survived the group kill')
+
 def _without_waitid():
     import types
     module = types.ModuleType('os_without_waitid')

@@ -237,6 +237,18 @@ def cleanup_cgroup(path):
     raise RuntimeError("operation process tree did not leave its cgroup")
 
 
+def signal_group(pgid, signum):
+    """Signal a process group; one with no live member is already gone."""
+    try:
+        os.killpg(pgid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # macOS answers EPERM, not ESRCH, when only the unreaped leader is left.
+        if sys.platform != "darwin":
+            raise
+
+
 def wait_unreaped(pid):
     """Block until child `pid` exits, leaving it unreaped."""
     if hasattr(os, "waitid"):
@@ -394,10 +406,7 @@ def managed_run(args, context):
     def forward(signum, _frame):
         with group_lock:
             if group_alive:
-                try:
-                    os.killpg(child.pid, signum)
-                except ProcessLookupError:
-                    pass
+                signal_group(child.pid, signum)
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, forward)
