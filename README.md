@@ -504,6 +504,35 @@ release is refused and stops its command. `ptc-operation self-test` checks
 signal forwarding, the unreaped wait, the group kill and the marker listing on
 the host it runs on.
 
+### Host readiness
+
+Before it admits work, PtcManager checks that the host can run the whole job
+lifecycle. The checks run at boot, again with every tool-inventory refresh,
+and when **Recheck** is pressed in the banner that names each failing check:
+
+| Check | Fails when |
+|---|---|
+| `paths` | a release's host path is unusable; roots created on first use may be absent, and on Linux worker-owned roots are only checked to exist |
+| `helpers` | on macOS, `ptc-operation`, `ptc-manager-worker-review`, `ptc-manager-worker-agent-login` or `macos-deploy-host` under the service root is missing or differs from the copy this release was built with |
+| `operation_wrapper` | `ptc-operation self-test` fails |
+| `operation_broker` | the broker does not answer an authenticated `ping` on its socket |
+| `reconcile` | dispatch is enabled but `PTC_RESULT_RECONCILE_INTERVAL_MS` is 0 |
+| `publication` | dispatch is enabled and brokered publication lacks its GitHub App settings, or agents publish but `gh` is not signed in for the agent identity |
+| `agent_login` | an enabled agent kind is signed out |
+
+On macOS and in development a failing check keeps the machine gate from
+admitting anything (`host_not_ready`): queued work waits, and inspection,
+deployment, configuration and releasing a fenced operation stay available.
+On Linux the banner reports failures but admission is unchanged.
+
+A queued job also says why it has not started. The jobs of a repository the
+gate holds back carry the gate's reason, and an error that stopped dispatch
+before the lease is recorded on the job it had picked; the Operations work
+queue shows it, a lease or a cancel clears it, and after the queue-wait
+threshold it raises the **Waiting for a capable machine** stall. The dispatch
+poller logs a new reason once and its recovery once, and backs off from 5 to
+60 seconds while the same failure repeats.
+
 SQLite permits one writer. High-frequency Herdr and maintainer-action work is
 phase-shifted, and only one housekeeping poller runs shared action expiry and
 cleanup work. Queries that spend at least one second waiting, and transactions

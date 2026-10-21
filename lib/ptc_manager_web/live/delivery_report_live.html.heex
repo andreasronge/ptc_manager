@@ -1,4 +1,4 @@
-<Layouts.app flash={@flash} current_path="/board" switch_to="/cluster">
+<Layouts.app readiness={@host_readiness} flash={@flash} current_path="/board" switch_to="/cluster">
   <main class="mx-auto max-w-6xl space-y-6 p-6 text-slate-200" id="delivery-report">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <.link navigate="/board" class="text-teal-300">← Delivery</.link>

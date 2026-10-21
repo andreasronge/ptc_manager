@@ -13,28 +13,62 @@ defmodule PtcManager.Machine.Gate do
 
   import Ecto.Query
 
-  alias PtcManager.Machine.{Inventory, Requirements}
+  alias PtcManager.Machine.{Inventory, Readiness, Requirements}
   alias PtcManager.Operations.Repository
   alias PtcManager.Repo
 
+  @doc "Admission errors that mean the work waits rather than fails."
+  defguard waiting_reason?(reason)
+           when reason in [:machine_incapable, :cluster_fenced, :host_not_ready]
+
   @doc """
-  Ids of repositories this console may not admit work for now: their
-  requirements are unmet here, or the cluster fences them
+  Ids of repositories this console may not admit work for now: every one
+  while the host is not ready (`PtcManager.Machine.Readiness`), otherwise
+  those whose requirements are unmet here or that the cluster fences
   (`PtcManager.Cluster.Fence`).
   """
   def unsatisfied_repository_ids(now \\ DateTime.utc_now()) do
-    inventory = Inventory.current()
+    if Readiness.ready?() do
+      inventory = Inventory.current()
 
-    incapable =
-      for {id, requirements} <- requirement_rows(),
-          not Requirements.evaluate(requirements, inventory, now).satisfied?,
-          do: id
+      incapable =
+        for {id, requirements} <- requirement_rows(),
+            not Requirements.evaluate(requirements, inventory, now).satisfied?,
+            do: id
 
-    Enum.uniq(incapable ++ PtcManager.Cluster.Fence.fenced_repository_ids())
+      Enum.uniq(incapable ++ PtcManager.Cluster.Fence.fenced_repository_ids())
+    else
+      Repo.all(from repository in Repository, select: repository.id)
+    end
+  end
+
+  @doc """
+  The reason each blocked repository waits: `:host_not_ready`,
+  `:machine_incapable` or `:cluster_fenced`.
+  """
+  def blocked_reasons(now \\ DateTime.utc_now()) do
+    if Readiness.ready?() do
+      inventory = Inventory.current()
+
+      incapable =
+        for {id, requirements} <- requirement_rows(),
+            not Requirements.evaluate(requirements, inventory, now).satisfied?,
+            into: %{},
+            do: {id, :machine_incapable}
+
+      PtcManager.Cluster.Fence.fenced_repository_ids()
+      |> Map.new(&{&1, :cluster_fenced})
+      |> Map.merge(incapable)
+    else
+      Map.new(
+        Repo.all(from repository in Repository, select: repository.id),
+        &{&1, :host_not_ready}
+      )
+    end
   end
 
   @doc "Whether an admission error means the work waits rather than fails."
-  def waiting?(reason), do: reason in [:machine_incapable, :cluster_fenced]
+  def waiting?(reason), do: waiting_reason?(reason)
 
   @doc "Repository id => evaluation for every repository that declares requirements."
   def evaluations(now \\ DateTime.utc_now()) do
@@ -60,13 +94,17 @@ defmodule PtcManager.Machine.Gate do
 
   @doc """
   `:ok` when work for the repository may start here, otherwise
-  `{:error, :machine_incapable}`. Reads the repository row, so inside a write
+  `{:error, :host_not_ready}`, `{:error, :machine_incapable}` or
+  `{:error, :cluster_fenced}`. Reads the repository row, so inside a write
   transaction it sees the requirements that transaction sees.
   """
   def check(repository_or_id, now \\ DateTime.utc_now())
 
   def check(%Repository{machine_requirements: requirements} = repository, now) do
     cond do
+      not Readiness.ready?() ->
+        {:error, :host_not_ready}
+
       not Requirements.evaluate(requirements, Inventory.current(), now).satisfied? ->
         {:error, :machine_incapable}
 

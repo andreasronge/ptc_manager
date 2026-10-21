@@ -5,7 +5,7 @@ defmodule PtcManagerWeb.MaintenanceMode do
 
   alias PtcManager.OperationalMode
 
-  @read_only_events ["close_agent"]
+  @read_only_events ["close_agent", "recheck-readiness"]
   # The one mutation a restricted console must accept: the Deployments page's
   # Activate, which runs the canary and ends the restriction. Its handler
   # decides on its own whether activation is available.

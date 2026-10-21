@@ -142,6 +142,50 @@ defmodule PtcManagerWeb.OperationsLiveTest do
     assert Repo.get!(PtcManager.Operations.ResourceOperation, operation.id).state == "lost"
   end
 
+  test "the readiness banner names failing checks and rechecks on request", %{conn: conn} do
+    report = PtcManager.Machine.Readiness.current()
+    keys = [:host_readiness | Enum.map(PtcManager.Host.path_specs(), &elem(&1, 1))]
+    previous = Map.new(keys, &{&1, Application.fetch_env(:ptc_manager, &1)})
+
+    on_exit(fn ->
+      :persistent_term.put({PtcManager.Machine.Readiness, :report}, report)
+
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:ptc_manager, key, value)
+        {key, :error} -> Application.delete_env(:ptc_manager, key)
+      end)
+    end)
+
+    # No host paths and no broker: a recheck finds nothing to fail.
+    Enum.each(keys, &Application.put_env(:ptc_manager, &1, nil))
+    Application.put_env(:ptc_manager, :host_readiness, true)
+
+    PtcManager.Machine.Readiness.put_report(%{
+      checks: [%{key: :reconcile, status: :failed, blocking: true, sentence: "Never reconciled."}],
+      evaluated_at: DateTime.utc_now()
+    })
+
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+    assert has_element?(view, "#readiness-banner", "admits no new work")
+    assert has_element?(view, "#readiness-reconcile", "Never reconciled.")
+
+    assert {:error, {:live_redirect, %{to: "/operations", flash: _}}} =
+             view |> element("#recheck-readiness") |> render_click()
+
+    assert PtcManager.Machine.Readiness.ready?()
+    {:ok, view, _html} = conn |> authenticated_conn() |> live(~p"/operations")
+    refute has_element?(view, "#readiness-banner")
+
+    # An open page follows readiness as it changes.
+    PtcManager.Machine.Readiness.put_report(%{
+      checks: [%{key: :paths, status: :failed, blocking: false, sentence: "Missing root."}],
+      evaluated_at: DateTime.utc_now()
+    })
+
+    assert render(view) =~ "Missing root."
+    assert has_element?(view, "#readiness-banner", "needs attention")
+  end
+
   test "an observed Herdr pane is listed apart and cannot be cancelled", %{conn: conn} do
     worker = worker_fixture(%{name: "Mac mini"})
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)

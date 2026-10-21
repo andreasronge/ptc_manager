@@ -382,6 +382,13 @@
           >
             Waiting for a capable machine: {@machine_waits[job.repository_id]}
           </p>
+          <p
+            :if={Operations.dispatch_blocked_words(job)}
+            id={"queued-job-#{job.id}-blocked"}
+            class="mt-2 text-xs leading-5 text-amber-300"
+          >
+            {Operations.dispatch_blocked_words(job)}
+          </p>
           <button
             type="button"
             phx-click="cancel_queued_job"

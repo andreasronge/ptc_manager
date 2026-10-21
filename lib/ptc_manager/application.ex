@@ -38,6 +38,7 @@ defmodule PtcManager.Application do
       PtcManager.Cluster.PeerPoller,
       PtcManager.DeploymentCoordinator,
       PtcManager.ResourceOperationBroker,
+      PtcManager.Machine.Readiness,
       maintainer_action_supervisor(),
       PtcManager.GitHub.Poller,
       PtcManager.Herdr.Poller,

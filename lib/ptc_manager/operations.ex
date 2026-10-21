@@ -7,7 +7,9 @@ defmodule PtcManager.Operations do
   performs an external effect directly.
   """
 
+  import PtcManager.Machine.Gate, only: [waiting_reason?: 1]
   import Ecto.Query
+  require Logger
   alias Ecto.Multi
   alias PtcManager.Gateway
   alias PtcManager.Repo
@@ -1798,12 +1800,17 @@ defmodule PtcManager.Operations do
     now = utc_now()
     error = if extra[:last_error], do: [last_error: extra.last_error], else: []
 
+    blocked =
+      if schema == Job, do: [dispatch_blocked_reason: nil, dispatch_blocked_at: nil], else: []
+
     outcome =
       Repo.transaction(fn ->
         {updated, _rows} =
           schema
           |> where([record], record.id == ^id and record.state == "queued")
-          |> Repo.update_all(set: [state: "cancelled", ended_at: now, updated_at: now] ++ error)
+          |> Repo.update_all(
+            set: [state: "cancelled", ended_at: now, updated_at: now] ++ error ++ blocked
+          )
 
         if updated != 1, do: Repo.rollback(:work_no_longer_queued)
 
@@ -2342,6 +2349,74 @@ defmodule PtcManager.Operations do
     end
   end
 
+  @gate_reasons ~w(host_not_ready machine_incapable cluster_fenced)
+
+  @doc """
+  Records why queued jobs of gate-blocked repositories wait, given
+  `repository_id => reason`, and clears a gate reason that no longer applies.
+  Only rows whose reason changes are written. Returns the number changed.
+  """
+  def record_dispatch_blocked(blocked, now \\ utc_now()) when is_map(blocked) do
+    changed =
+      blocked
+      |> Enum.group_by(fn {_id, reason} -> Atom.to_string(reason) end, fn {id, _} -> id end)
+      |> Enum.map(fn {reason, ids} ->
+        {count, _rows} =
+          Job
+          |> where([job], job.state == "queued" and job.repository_id in ^ids)
+          |> where(
+            [job],
+            is_nil(job.dispatch_blocked_reason) or job.dispatch_blocked_reason != ^reason
+          )
+          |> Repo.update_all(set: [dispatch_blocked_reason: reason, dispatch_blocked_at: now])
+
+        if count > 0, do: Logger.info("Dispatch: #{count} queued job(s) wait: #{reason}")
+        count
+      end)
+      |> Enum.sum()
+
+    {cleared, _rows} =
+      Job
+      |> where([job], job.state == "queued" and job.dispatch_blocked_reason in @gate_reasons)
+      |> where([job], job.repository_id not in ^Map.keys(blocked))
+      |> Repo.update_all(set: [dispatch_blocked_reason: nil, dispatch_blocked_at: nil])
+
+    if cleared > 0,
+      do: Logger.info("Dispatch: #{cleared} queued job(s) no longer wait on the gate")
+
+    if changed + cleared > 0, do: notify_changed(__MODULE__)
+    changed + cleared
+  end
+
+  @doc """
+  Records the error that stopped dispatch before it leased this job. A job
+  that was leased meanwhile is left alone: its errors are its `last_error`.
+  """
+  def record_dispatch_error(job_id, reason, now \\ utc_now()) when is_integer(job_id) do
+    text = reason |> inspect() |> String.slice(0, 500)
+
+    {count, _rows} =
+      Job
+      |> where([job], job.id == ^job_id and job.state == "queued")
+      |> where(
+        [job],
+        is_nil(job.dispatch_blocked_reason) or job.dispatch_blocked_reason != ^text
+      )
+      |> Repo.update_all(set: [dispatch_blocked_reason: text, dispatch_blocked_at: now])
+
+    if count > 0, do: notify_changed(__MODULE__)
+    count
+  end
+
+  @doc "A queued job's blocked reason in words, or nil."
+  def dispatch_blocked_words(%Job{dispatch_blocked_reason: nil}), do: nil
+
+  def dispatch_blocked_words(%Job{dispatch_blocked_reason: reason}) when reason in @gate_reasons,
+    do: rejection_words(String.to_existing_atom(reason))
+
+  def dispatch_blocked_words(%Job{dispatch_blocked_reason: reason}),
+    do: "Dispatch stopped before leasing it: #{reason}"
+
   @doc """
   The oldest queued job dispatch may start. `excluded_repository_ids` are
   repositories this machine cannot run (`PtcManager.Machine.Gate`); their jobs
@@ -2472,6 +2547,8 @@ defmodule PtcManager.Operations do
                 branch_name: branch_name,
                 publication_source: publication_source,
                 last_error: nil,
+                dispatch_blocked_reason: nil,
+                dispatch_blocked_at: nil,
                 updated_at: lifecycle_now
               ]
             )
@@ -2539,7 +2616,7 @@ defmodule PtcManager.Operations do
             Repo.rollback(:collection_run_paused)
 
           # The job waits for a capable machine; rejecting it would cancel it.
-          {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+          {:error, reason} when waiting_reason?(reason) ->
             Repo.rollback(reason)
 
           {:error, reason} ->
@@ -6296,6 +6373,9 @@ defmodule PtcManager.Operations do
   def rejection_words(:cluster_fenced),
     do:
       "The cluster does not let this machine start new work for the repository now; see the Cluster page."
+
+  def rejection_words(:host_not_ready),
+    do: "This host is not ready to run work; the banner names the failing readiness checks."
 
   def rejection_words(:machine_incapable),
     do:

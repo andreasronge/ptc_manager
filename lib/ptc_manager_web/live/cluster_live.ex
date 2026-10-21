@@ -110,7 +110,7 @@ defmodule PtcManagerWeb.ClusterLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path="/cluster">
+    <Layouts.app readiness={@host_readiness} flash={@flash} current_path="/cluster">
       <section class="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 class="text-2xl font-semibold">Cluster</h1>

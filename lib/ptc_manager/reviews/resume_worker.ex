@@ -11,6 +11,8 @@ defmodule PtcManager.Reviews.ResumeWorker do
       states: [:available, :scheduled, :executing, :retryable]
     ]
 
+  import PtcManager.Machine.Gate, only: [waiting_reason?: 1]
+
   alias PtcManager.{Repo, RepoTransaction}
   alias PtcManager.Operations.Job
   @impl true
@@ -26,7 +28,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
   defp resume(id, generation) do
     case PtcManager.Machine.Gate.check(Repo.get!(Job, id).repository_id) do
       :ok -> recover(id, generation)
-      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] -> {:snooze, 60}
+      {:error, reason} when waiting_reason?(reason) -> {:snooze, 60}
     end
   end
 
@@ -43,7 +45,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
           {:error, :stale_continuation} ->
             :ok
 
-          {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+          {:error, reason} when waiting_reason?(reason) ->
             {:snooze, 60}
 
           {:error, _} ->
@@ -88,7 +90,7 @@ defmodule PtcManager.Reviews.ResumeWorker do
            ] ->
         {:snooze, 10}
 
-      {:error, reason} when reason in [:machine_incapable, :cluster_fenced] ->
+      {:error, reason} when waiting_reason?(reason) ->
         {:snooze, 60}
 
       {:error, reason} when reason in [:stale_continuation, :continuation_already_claimed] ->

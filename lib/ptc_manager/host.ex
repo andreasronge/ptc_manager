@@ -119,8 +119,8 @@ defmodule PtcManager.Host do
     {:planning_snapshot_root, :planning_snapshot_root, "PTC_PLANNING_SNAPSHOT_ROOT",
      :created_directory},
     {:daily_digest_bundle_root, :daily_digest_bundle_root, "PTC_DAILY_DIGEST_BUNDLE_ROOT",
-     :directory},
-    {:tool_inventory_dir, :tool_inventory_dir, "PTC_TOOL_INVENTORY_DIR", :directory},
+     :created_directory},
+    {:tool_inventory_dir, :tool_inventory_dir, "PTC_TOOL_INVENTORY_DIR", :created_directory},
     {:health_output, :health_snapshot_path, "PTC_HEALTH_OUT", :output_file}
   ]
 

@@ -384,35 +384,23 @@ defmodule PtcManager.Stalls do
       |> Enum.reject(fn {_id, evaluation} -> evaluation.satisfied? end)
       |> Map.new()
 
-    if unsatisfied == %{} do
-      []
-    else
-      ids = Map.keys(unsatisfied)
-      reason = &PtcManager.Machine.Requirements.explain(Map.fetch!(unsatisfied, &1))
+    incapable =
+      if unsatisfied == %{},
+        do: [],
+        else: incapable_stalls(unsatisfied, waiting_before, now)
 
-      jobs =
-        Repo.all(
-          from job in Job,
-            left_join: round in Round,
-            on: round.job_id == job.id and round.state == "queued",
-            where:
-              job.repository_id in ^ids and job.updated_at <= ^waiting_before and
-                (job.state == "queued" or
-                   (job.state in ^Reviews.active_states() and
-                      (job.review_state == "resume_pending" or not is_nil(round.id)))),
-            distinct: true,
-            preload: [:issue]
-        )
+    stalled_ids = MapSet.new(incapable, &{&1.target_type, &1.target_id})
 
-      actions =
-        Repo.all(
-          from action in AgentAction,
-            where:
-              action.repository_id in ^ids and action.state == "queued" and
-                action.updated_at <= ^waiting_before
-        )
-
-      Enum.map(jobs, fn job ->
+    incapable ++
+      for job <-
+            Repo.all(
+              from job in Job,
+                where:
+                  job.state == "queued" and not is_nil(job.dispatch_blocked_reason) and
+                    job.dispatch_blocked_at <= ^waiting_before,
+                preload: [:issue]
+            ),
+          not MapSet.member?(stalled_ids, {"job", job.id}) do
         %{
           kind: :machine_incapable,
           severity: :attention,
@@ -420,29 +408,71 @@ defmodule PtcManager.Stalls do
           target_id: job.id,
           repository_id: job.repository_id,
           issue_id: job.issue_id,
-          since: job.updated_at,
+          since: job.dispatch_blocked_at,
           detail:
-            "Work for ##{job.issue.number} has waited #{humanize(elapsed_ms(job.updated_at, now))} " <>
-              "for a capable machine: #{reason.(job.repository_id)}. Install the tool, refresh the " <>
-              "inventory, or move the repository to a machine that has it."
+            "Work for ##{job.issue.number} has waited " <>
+              "#{humanize(elapsed_ms(job.dispatch_blocked_at, now))} before leasing. " <>
+              Operations.dispatch_blocked_words(job)
         }
-      end) ++
-        Enum.map(actions, fn action ->
-          %{
-            kind: :machine_incapable,
-            severity: :attention,
-            target_type: "agent_action",
-            target_id: action.id,
-            repository_id: action.repository_id,
-            issue_id: nil,
-            since: action.updated_at,
-            detail:
-              "The #{String.replace(action.action_key, "_", " ")} action has waited " <>
-                "#{humanize(elapsed_ms(action.updated_at, now))} for a capable machine: " <>
-                "#{reason.(action.repository_id)}."
-          }
-        end)
-    end
+      end
+  end
+
+  defp incapable_stalls(unsatisfied, waiting_before, now) do
+    ids = Map.keys(unsatisfied)
+    reason = &PtcManager.Machine.Requirements.explain(Map.fetch!(unsatisfied, &1))
+
+    jobs =
+      Repo.all(
+        from job in Job,
+          left_join: round in Round,
+          on: round.job_id == job.id and round.state == "queued",
+          where:
+            job.repository_id in ^ids and job.updated_at <= ^waiting_before and
+              (job.state == "queued" or
+                 (job.state in ^Reviews.active_states() and
+                    (job.review_state == "resume_pending" or not is_nil(round.id)))),
+          distinct: true,
+          preload: [:issue]
+      )
+
+    actions =
+      Repo.all(
+        from action in AgentAction,
+          where:
+            action.repository_id in ^ids and action.state == "queued" and
+              action.updated_at <= ^waiting_before
+      )
+
+    Enum.map(jobs, fn job ->
+      %{
+        kind: :machine_incapable,
+        severity: :attention,
+        target_type: "job",
+        target_id: job.id,
+        repository_id: job.repository_id,
+        issue_id: job.issue_id,
+        since: job.updated_at,
+        detail:
+          "Work for ##{job.issue.number} has waited #{humanize(elapsed_ms(job.updated_at, now))} " <>
+            "for a capable machine: #{reason.(job.repository_id)}. Install the tool, refresh the " <>
+            "inventory, or move the repository to a machine that has it."
+      }
+    end) ++
+      Enum.map(actions, fn action ->
+        %{
+          kind: :machine_incapable,
+          severity: :attention,
+          target_type: "agent_action",
+          target_id: action.id,
+          repository_id: action.repository_id,
+          issue_id: nil,
+          since: action.updated_at,
+          detail:
+            "The #{String.replace(action.action_key, "_", " ")} action has waited " <>
+              "#{humanize(elapsed_ms(action.updated_at, now))} for a capable machine: " <>
+              "#{reason.(action.repository_id)}."
+        }
+      end)
   end
 
   @doc """

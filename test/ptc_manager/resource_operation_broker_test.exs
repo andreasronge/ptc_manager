@@ -182,6 +182,38 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     File.rm_rf!(directory)
   end
 
+  test "only a readiness context may ping, and a ping creates nothing" do
+    directory =
+      Path.join(System.tmp_dir!(), "ptc-operation-ping-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    ping = fn owner_type ->
+      {:ok, issued} =
+        ManagedOperationContext.issue(
+          %{
+            owner_type: owner_type,
+            owner_id: 0,
+            repository_id: 0,
+            worker_id: 0,
+            pane_id: "ping",
+            fencing_token: 0
+          },
+          directory: directory
+        )
+
+      ResourceOperationBroker.dispatch(%{
+        "token" => issued.token,
+        "context_id" => issued.payload["context_id"],
+        "operation" => "ping"
+      })
+    end
+
+    assert ping.("readiness") == %{"status" => "ok"}
+    assert %{"status" => "error", "error" => ":unsupported_operation"} = ping.("job")
+    assert Repo.aggregate(ResourceOperation, :count) == 0
+  end
+
   test "the broker validates and forwards processes that outlived the command" do
     context = managed_run_fixture()
 

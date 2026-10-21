@@ -1,4 +1,9 @@
-<Layouts.app flash={@flash} current_path="/configuration" switch_to={@repository}>
+<Layouts.app
+  readiness={@host_readiness}
+  flash={@flash}
+  current_path="/configuration"
+  switch_to={@repository}
+>
   <div class="space-y-8">
     <section
       id="resolved-commit-identity"

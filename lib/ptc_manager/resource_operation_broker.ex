@@ -238,6 +238,11 @@ defmodule PtcManager.ResourceOperationBroker do
     end
   end
 
+  # Readiness proves the socket, the context directory and authentication
+  # with a context that owns nothing; it creates no operation.
+  defp handle_request(%{"operation" => "ping"}, %{"owner_type" => "readiness"}),
+    do: %{"status" => "ok"}
+
   defp handle_request(_request, _payload), do: error_response(:unsupported_operation)
 
   @remaining_limit 20
