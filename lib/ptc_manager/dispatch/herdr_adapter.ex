@@ -640,25 +640,40 @@ defmodule PtcManager.Dispatch.HerdrAdapter do
   override trusts the single workspace a generic action runs in; a worktree
   agent must also trust the checkout it was created from, where Codex resolves
   trust for a linked worktree, so that override is replaced by one covering
-  both paths. Other kinds receive their profile unchanged.
+  both paths. Codex also gets `CodexTrust.unattended_args/0`, replacing any
+  profile value for the same setting. Other kinds receive their profile
+  unchanged.
   """
   def agent_arguments(kind, workspace_path, trusted_paths, settings \\ nil)
       when is_binary(kind) and is_binary(workspace_path) and is_list(trusted_paths) do
     args =
       kind |> AgentProfiles.execution_args(settings) |> AgentProfiles.expand_args(workspace_path)
 
-    if kind == "codex" and trusted_paths != [] do
-      without_project_trust(args) ++ PtcManager.CodexTrust.override_args(trusted_paths)
-    else
-      args
+    cond do
+      kind == "codex" and trusted_paths != [] ->
+        without_overrides(args, ["projects=", "check_for_update_on_startup="]) ++
+          PtcManager.CodexTrust.override_args(trusted_paths) ++
+          PtcManager.CodexTrust.unattended_args()
+
+      kind == "codex" ->
+        without_overrides(args, ["check_for_update_on_startup="]) ++
+          PtcManager.CodexTrust.unattended_args()
+
+      true ->
+        args
     end
   end
 
-  defp without_project_trust(["-c", "projects=" <> _override | rest]),
-    do: without_project_trust(rest)
+  defp without_overrides(["-c", setting | rest], prefixes) do
+    if String.starts_with?(setting, prefixes),
+      do: without_overrides(rest, prefixes),
+      else: ["-c", setting | without_overrides(rest, prefixes)]
+  end
 
-  defp without_project_trust([argument | rest]), do: [argument | without_project_trust(rest)]
-  defp without_project_trust([]), do: []
+  defp without_overrides([argument | rest], prefixes),
+    do: [argument | without_overrides(rest, prefixes)]
+
+  defp without_overrides([], _prefixes), do: []
 
   defp start_agent(command, name, pane_id, kind, repository_path, workspace_path, settings \\ nil)
 

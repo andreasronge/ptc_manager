@@ -230,7 +230,15 @@ pr_reconcile_enabled =
     end
   end
 
-external_pr_reconcile_enabled = pr_reconcile_enabled
+# Importing pull requests PtcManager did not open rides on PR reconciliation;
+# it follows that setting unless PTC_EXTERNAL_PR_RECONCILE_ENABLED says otherwise.
+external_pr_reconcile_enabled =
+  case System.get_env("PTC_EXTERNAL_PR_RECONCILE_ENABLED") do
+    nil -> pr_reconcile_enabled
+    "true" -> pr_reconcile_enabled
+    "false" -> false
+    _value -> raise "PTC_EXTERNAL_PR_RECONCILE_ENABLED must be true or false when set"
+  end
 
 operation_cgroups_default = if host_profile == :linux, do: "true", else: "false"
 
@@ -407,8 +415,14 @@ config :ptc_manager,
     System.get_env("PTC_DISPATCH_RECONCILE_AFTER_MS", "60000") |> String.to_integer(),
   worktree_reconcile_interval_ms:
     System.get_env("PTC_WORKTREE_RECONCILE_INTERVAL_MS", "30000") |> String.to_integer(),
+  # A macOS host that dispatches reconciles finished jobs by default; Linux
+  # keeps its explicit setting.
   result_reconcile_interval_ms:
-    System.get_env("PTC_RESULT_RECONCILE_INTERVAL_MS", "0") |> String.to_integer(),
+    System.get_env(
+      "PTC_RESULT_RECONCILE_INTERVAL_MS",
+      if(host_profile == :macos and dispatch_enabled, do: "10000", else: "0")
+    )
+    |> String.to_integer(),
   result_no_commits_timeout_ms:
     System.get_env("PTC_RESULT_NO_COMMITS_TIMEOUT_MS", "900000") |> String.to_integer(),
   result_claim_timeout_ms:

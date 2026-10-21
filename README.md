@@ -389,6 +389,9 @@ access. Sign in as the service account, then refresh; unavailable catalogs do
 not replace saved profile settings. Agent launch checks authentication when
 `PTC_MACOS_SERVICE_ROOT` is configured, so signed-out agents fail before creating
 an unattended login prompt. Enable the desired kinds in `PTC_AGENT_PROFILES_JSON`.
+With `PTC_DISPATCH_ENABLED=true`, finished jobs are reconciled every 10 seconds
+unless `PTC_RESULT_RECONCILE_INTERVAL_MS` says otherwise (Linux keeps its
+explicit setting, which defaults to 0).
 
 Private Tailscale HTTPS can proxy the loopback app listener; SSH over the same
 network reaches Herdr. Installing agents does not enable job dispatch or
@@ -2517,7 +2520,9 @@ setting the only profile is `PTC_IMPLEMENTATION_AGENT_KIND` started with
 `PTC_IMPLEMENTATION_AGENT_ARGS`, which default to Codex and its current
 unattended CLI flag `--dangerously-bypass-approvals-and-sandbox`. Override the
 arguments only when the installed agent CLI requires a different supported
-mode.
+mode. Whatever the profile says, every Codex start also gets
+`-c check_for_update_on_startup=false`, because an update prompt would wait for
+a person nobody is watching; a profile no longer needs to carry it.
 
 A profile also names the model that kind runs, as `"model"` alongside its
 `"args"`. Left unset each kind takes its default from
@@ -2553,6 +2558,9 @@ repository; a branch already owned by a PtcManager job remains the managed
 record instead of being duplicated as an external PR. If no
 explicit `PTC_PR_RECONCILE_ENABLED` value is set, any positive
 `PTC_GITHUB_SYNC_INTERVAL_MS` also enables this PR import/reconciliation loop.
+`PTC_EXTERNAL_PR_RECONCILE_ENABLED=false` keeps that loop for PtcManager's own
+pull requests but stops it importing pull requests PtcManager did not open;
+unset, it follows `PTC_PR_RECONCILE_ENABLED`.
 The inexpensive list snapshot runs each cycle, while detailed CI and
 mergeability health rotates through one open PR per cycle to stay within GitHub
 API limits. If no

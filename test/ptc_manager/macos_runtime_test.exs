@@ -44,6 +44,43 @@ defmodule PtcManager.MacOSRuntimeTest do
     assert config[:resource_operation_cgroups] == false
   end
 
+  test "a dispatching macOS host reconciles finished jobs by default" do
+    with_environment(%{"PTC_DISPATCH_ENABLED" => "true"}, fn ->
+      config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
+      assert config[:result_reconcile_interval_ms] == 10_000
+    end)
+
+    with_environment(
+      %{"PTC_DISPATCH_ENABLED" => "true", "PTC_RESULT_RECONCILE_INTERVAL_MS" => "0"},
+      fn ->
+        config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
+        assert config[:result_reconcile_interval_ms] == 0
+      end
+    )
+
+    with_environment(%{"PTC_DISPATCH_ENABLED" => nil}, fn ->
+      config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
+      assert config[:result_reconcile_interval_ms] == 0
+    end)
+  end
+
+  test "importing external pull requests follows PR reconciliation unless set" do
+    for {pr, external, expected} <- [
+          {"true", nil, true},
+          {"true", "false", false},
+          {"false", nil, false},
+          {"false", "true", false}
+        ] do
+      with_environment(
+        %{"PTC_PR_RECONCILE_ENABLED" => pr, "PTC_EXTERNAL_PR_RECONCILE_ENABLED" => external},
+        fn ->
+          config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
+          assert config[:external_pr_reconcile_enabled] == expected, inspect({pr, external})
+        end
+      )
+    end
+  end
+
   test "an explicit environment variable still wins over the service root" do
     with_environment(%{"PTC_OPERATION_SOCKET_PATH" => "/tmp/elsewhere.sock"}, fn ->
       config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
