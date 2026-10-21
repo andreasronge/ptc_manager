@@ -60,70 +60,21 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
 
   @tag :nightly
   test "wrapper uses the generic socket protocol and preserves multi-megabyte child output" do
-    root = Path.join(System.tmp_dir!(), "ptc-operation-e2e-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    File.mkdir!(Path.join(root, "artifacts"))
-    socket_path = Path.join(root, "broker.sock")
-    context_path = Path.join(root, "context.json")
-
-    {:ok, listener} =
-      :gen_tcp.listen(0, [
-        :binary,
-        packet: :line,
-        active: false,
-        ifaddr: {:local, socket_path},
-        reuseaddr: true
+    {output, status, root} =
+      run_wrapped([
+        "/usr/bin/python3",
+        "-c",
+        "import os, subprocess, sys; os.write(1, ('managed:' + os.environ['PTC_OPERATION_ACTIVE'] + '\\n').encode()); " <>
+          "[(os.write(1, b'x' * 10000), os.write(2, b'y' * 10000)) for _ in range(220)]; " <>
+          "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); sys.exit(23)"
       ])
 
-    parent = self()
-    server = Task.async(fn -> fake_broker(listener, parent, 4) end)
-
-    File.write!(
-      context_path,
-      Jason.encode!(%{
-        "context_id" => "e2e-context",
-        "token" => "fake-token",
-        "socket_path" => socket_path,
-        "lock_directory" => root,
-        "artifact_root" => Path.join(root, "artifacts"),
-        "artifact_max_bytes" => 8_000_000,
-        "repository_id" => 12,
-        "owner_type" => "job",
-        "owner_id" => 34
-      })
-    )
-
-    wrapper = Path.expand("deploy/ptc-operation")
-
-    assert {output, 23} =
-             System.cmd(
-               "/usr/bin/timeout",
-               [
-                 "5",
-                 wrapper,
-                 "run",
-                 "--label",
-                 "test",
-                 "--",
-                 "/usr/bin/python3",
-                 "-c",
-                 "import os, subprocess, sys; os.write(1, ('managed:' + os.environ['PTC_OPERATION_ACTIVE'] + '\\n').encode()); " <>
-                   "[(os.write(1, b'x' * 10000), os.write(2, b'y' * 10000)) for _ in range(220)]; " <>
-                   "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); sys.exit(23)"
-               ],
-               env: [
-                 {"PTC_MANAGED_OPERATION_CONTEXT", context_path},
-                 {"PTC_OPERATION_POLL_SECONDS", "0.01"},
-                 {"PTC_OPERATION_HEARTBEAT_SECONDS", "60"}
-               ],
-               stderr_to_stdout: true
-             )
+    assert status == 23, output
 
     assert output =~ "Waiting for PtcManager operation slot: test"
     assert output =~ "managed:77"
     assert_receive {:wrapper_request, %{"operation" => "request", "label" => "test"}}
     assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 23}}
-    Task.await(server, 2_000)
 
     [artifact] =
       Path.wildcard(Path.join(root, "artifacts/repository-12/job-34/operation-77-*/"))
@@ -175,6 +126,67 @@ defmodule PtcManager.ResourceOperationWrapperE2ETest do
     assert output =~ "coordinator unavailable"
     refute File.exists?(marker_path)
     File.rm_rf!(root)
+  end
+
+  @tag :nightly
+  test "a command that leaves no process behind finishes cleanly" do
+    # macOS answers EPERM, not ESRCH, when the group holds only the exited leader.
+    {output, status, root} = run_wrapped(["/usr/bin/python3", "-c", "pass"])
+
+    assert status == 0, output
+    refute output =~ "coordinator unavailable"
+    assert_receive {:wrapper_request, %{"operation" => "finish", "exit_status" => 0}}
+    File.rm_rf!(root)
+  end
+
+  defp run_wrapped(command) do
+    root = Path.join(System.tmp_dir!(), "ptc-operation-e2e-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    File.mkdir!(Path.join(root, "artifacts"))
+    socket_path = Path.join(root, "broker.sock")
+    context_path = Path.join(root, "context.json")
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [
+        :binary,
+        packet: :line,
+        active: false,
+        ifaddr: {:local, socket_path},
+        reuseaddr: true
+      ])
+
+    parent = self()
+    server = Task.async(fn -> fake_broker(listener, parent, 4) end)
+
+    File.write!(
+      context_path,
+      Jason.encode!(%{
+        "context_id" => "e2e-context",
+        "token" => "fake-token",
+        "socket_path" => socket_path,
+        "lock_directory" => root,
+        "artifact_root" => Path.join(root, "artifacts"),
+        "artifact_max_bytes" => 8_000_000,
+        "repository_id" => 12,
+        "owner_type" => "job",
+        "owner_id" => 34
+      })
+    )
+
+    {output, status} =
+      System.cmd(
+        System.find_executable("timeout") || flunk("needs coreutils timeout on PATH"),
+        ["5", Path.expand("deploy/ptc-operation"), "run", "--label", "test", "--" | command],
+        env: [
+          {"PTC_MANAGED_OPERATION_CONTEXT", context_path},
+          {"PTC_OPERATION_POLL_SECONDS", "0.01"},
+          {"PTC_OPERATION_HEARTBEAT_SECONDS", "60"}
+        ],
+        stderr_to_stdout: true
+      )
+
+    Task.await(server, 2_000)
+    {output, status, root}
   end
 
   defp fake_broker(listener, parent, remaining) when remaining > 0 do
