@@ -237,6 +237,26 @@ def cleanup_cgroup(path):
     raise RuntimeError("operation process tree did not leave its cgroup")
 
 
+def wait_unreaped(pid):
+    """Block until child `pid` exits, leaving it unreaped."""
+    if hasattr(os, "waitid"):
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        return
+    # macOS has no waitid; a kqueue exit event also leaves the zombie in place.
+    queue = select.kqueue()
+    try:
+        event = select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                              flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                              fflags=select.KQ_NOTE_EXIT)
+        try:
+            queue.control([event], 1, None)
+        except ProcessLookupError:
+            # Already exited: an unreaped child of ours is a zombie.
+            pass
+    finally:
+        queue.close()
+
+
 def managed_run(args, context):
     response = broker_request_with_retry(
         context,
@@ -406,7 +426,7 @@ def managed_run(args, context):
     pumps = artifact.start(child)
     # Keep the exited leader unreaped so its PID/PGID cannot be reused while
     # signalling descendants. Reap only after terminating the original group.
-    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+    wait_unreaped(child.pid)
     stop_heartbeat.set()
     # A completed command must not leave descendants holding its pipe writers.
     with group_lock:
