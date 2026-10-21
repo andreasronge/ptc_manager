@@ -41,6 +41,14 @@ def execute_direct(command):
     os.execvp(command[0], command)
 
 
+class LeaseRefused(Exception):
+    """The coordinator no longer leases this attempt to the wrapper."""
+
+
+LEASED_STATES = ("starting", "running", "cancelling", "recovery_pending")
+LEASE_REFUSALS = ("stale_operation_lease", "operation_not_found")
+
+
 def broker_request(context, fields):
     message = {
         "token": context["token"],
@@ -60,7 +68,10 @@ def broker_request(context, fields):
             response += chunk
         decoded = json.loads(response.split(b"\n", 1)[0])
         if decoded.get("status") == "error":
-            raise RuntimeError(decoded.get("error", "coordinator error"))
+            error = str(decoded.get("error", "coordinator error"))
+            if any(refusal in error for refusal in LEASE_REFUSALS):
+                raise LeaseRefused(error)
+            raise RuntimeError(error)
         return decoded
     finally:
         client.close()
@@ -237,16 +248,104 @@ def cleanup_cgroup(path):
     raise RuntimeError("operation process tree did not leave its cgroup")
 
 
-def signal_group(pgid, signum):
-    """Signal a process group; one with no live member is already gone."""
+def signal_group(pgid, signum, quiet=()):
+    """Signal a process group. A failure is logged unless listed in `quiet`,
+    and is never taken as proof that the group is gone: macOS answers EPERM
+    for a group that holds only its unreaped leader, and also for one it may
+    not signal."""
     try:
         os.killpg(pgid, signum)
     except ProcessLookupError:
         pass
-    except PermissionError:
-        # macOS answers EPERM, not ESRCH, when only the unreaped leader is left.
-        if sys.platform != "darwin":
-            raise
+    except quiet:
+        pass
+    except Exception as error:
+        print(f"ptc-operation: signal {signum} to process group {pgid} failed: {error}",
+              file=sys.stderr)
+
+
+MARKER_VARIABLE = "PTC_OPERATION_ATTEMPT"
+REMAINING_LIMIT = 20
+
+
+def attempt_marker(operation_id, attempt_token):
+    return f"{operation_id}-{attempt_token[:12]}"
+
+
+def marked_processes(marker):
+    """Live processes of this user whose visible environment carries the
+    attempt marker, as (pid, stat, command) without zombies. macOS hides the
+    environment of Apple platform binaries and Linux that of non-dumpable
+    processes, so this is one of two detectors."""
+    needle = f"{MARKER_VARIABLE}={marker}"
+    if sys.platform == "darwin":
+        listing = subprocess.run(["/bin/ps", "-E", "-ww", "-x", "-o", "pid=,stat=,command="],
+                                 capture_output=True, text=True, timeout=10, check=True,
+                                 errors="replace").stdout
+        pids = []
+        for line in listing.splitlines():
+            fields = line.split(None, 2)
+            if len(fields) == 3 and not fields[1].startswith("Z") and \
+                    needle in fields[2].split():
+                pids.append(fields[0])
+        if not pids:
+            return []
+        # Describe matches from their arguments alone; the environment can hold secrets.
+        # ps exits 1 when none of the pids exist any more, so its status alone
+        # cannot tell a vanished match from a failure. A match it does not
+        # describe stays listed; the next poll drops it once it is really gone.
+        described = {}
+        for line in subprocess.run(["/bin/ps", "-ww", "-o", "pid=,stat=,command=", "-p", ",".join(pids)],
+                                   capture_output=True, text=True, timeout=10,
+                                   errors="replace").stdout.splitlines():
+            fields = line.split(None, 2)
+            if len(fields) >= 2:
+                described[fields[0]] = (fields[1], fields[2] if len(fields) == 3 else "")
+        found = []
+        for pid in pids:
+            stat, command = described.get(pid, ("?", "(not described)"))
+            if not stat.startswith("Z"):
+                found.append((int(pid), stat, command))
+        return found
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{entry}").st_uid != os.getuid():
+                continue
+            with open(f"/proc/{entry}/environ", "rb") as source:
+                if needle.encode() not in source.read().split(b"\0"):
+                    continue
+            with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as source:
+                state = source.read().rsplit(")", 1)[1].split()[0]
+            with open(f"/proc/{entry}/cmdline", "rb") as source:
+                command = source.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError:
+            # A non-dumpable process (one that changed credentials) hides its
+            # environment from its own account, as macOS does for platform
+            # binaries; the output check is what can still see it.
+            continue
+        if not state.startswith("Z"):
+            found.append((int(entry), state, command))
+    return found
+
+
+def remaining_after_kill(marker, timeout=2.0):
+    """Give SIGKILL up to `timeout` seconds to take effect, then return the
+    marked processes still alive, or the error that prevented listing them."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            found = marked_processes(marker)
+            error = None
+        except Exception as listing_error:
+            found, error = [], f"process listing failed: {listing_error}"
+        if (not found and error is None) or time.monotonic() >= deadline:
+            return found, error
+        time.sleep(0.1)
 
 
 def wait_unreaped(pid):
@@ -333,8 +432,46 @@ def managed_run(args, context):
         slot_lock.close()
         raise
 
+    group_lock = threading.RLock()
+    child = None
+    group_alive = True
+    pending_signals = []
+    lease_lost = threading.Event()
+
+    def forward(signum, _frame):
+        with group_lock:
+            if child is None:
+                pending_signals.append(signum)
+            elif group_alive:
+                signal_group(child.pid, signum)
+
+    # Handlers go in before the coordinator records the launch, so a signal
+    # can no longer kill the wrapper between `running` and the command start.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, forward)
+
+    def give_up(reason, detail):
+        cleanup_cgroup(cgroup_path)
+        slot_lock.close()
+        print(f"ptc-operation: {reason}: {detail}", file=sys.stderr)
+        try:
+            broker_request_with_retry(
+                context,
+                {
+                    "operation": "finish",
+                    "operation_id": operation_id,
+                    "attempt_token": attempt_token,
+                    "exit_status": 75,
+                    "peak_memory_bytes": 0,
+                    "last_error": f"{reason}: {detail}"[:500],
+                },
+            )
+        except Exception:
+            pass
+        return 75
+
     try:
-        broker_request_with_retry(
+        acknowledgement = broker_request_with_retry(
             context,
             {
                 "operation": "running",
@@ -345,27 +482,18 @@ def managed_run(args, context):
             },
         )
     except Exception as error:
-        cleanup_cgroup(cgroup_path)
-        slot_lock.close()
-        try:
-            broker_request_with_retry(
-                context,
-                {
-                    "operation": "finish",
-                    "operation_id": operation_id,
-                    "attempt_token": attempt_token,
-                    "exit_status": 75,
-                    "peak_memory_bytes": 0,
-                    "last_error": f"running-state persistence failed: {error}",
-                },
-            )
-        except Exception:
-            pass
-        raise
+        return give_up("the coordinator did not acknowledge the launch", error)
+    if acknowledgement.get("status") != "running" or \
+            acknowledgement.get("operation_id") != operation_id:
+        return give_up("the coordinator did not acknowledge the launch",
+                       json.dumps(acknowledgement, sort_keys=True))
 
+    marker = attempt_marker(operation_id, attempt_token)
+    check_remaining = bool(context.get("check_remaining_processes")) and not cgroup_path
     child_environment = os.environ.copy()
     child_environment["PTC_OPERATION_ACTIVE"] = str(operation_id)
     child_environment["PTC_OPERATION_LABEL"] = args.label
+    child_environment[MARKER_VARIABLE] = marker
     artifact = None
     try:
         artifact = OperationArtifact(context, operation_id, attempt_token)
@@ -373,43 +501,23 @@ def managed_run(args, context):
         print(f"PtcManager artifact capture unavailable: {error}", file=sys.stderr)
         artifact = PassthroughArtifact()
     try:
-        if cgroup_path:
-
-            def child_setup():
-                os.setsid()
-                cgroup_add_process(cgroup_path, os.getpid())
-
-            child = subprocess.Popen(args.command, env=child_environment, preexec_fn=child_setup,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        else:
-            child = subprocess.Popen(args.command, env=child_environment, start_new_session=True,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except Exception as error:
-        cleanup_cgroup(cgroup_path)
-        broker_request_with_retry(
-            context,
-            {
-                "operation": "finish",
-                "operation_id": operation_id,
-                "attempt_token": attempt_token,
-                "exit_status": 75,
-                "peak_memory_bytes": 0,
-                "last_error": f"command start failed: {error}",
-            },
-        )
-        slot_lock.close()
-        raise
-    stop_heartbeat = threading.Event()
-    group_lock = threading.RLock()
-    group_alive = True
-
-    def forward(signum, _frame):
         with group_lock:
-            if group_alive:
-                signal_group(child.pid, signum)
+            if cgroup_path:
 
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, forward)
+                def child_setup():
+                    os.setsid()
+                    cgroup_add_process(cgroup_path, os.getpid())
+
+                child = subprocess.Popen(args.command, env=child_environment, preexec_fn=child_setup,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            else:
+                child = subprocess.Popen(args.command, env=child_environment, start_new_session=True,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for signum in pending_signals:
+                signal_group(child.pid, signum)
+    except Exception as error:
+        return give_up("command start failed", error)
+    stop_heartbeat = threading.Event()
 
     def heartbeat():
         interval = float(os.environ.get("PTC_OPERATION_HEARTBEAT_SECONDS", "5"))
@@ -423,8 +531,17 @@ def managed_run(args, context):
                         "attempt_token": attempt_token,
                     },
                 )
+                if update.get("status") not in LEASED_STATES:
+                    raise LeaseRefused(f"operation is {update.get('status')}")
                 if update.get("cancel_requested"):
                     forward(signal.SIGTERM, None)
+            except LeaseRefused as error:
+                # The slot may already belong to someone else: stop at once.
+                print(f"ptc-operation: the coordinator released this operation ({error}); "
+                      "stopping the command", file=sys.stderr)
+                lease_lost.set()
+                forward(signal.SIGKILL, None)
+                return
             except Exception as error:
                 print(
                     f"PtcManager operation heartbeat failed: {error}", file=sys.stderr
@@ -438,9 +555,16 @@ def managed_run(args, context):
     wait_unreaped(child.pid)
     stop_heartbeat.set()
     # A completed command must not leave descendants holding its pipe writers.
+    # macOS refuses this with EPERM after every command whose group holds only
+    # the unreaped leader; that is not logged, and not trusted either: the
+    # remaining-process check below decides.
     with group_lock:
-        forward(signal.SIGKILL, None)
+        signal_group(child.pid, signal.SIGKILL,
+                     quiet=(PermissionError,) if sys.platform == "darwin" else ())
         group_alive = False
+    remaining, listing_error = [], None
+    if check_remaining and not lease_lost.is_set():
+        remaining, listing_error = remaining_after_kill(marker)
     status = child.wait()
     if cgroup_path:
         try:
@@ -450,30 +574,49 @@ def managed_run(args, context):
     artifact.stopped.set()
     for pump in pumps:
         pump.join()
+    exit_status = status if status >= 0 else 128 + abs(status)
     try:
-        artifact.seal(status if status >= 0 else 128 + abs(status))
+        artifact.seal(exit_status)
     except OSError as error:
         print(f"PtcManager artifact sealing failed: {error}", file=sys.stderr)
-    stop_heartbeat.set()
     thread.join(timeout=1)
+
+    if lease_lost.is_set():
+        cleanup_cgroup(cgroup_path)
+        slot_lock.close()
+        return 75
 
     observed_peak = cgroup_peak(cgroup_path)
     observed_metrics = resource_metrics(cgroup_path)
     cleanup_cgroup(cgroup_path)
 
-    broker_request_with_retry(
-        context,
-        {
-            "operation": "finish",
-            "operation_id": operation_id,
-            "attempt_token": attempt_token,
-            "exit_status": status if status >= 0 else 128 + abs(status),
-            "peak_memory_bytes": observed_peak,
-            "resource_metrics": observed_metrics,
-        },
-    )
+    finish = {
+        "operation": "finish",
+        "operation_id": operation_id,
+        "attempt_token": attempt_token,
+        "exit_status": exit_status,
+        "peak_memory_bytes": observed_peak,
+        "resource_metrics": observed_metrics,
+    }
+    if check_remaining and (remaining or listing_error or artifact.output_held):
+        detail = listing_error or (
+            "a process outside the command's group still holds its output"
+            if artifact.output_held and not remaining else None)
+        finish.update(processes_remaining=True, remaining_detail=detail,
+                      remaining_processes=[
+                          {"pid": pid, "stat": stat[:16], "command": command[:300]}
+                          for pid, stat, command in remaining[:REMAINING_LIMIT]])
+        print("ptc-operation: processes started by this command are still running; "
+              "PtcManager keeps its operation slot until a maintainer releases it",
+              file=sys.stderr)
+    try:
+        broker_request_with_retry(context, finish)
+    except LeaseRefused as error:
+        print(f"ptc-operation: the coordinator refused the result ({error})", file=sys.stderr)
+        slot_lock.close()
+        return 75
     slot_lock.close()
-    return status if status >= 0 else 128 + abs(status)
+    return exit_status
 
 
 def stream_chunks(source, stopped=None):
@@ -493,6 +636,8 @@ def stream_chunks(source, stopped=None):
 
 class OperationArtifact:
     """Continuously tees separate child streams into an attempt-scoped durable directory."""
+    output_held = False
+
     def __init__(self, context, operation_id, attempt_token):
         root = context.get("artifact_root")
         if not root:
@@ -543,6 +688,7 @@ class OperationArtifact:
                         target = None
         except TimeoutError as error:
             state, detail = "partial", str(error)
+            self.output_held = True
         finally:
             source.close()
             if target is not None:
@@ -581,6 +727,8 @@ class OperationArtifact:
 
 class PassthroughArtifact:
     """Drain and forward streams even when durable capture cannot start."""
+    output_held = False
+
     def start(self, child):
         self.stopped = threading.Event()
         threads = []
@@ -596,6 +744,7 @@ class PassthroughArtifact:
                 live.write(data)
                 live.flush()
         except TimeoutError as error:
+            self.output_held = True
             print(f"PtcManager output forwarding incomplete: {error}", file=sys.stderr)
         finally:
             source.close()

@@ -458,6 +458,25 @@ child process tree stopped. The production default requires the versioned Herdr
 unit, launcher, and sourceable agent-context helper installed by deployment. It
 is never enabled by default on the Mac.
 
+The wrapper starts a command only after the coordinator acknowledges that exact
+operation as running. Its signal handlers are installed first, so an interrupt
+that arrives before the command exists is delivered to it once it starts; a
+failed signal is logged and never taken as proof that the command stopped. If
+a later heartbeat is refused because the attempt is stale or no longer leased,
+the wrapper kills its command and exits 75 without reporting a result. Every
+command's environment carries `PTC_OPERATION_ATTEMPT=<operation>-<attempt>`.
+
+On a macOS host and in development, where there are no cgroups, the wrapper
+checks for leftovers after the command's group has been killed: processes of
+the same account whose environment still carries the attempt marker, and any
+process still holding the command's output. If it finds one, or cannot list
+processes, it reports them and the operation keeps its slot fenced instead of
+completing. Linux releases do not run this check. Detection is best effort: a
+descendant that escapes the process group, does not hold the command's output,
+and either clears its environment or hides it (macOS hides the environment of
+Apple platform binaries such as `/bin/sh` or `/bin/sleep`, Linux that of
+non-dumpable processes) is not detected, and its command finishes normally.
+
 SQLite permits one writer. High-frequency Herdr and maintainer-action work is
 phase-shifted, and only one housekeeping poller runs shared action expiry and
 cleanup work. Queries that spend at least one second waiting, and transactions

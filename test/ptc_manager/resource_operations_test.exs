@@ -198,6 +198,55 @@ defmodule PtcManager.ResourceOperationsTest do
     assert finished.last_error =~ "recovery"
   end
 
+  test "a finish with processes remaining keeps the slot fenced" do
+    set_operation_capacity(1)
+    context = managed_run_fixture()
+    base = ~U[2026-09-01 12:00:00.000000Z]
+
+    {:ok, _first} = ResourceOperations.request(operation_attrs(context, "survivor"), base)
+    {:ok, _second} = ResourceOperations.request(operation_attrs(context, "waiting"), base)
+    {:ok, first} = ResourceOperations.claim_next(context.worker.id, base)
+    {:ok, first} = ResourceOperations.mark_running(first.id, first.attempt_token, %{}, base)
+
+    assert {:ok, fenced} =
+             ResourceOperations.finish(
+               first.id,
+               first.attempt_token,
+               %{
+                 exit_status: 0,
+                 processes_remaining: true,
+                 remaining_processes: [
+                   %{"pid" => 4321, "stat" => "S", "command" => "mix phx.server"}
+                 ],
+                 remaining_detail: nil
+               },
+               DateTime.add(base, 5, :second)
+             )
+
+    assert fenced.state == "recovery_pending"
+    assert fenced.slot_number == 1
+    assert fenced.exit_status == 0
+    assert is_nil(fenced.finished_at)
+    assert fenced.last_error =~ "still running"
+    assert fenced.last_error =~ "pid 4321 (S) mix phx.server"
+
+    assert %{"processes" => [%{"pid" => 4321, "command" => "mix phx.server"}]} =
+             fenced.remaining_processes
+
+    assert {:ok, :empty} = ResourceOperations.claim_next(context.worker.id)
+
+    # A heartbeat the wrapper sent before finishing must not lift the fence.
+    assert {:ok, still_fenced} =
+             ResourceOperations.heartbeat(
+               first.id,
+               first.attempt_token,
+               DateTime.add(base, 6, :second)
+             )
+
+    assert still_fenced.state == "recovery_pending"
+    assert {:ok, :empty} = ResourceOperations.claim_next(context.worker.id)
+  end
+
   test "recovery without cgroup containment keeps the slot fenced for a retry" do
     assert {:retry, :operation_recovery_requires_cgroup_containment} =
              ResourceOperationRecovery.recover(%ResourceOperation{wrapper_pid: 999_999})

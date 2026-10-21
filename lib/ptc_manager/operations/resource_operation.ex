@@ -27,6 +27,7 @@ defmodule PtcManager.Operations.ResourceOperation do
     field :resource_metrics, :map
     field :cancellation_reason, :string
     field :last_error, :string
+    field :remaining_processes, :map
 
     belongs_to :worker, PtcManager.Operations.Worker
     belongs_to :repository, PtcManager.Operations.Repository
@@ -64,7 +65,8 @@ defmodule PtcManager.Operations.ResourceOperation do
       :peak_memory_bytes,
       :resource_metrics,
       :cancellation_reason,
-      :last_error
+      :last_error,
+      :remaining_processes
     ])
     |> validate_required([
       :worker_id,

@@ -71,6 +71,8 @@ defmodule PtcManager.ManagedOperationContext do
         "artifact_max_bytes" =>
           Application.get_env(:ptc_manager, :execution_artifact_max_bytes, 256_000_000),
         "cgroups" => Application.get_env(:ptc_manager, :resource_operation_cgroups, false),
+        "check_remaining_processes" =>
+          Application.get_env(:ptc_manager, :resource_operation_check_remaining_processes, false),
         "operation_memory_high_bytes" =>
           Application.get_env(:ptc_manager, :operation_memory_high_bytes, 2_147_483_648),
         "verify_operation_memory_high_bytes" =>

@@ -280,6 +280,9 @@ config :ptc_manager,
     ),
   resource_operation_cgroups:
     env_default.("PTC_OPERATION_CGROUPS", operation_cgroups_default) == "true",
+  # Linux releases keep finishing as they always have; development and macOS
+  # hosts (below) fence an operation whose command leaves processes behind.
+  resource_operation_check_remaining_processes: config_env() != :prod,
   resource_operation_agent_context:
     env_default.(
       "PTC_OPERATION_AGENT_CONTEXT",
@@ -600,6 +603,8 @@ if config_env() == :prod and :os.type() == {:unix, :darwin} do
         System.get_env("PTC_EXECUTION_ARTIFACT_ROOT") ||
           Path.join(root, "data/execution-artifacts"),
       worker_agent_login_helper: Path.join(root, "bin/ptc-manager-worker-agent-login"),
-      verify_agent_login: true
+      verify_agent_login: true,
+      # Without cgroups a wrapper reports processes that outlive its command.
+      resource_operation_check_remaining_processes: true
   end
 end

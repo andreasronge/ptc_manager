@@ -109,9 +109,18 @@ defmodule PtcManager.ResourceOperations do
   def heartbeat(id, attempt_token, at \\ now()) do
     transition(id, attempt_token, @leased_states, fn operation ->
       attrs =
-        if operation.state == "recovery_pending",
-          do: %{state: "running", last_heartbeat_at: at, last_error: nil},
-          else: %{last_heartbeat_at: at}
+        cond do
+          # The wrapper already reported its exit with processes remaining;
+          # a heartbeat still in flight must not lift that fence.
+          operation.state == "recovery_pending" and not is_nil(operation.exit_status) ->
+            %{}
+
+          operation.state == "recovery_pending" ->
+            %{state: "running", last_heartbeat_at: at, last_error: nil}
+
+          true ->
+            %{last_heartbeat_at: at}
+        end
 
       ResourceOperation.changeset(operation, attrs)
     end)
@@ -236,7 +245,30 @@ defmodule PtcManager.ResourceOperations do
     )
   end
 
-  def finish(id, attempt_token, attrs \\ %{}, at \\ now()) do
+  def finish(id, attempt_token, attrs \\ %{}, at \\ now())
+
+  # The command exited, but its wrapper found processes it started still
+  # running. Nothing proves the slot is free, so it stays leased and fenced.
+  def finish(id, attempt_token, %{processes_remaining: true} = attrs, at) do
+    transition(id, attempt_token, @leased_states, fn operation ->
+      ResourceOperation.changeset(operation, %{
+        state: "recovery_pending",
+        exit_status: Map.get(attrs, :exit_status),
+        peak_memory_bytes: Map.get(attrs, :peak_memory_bytes),
+        resource_metrics: Map.get(attrs, :resource_metrics),
+        last_error: remaining_error(attrs),
+        remaining_processes: %{
+          "processes" => Map.get(attrs, :remaining_processes, []),
+          "detail" => Map.get(attrs, :remaining_detail),
+          "reported_at" => DateTime.to_iso8601(at)
+        },
+        last_heartbeat_at: at,
+        run_duration_ms: duration_ms(operation.started_at || at, at)
+      })
+    end)
+  end
+
+  def finish(id, attempt_token, attrs, at) do
     transition(
       id,
       attempt_token,
@@ -279,6 +311,25 @@ defmodule PtcManager.ResourceOperations do
 
   defp finish_error(_operation, attrs, _exit_status),
     do: Map.get(attrs, :last_error, Map.get(attrs, "last_error"))
+
+  @doc "The prefix of `last_error` for an operation that exited with processes remaining."
+  def remaining_prefix, do: "The command exited but processes it started are still running"
+
+  defp remaining_error(attrs) do
+    processes =
+      attrs
+      |> Map.get(:remaining_processes, [])
+      |> Enum.map_join("; ", fn process ->
+        "pid #{process["pid"]} (#{process["stat"]}) #{process["command"]}"
+      end)
+
+    detail = Map.get(attrs, :remaining_detail)
+
+    [remaining_prefix(), detail, processes]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(": ")
+    |> String.slice(0, 1_000)
+  end
 
   def cancel(id, reason, at \\ now()) do
     result =

@@ -180,6 +180,82 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     File.rm_rf!(directory)
   end
 
+  test "the broker validates and forwards processes that outlived the command" do
+    context = managed_run_fixture()
+
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ptc-operation-remaining-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    {:ok, issued} =
+      ManagedOperationContext.issue(
+        %{
+          owner_type: "job",
+          owner_id: context.job.id,
+          repository_id: context.repository.id,
+          worker_id: context.worker.id,
+          pane_id: "pane-operation-test",
+          fencing_token: 4
+        },
+        directory: directory
+      )
+
+    common = %{"token" => issued.token, "context_id" => issued.payload["context_id"]}
+    dispatch = &ResourceOperationBroker.dispatch(Map.merge(common, &1))
+
+    requested =
+      dispatch.(%{"operation" => "request", "invocation_id" => "remaining", "label" => "test"})
+
+    acquired = dispatch.(%{"operation" => "acquire", "operation_id" => requested["operation_id"]})
+
+    lease = %{
+      "operation_id" => requested["operation_id"],
+      "attempt_token" => acquired["attempt_token"]
+    }
+
+    assert %{"status" => "running"} =
+             dispatch.(Map.merge(lease, %{"operation" => "running", "wrapper_pid" => 4321}))
+
+    finish = Map.merge(lease, %{"operation" => "finish", "exit_status" => 0})
+
+    for invalid <- [
+          %{"processes_remaining" => "yes"},
+          %{"processes_remaining" => true, "remaining_processes" => [%{"pid" => -1}]},
+          %{"processes_remaining" => true, "remaining_processes" => List.duplicate(%{}, 21)},
+          %{"processes_remaining" => true, "remaining_detail" => 7}
+        ] do
+      assert %{"status" => "error", "error" => ":invalid_remaining_processes"} =
+               dispatch.(Map.merge(finish, invalid))
+    end
+
+    assert Repo.get!(ResourceOperation, requested["operation_id"]).state == "running"
+
+    assert %{"status" => "recovery_pending"} =
+             dispatch.(
+               Map.merge(finish, %{
+                 "processes_remaining" => true,
+                 "remaining_processes" => [
+                   %{"pid" => 9876, "stat" => "S", "command" => "node server.js", "env" => "x"},
+                   # Python bounds by characters; multibyte text must not be refused.
+                   %{"pid" => 9877, "stat" => "S", "command" => String.duplicate("é", 300)}
+                 ]
+               })
+             )
+
+    operation = Repo.get!(ResourceOperation, requested["operation_id"])
+    assert operation.slot_number == 1
+    assert operation.last_error =~ "pid 9876 (S) node server.js"
+
+    assert [%{"pid" => 9876} = reported, %{"pid" => 9877}] =
+             operation.remaining_processes["processes"]
+
+    refute Map.has_key?(reported, "env")
+  end
+
   test "Linux containment is explicit in the pane command only when enabled" do
     previous = Application.get_env(:ptc_manager, :resource_operation_cgroups)
     Application.put_env(:ptc_manager, :resource_operation_cgroups, true)
