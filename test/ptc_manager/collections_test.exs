@@ -415,6 +415,31 @@ defmodule PtcManager.CollectionsTest do
                  | github_assignees: %{"logins" => ["console-bot", "x"]}
                })
     end
+
+    # tyraorg/api#205 kept showing :worktree_capacity, recorded while another
+    # member held the only slot, after its run paused and dispatch skipped it.
+    test "a member held by a paused run says so instead of its last dispatch error" do
+      repository = repository_fixture()
+      {umbrella, [member]} = collection_fixture(repository, [1])
+      run = start!(umbrella)
+      assert :ok = Collections.reconcile(repository.id)
+      job = job_for(member)
+
+      assert Operations.record_dispatch_error(job.id, :worktree_capacity) == 1
+      {:ok, _paused} = Collections.pause(run.id, "andreas")
+
+      assert {:ok, :empty} = PtcManager.Dispatch.run_once()
+      held = Repo.reload!(job)
+      assert held.dispatch_blocked_reason == "collection_paused"
+      assert Operations.dispatch_blocked_words(held) =~ "collection run is paused"
+
+      later = DateTime.add(DateTime.utc_now(), PtcManager.Stalls.queue_wait_ms() + 1_000)
+      assert PtcManager.Stalls.machine_incapable(later) == []
+
+      {:ok, _resumed} = Collections.resume(run.id, "andreas")
+      assert Operations.record_dispatch_held([]) == 1
+      assert is_nil(Repo.reload!(job).dispatch_blocked_reason)
+    end
   end
 
   describe "handoff and merge" do

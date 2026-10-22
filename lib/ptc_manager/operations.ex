@@ -2350,6 +2350,7 @@ defmodule PtcManager.Operations do
   end
 
   @gate_reasons ~w(host_not_ready machine_incapable cluster_fenced)
+  @held_reason "collection_paused"
 
   @doc """
   Records why queued jobs of gate-blocked repositories wait, given
@@ -2389,6 +2390,36 @@ defmodule PtcManager.Operations do
   end
 
   @doc """
+  Records that queued members of a paused collection run wait on that run,
+  and clears the reason once a job is no longer held. Dispatch never picks a
+  held job, so an earlier pre-lease error would otherwise stay on it. Jobs of
+  `excluded_repository_ids` keep their gate reason. Returns the number changed.
+  """
+  def record_dispatch_held(excluded_repository_ids, now \\ utc_now())
+      when is_list(excluded_repository_ids) do
+    held = PtcManager.Collections.held_job_ids()
+
+    {marked, _rows} =
+      Job
+      |> where([job], job.id in subquery(held))
+      |> where([job], job.repository_id not in ^excluded_repository_ids)
+      |> where(
+        [job],
+        is_nil(job.dispatch_blocked_reason) or job.dispatch_blocked_reason != @held_reason
+      )
+      |> Repo.update_all(set: [dispatch_blocked_reason: @held_reason, dispatch_blocked_at: now])
+
+    {cleared, _rows} =
+      Job
+      |> where([job], job.state == "queued" and job.dispatch_blocked_reason == @held_reason)
+      |> where([job], job.id not in subquery(held))
+      |> Repo.update_all(set: [dispatch_blocked_reason: nil, dispatch_blocked_at: nil])
+
+    if marked + cleared > 0, do: notify_changed(__MODULE__)
+    marked + cleared
+  end
+
+  @doc """
   Records the error that stopped dispatch before it leased this job. A job
   that was leased meanwhile is left alone: its errors are its `last_error`.
   """
@@ -2413,6 +2444,9 @@ defmodule PtcManager.Operations do
 
   def dispatch_blocked_words(%Job{dispatch_blocked_reason: reason}) when reason in @gate_reasons,
     do: rejection_words(String.to_existing_atom(reason))
+
+  def dispatch_blocked_words(%Job{dispatch_blocked_reason: @held_reason}),
+    do: "Held: its collection run is paused; resuming the run releases it."
 
   def dispatch_blocked_words(%Job{dispatch_blocked_reason: reason}),
     do: "Dispatch stopped before leasing it: #{reason}"

@@ -23,10 +23,12 @@ defmodule PtcManager.Dispatch do
       Clock.utc_now(PtcManager.Clock.System)
     )
 
-    # Queued jobs of a gate-blocked repository are never picked; they carry
-    # the gate's reason instead, so the queue says why they wait.
+    # Queued jobs of a gate-blocked repository, or of a paused collection run,
+    # are never picked; they carry that reason instead, so the queue says why
+    # they wait.
     blocked = PtcManager.Machine.Gate.blocked_reasons()
     _ = Operations.record_dispatch_blocked(blocked)
+    _ = Operations.record_dispatch_held(Map.keys(blocked))
 
     case Operations.next_queued_job(Map.keys(blocked)) do
       nil ->

@@ -374,6 +374,8 @@ defmodule PtcManager.Stalls do
   Work for a repository whose requirements this machine does not satisfy, queued
   for longer than `queue_wait_ms/0`. It waits by design (a missing tool must not
   spend a retry), so it needs a person: install the tool or move the repository.
+  A member held by a paused collection run is not reported here; the run's
+  card already shows its pause.
   """
   def machine_incapable(now) do
     waiting_before = DateTime.add(now, -queue_wait_ms(), :millisecond)
@@ -397,6 +399,7 @@ defmodule PtcManager.Stalls do
               from job in Job,
                 where:
                   job.state == "queued" and not is_nil(job.dispatch_blocked_reason) and
+                    job.dispatch_blocked_reason != "collection_paused" and
                     job.dispatch_blocked_at <= ^waiting_before,
                 preload: [:issue]
             ),
