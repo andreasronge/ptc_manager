@@ -396,9 +396,12 @@ are not automatically reversed; the pre-deployment backup remains available.
 The worker only deploys `andreasronge/ptc_manager` from `PTC_MACOS_SOURCE`.
 
 With no `PTC_HERDR_RUN_AS_USER`, model discovery and independent reviews execute
-as the local service account with a scrubbed child environment. The macOS
-review helper resolves `codex`, `claude`, and `cursor-agent` on that account's
-`PATH`. Execution profiles → Refresh models queries the actual installed CLIs:
+as the local service account with a scrubbed child environment. A Herdr pane
+is an interactive login shell, whose profile (for example `brew shellenv`)
+rebuilds `PATH`, so the macOS review helper asks that account's login shell for
+its `PATH` and resolves `codex`, `claude`, and `cursor-agent` there, not on the
+service's own `PATH`. A reviewer therefore runs the same CLI as the implementer
+it reviews; if the login shell does not answer, the review fails. Execution profiles → Refresh models queries the actual installed CLIs:
 Codex and Cursor return account catalogs; Claude returns its SDK initialization
 catalog without starting a model turn. Claude aliases do not prove account
 access. Sign in as the service account, then refresh; unavailable catalogs do

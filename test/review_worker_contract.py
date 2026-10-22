@@ -8,25 +8,92 @@ import runpy
 import sys
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-helper = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
+# Loaded as on Linux, so the suite neither reads this account's login profile
+# nor needs agent CLIs installed; the macOS resolution is tested on its own.
+with patch('sys.platform', 'linux'):
+    helper = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
 review = helper['review']
 regenerated_patch = helper['regenerated_patch']
 context = review.__globals__
 
 
 class ReviewerContract(unittest.TestCase):
+    def login_shell(self, body):
+        """A stand-in for the account's shell: drops `-i -l`, runs `body`, then the helper's script."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', directory]))
+        shell = Path(directory) / 'shell'
+        shell.write_text('#!/bin/sh\nshift 2\n' + body + '\n')
+        shell.chmod(0o755)
+        return patch('pwd.getpwuid', return_value=type('Entry', (), {'pw_shell': str(shell)}))
+
+    def load_on_macos(self, shell):
+        with patch('sys.platform', 'darwin'), shell, patch('sys.stderr', new_callable=io.StringIO), \
+                patch.dict(os.environ, {'PATH': '/service/tools/bin:/usr/bin:/bin'}):
+            local = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
+            return local, os.environ['PATH']
+
     def test_macos_catalog_uses_installed_agent_paths(self):
         paths = {'codex': '/opt/homebrew/bin/codex',
                  'claude': '/opt/homebrew/bin/claude',
                  'cursor-agent': '/Users/worker/.local/bin/cursor-agent'}
-        with patch('sys.platform', 'darwin'), patch('shutil.which', side_effect=paths.get):
-            local = runpy.run_path(str(ROOT / 'deploy/ptc-manager-worker-review'))
+        # Profile noise before the record and logout noise after it are ignored.
+        shell = self.login_shell('echo motd\nPATH=/opt/homebrew/bin:/usr/bin:/bin /bin/sh "$@"\necho logout')
+        with patch('shutil.which', side_effect=lambda name, path=None: paths.get(name)) as which:
+            local, child_path = self.load_on_macos(shell)
         self.assertEqual(local['BINARIES'], {'codex': paths['codex'],
                          'claude': paths['claude'], 'cursor': paths['cursor-agent']})
+        # Herdr panes are login shells, so a reviewer resolves the CLI an
+        # implementer runs, not whatever the service PATH names first.
+        self.assertEqual({call.kwargs['path'] for call in which.call_args_list},
+                         {'/opt/homebrew/bin:/usr/bin:/bin'})
+        self.assertEqual(child_path, '/opt/homebrew/bin:/usr/bin:/bin')
+
+    def test_macos_without_a_login_path_resolves_no_agent_cli(self):
+        for body in ('echo /opt/homebrew/bin', 'exit 1', '/bin/sh "$@"; /bin/sh "$@"',
+                     'PATH=:/usr/bin:/bin /bin/sh "$@"', 'PATH=/usr/bin::/bin /bin/sh "$@"'):
+            with self.subTest(body=body), patch('shutil.which', return_value='/usr/local/bin/codex'):
+                local, child_path = self.load_on_macos(self.login_shell(body))
+                self.assertEqual(set(local['BINARIES'].values()), {None})
+                self.assertEqual(child_path, '/service/tools/bin:/usr/bin:/bin')
+                with self.assertRaisesRegex(RuntimeError, 'agent_cli_unresolved: codex'):
+                    local['agent_binary']('codex')
+
+    def test_a_hanging_login_shell_is_stopped_with_what_it_started(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', directory]))
+        marker = Path(directory) / 'child.pid'
+        shell = self.login_shell(f'sleep 30 &\necho $! > {marker}\nwait')
+        with shell, patch.dict(context, LOGIN_SHELL_TIMEOUT=0.5), patch('sys.stderr', new_callable=io.StringIO):
+            self.assertIsNone(context['login_path']())
+        child = int(marker.read_text())
+        for _ in range(50):
+            if subprocess.run(['kill', '-0', str(child)], capture_output=True).returncode:
+                break
+            subprocess.run(['sleep', '0.05'])
+        else:
+            self.fail('the login shell left its child running')
+
+    def test_a_descendant_holding_output_open_does_not_hold_the_helper(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', directory]))
+        marker = Path(directory) / 'escaped.pid'
+        escape = f"import os, time; os.setsid(); open('{marker}', 'w').write(str(os.getpid())); time.sleep(30)"
+        shell = self.login_shell(f'/usr/bin/python3 -c "{escape}" &\n/bin/sh "$@"')
+        started = time.monotonic()
+        with shell, patch.dict(context, LOGIN_SHELL_TIMEOUT=0.5), patch('sys.stderr', new_callable=io.StringIO):
+            self.assertIsNone(context['login_path']())
+        self.assertLess(time.monotonic() - started, 5)
+        for _ in range(50):
+            if marker.exists() and marker.read_text():
+                break
+            time.sleep(0.05)
+        subprocess.run(['kill', '-9', marker.read_text()], capture_output=True)
 
     def test_capture_initialization_failure_does_not_change_command_result(self):
         with tempfile.TemporaryDirectory() as root:

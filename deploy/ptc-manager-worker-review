@@ -1,8 +1,10 @@
 #!/usr/bin/python3 -I
-"""Bounded independent reviewer and account-catalog bridge. No shell commands."""
+"""Bounded independent reviewer and account-catalog bridge. On macOS it starts one login
+shell to read the PATH a Herdr pane gets; it runs no other shell commands."""
 import hashlib
 import json
 import os
+import pwd
 import re
 import selectors
 import signal
@@ -17,9 +19,66 @@ import shutil
 import fcntl
 
 BINARIES = {"codex": "/usr/local/bin/codex", "claude": "/usr/local/bin/claude", "cursor": "/usr/local/bin/cursor-agent"}
+LOGIN_PATH_RECORD = re.compile(r"__PTC_LOGIN_PATH_BEGIN__([^\n\0]*)__PTC_LOGIN_PATH_END__")
+LOGIN_SHELL_TIMEOUT = 15
+
+
+def login_path():
+    """The PATH an interactive login shell of this account builds, as in a Herdr pane."""
+    shell = pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
+    script = 'printf "\\n__PTC_LOGIN_PATH_BEGIN__%s__PTC_LOGIN_PATH_END__\\n" "$PATH"'
+    try:
+        process = subprocess.Popen([shell, "-i", "-l", "-c", script], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                   start_new_session=True)
+    except OSError as error:
+        print(f"login shell PATH unavailable: {error}", file=sys.stderr)
+        return None
+    try:
+        stdout, _ = process.communicate(timeout=LOGIN_SHELL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        stdout = ""
+    finally:
+        # A profile may leave a child behind; the session's group goes with it.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        # macOS refuses a group whose only member is the exited shell.
+        except (ProcessLookupError, PermissionError):
+            pass
+        # A descendant in another session can still hold stdout open.
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.stdout.close()
+            process.wait()
+    records = LOGIN_PATH_RECORD.findall(stdout)
+    entries = records[0].split(":") if len(records) == 1 else []
+    # An empty entry means the working directory, which for a review is the
+    # repository under review, so every entry must be absolute.
+    if process.returncode or not entries or not all(entry.startswith("/") for entry in entries):
+        print(f"login shell PATH unavailable: exit {process.returncode}, {len(records)} record(s)",
+              file=sys.stderr)
+        return None
+    return records[0]
+
+
+# On macOS an implementer runs in a Herdr pane, an interactive login shell whose
+# profile rebuilds PATH. Resolving on the service's own PATH instead ran a stale
+# Codex for reviews that rejected the implementer's model. Without a login PATH
+# no CLI is resolved, so a review fails rather than guessing.
 if sys.platform == "darwin":
-    BINARIES = {kind: shutil.which(name) or path for (kind, path), name in
-                zip(BINARIES.items(), ("codex", "claude", "cursor-agent"))}
+    PANE_PATH = login_path()
+    if PANE_PATH:
+        os.environ["PATH"] = PANE_PATH
+    BINARIES = {kind: PANE_PATH and shutil.which(name, path=PANE_PATH)
+                for kind, name in zip(BINARIES, ("codex", "claude", "cursor-agent"))}
+
+
+def agent_binary(kind):
+    binary = BINARIES[kind]
+    if not binary:
+        raise RuntimeError(f"agent_cli_unresolved: {kind}")
+    return binary
 
 
 class CodexSessionEvents:
@@ -199,12 +258,12 @@ def run(command, prompt=None, cwd=None, timeout=900, max_output=1_000_000, sessi
 
 def catalog(kind):
     if kind == "codex":
-        data = json.loads(run([BINARIES[kind], "debug", "models"], timeout=30))
+        data = json.loads(run([agent_binary(kind), "debug", "models"], timeout=30))
         return {"kind": kind, "source": "account", "models": [
             {"id": m["slug"], "name": m.get("display_name", m["slug"])}
             for m in data["models"] if m.get("visibility") == "list"]}
     if kind == "cursor":
-        output = run([BINARIES[kind], "models"], timeout=30)
+        output = run([agent_binary(kind), "models"], timeout=30)
         models = [{"id": m[1], "name": m[2]} for line in output.splitlines()
                   if (m := re.match(r"^([a-zA-Z0-9._-]+) - (.+)$", line))]
         if not models:
@@ -216,7 +275,7 @@ def catalog(kind):
     request = {"type": "control_request", "request_id": request_id,
                "request": {"subtype": "initialize"}}
     with tempfile.TemporaryDirectory(prefix="ptc-models-") as directory:
-        output = run([BINARIES[kind], "--print", "--input-format", "stream-json",
+        output = run([agent_binary(kind), "--print", "--input-format", "stream-json",
                       "--output-format", "stream-json", "--verbose",
                       "--no-session-persistence", "--tools", "",
                       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
@@ -369,7 +428,7 @@ def run_review(request, remaining=None):
         if timeout <= 0:
             raise RuntimeError("review_timeout")
         if kind == "codex":
-            args = [BINARIES[kind], "exec", "--sandbox", "read-only", "-C", repository_path]
+            args = [agent_binary(kind), "exec", "--sandbox", "read-only", "-C", repository_path]
             if session_id:
                 args += ["resume", session_id]
             args += ["--skip-git-repo-check", "--json", "--model", model, "--output-schema", schema_path, "-o", result_path]
@@ -388,7 +447,7 @@ def run_review(request, remaining=None):
             envelope["usage"] = started[0].get("usage")
             return envelope
         if kind == "claude":
-            args = [BINARIES[kind], "--print", "--restricted", "--tools", "Read,Glob,Grep",
+            args = [agent_binary(kind), "--print", "--restricted", "--tools", "Read,Glob,Grep",
                     "--allowedTools", "Read,Glob,Grep",
                     "--model", model, "--output-format", "json", "--json-schema", json.dumps(request["schema"])]
             if session_id:
@@ -400,7 +459,7 @@ def run_review(request, remaining=None):
                                       artifact_max_bytes=request.get("artifact_max_bytes", 256_000_000),
                                       artifact_root=request.get("artifact_root")))
             return review_envelope(envelope["structured_output"], envelope.get("session_id"), session_id)
-        args = [BINARIES[kind], "--print", "--mode", "ask", "--model", model,
+        args = [agent_binary(kind), "--print", "--mode", "ask", "--model", model,
                 "--workspace", repository_path, "--output-format", "json"]
         if session_id:
             args += ["--resume", session_id]
