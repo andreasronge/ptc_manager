@@ -10,6 +10,8 @@ defmodule PtcManager.MaintainerActions.Sync do
   alias PtcManager.Repository.GitProbe
   alias PtcManager.Toolchain.PinBump
 
+  require PrPublication
+
   def sync_action(%{target_type: "issue", target_id: issue_id}) do
     issue = Issue |> Repo.get!(issue_id) |> Repo.preload(:repository)
     GitHubSync.sync_issue(issue.repository, issue.number)
@@ -144,9 +146,16 @@ defmodule PtcManager.MaintainerActions.Sync do
     end
   end
 
-  defp reconcile_repair_status(_action, publication, result, :preflight) do
+  defp reconcile_repair_status(action, publication, result, :preflight) do
     case Publications.record_remote_status(publication.id, result) do
       {:ok, %{state: "published", pr_state: "open"}} ->
+        {:ok, %{pull_request: result}}
+
+      # Only a repair clears a head PtcManager never verified. A collection
+      # merge is authorized for one verified head and never repairs.
+      {:ok, %PrPublication{pr_state: "open"} = current}
+      when PrPublication.unverified_head?(current) and
+             action.action_key in ["repair_pr", "repair_and_merge_pr"] ->
         {:ok, %{pull_request: result}}
 
       {:ok, _publication} ->

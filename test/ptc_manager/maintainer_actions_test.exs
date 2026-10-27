@@ -1597,6 +1597,36 @@ defmodule PtcManager.MaintainerActionsTest do
     assert_receive {:repair_postflight, {:ok, %{"outcome" => "repaired"}}}
   end
 
+  test "a repair queued on an unverified head passes preflight and runs" do
+    previous_client = Application.get_env(:ptc_manager, :pull_request_client)
+    Application.put_env(:ptc_manager, :pull_request_client, RepairClient)
+    on_exit(fn -> Application.put_env(:ptc_manager, :pull_request_client, previous_client) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    unverified =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{head_sha: String.duplicate("e", 40), mergeability: "conflicting"})
+
+    assert {:ok, %{state: "blocked"}} =
+             PtcManager.Publications.record_remote_status(publication.id, unverified)
+
+    assert Repo.get!(PtcManager.Operations.Job, publication.job_id).state == "publish_blocked"
+
+    Process.put(:repair_status, unverified)
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    assert {:ok, _action} = MaintainerActions.run_once(adapter: RepairAdapter, sync: Sync)
+    assert_receive {:ran_agent_action, %{id: action_id}}
+    assert action_id == queued.id
+  end
+
   test "a collection merge merges only its authorized head and never repairs" do
     repository = repository_fixture()
     issue = issue_fixture(repository)

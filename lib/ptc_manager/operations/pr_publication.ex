@@ -6,6 +6,7 @@ defmodule PtcManager.Operations.PrPublication do
   alias PtcManager.GitHub.LinkedIssues
 
   @states ~w(queued publishing published blocked)
+  @unverified_head_error "GitHub reports a different pull-request head commit."
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   schema "pr_publications" do
@@ -158,6 +159,21 @@ defmodule PtcManager.Operations.PrPublication do
 
   def external?(%__MODULE__{source: "external", job_id: nil}), do: true
   def external?(%__MODULE__{}), do: false
+
+  @doc "Why a publication is blocked when GitHub reports a head PtcManager never verified."
+  def unverified_head_error, do: @unverified_head_error
+
+  @doc """
+  True for a publication blocked on a head PtcManager never verified. Only a
+  repair action clears it, so the repair actions accept it like a published one.
+  """
+  defguard unverified_head?(publication)
+           when publication.state == "blocked" and
+                  publication.last_error == @unverified_head_error
+
+  @doc "True for a publication a repair action may target."
+  defguard repairable?(publication)
+           when publication.state == "published" or unverified_head?(publication)
 
   @doc """
   The repository this pull request belongs to, from whichever side carries it.

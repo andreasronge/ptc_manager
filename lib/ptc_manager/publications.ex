@@ -23,6 +23,8 @@ defmodule PtcManager.Publications do
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
 
+  require PrPublication
+
   @agent_reconciliation_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
   @external_missing_marker "GitHub open-PR listing omitted this PR once; waiting for confirmation."
   @external_adoption_deferred "The matching pull request has an active external action. Adoption will retry after that action finishes."
@@ -968,7 +970,7 @@ defmodule PtcManager.Publications do
                 # head: the first poll announces it and parks the job and worktree,
                 # later polls only keep checks and mergeability current.
                 result.state == "open" and result.head_sha != publication.remote_head_sha ->
-                  message = "GitHub reports a different pull-request head commit."
+                  message = PrPublication.unverified_head_error()
 
                   announced? =
                     publication.state == "blocked" and
@@ -1797,10 +1799,8 @@ defmodule PtcManager.Publications do
 
   defp repair_lineage_open?(%{state: "published"}, %{state: "pr_open"}), do: true
 
-  defp repair_lineage_open?(
-         %{state: "blocked", last_error: "GitHub reports a different pull-request head commit."},
-         %{state: "publish_blocked"}
-       ),
+  defp repair_lineage_open?(%PrPublication{} = publication, %{state: "publish_blocked"})
+       when PrPublication.unverified_head?(publication),
        do: true
 
   defp repair_lineage_open?(_publication, _job), do: false

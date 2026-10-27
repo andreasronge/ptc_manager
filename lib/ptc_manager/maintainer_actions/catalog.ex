@@ -7,10 +7,9 @@ defmodule PtcManager.MaintainerActions.Catalog do
   alias PtcManager.Automations.Defaults
   alias PtcManager.Dispatch.HerdrAdapter, as: ImplementationAdapter
 
-  @prompt_version 1
+  require PrPublication
 
-  # The one blocked reason the repair actions may clear; see pull_request_actions/1.
-  @unverified_head "GitHub reports a different pull-request head commit."
+  @prompt_version 1
 
   # The only outcomes a blocker report may return. Marking an issue ready or
   # closing it are decisions the maintainer did not make, and this action's
@@ -163,10 +162,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
   # are what resolve it. Offering nothing here strands the pull request: the
   # state is the one `Publications.repair_lineage_open?/2` already accepts for
   # repair verification. Any other blocked reason still offers nothing.
-  def pull_request_actions(
-        %PrPublication{state: "blocked", pr_state: "open", last_error: @unverified_head} =
-          publication
-      ) do
+  def pull_request_actions(%PrPublication{pr_state: "open"} = publication)
+      when PrPublication.unverified_head?(publication) do
     Automations.contextual_actions(publication_repository_id(publication), "delivery_pr")
     |> Enum.filter(&(&1.key in ["repair_pr", "repair_and_merge_pr"]))
   end
@@ -562,8 +559,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
         issue: issue,
         repository: repository
       })
-      when publication.state == "published" or
-             (publication.state == "blocked" and publication.last_error == @unverified_head) do
+      when PrPublication.repairable?(publication) do
     if repair_needed?(publication) and repair_supported?(publication, repository) do
       {:ok,
        %{
@@ -587,8 +583,7 @@ defmodule PtcManager.MaintainerActions.Catalog do
         issue: issue,
         repository: repository
       })
-      when publication.state == "published" or
-             (publication.state == "blocked" and publication.last_error == @unverified_head) do
+      when PrPublication.repairable?(publication) do
     if repair_supported?(publication, repository) do
       {:ok,
        %{
