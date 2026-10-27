@@ -1424,6 +1424,60 @@ defmodule PtcManager.PublisherTest do
     assert PtcManager.MaintainerActions.Catalog.pull_request_actions(other) == []
   end
 
+  test "Fix is offered on an unverified head only when there is something to repair" do
+    {job, publication, _result} = published_publication_fixture()
+
+    definition =
+      Repo.get_by!(PtcManager.Automations.Definition,
+        repository_id: job.repository_id,
+        key: "repair_pr"
+      )
+
+    {:ok, _trigger} =
+      PtcManager.Automations.create_trigger(definition, %{
+        trigger_type: "contextual",
+        surface: "delivery_pr",
+        label: "Fix",
+        enabled: true
+      })
+
+    keys = fn remote ->
+      {:ok, blocked} = Publications.record_remote_status(publication.id, remote)
+
+      blocked
+      |> PtcManager.MaintainerActions.Catalog.pull_request_actions()
+      |> Enum.map(& &1.key)
+      |> Enum.sort()
+    end
+
+    unverified = remote_status(job, publication, String.duplicate("e", 40))
+
+    assert keys.(%{unverified | checks_state: "success", mergeability: "mergeable"}) ==
+             ["repair_and_merge_pr"]
+
+    assert keys.(%{unverified | checks_state: "success", mergeability: "conflicting"}) ==
+             ["repair_and_merge_pr", "repair_pr"]
+  end
+
+  test "the repair button offered on an unverified head queues its action" do
+    {job, publication, _result} = published_publication_fixture()
+    remote = remote_status(job, publication, String.duplicate("e", 40))
+    assert {:ok, blocked} = Publications.record_remote_status(publication.id, remote)
+
+    assert {:ok, action} =
+             PtcManager.MaintainerActions.enqueue("repair_and_merge_pr", blocked.id, "maintainer")
+
+    assert action.target_id == blocked.id
+
+    other =
+      blocked
+      |> PtcManager.Operations.PrPublication.changeset(%{last_error: "Something else entirely."})
+      |> Repo.update!()
+
+    assert {:error, :pull_request_not_open} =
+             PtcManager.MaintainerActions.enqueue("repair_pr", other.id, "maintainer")
+  end
+
   defp remote_status(job, publication, head_sha) do
     %{
       state: "open",

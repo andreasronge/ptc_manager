@@ -4133,7 +4133,7 @@ defmodule PtcManager.Operations do
     )
   end
 
-  def reserve_worktree_for_repair(job_id, actor \\ "coordinator")
+  def reserve_worktree_for_repair(job_id, actor \\ "coordinator", action_key \\ nil)
       when is_integer(job_id) and is_binary(actor) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -4147,7 +4147,17 @@ defmodule PtcManager.Operations do
           |> preload(:worker)
           |> Repo.one()
 
-        with %Job{state: "pr_open"} <- job,
+        # A `publish_blocked` job may be repaired only by a repair action, and
+        # only when its publication is blocked on a head PtcManager never
+        # verified.
+        with %Job{} <- job,
+             true <-
+               job.state == "pr_open" or
+                 PrPublication.repair_lineage_open?(
+                   Repo.get_by(PrPublication, job_id: job_id),
+                   job,
+                   action_key
+                 ),
              :ok <- PtcManager.Machine.Gate.check(job.repository_id),
              %WorktreeAllocation{state: state, worker: worker} = allocation <- allocation,
              true <- state in ~w(warm waiting reclaimable attention),

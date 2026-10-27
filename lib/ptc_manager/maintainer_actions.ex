@@ -1105,7 +1105,7 @@ defmodule PtcManager.MaintainerActions do
 
   defp reserve_repair_worktree(action, "retained") do
     publication = Repo.get!(PrPublication, action.target_id)
-    Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+    Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent", action.action_key)
   end
 
   # A fresh repair takes no reservation: the adapter creates its own worktree, so

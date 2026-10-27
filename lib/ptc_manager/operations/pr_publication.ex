@@ -6,6 +6,7 @@ defmodule PtcManager.Operations.PrPublication do
   alias PtcManager.GitHub.LinkedIssues
 
   @states ~w(queued publishing published blocked)
+  @unverified_head_error "GitHub reports a different pull-request head commit."
   @sha ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
   schema "pr_publications" do
@@ -158,6 +159,46 @@ defmodule PtcManager.Operations.PrPublication do
 
   def external?(%__MODULE__{source: "external", job_id: nil}), do: true
   def external?(%__MODULE__{}), do: false
+
+  @doc "Why a publication is blocked when GitHub reports a head PtcManager never verified."
+  def unverified_head_error, do: @unverified_head_error
+
+  @doc """
+  True for a publication blocked on a head PtcManager never verified. Only a
+  repair action clears it, so the repair actions accept it like a published one.
+  """
+  defguard unverified_head?(publication)
+           when publication.state == "blocked" and
+                  publication.last_error == @unverified_head_error
+
+  @doc "True for a publication a repair action may target."
+  defguard repairable?(publication)
+           when publication.state == "published" or unverified_head?(publication)
+
+  @doc """
+  True when a repair may run for this publication and its job: an open lineage,
+  or one blocked on an unverified head, whose job waits in `publish_blocked`.
+  """
+  def repair_lineage_open?(%__MODULE__{state: "published"}, %{state: "pr_open"}), do: true
+
+  def repair_lineage_open?(%__MODULE__{} = publication, %{state: "publish_blocked"})
+      when unverified_head?(publication),
+      do: true
+
+  def repair_lineage_open?(_publication, _job), do: false
+
+  @doc """
+  `repair_lineage_open?/2` for one action. A collection merge is authorized for
+  one verified head, so only the repair actions may run on an unverified one.
+  """
+  def repair_lineage_open?(publication, job, action_key)
+      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      do: repair_lineage_open?(publication, job)
+
+  def repair_lineage_open?(%__MODULE__{state: "published"}, %{state: "pr_open"}, _action_key),
+    do: true
+
+  def repair_lineage_open?(_publication, _job, _action_key), do: false
 
   @doc """
   The repository this pull request belongs to, from whichever side carries it.

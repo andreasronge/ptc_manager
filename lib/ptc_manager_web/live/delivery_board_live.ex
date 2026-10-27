@@ -261,6 +261,10 @@ defmodule PtcManagerWeb.DeliveryBoardLive do
       {:error, :pull_request_not_ready_for_retrospective} ->
         {:noreply, put_flash(socket, :info, "The PR is no longer ready for a retrospective.")}
 
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "The PR action could not be queued: #{inspect(reason)}.")}
+
       _error ->
         {:noreply, put_flash(socket, :error, "The PR action could not be queued.")}
     end

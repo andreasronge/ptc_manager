@@ -968,7 +968,7 @@ defmodule PtcManager.Publications do
                 # head: the first poll announces it and parks the job and worktree,
                 # later polls only keep checks and mergeability current.
                 result.state == "open" and result.head_sha != publication.remote_head_sha ->
-                  message = "GitHub reports a different pull-request head commit."
+                  message = PrPublication.unverified_head_error()
 
                   announced? =
                     publication.state == "blocked" and
@@ -1117,7 +1117,7 @@ defmodule PtcManager.Publications do
           repository = Repo.get!(Repository, job.repository_id)
 
           cond do
-            not repair_lineage_open?(publication, job) ->
+            not PrPublication.repair_lineage_open?(publication, job) ->
               Repo.rollback(:publication_not_open)
 
             result.state != "open" ->
@@ -1794,16 +1794,6 @@ defmodule PtcManager.Publications do
       Regex.match?(~r/\A[0-9a-f]{64}\z/, result.diff_digest) and
       is_integer(result[:commit_count]) and result.commit_count > 0
   end
-
-  defp repair_lineage_open?(%{state: "published"}, %{state: "pr_open"}), do: true
-
-  defp repair_lineage_open?(
-         %{state: "blocked", last_error: "GitHub reports a different pull-request head commit."},
-         %{state: "publish_blocked"}
-       ),
-       do: true
-
-  defp repair_lineage_open?(_publication, _job), do: false
 
   # A managed pull request must target the base its job stored at approval;
   # an imported one, the default branch.
