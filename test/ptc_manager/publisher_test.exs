@@ -1424,6 +1424,25 @@ defmodule PtcManager.PublisherTest do
     assert PtcManager.MaintainerActions.Catalog.pull_request_actions(other) == []
   end
 
+  test "the repair button offered on an unverified head queues its action" do
+    {job, publication, _result} = published_publication_fixture()
+    remote = remote_status(job, publication, String.duplicate("e", 40))
+    assert {:ok, blocked} = Publications.record_remote_status(publication.id, remote)
+
+    assert {:ok, action} =
+             PtcManager.MaintainerActions.enqueue("repair_and_merge_pr", blocked.id, "maintainer")
+
+    assert action.target_id == blocked.id
+
+    other =
+      blocked
+      |> PtcManager.Operations.PrPublication.changeset(%{last_error: "Something else entirely."})
+      |> Repo.update!()
+
+    assert {:error, :pull_request_not_open} =
+             PtcManager.MaintainerActions.enqueue("repair_pr", other.id, "maintainer")
+  end
+
   defp remote_status(job, publication, head_sha) do
     %{
       state: "open",

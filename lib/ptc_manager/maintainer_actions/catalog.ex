@@ -9,6 +9,9 @@ defmodule PtcManager.MaintainerActions.Catalog do
 
   @prompt_version 1
 
+  # The one blocked reason the repair actions may clear; see pull_request_actions/1.
+  @unverified_head "GitHub reports a different pull-request head commit."
+
   # The only outcomes a blocker report may return. Marking an issue ready or
   # closing it are decisions the maintainer did not make, and this action's
   # entire input was written by a model.
@@ -161,11 +164,8 @@ defmodule PtcManager.MaintainerActions.Catalog do
   # state is the one `Publications.repair_lineage_open?/2` already accepts for
   # repair verification. Any other blocked reason still offers nothing.
   def pull_request_actions(
-        %PrPublication{
-          state: "blocked",
-          pr_state: "open",
-          last_error: "GitHub reports a different pull-request head commit."
-        } = publication
+        %PrPublication{state: "blocked", pr_state: "open", last_error: @unverified_head} =
+          publication
       ) do
     Automations.contextual_actions(publication_repository_id(publication), "delivery_pr")
     |> Enum.filter(&(&1.key in ["repair_pr", "repair_and_merge_pr"]))
@@ -558,10 +558,12 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def build("prepare_merge_decision", _target), do: {:error, :pull_request_not_open}
 
   def build("repair_pr", %{
-        publication: %PrPublication{state: "published", pr_state: "open"} = publication,
+        publication: %PrPublication{pr_state: "open"} = publication,
         issue: issue,
         repository: repository
-      }) do
+      })
+      when publication.state == "published" or
+             (publication.state == "blocked" and publication.last_error == @unverified_head) do
     if repair_needed?(publication) and repair_supported?(publication, repository) do
       {:ok,
        %{
@@ -581,10 +583,12 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def build("repair_pr", _target), do: {:error, :pull_request_not_open}
 
   def build("repair_and_merge_pr", %{
-        publication: %PrPublication{state: "published", pr_state: "open"} = publication,
+        publication: %PrPublication{pr_state: "open"} = publication,
         issue: issue,
         repository: repository
-      }) do
+      })
+      when publication.state == "published" or
+             (publication.state == "blocked" and publication.last_error == @unverified_head) do
     if repair_supported?(publication, repository) do
       {:ok,
        %{

@@ -85,10 +85,13 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
 
   defp retained_worktree_available(_publication), do: {:error, :repair_worktree_unavailable}
 
+  # `publish_blocked` is the job of a pull request blocked on a head PtcManager
+  # did not verify, which only a repair can clear.
   defp retained_context_open(%{
          pr_state: "open",
-         job: %{state: "pr_open", worktree_allocation: %{state: "active"}}
-       }),
+         job: %{state: state, worktree_allocation: %{state: "active"}}
+       })
+       when state in ~w(pr_open publish_blocked),
        do: :ok
 
   defp retained_context_open(_publication), do: {:error, :retained_herdr_context_not_open}

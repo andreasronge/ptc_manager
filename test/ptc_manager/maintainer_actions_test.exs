@@ -1052,6 +1052,29 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Enum.count(results, &(&1 == {:ok, :empty})) == 1
   end
 
+  defp retained_waiting_run(job, allocation) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    {:ok, run} =
+      Operations.create_agent_run(%{
+        worker_id: allocation.worker_id,
+        job_id: job.id,
+        role: "implementer",
+        state: "waiting",
+        status_text: "Waiting with open PR.",
+        agent_name: "impl_j#{job.id}_f#{job.fencing_token}",
+        herdr_workspace: "w-retained",
+        herdr_pane: "w-retained:p1",
+        herdr_session: "default",
+        external_key: "default:retained-#{job.id}",
+        started_at: DateTime.add(now, -300, :second),
+        last_heartbeat_at: now,
+        fencing_token: job.fencing_token
+      })
+
+    run
+  end
+
   defp health_snapshot(captured_at) do
     %{
       "captured_at" => captured_at,
@@ -2047,6 +2070,44 @@ defmodule PtcManager.MaintainerActionsTest do
     assert Repo.get!(WorktreeAllocation, allocation.id).state == "waiting"
   end
 
+  test "Fix and merge resumes the retained session of a PR blocked on an unverified head" do
+    previous_command = Application.get_env(:ptc_manager, :herdr_command)
+    Application.put_env(:ptc_manager, :herdr_command, RetainedHerdrCommand)
+    on_exit(fn -> Application.put_env(:ptc_manager, :herdr_command, previous_command) end)
+
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+
+    publication =
+      issue
+      |> open_publication_fixture()
+      |> PrPublication.changeset(%{
+        state: "blocked",
+        last_error: "GitHub reports a different pull-request head commit.",
+        mergeability: "conflicting"
+      })
+      |> Repo.update!()
+
+    allocation = retain_real_repair_worktree(publication, issue)
+
+    job =
+      PtcManager.Operations.Job
+      |> Repo.get!(publication.job_id)
+      |> PtcManager.Operations.Job.changeset(%{state: "publish_blocked"})
+      |> Repo.update!()
+
+    _retained_run = retained_waiting_run(job, allocation)
+
+    assert {:ok, queued} =
+             MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
+
+    assert {:ok, _reserved} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+
+    assert {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
+    assert {:ok, %{"outcome" => "repaired"}} = RetainedHerdrAdapter.run(action)
+  end
+
   test "a PR repair resumes the original named Herdr implementation session" do
     previous_command = Application.get_env(:ptc_manager, :herdr_command)
     Application.put_env(:ptc_manager, :herdr_command, RetainedHerdrCommand)
@@ -2068,25 +2129,7 @@ defmodule PtcManager.MaintainerActionsTest do
       |> Repo.update!()
 
     job = Repo.get!(PtcManager.Operations.Job, publication.job_id)
-    worker = Repo.get!(PtcManager.Operations.Worker, allocation.worker_id)
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
-    {:ok, retained_run} =
-      Operations.create_agent_run(%{
-        worker_id: worker.id,
-        job_id: job.id,
-        role: "implementer",
-        state: "waiting",
-        status_text: "Waiting with open PR.",
-        agent_name: "impl_j#{job.id}_f#{job.fencing_token}",
-        herdr_workspace: "w-retained",
-        herdr_pane: "w-retained:p1",
-        herdr_session: "default",
-        external_key: "default:retained-#{job.id}",
-        started_at: DateTime.add(now, -300, :second),
-        last_heartbeat_at: now,
-        fencing_token: job.fencing_token
-      })
+    retained_run = retained_waiting_run(job, allocation)
 
     assert {:ok, queued} = MaintainerActions.enqueue("repair_pr", publication.id, "andreas")
     assert {:ok, {action, token}} = Operations.claim_agent_action(queued.id)
