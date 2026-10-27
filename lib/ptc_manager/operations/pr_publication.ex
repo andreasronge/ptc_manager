@@ -176,6 +176,18 @@ defmodule PtcManager.Operations.PrPublication do
            when publication.state == "published" or unverified_head?(publication)
 
   @doc """
+  True when a repair may run for this publication and its job: an open lineage,
+  or one blocked on an unverified head, whose job waits in `publish_blocked`.
+  """
+  def repair_lineage_open?(%__MODULE__{state: "published"}, %{state: "pr_open"}), do: true
+
+  def repair_lineage_open?(%__MODULE__{} = publication, %{state: "publish_blocked"})
+      when unverified_head?(publication),
+      do: true
+
+  def repair_lineage_open?(_publication, _job), do: false
+
+  @doc """
   The repository this pull request belongs to, from whichever side carries it.
 
   An imported pull request is linked to its repository directly. One PtcManager

@@ -4147,10 +4147,15 @@ defmodule PtcManager.Operations do
           |> preload(:worker)
           |> Repo.one()
 
-        # A repair action is enqueued only for an open pull request or one
-        # blocked on a head PtcManager did not verify, whose job is
-        # `publish_blocked`; the repair is what clears that block.
-        with %Job{state: job_state} when job_state in ~w(pr_open publish_blocked) <- job,
+        # A `publish_blocked` job may be repaired only when its publication is
+        # blocked on a head PtcManager never verified.
+        with %Job{} <- job,
+             true <-
+               job.state == "pr_open" or
+                 PrPublication.repair_lineage_open?(
+                   Repo.get_by(PrPublication, job_id: job_id),
+                   job
+                 ),
              :ok <- PtcManager.Machine.Gate.check(job.repository_id),
              %WorktreeAllocation{state: state, worker: worker} = allocation <- allocation,
              true <- state in ~w(warm waiting reclaimable attention),

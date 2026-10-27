@@ -532,7 +532,10 @@ defmodule PtcManager.MaintainerActions.Sync do
       fresh_repair?(action, publication) ->
         {:ok, publication}
 
-      is_binary(preflight_head(action)) and result.head_sha == preflight_head(action) ->
+      # An unchanged head needs no verification only when PtcManager had
+      # already verified it; an unverified one is verified like any other.
+      is_binary(preflight_head(action)) and result.head_sha == preflight_head(action) and
+          result.head_sha == publication.remote_head_sha ->
         {:ok, publication}
 
       true ->

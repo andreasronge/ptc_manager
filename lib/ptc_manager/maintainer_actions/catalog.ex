@@ -165,7 +165,10 @@ defmodule PtcManager.MaintainerActions.Catalog do
   def pull_request_actions(%PrPublication{pr_state: "open"} = publication)
       when PrPublication.unverified_head?(publication) do
     Automations.contextual_actions(publication_repository_id(publication), "delivery_pr")
-    |> Enum.filter(&(&1.key in ["repair_pr", "repair_and_merge_pr"]))
+    |> Enum.filter(fn action ->
+      action.key == "repair_and_merge_pr" or
+        (action.key == "repair_pr" and repair_needed?(publication))
+    end)
   end
 
   def pull_request_actions(%PrPublication{state: "published", pr_state: "open"} = publication) do

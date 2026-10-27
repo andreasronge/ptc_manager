@@ -23,8 +23,6 @@ defmodule PtcManager.Publications do
   alias PtcManager.Repo
   alias PtcManager.RepoTransaction
 
-  require PrPublication
-
   @agent_reconciliation_job_states ~w(starting working idle blocked reconciling awaiting_reconciliation verifying_result ready_for_pr publishing_pr pr_open)
   @external_missing_marker "GitHub open-PR listing omitted this PR once; waiting for confirmation."
   @external_adoption_deferred "The matching pull request has an active external action. Adoption will retry after that action finishes."
@@ -1119,7 +1117,7 @@ defmodule PtcManager.Publications do
           repository = Repo.get!(Repository, job.repository_id)
 
           cond do
-            not repair_lineage_open?(publication, job) ->
+            not PrPublication.repair_lineage_open?(publication, job) ->
               Repo.rollback(:publication_not_open)
 
             result.state != "open" ->
@@ -1796,14 +1794,6 @@ defmodule PtcManager.Publications do
       Regex.match?(~r/\A[0-9a-f]{64}\z/, result.diff_digest) and
       is_integer(result[:commit_count]) and result.commit_count > 0
   end
-
-  defp repair_lineage_open?(%{state: "published"}, %{state: "pr_open"}), do: true
-
-  defp repair_lineage_open?(%PrPublication{} = publication, %{state: "publish_blocked"})
-       when PrPublication.unverified_head?(publication),
-       do: true
-
-  defp repair_lineage_open?(_publication, _job), do: false
 
   # A managed pull request must target the base its job stored at approval;
   # an imported one, the default branch.

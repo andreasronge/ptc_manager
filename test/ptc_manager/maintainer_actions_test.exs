@@ -1625,6 +1625,32 @@ defmodule PtcManager.MaintainerActionsTest do
     assert {:ok, _action} = MaintainerActions.run_once(adapter: RepairAdapter, sync: Sync)
     assert_receive {:ran_agent_action, %{id: action_id}}
     assert action_id == queued.id
+
+    # Merging the unverified head unchanged is not a verified repair.
+    Process.put(:repair_status, %{unverified | state: "merged"})
+    action = Repo.get!(PtcManager.Operations.AgentAction, queued.id)
+    refute match?({:ok, _}, Sync.sync_action(action, {:ok, %{"outcome" => "repaired"}}))
+    assert Repo.get!(PrPublication, publication.id).pr_state == "open"
+  end
+
+  test "a retained repair does not reserve a job blocked for another reason" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    moved_base =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{base_ref: "elsewhere"})
+
+    assert {:ok, %{state: "blocked"}} =
+             PtcManager.Publications.record_remote_status(publication.id, moved_base)
+
+    assert Repo.get!(PtcManager.Operations.Job, publication.job_id).state == "publish_blocked"
+
+    assert {:error, :repair_worktree_not_available} =
+             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
   end
 
   test "a collection merge merges only its authorized head and never repairs" do
