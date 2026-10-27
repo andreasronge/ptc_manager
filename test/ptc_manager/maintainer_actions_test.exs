@@ -1626,11 +1626,47 @@ defmodule PtcManager.MaintainerActionsTest do
     assert_receive {:ran_agent_action, %{id: action_id}}
     assert action_id == queued.id
 
-    # Merging the unverified head unchanged is not a verified repair.
-    Process.put(:repair_status, %{unverified | state: "merged"})
+    # Merging the unverified head unchanged is not a verified repair, also
+    # when the status poller records the merge before the postflight runs.
+    merged = %{unverified | state: "merged"}
+    Process.put(:repair_status, merged)
     action = Repo.get!(PtcManager.Operations.AgentAction, queued.id)
     refute match?({:ok, _}, Sync.sync_action(action, {:ok, %{"outcome" => "repaired"}}))
     assert Repo.get!(PrPublication, publication.id).pr_state == "open"
+
+    assert {:ok, %{pr_state: "merged"}} =
+             PtcManager.Publications.record_remote_status(publication.id, merged)
+
+    refute match?({:ok, _}, Sync.sync_action(action, {:ok, %{"outcome" => "repaired"}}))
+  end
+
+  test "a collection merge does not reserve a job blocked on an unverified head" do
+    repository = repository_fixture()
+    issue = issue_fixture(repository)
+    publication = open_publication_fixture(issue)
+    retain_repair_worktree(publication)
+
+    unverified =
+      publication
+      |> merge_status(repository)
+      |> Map.merge(%{head_sha: String.duplicate("e", 40)})
+
+    assert {:ok, %{state: "blocked"}} =
+             PtcManager.Publications.record_remote_status(publication.id, unverified)
+
+    assert {:error, :repair_worktree_not_available} =
+             Operations.reserve_worktree_for_repair(
+               publication.job_id,
+               "repair-agent",
+               "merge_reviewed_pr"
+             )
+
+    assert {:ok, %{state: "active"}} =
+             Operations.reserve_worktree_for_repair(
+               publication.job_id,
+               "repair-agent",
+               "repair_and_merge_pr"
+             )
   end
 
   test "a retained repair does not reserve a job blocked for another reason" do
@@ -2158,7 +2194,11 @@ defmodule PtcManager.MaintainerActionsTest do
              MaintainerActions.enqueue("repair_and_merge_pr", publication.id, "andreas")
 
     assert {:ok, _reserved} =
-             Operations.reserve_worktree_for_repair(publication.job_id, "repair-agent")
+             Operations.reserve_worktree_for_repair(
+               publication.job_id,
+               "repair-agent",
+               "repair_and_merge_pr"
+             )
 
     assert {:ok, {action, _token}} = Operations.claim_agent_action(queued.id)
     assert {:ok, %{"outcome" => "repaired"}} = RetainedHerdrAdapter.run(action)

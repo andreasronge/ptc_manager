@@ -20,16 +20,16 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
            PrPublication
            |> Repo.get(publication_id)
            |> Repo.preload(job: [:worktree_allocation]),
-         :ok <- retained_context_open(publication),
+         :ok <- retained_context_open(publication, action_key),
          %AgentRun{} = retained_run <- retained_run(publication.job),
          :ok <- retained_worktree_available(publication),
          {:ok, _context} <-
            PtcManager.ManagedOperationContext.rebind_action(retained_run.herdr_pane, action),
          {:ok, resumed_run} <- mark_resumed(retained_run, action),
-         :ok <- retained_context_still_open(publication.id) do
+         :ok <- retained_context_still_open(publication.id, action_key) do
       case prompt(resumed_run, action.prompt) do
         {:ok, output} ->
-          finish_result(resumed_run, publication.id, output)
+          finish_result(resumed_run, publication.id, action_key, output)
 
         {:error, reason} ->
           _ = mark_uncertain(resumed_run, publication.job.worktree_allocation, reason)
@@ -87,22 +87,24 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
 
   defp retained_context_open(
          %PrPublication{pr_state: "open", job: %{worktree_allocation: %{state: "active"}}} =
-           publication
+           publication,
+         action_key
        ) do
-    if PrPublication.repair_lineage_open?(publication, publication.job),
+    if PrPublication.repair_lineage_open?(publication, publication.job, action_key),
       do: :ok,
       else: {:error, :retained_herdr_context_not_open}
   end
 
-  defp retained_context_open(_publication), do: {:error, :retained_herdr_context_not_open}
+  defp retained_context_open(_publication, _action_key),
+    do: {:error, :retained_herdr_context_not_open}
 
-  defp retained_context_still_open(publication_id) do
+  defp retained_context_still_open(publication_id, action_key) do
     publication =
       PrPublication
       |> Repo.get(publication_id)
       |> Repo.preload(job: :worktree_allocation)
 
-    retained_context_open(publication)
+    retained_context_open(publication, action_key)
   end
 
   defp mark_resumed(retained_run, action) do
@@ -115,7 +117,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
           |> Repo.get!(action.target_id)
           |> Repo.preload(job: :worktree_allocation)
 
-        if retained_context_open(publication) != :ok,
+        if retained_context_open(publication, action.action_key) != :ok,
           do: Repo.rollback(:retained_herdr_context_not_open)
 
         {resumed_count, _rows} =
@@ -199,9 +201,9 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
     )
   end
 
-  defp finish_result(run, publication_id, output) do
+  defp finish_result(run, publication_id, action_key, output) do
     blocked? = HerdrOutput.settled_state(output) == "blocked"
-    _ = settle_run_if_open(run, publication_id, blocked?)
+    _ = settle_run_if_open(run, publication_id, action_key, blocked?)
 
     if blocked? do
       {:ok, result("repair-blocked", "The retained implementation agent needs attention.")}
@@ -210,7 +212,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
     end
   end
 
-  defp settle_run_if_open(run, publication_id, blocked?) do
+  defp settle_run_if_open(run, publication_id, action_key, blocked?) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     attrs =
@@ -232,7 +234,7 @@ defmodule PtcManager.MaintainerActions.RetainedHerdrAdapter do
 
     outcome =
       Repo.transaction(fn ->
-        case retained_context_still_open(publication_id) do
+        case retained_context_still_open(publication_id, action_key) do
           :ok ->
             {updated, _rows} =
               AgentRun

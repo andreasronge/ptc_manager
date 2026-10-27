@@ -188,6 +188,19 @@ defmodule PtcManager.Operations.PrPublication do
   def repair_lineage_open?(_publication, _job), do: false
 
   @doc """
+  `repair_lineage_open?/2` for one action. A collection merge is authorized for
+  one verified head, so only the repair actions may run on an unverified one.
+  """
+  def repair_lineage_open?(publication, job, action_key)
+      when action_key in ["repair_pr", "repair_and_merge_pr"],
+      do: repair_lineage_open?(publication, job)
+
+  def repair_lineage_open?(%__MODULE__{state: "published"}, %{state: "pr_open"}, _action_key),
+    do: true
+
+  def repair_lineage_open?(_publication, _job, _action_key), do: false
+
+  @doc """
   The repository this pull request belongs to, from whichever side carries it.
 
   An imported pull request is linked to its repository directly. One PtcManager

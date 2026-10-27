@@ -533,9 +533,11 @@ defmodule PtcManager.MaintainerActions.Sync do
         {:ok, publication}
 
       # An unchanged head needs no verification only when PtcManager had
-      # already verified it; an unverified one is verified like any other.
+      # already verified it; an unverified one is verified like any other. The
+      # verified head is `head_sha`: the poller may already have recorded a
+      # merge into `remote_head_sha`.
       is_binary(preflight_head(action)) and result.head_sha == preflight_head(action) and
-          result.head_sha == publication.remote_head_sha ->
+          result.head_sha == publication.head_sha ->
         {:ok, publication}
 
       true ->
