@@ -214,6 +214,42 @@ defmodule PtcManager.ResourceOperationBrokerTest do
     assert Repo.aggregate(ResourceOperation, :count) == 0
   end
 
+  test "a second broker leaves a socket another broker answers on alone" do
+    # A socket path must fit in sun_path, which the suite's temporary root can exceed.
+    root = "/tmp/ptc-broker-#{System.unique_integer([:positive])}"
+    on_exit(fn -> File.rm_rf!(root) end)
+    path = Path.join(root, "operations.sock")
+
+    start_supervised!({ResourceOperationBroker, name: :live_broker, path: path},
+      id: :live_broker
+    )
+
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:resource_operation_socket_in_use, ^path}} =
+             ResourceOperationBroker.start_link(name: :second_broker, path: path)
+
+    assert {:ok, socket} = :gen_tcp.connect({:local, path}, 0, [active: false], 1_000)
+    :gen_tcp.close(socket)
+  end
+
+  test "a broker replaces a socket nothing answers on" do
+    # A socket path must fit in sun_path, which the suite's temporary root can exceed.
+    root = "/tmp/ptc-broker-#{System.unique_integer([:positive])}"
+    on_exit(fn -> File.rm_rf!(root) end)
+    path = Path.join(root, "operations.sock")
+    File.mkdir_p!(root)
+    {:ok, stale} = :gen_tcp.listen(0, ifaddr: {:local, path})
+    :gen_tcp.close(stale)
+
+    start_supervised!({ResourceOperationBroker, name: :fresh_broker, path: path},
+      id: :fresh_broker
+    )
+
+    assert {:ok, socket} = :gen_tcp.connect({:local, path}, 0, [active: false], 1_000)
+    :gen_tcp.close(socket)
+  end
+
   test "the broker validates and forwards processes that outlived the command" do
     context = managed_run_fixture()
 
