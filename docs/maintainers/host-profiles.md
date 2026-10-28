@@ -124,5 +124,7 @@ agent stall or offer a cancel.
    fill it in.
 4. Install the launchers `deploy/launchd/run-*.example` as `bin/run-*`, and
    the plists from `deploy/launchd/` in `/Library/LaunchDaemons` with the
-   account name filled in; bootstrap them with `launchctl`.
+   account name filled in; bootstrap them with `launchctl`. `run-herdr`
+   starts Herdr with a clean environment because agent panes inherit it:
+   never source `manager.env` into the Herdr server.
 5. Open the console; the readiness banner names anything left to fix.
