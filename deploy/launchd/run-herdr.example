@@ -1,5 +1,13 @@
 #!/bin/sh
 # Example launcher for dev.ptc.herdr: install as <service root>/bin/run-herdr.
 set -eu
-. /Users/Shared/ptc-services/config/manager.env
-exec "$PTC_HERDR_BINARY" --session "$PTC_HERDR_SESSION" server
+env_file=${PTC_MANAGER_ENV_FILE:-/Users/Shared/ptc-services/config/manager.env}
+# Agent panes inherit the server's environment, so read only what Herdr needs
+# from manager.env. The console's secrets and service paths stay out of panes:
+# a test run there would otherwise start a second operation broker that unlinks
+# the console's socket.
+binary=$(. "$env_file" && printf '%s' "$PTC_HERDR_BINARY")
+session=$(. "$env_file" && printf '%s' "$PTC_HERDR_SESSION")
+exec env -i HOME="$HOME" PATH="$PATH" ${USER:+USER="$USER"} ${LOGNAME:+LOGNAME="$LOGNAME"} \
+  ${SHELL:+SHELL="$SHELL"} ${TMPDIR:+TMPDIR="$TMPDIR"} ${LANG:+LANG="$LANG"} \
+  "$binary" --session "$session" server

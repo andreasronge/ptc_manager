@@ -25,29 +25,53 @@ defmodule PtcManager.ResourceOperationBroker do
         Application.get_env(:ptc_manager, :resource_operation_socket_path)
 
     if is_binary(path) and path != "" do
-      ManagedOperationContext.cleanup_expired()
-      File.mkdir_p!(Path.dirname(path))
-      File.rm(path)
-
-      case :gen_tcp.listen(0, [
-             :binary,
-             packet: :line,
-             active: false,
-             reuseaddr: true,
-             ifaddr: {:local, path},
-             backlog: 64
-           ]) do
-        {:ok, listener} ->
-          File.chmod!(path, 0o660)
-          {:ok, acceptor} = Task.start_link(fn -> accept_loop(listener) end)
-          schedule_sweep()
-          {:ok, %{listener: listener, acceptor: acceptor, path: path}}
-
-        {:error, reason} ->
-          {:stop, {:resource_operation_socket_failed, reason}}
+      # Another node started with the same environment, such as a test run
+      # inside an agent pane, would otherwise unlink the live socket and leave
+      # the running broker unreachable once it exits.
+      if answering?(path) do
+        {:stop, {:resource_operation_socket_in_use, path}}
+      else
+        listen(path)
       end
     else
       {:ok, %{listener: nil, acceptor: nil, path: nil}}
+    end
+  end
+
+  defp answering?(path) do
+    case :gen_tcp.connect({:local, path}, 0, [active: false], 1_000) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        true
+
+      {:error, _reason} ->
+        false
+    end
+  catch
+    :exit, _reason -> false
+  end
+
+  defp listen(path) do
+    ManagedOperationContext.cleanup_expired()
+    File.mkdir_p!(Path.dirname(path))
+    File.rm(path)
+
+    case :gen_tcp.listen(0, [
+           :binary,
+           packet: :line,
+           active: false,
+           reuseaddr: true,
+           ifaddr: {:local, path},
+           backlog: 64
+         ]) do
+      {:ok, listener} ->
+        File.chmod!(path, 0o660)
+        {:ok, acceptor} = Task.start_link(fn -> accept_loop(listener) end)
+        schedule_sweep()
+        {:ok, %{listener: listener, acceptor: acceptor, path: path}}
+
+      {:error, reason} ->
+        {:stop, {:resource_operation_socket_failed, reason}}
     end
   end
 
