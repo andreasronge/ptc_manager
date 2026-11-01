@@ -11,6 +11,7 @@ defmodule PtcManager.Operations.Repository do
     field :github_default_branch, :string
     field :integration_branches, :map, default: %{"mappings" => []}
     field :github_branch_names, :map, default: %{"names" => []}
+    field :execution_profile_mappings, :map, default: %{"mappings" => []}
     field :branch_prefixes, :map, default: %{"default" => "ptc-manager/", "mappings" => []}
     field :github_branches_checked_at, :utc_datetime_usec
     field :workspace_setup_command, :string
@@ -56,6 +57,7 @@ defmodule PtcManager.Operations.Repository do
     :github_branch_names,
     :github_branches_checked_at,
     :branch_prefixes,
+    :execution_profile_mappings,
     :enabled,
     :auto_fix_issues,
     :auto_fix_daily_limit,
@@ -87,6 +89,7 @@ defmodule PtcManager.Operations.Repository do
     |> MaintainerLabels.validate()
     |> PtcManager.Repository.IntegrationBranches.validate()
     |> PtcManager.Repository.BranchPrefixes.validate()
+    |> PtcManager.Repository.ExecutionProfileMappings.validate()
     |> validate_number(:required_pre_pr_reviews,
       greater_than_or_equal_to: 0,
       less_than_or_equal_to: 3

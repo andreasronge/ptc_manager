@@ -3,6 +3,7 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
 
   @moduletag :nightly
 
+  import Ecto.Query
   import PtcManager.OperationsFixtures
 
   alias PtcManager.DeploymentCanary
@@ -27,6 +28,21 @@ defmodule PtcManager.DisposableDeploymentTargetTest do
     end
 
     {:ok, target: target}
+  end
+
+  @tag migration_opts: [to: 20_261_021_150_000]
+  test "ux migration preserves the three existing edited presets", %{target: target} do
+    alias PtcManager.ExecutionProfiles.Profile
+    assert Enum.sort(Repo.all(from p in Profile, select: p.name)) == ~w(small standard strong)
+    Repo.update_all(Profile, set: [model: "maintainer-model"])
+    DisposableDeploymentTarget.migrate_remaining!(target)
+    ux = Repo.get_by!(Profile, name: "ux")
+
+    assert {ux.kind, ux.model, ux.effort, ux.reviewer_model, ux.max_reviews, ux.review_timeout_ms} ==
+             {"claude", "claude-opus-5-5", "high", "gpt-6.1-sol", 2, 900_000}
+
+    assert Repo.all(from p in Profile, where: p.name != "ux", select: p.model) ==
+             List.duplicate("maintainer-model", 3)
   end
 
   test "a pre-effect failure restores the database snapshot", %{target: target} do

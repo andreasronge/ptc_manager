@@ -718,15 +718,13 @@ defmodule PtcManager.Reviews do
           do: Repo.rollback(:invalid_review_budget)
 
         settings =
-          case attrs["profile"] do
-            name when name in ~w(small standard strong) ->
-              case ExecutionProfiles.freeze(nil, name, nil) do
-                {:ok, settings, _} -> Map.merge(job.execution_settings, settings)
-                {:error, reason} -> Repo.rollback(reason)
-              end
-
-            _ ->
-              job.execution_settings
+          if attrs["profile"] in ExecutionProfiles.names() do
+            case ExecutionProfiles.freeze(nil, attrs["profile"], nil) do
+              {:ok, settings, _} -> Map.merge(job.execution_settings, settings)
+              {:error, reason} -> Repo.rollback(reason)
+            end
+          else
+            job.execution_settings
           end
 
         count = completed_count(id)

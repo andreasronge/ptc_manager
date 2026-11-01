@@ -499,9 +499,9 @@ defmodule PtcManager.ReviewsTest do
     assert ExecutionProfiles.suggested(%{scope: "small", risk: "high"}) == "strong"
     assert ExecutionProfiles.suggested(%{scope: "large", risk: "medium"}) == "strong"
     assert ExecutionProfiles.suggested(nil) == "standard"
-    assert Enum.map(ExecutionProfiles.list(), & &1.max_reviews) == [1, 2, 5]
+    assert Enum.map(ExecutionProfiles.list(), & &1.max_reviews) == [1, 2, 5, 2]
 
-    for profile <- ExecutionProfiles.list() do
+    for profile <- Enum.reject(ExecutionProfiles.list(), &(&1.name == "ux")) do
       assert profile.reviewer_model == "gpt-5.6-sol"
       assert profile.reviewer_effort == "xhigh"
     end

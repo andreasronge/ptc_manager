@@ -4,9 +4,11 @@ defmodule PtcManager.ExecutionProfiles do
   alias PtcManager.ExecutionProfiles.Profile
   alias PtcManager.Operations.AuditEvent
 
+  def names, do: ~w(small standard strong ux)
+
   def list do
     profiles = Repo.all(Profile)
-    Enum.map(~w(small standard strong), fn name -> Enum.find(profiles, &(&1.name == name)) end)
+    Enum.map(names(), fn name -> Enum.find(profiles, &(&1.name == name)) end)
   end
 
   def suggested(%{scope: "large"}), do: "strong"

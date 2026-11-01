@@ -3,45 +3,30 @@ defmodule PtcManager.MacOSRuntimeTest do
   @moduletag skip: :os.type() != {:unix, :darwin}
 
   test "macOS host commands override production Linux defaults" do
-    env = %{
-      "PTC_MACOS_SERVICE_ROOT" => "/tmp/ptc-macos-runtime",
-      "PTC_MANAGER_PASSWORD" => "runtime-test-password",
-      "DATABASE_PATH" => "/tmp/runtime-test.db",
-      "SECRET_KEY_BASE" => String.duplicate("a", 64)
-    }
+    with_environment(%{}, fn ->
+      config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
+      host = "/tmp/ptc-macos-runtime/bin/macos-deploy-host"
+      assert config[:deployment_trigger_command] == host
+      assert config[:deployment_status_command] == host
+      assert config[:deployment_trigger_args] == ["trigger", "/tmp/ptc-macos-runtime"]
+      assert config[:host_profile] == :macos
 
-    previous = Map.new(env, fn {key, _} -> {key, System.get_env(key)} end)
+      # Every host path stays under the service root, not /usr/local or /var/lib.
+      for {key, relative} <- [
+            resource_operation_wrapper: "bin/ptc-operation",
+            resource_operation_socket_path: "run/operations.sock",
+            resource_operation_context_dir: "data/operation-contexts",
+            execution_artifact_root: "data/execution-artifacts",
+            planning_snapshot_root: "data/planning-snapshots",
+            daily_digest_bundle_root: "data/daily-digest-bundles",
+            tool_inventory_dir: "data/tool-inventory",
+            health_snapshot_path: "data/health.json"
+          ] do
+        assert config[key] == Path.join("/tmp/ptc-macos-runtime", relative), inspect(key)
+      end
 
-    on_exit(fn ->
-      Enum.each(previous, fn
-        {key, nil} -> System.delete_env(key)
-        {key, value} -> System.put_env(key, value)
-      end)
+      assert config[:resource_operation_cgroups] == false
     end)
-
-    System.put_env(env)
-    config = Config.Reader.read!("config/runtime.exs", env: :prod)[:ptc_manager]
-    host = "/tmp/ptc-macos-runtime/bin/macos-deploy-host"
-    assert config[:deployment_trigger_command] == host
-    assert config[:deployment_status_command] == host
-    assert config[:deployment_trigger_args] == ["trigger", "/tmp/ptc-macos-runtime"]
-    assert config[:host_profile] == :macos
-
-    # Every host path stays under the service root, not /usr/local or /var/lib.
-    for {key, relative} <- [
-          resource_operation_wrapper: "bin/ptc-operation",
-          resource_operation_socket_path: "run/operations.sock",
-          resource_operation_context_dir: "data/operation-contexts",
-          execution_artifact_root: "data/execution-artifacts",
-          planning_snapshot_root: "data/planning-snapshots",
-          daily_digest_bundle_root: "data/daily-digest-bundles",
-          tool_inventory_dir: "data/tool-inventory",
-          health_snapshot_path: "data/health.json"
-        ] do
-      assert config[key] == Path.join("/tmp/ptc-macos-runtime", relative), inspect(key)
-    end
-
-    assert config[:resource_operation_cgroups] == false
   end
 
   test "a dispatching macOS host reconciles finished jobs by default" do
@@ -117,18 +102,20 @@ defmodule PtcManager.MacOSRuntimeTest do
 
     previous = Map.new(env, fn {key, _} -> {key, System.get_env(key)} end)
 
-    try do
-      Enum.each(env, fn
-        {key, nil} -> System.delete_env(key)
-        {key, value} -> System.put_env(key, value)
-      end)
+    PtcManager.TestHostEnvironment.without_host_environment(fn ->
+      try do
+        Enum.each(env, fn
+          {key, nil} -> System.delete_env(key)
+          {key, value} -> System.put_env(key, value)
+        end)
 
-      fun.()
-    after
-      Enum.each(previous, fn
-        {key, nil} -> System.delete_env(key)
-        {key, value} -> System.put_env(key, value)
-      end)
-    end
+        fun.()
+      after
+        Enum.each(previous, fn
+          {key, nil} -> System.delete_env(key)
+          {key, value} -> System.put_env(key, value)
+        end)
+      end
+    end)
   end
 end

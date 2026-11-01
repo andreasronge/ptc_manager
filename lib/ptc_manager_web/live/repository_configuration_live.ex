@@ -252,6 +252,34 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
     end
   end
 
+  def handle_event("add-execution-profile", %{"mapping" => params}, socket) do
+    case Operations.add_execution_profile_mapping(
+           socket.assigns.repository.id,
+           params["label"] || "",
+           params["profile"],
+           socket.assigns.actor
+         ) do
+      {:ok, _} ->
+        socket
+        |> put_flash(:info, "Execution profile mapping saved. Approved jobs keep their settings.")
+        |> reload()
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, mapping_error(reason))}
+    end
+  end
+
+  def handle_event("remove-execution-profile", %{"label" => label}, socket) do
+    case Operations.remove_execution_profile_mapping(
+           socket.assigns.repository.id,
+           label,
+           socket.assigns.actor
+         ) do
+      {:ok, _} -> socket |> put_flash(:info, "Execution profile mapping removed.") |> reload()
+      {:error, reason} -> {:noreply, put_flash(socket, :error, mapping_error(reason))}
+    end
+  end
+
   def handle_event("set-default-branch-prefix", %{"prefix" => prefix}, socket) do
     case Operations.set_default_branch_prefix(
            socket.assigns.repository.id,
@@ -567,6 +595,9 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
            maintainer_labels: MaintainerLabels.list(repository),
            integration_branches: IntegrationBranches.list(repository),
            integration_suggestions: IntegrationBranches.suggestions(repository),
+           execution_profile_mappings:
+             PtcManager.Repository.ExecutionProfileMappings.list(repository),
+           execution_profile_names: PtcManager.ExecutionProfiles.names(),
            branch_prefix_default: BranchPrefixes.default(repository),
            branch_prefix_mappings: BranchPrefixes.list(repository),
            agent_environment_variables: AgentEnvironmentVariables.list_metadata(repository.id),
@@ -586,6 +617,8 @@ defmodule PtcManagerWeb.RepositoryConfigurationLive do
       _invalid -> nil
     end
   end
+
+  defp mapping_error(:invalid_execution_profile), do: "Choose an execution preset from the list."
 
   defp mapping_error(:invalid_label_name),
     do: "Use 1 to 50 characters from letters, digits, spaces, and . _ / : - for the label."

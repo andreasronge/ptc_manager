@@ -413,6 +413,7 @@ defmodule PtcManager.ManagedOperationContextTest do
     environment_path = Path.join(directory, "pane.env")
     capture_path = Path.join(directory, "captured")
     previous = Application.get_env(:ptc_manager, :resource_operation_agent_context)
+    previous_wrapper = Application.get_env(:ptc_manager, :resource_operation_wrapper)
 
     File.mkdir_p!(directory)
 
@@ -433,9 +434,11 @@ defmodule PtcManager.ManagedOperationContextTest do
     )
 
     Application.put_env(:ptc_manager, :resource_operation_agent_context, context_script)
+    Application.put_env(:ptc_manager, :resource_operation_wrapper, "/usr/local/bin/ptc-operation")
 
     on_exit(fn ->
       restore_env(:resource_operation_agent_context, previous)
+      restore_env(:resource_operation_wrapper, previous_wrapper)
       File.rm_rf!(directory)
     end)
 
@@ -446,7 +449,12 @@ defmodule PtcManager.ManagedOperationContextTest do
         environment: environment_path
       )
 
-    assert {output, 0} = System.cmd(dash, ["-c", command], stderr_to_stdout: true)
+    assert {output, 0} =
+             System.cmd(dash, ["-c", command],
+               stderr_to_stdout: true,
+               env: PtcManager.TestHostEnvironment.cleared_environment()
+             )
+
     assert output =~ "PTC_OPERATION_CONTEXT_READY:trusted-context"
 
     assert File.read!(capture_path) ==

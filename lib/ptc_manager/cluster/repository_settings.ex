@@ -23,7 +23,7 @@ defmodule PtcManager.Cluster.RepositorySettings do
 
   # Fields of `Repository.changeset/2` that move with the repository.
   @transferred ~w(default_branch workspace_setup_command workspace_setup_timeout_minutes
-    integration_branches github_branch_names branch_prefixes auto_fix_issues
+    integration_branches github_branch_names branch_prefixes execution_profile_mappings auto_fix_issues
     auto_fix_daily_limit maintainer_labels github_label_names required_pre_pr_reviews
     machine_requirements)a
 

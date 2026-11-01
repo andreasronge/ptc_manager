@@ -54,6 +54,48 @@ defmodule PtcManagerWeb.DashboardLiveTest do
       do: Application.fetch_env!(:ptc_manager, :dashboard_label_remote_issue)
   end
 
+  test "label presets preselect approval and direct fixes, and explain conflicts", %{conn: conn} do
+    put_agent_profiles(%{"codex" => %{"enabled" => true}, "claude" => %{"enabled" => true}})
+
+    repository =
+      repository_fixture(%{
+        execution_profile_mappings: %{
+          "mappings" => [
+            %{"label" => "design", "profile" => "ux"},
+            %{"label" => "urgent", "profile" => "strong"}
+          ]
+        }
+      })
+
+    for prepared <- [true, false] do
+      issue = issue_fixture(repository, %{github_labels: %{"names" => ["DESIGN"]}})
+      if prepared, do: proposal_fixture(issue)
+      {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/")
+      selector = "#approve-form-issue-#{issue.id}"
+      assert has_element?(view, selector <> " option[value='ux'][selected]")
+      view |> form(selector) |> render_submit(if prepared, do: %{}, else: %{"direct" => "true"})
+      assert Repo.get_by!(Job, issue_id: issue.id).execution_settings["name"] == "ux"
+    end
+
+    issue = issue_fixture(repository, %{github_labels: %{"names" => ["design", "urgent"]}})
+    proposal_fixture(issue)
+    {:ok, view, _} = conn |> authenticated_conn() |> live(~p"/")
+
+    assert has_element?(
+             view,
+             "#issue-#{issue.id}",
+             "Conflicting execution profile labels: design, urgent"
+           )
+
+    assert has_element?(view, "#approve-form-issue-#{issue.id} option[value='small'][selected]")
+
+    view
+    |> form("#approve-form-issue-#{issue.id}", %{"execution-profile" => "ux"})
+    |> render_submit()
+
+    assert Repo.get_by!(Job, issue_id: issue.id).execution_settings["name"] == "ux"
+  end
+
   test "filters Planning by repository from the URL" do
     first = repository_fixture(%{github_owner: "andreas", github_name: "first"})
     second = repository_fixture(%{github_owner: "andreas", github_name: "second"})
