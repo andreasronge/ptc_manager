@@ -634,12 +634,14 @@ defmodule PtcManager.Repository.GitProbe do
   def command(binary, git_args) do
     # Keep successful stderr out of refs and patch hashes. A separate reader
     # retains only the last 2 KiB, without limiting Git's own filesystem writes.
+    # The reader takes the FIFO as a file argument: uutils tail (the default on
+    # Ubuntu 26.04) never returns at EOF when the FIFO is its standard input.
     script = ~S"""
     umask 077
     diagnostics=$(mktemp -d) || exit 125
     trap 'rm -rf "$diagnostics"' EXIT
     mkfifo "$diagnostics/stderr" || exit 125
-    tail -c 2000 <"$diagnostics/stderr" >"$diagnostics/tail" &
+    tail -c 2000 "$diagnostics/stderr" >"$diagnostics/tail" &
     reader=$!
     "$@" 2>"$diagnostics/stderr"
     status=$?
