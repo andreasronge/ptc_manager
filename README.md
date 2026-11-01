@@ -124,19 +124,28 @@ lines.
 ## Execution profiles and review limits
 
 Configuration → **Execution profiles and models** sets the implementation and
-reviewer agent, model, reasoning effort, and maximum reviews for three presets:
+reviewer agent, model, reasoning effort, and maximum reviews for four presets:
 
 | Suggestion | Initial implementation model | Maximum reviews |
 | --- | --- | --- |
 | Small scope and low risk | Codex `gpt-5.4-mini` | 1 |
 | Other or unknown scope/risk | Codex `gpt-5.6-sol` | 2 |
 | Large scope or high risk | Codex `gpt-6-astra` | 5 |
+| UX (explicit or label mapping only) | Claude `claude-opus-5-5`, high effort | 2 |
 
-All three initially use Codex `gpt-5.6-sol` with extra-high (`xhigh`) reasoning
-effort as reviewer. **Approve and start**
+Small, Standard and Strong initially use Codex `gpt-5.6-sol` with extra-high (`xhigh`) reasoning
+effort as reviewer. UX initially uses Codex `gpt-6.1-sol` as reviewer and a
+15-minute review timeout. **Approve and start**
 and **Fix directly** offer a profile override and a 0–5 review limit; leaving
 the limit blank uses that preset's maximum. Approval freezes the selected
 models and issue context. Editing presets affects future approvals only.
+Repository configuration offers up to 20 label → execution profile mappings
+(for example `design` → `ux`). Only the issue's own mapped labels count, compared
+case-insensitively. A mapped preset precedes scope and risk for manual and
+automatic implementation; an explicit approval choice wins. Labels mapping to
+different presets fall back to scope and risk, with a conflict explanation on
+the approval card. Labels only preselect: approval still decides. Mappings move
+with repository settings, and later edits never change approved jobs.
 The implementation profile takes precedence over the implementation automation's
 agent selector; other maintainer actions keep their existing selection policy.
 Pre-upgrade jobs retain their original prompt/count policy.
@@ -1513,7 +1522,7 @@ workflow labels. Queued, running, or synchronizing issue actions defer admission
 until their assessment has been stored and the action finishes; the next
 successful synchronization then selects the profile. Existing backlog issues are included; a single-issue refresh
 only considers that issue. No selector model or new coding workflow is involved.
-The existing execution profile selection uses a current assessment's scope and
+Execution profile selection first uses the issue's mapped labels, then a current assessment's scope and
 risk; an absent or stale assessment uses the existing `standard` fallback.
 Models, review budgets, publication, and worker capacity follow the existing
 implementation pipeline.

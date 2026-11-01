@@ -7,6 +7,27 @@ defmodule PtcManagerWeb.RepositoryConfigurationLiveTest do
   alias PtcManager.AgentEnvironmentVariables
   alias PtcManager.{Operations, Repo}
 
+  test "adds and removes execution profile mappings", %{conn: conn} do
+    repository = repository_fixture()
+    {:ok, view, _} = conn |> authenticated_conn() |> live(repository_path(repository))
+
+    view
+    |> form("#add-execution-profile", mapping: %{label: "design", profile: "ux"})
+    |> render_submit()
+
+    assert has_element?(view, "#execution-profile-mappings", "design → ux")
+
+    assert Repo.get!(Repository, repository.id).execution_profile_mappings == %{
+             "mappings" => [%{"label" => "design", "profile" => "ux"}]
+           }
+
+    view
+    |> element("#execution-profile-mappings button[phx-click='remove-execution-profile']")
+    |> render_click()
+
+    assert Repo.get!(Repository, repository.id).execution_profile_mappings == %{"mappings" => []}
+  end
+
   test "shows the resolved identity, its source and a missing identity reason", %{conn: conn} do
     repository = repository_fixture(%{github_owner: "tyraorg"})
     {:ok, view, _} = conn |> authenticated_conn() |> live(repository_path(repository))

@@ -5,6 +5,56 @@
   switch_to={@repository}
 >
   <div class="space-y-8">
+    <section id="execution-profile-mappings" class="rounded-xl border border-white/10 p-5">
+      <h2 class="text-lg font-semibold text-white">Label → execution profile</h2>
+      <p class="text-sm text-slate-400">
+        Mapped labels preselect a preset before scope and risk. Labels compare case-insensitively.
+        Conflicting presets fall back to scope and risk. Approval decides and freezes the settings;
+        labels are suggestions. At most 20 mappings per repository.
+      </p>
+      <ul class="my-3 space-y-2">
+        <li :for={mapping <- @execution_profile_mappings}>
+          {mapping["label"]} → {mapping["profile"]}
+          <button
+            type="button"
+            phx-click="remove-execution-profile"
+            phx-value-label={mapping["label"]}
+            class="ml-3 text-rose-300"
+          >
+            Remove
+          </button>
+        </li>
+      </ul>
+      <.form
+        for={%{}}
+        as={:mapping}
+        id="add-execution-profile"
+        phx-submit="add-execution-profile"
+        class="flex flex-wrap items-end gap-3"
+      >
+        <label>
+          Label<input
+            required
+            name="mapping[label]"
+            maxlength="50"
+            placeholder="design"
+            list="execution-profile-label-names"
+            class="block bg-slate-950 p-2"
+          />
+        </label>
+        <datalist id="execution-profile-label-names">
+          <option :for={name <- IntegrationBranches.label_names(@repository)} value={name} />
+        </datalist>
+        <label>
+          Preset<select name="mapping[profile]" class="block bg-slate-950 p-2"><option
+              :for={name <- @execution_profile_names}
+              value={name}
+            >{String.capitalize(name)}</option></select>
+        </label>
+        <button class="rounded bg-white/10 px-3 py-2">Add mapping</button>
+      </.form>
+    </section>
+
     <section
       id="resolved-commit-identity"
       class="rounded-2xl border border-white/10 bg-slate-900/70 p-5"

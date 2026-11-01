@@ -37,7 +37,7 @@ defmodule PtcManager.ExecutionProfiles.Profile do
       :max_reviews,
       :review_timeout_ms
     ])
-    |> validate_inclusion(:name, ~w(small standard strong))
+    |> validate_inclusion(:name, PtcManager.ExecutionProfiles.names())
     |> validate_inclusion(:kind, ~w(codex claude cursor))
     |> validate_inclusion(:reviewer_kind, ~w(codex claude cursor))
     |> validate_format(:model, ~r/\A(?=.{1,120}\z)[a-zA-Z0-9][a-zA-Z0-9._:-]*(?:\[1m\])?\z/)

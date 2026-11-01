@@ -1060,6 +1060,40 @@ defmodule PtcManagerWeb.DashboardLive do
     end
   end
 
+  def execution_profile_suggestion(item) do
+    PtcManager.Repository.ExecutionProfileMappings.preselected(
+      item.issue.repository,
+      item.issue,
+      item.proposal
+    )
+  end
+
+  attr :item, :map, required: true
+
+  def execution_profile_conflict(assigns) do
+    route =
+      PtcManager.Repository.ExecutionProfileMappings.resolve(
+        assigns.item.issue.repository,
+        PtcManager.Repository.MaintainerLabels.reported_names(assigns.item.issue)
+      )
+
+    assigns =
+      assign(
+        assigns,
+        :conflict,
+        case route do
+          {:error, mappings} -> Enum.map_join(mappings, ", ", & &1["label"])
+          _ -> nil
+        end
+      )
+
+    ~H"""
+    <p :if={@conflict} class="text-xs text-amber-300">
+      Conflicting execution profile labels: {@conflict}. Using the scope and risk suggestion; choose a preset to override.
+    </p>
+    """
+  end
+
   attr :item, :map, required: true
 
   def branch_prefix_field(assigns) do

@@ -873,7 +873,28 @@ defmodule PtcManager.Operations do
     end
   end
 
+  def add_execution_profile_mapping(repository_id, label, profile, actor) do
+    update_label_setting(
+      :execution_profile_mappings,
+      repository_id,
+      &PtcManager.Repository.ExecutionProfileMappings.add(&1, label, profile),
+      actor,
+      %{"added" => %{"label" => label, "profile" => profile}}
+    )
+  end
+
+  def remove_execution_profile_mapping(repository_id, label, actor) do
+    update_label_setting(
+      :execution_profile_mappings,
+      repository_id,
+      &{:ok, PtcManager.Repository.ExecutionProfileMappings.remove(&1, label)},
+      actor,
+      %{"removed" => label}
+    )
+  end
+
   defp invalid_setting(:integration_branches), do: :invalid_integration_branches
+  defp invalid_setting(:execution_profile_mappings), do: :invalid_execution_profile_mappings
   defp invalid_setting(:branch_prefixes), do: :invalid_branch_prefixes
 
   @doc "Whether GitHub reports the branch, through the read-only client."
@@ -4539,8 +4560,12 @@ defmodule PtcManager.Operations do
     |> Multi.run(:branch_prefix, fn _repo, %{snapshot: {issue, _proposal, repository}} ->
       approval_branch_prefix(issue, repository, mode, prefix_choice)
     end)
-    |> Multi.run(:execution, fn _repo, %{snapshot: {_issue, proposal, _repository}} ->
-      case PtcManager.ExecutionProfiles.freeze(proposal, profile, requested_review_count) do
+    |> Multi.run(:execution, fn _repo, %{snapshot: {issue, proposal, repository}} ->
+      choice =
+        profile ||
+          PtcManager.Repository.ExecutionProfileMappings.preselected(repository, issue, proposal)
+
+      case PtcManager.ExecutionProfiles.freeze(proposal, choice, requested_review_count) do
         {:ok, settings, budget} -> {:ok, %{settings: settings, budget: budget}}
         error -> error
       end

@@ -366,12 +366,12 @@
                             value={profile.name}
                             selected={
                               profile.name ==
-                                PtcManager.ExecutionProfiles.suggested(item.proposal)
+                                execution_profile_suggestion(item)
                             }
                           >
                             {String.capitalize(profile.name)} · {profile.model} · max {profile.max_reviews}{if profile.name ==
-                                                                                                                 PtcManager.ExecutionProfiles.suggested(
-                                                                                                                   item.proposal
+                                                                                                                 execution_profile_suggestion(
+                                                                                                                   item
                                                                                                                  ),
                                                                                                                do:
                                                                                                                  " · suggested",
@@ -399,6 +399,7 @@
                       </label>
                       <.approval_route item={item} route={issue_route(item)} />
                       <.branch_prefix_field item={item} />
+                      <.execution_profile_conflict item={item} />
                       <button
                         id={"approve-issue-#{item.issue.id}"}
                         type="submit"

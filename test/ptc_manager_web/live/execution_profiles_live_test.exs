@@ -45,6 +45,12 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
     refute html =~ "Available model IDs"
   end
 
+  test "ux can be edited", %{conn: conn} do
+    {:ok, view, _} = conn |> login() |> live("/execution-profiles")
+    view |> form("#profile-ux", profile: %{model: "opus", max_reviews: "3"}) |> render_submit()
+    assert Repo.get_by!(PtcManager.ExecutionProfiles.Profile, name: "ux").max_reviews == 3
+  end
+
   test "Claude catalog context aliases can be saved for implementation and review", %{conn: conn} do
     {:ok, view, _} = conn |> login() |> live("/execution-profiles")
 
@@ -95,6 +101,7 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
   end
 
   test "shows preserved findings and records explicit additional review budget", %{conn: conn} do
+    put_agent_profiles(%{"codex" => %{"enabled" => true}, "claude" => %{"enabled" => true}})
     repository = repository_fixture()
     issue = issue_fixture(repository)
     proposal_fixture(issue)
@@ -113,7 +120,7 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
       decision: %{
         generation: "0",
         extra_rounds: "2",
-        profile: "strong",
+        profile: "ux",
         instructions: "Inspect all failure paths before editing.",
         reason: ""
       }
@@ -123,6 +130,7 @@ defmodule PtcManagerWeb.ExecutionProfilesLiveTest do
     updated = Repo.get!(Job, job.id)
     assert updated.review_continuation_instructions == "Inspect all failure paths before editing."
     assert render(view) =~ "Inspect all failure paths before editing."
+    assert updated.execution_settings["name"] == "ux"
     assert updated.required_review_count == 3
     assert updated.review_state == "resume_pending"
     assert updated.branch_name == "keep-my-work"
